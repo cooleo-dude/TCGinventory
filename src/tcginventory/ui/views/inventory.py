@@ -139,3 +139,4 @@ class InventoryView(QWidget):
         source_index = self._proxy.mapToSource(proxy_index)
         row = self._model.row_at(source_index.row())
         ItemDetailDialog(self._conn, row.item.id, parent=self).exec()
+        self.refresh()  # reflect any edits made in the detail/editor

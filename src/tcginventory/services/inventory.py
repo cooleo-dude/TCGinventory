@@ -92,6 +92,23 @@ class InventoryService:
                 positions.append(pos)
         return positions
 
+    def sellable_items(self) -> list[tuple[Item, int]]:
+        """Items with sellable (non-ripping, on-hand) units, for the give picker.
+
+        Returns ``(item, available_qty)`` pairs — ripping lots are excluded since
+        they are never sold (invariant 8).
+        """
+        out: list[tuple[Item, int]] = []
+        for item in self.items.list_all():
+            available = sum(
+                lot.remaining_qty
+                for lot in self.lots.list_for_item(item.id)
+                if lot.remaining_qty > 0 and lot.intent is not Intent.RIPPING
+            )
+            if available > 0:
+                out.append((item, available))
+        return out
+
     def inventory_rows(self) -> list[InventoryRow]:
         """One aggregate row per item that has ever had a lot (incl. sold-out).
 

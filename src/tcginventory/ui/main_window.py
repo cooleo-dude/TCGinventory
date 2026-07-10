@@ -1,8 +1,8 @@
 """The application's main window.
 
-Hosts the four navigation destinations. In M3 the Dashboard, Inventory, and
-History views are live (read-only) over a real database; the Transaction entry
-screen is a placeholder until M4 (write UI).
+Hosts the four navigation destinations over a shared database connection:
+Dashboard, the unified Transaction window (write UI), Inventory, and History.
+Posting/void/edit refresh the read views so everything stays in sync.
 """
 
 from __future__ import annotations
@@ -11,13 +11,11 @@ import sqlite3
 
 from PySide6.QtWidgets import (
     QHBoxLayout,
-    QLabel,
     QListWidget,
     QMainWindow,
     QSplitter,
     QStackedWidget,
     QStatusBar,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -27,18 +25,10 @@ from tcginventory.data.migrator import migrate
 from tcginventory.ui.views.dashboard import DashboardView
 from tcginventory.ui.views.history import HistoryView
 from tcginventory.ui.views.inventory import InventoryView
+from tcginventory.ui.views.transaction import TransactionView
 
 NAV_ITEMS = ["Dashboard", "Transaction", "Inventory", "History"]
-
-
-def _placeholder(text: str) -> QWidget:
-    widget = QWidget()
-    layout = QVBoxLayout(widget)
-    label = QLabel(text)
-    label.setContentsMargins(24, 24, 24, 24)
-    layout.addWidget(label)
-    layout.addStretch(1)
-    return widget
+_TRANSACTION_INDEX = 1
 
 
 class MainWindow(QMainWindow):
@@ -51,27 +41,31 @@ class MainWindow(QMainWindow):
         self._conn = conn
 
         self.setWindowTitle(f"TCGinventory {__version__}")
-        self.resize(1150, 760)
+        self.resize(1200, 800)
 
         self._dashboard = DashboardView(conn)
+        self._transaction = TransactionView(conn)
         self._inventory = InventoryView(conn)
         self._history = HistoryView(conn)
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._dashboard)  # 0 Dashboard
-        self._stack.addWidget(
-            _placeholder("Transaction entry — coming in M4 (write UI).")
-        )
+        self._stack.addWidget(self._transaction)  # 1 Transaction
         self._stack.addWidget(self._inventory)  # 2 Inventory
         self._stack.addWidget(self._history)  # 3 History
 
-        nav = QListWidget()
-        nav.addItems(NAV_ITEMS)
-        nav.setMaximumWidth(180)
-        nav.currentRowChanged.connect(self._on_nav_changed)
+        # Keep read views current as the ledger changes.
+        self._transaction.posted.connect(self._on_ledger_changed)
+        self._history.changed.connect(self._on_ledger_changed)
+        self._history.edit_requested.connect(self._start_edit)
+
+        self._nav = QListWidget()
+        self._nav.addItems(NAV_ITEMS)
+        self._nav.setMaximumWidth(180)
+        self._nav.currentRowChanged.connect(self._on_nav_changed)
 
         splitter = QSplitter()
-        splitter.addWidget(nav)
+        splitter.addWidget(self._nav)
         splitter.addWidget(self._stack)
         splitter.setStretchFactor(1, 1)
 
@@ -84,16 +78,25 @@ class MainWindow(QMainWindow):
         self.setStatusBar(QStatusBar())
         self._update_status()
 
-        nav.setCurrentRow(0)
+        self._nav.setCurrentRow(0)
 
     def _on_nav_changed(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
-        # Refresh the destination so it reflects the latest data.
         widget = self._stack.widget(index)
         refresh = getattr(widget, "refresh", None)
         if callable(refresh):
             refresh()
         self._update_status()
+
+    def _on_ledger_changed(self) -> None:
+        self._dashboard.refresh()
+        self._inventory.refresh()
+        self._history.refresh()
+        self._update_status()
+
+    def _start_edit(self, transaction_id: int) -> None:
+        if self._transaction.load_transaction(transaction_id):
+            self._nav.setCurrentRow(_TRANSACTION_INDEX)
 
     def _update_status(self) -> None:
         count = self._conn.execute("SELECT COUNT(*) FROM item").fetchone()[0]

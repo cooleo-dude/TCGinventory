@@ -39,7 +39,15 @@ offline; no external price feeds in V1.
   (`TCGINVENTORY_SEED=1`). Verified on Python 3.12.10 (ruff clean, 79 tests pass,
   offscreen screenshots render all views; ripping lot shows as a loss). The
   Transaction nav item is a placeholder until M4.
-- **Next: M4** (write UI — the unified Transaction window) — see [`specs/05-roadmap.md`](specs/05-roadmap.md).
+- **M4 (write UI — unified Transaction window): done** — `ui/views/transaction.py`
+  (live type badge, give/receive tables, cash fields, summary+margin footer via
+  `TransactionService.preview()`, submit blocked on oversell), `_card_dialogs.py`
+  (give/receive add dialogs; condition greys out when graded; market value
+  required), `item_editor.py` (edit/soft-delete guard), and Void/Edit wired from
+  History (edit = atomic void+re-post, warns on P/L change). Verified on Python
+  3.12.10 (ruff clean, 81 tests pass incl. a full purchase→sale→trade→rip
+  lifecycle + edit + void through the UI; offscreen screenshots confirm).
+- **Next: M5** (import/export & backup) — see [`specs/05-roadmap.md`](specs/05-roadmap.md).
 
 ## Source of truth
 

@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import sqlite3
 
-from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
+from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
+    QPushButton,
     QSplitter,
     QTableView,
     QTextBrowser,
@@ -27,8 +29,10 @@ from tcginventory.data.repositories import (
     TransactionLineRepository,
     TransactionRepository,
 )
-from tcginventory.domain.enums import Direction
+from tcginventory.domain.enums import Direction, TransactionStatus
+from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.reporting import ReportingService
+from tcginventory.services.transactions import TransactionService
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.models.history_model import HistoryRow, HistoryTableModel
 
@@ -60,6 +64,9 @@ class _HistoryFilterProxy(QSortFilterProxyModel):
 
 
 class HistoryView(QWidget):
+    edit_requested = Signal(int)  # transaction id to edit
+    changed = Signal()  # a void changed the ledger
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         super().__init__()
         self._conn = conn
@@ -68,6 +75,7 @@ class HistoryView(QWidget):
         self._consumptions = LotConsumptionRepository(conn)
         self._items = ItemRepository(conn)
         self._reporting = ReportingService(conn)
+        self._service = TransactionService(conn)
 
         self._model = HistoryTableModel()
         self._proxy = _HistoryFilterProxy()
@@ -81,10 +89,17 @@ class HistoryView(QWidget):
         self._search.setPlaceholderText("Search counterparty…")
         self._search.textChanged.connect(self._proxy.set_text)
 
+        self._edit_btn = QPushButton("Edit…")
+        self._edit_btn.clicked.connect(self._edit_selected)
+        self._void_btn = QPushButton("Void…")
+        self._void_btn.clicked.connect(self._void_selected)
+
         filter_bar = QHBoxLayout()
         filter_bar.addWidget(QLabel("Type:"))
         filter_bar.addWidget(self._type)
         filter_bar.addWidget(self._search, 1)
+        filter_bar.addWidget(self._edit_btn)
+        filter_bar.addWidget(self._void_btn)
 
         self._table = QTableView()
         self._table.setModel(self._proxy)
@@ -125,6 +140,47 @@ class HistoryView(QWidget):
         self._model.set_rows(rows)
         self._table.resizeColumnsToContents()
         self._detail.clear()
+
+    def _selected_transaction(self):
+        indexes = self._table.selectionModel().selectedRows()
+        if not indexes:
+            return None
+        source = self._proxy.mapToSource(indexes[0])
+        return self._model.row_at(source.row()).transaction
+
+    def _edit_selected(self) -> None:
+        txn = self._selected_transaction()
+        if txn is None:
+            QMessageBox.information(self, "Edit", "Select a transaction first.")
+            return
+        if txn.status is TransactionStatus.VOIDED:
+            QMessageBox.information(self, "Edit", "That transaction is voided.")
+            return
+        self.edit_requested.emit(txn.id)
+
+    def _void_selected(self) -> None:
+        txn = self._selected_transaction()
+        if txn is None:
+            QMessageBox.information(self, "Void", "Select a transaction first.")
+            return
+        if txn.status is TransactionStatus.VOIDED:
+            QMessageBox.information(self, "Void", "That transaction is already voided.")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Void transaction",
+            f"Void transaction {txn.id} ({txn.type.value})? This reverses its "
+            "effects but keeps it in history.",
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            self._service.void(txn.id)
+        except ServiceError as exc:
+            QMessageBox.warning(self, "Could not void", str(exc))
+            return
+        self.refresh()
+        self.changed.emit()
 
     def _show_detail(self) -> None:
         indexes = self._table.selectionModel().selectedRows()

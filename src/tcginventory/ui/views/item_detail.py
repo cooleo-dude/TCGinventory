@@ -7,8 +7,10 @@ import sqlite3
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -50,6 +52,24 @@ class ItemDetailDialog(QDialog):
 
         layout.addWidget(QLabel("<b>History</b>"))
         layout.addWidget(self._history_table(item_id))
+
+        if item is not None:
+            buttons = QHBoxLayout()
+            buttons.addStretch(1)
+            edit = QPushButton("Edit item…")
+            edit.clicked.connect(lambda: self._edit_item(item_id))
+            buttons.addWidget(edit)
+            close = QPushButton("Close")
+            close.clicked.connect(self.reject)
+            buttons.addWidget(close)
+            layout.addLayout(buttons)
+
+    def _edit_item(self, item_id: int) -> None:
+        from tcginventory.ui.views.item_editor import ItemEditorDialog
+
+        if ItemEditorDialog(self._conn, item_id, parent=self).exec():
+            # Data changed — close so the inventory refreshes with new values.
+            self.accept()
 
     def _header(self, item) -> QLabel:
         if item is None:

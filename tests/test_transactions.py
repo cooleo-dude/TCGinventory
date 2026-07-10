@@ -265,6 +265,60 @@ def test_ripping_lot_cannot_be_sold(svc, conn):
 # -- audit ------------------------------------------------------------------
 
 
+def test_preview_infers_type_and_realized(svc, conn):
+    p = buy(svc, "X", 9000, 9000, "2026-01-01")
+    item_id = p.lots[0].item_id
+
+    req = TransactionRequest(
+        occurred_at="2026-02-01",
+        outgoing=[OutgoingCard(item_id=item_id, quantity=1, agreed_value_cents=12000)],
+        cash_in_cents=12000,
+    )
+    preview = svc.preview(req)
+    assert preview.inferred_type is TransactionType.SALE
+    assert preview.proceeds_cents == 12000
+    assert preview.realized_pl_cents == 3000  # 12000 − 9000 FIFO cost
+    assert preview.feasible is True
+
+
+def test_preview_flags_oversell(svc, conn):
+    p = buy(svc, "X", 1000, 1000, "2026-01-01")
+    item_id = p.lots[0].item_id
+    req = TransactionRequest(
+        occurred_at="2026-02-01",
+        outgoing=[OutgoingCard(item_id=item_id, quantity=5, agreed_value_cents=500)],
+        cash_in_cents=2500,
+    )
+    preview = svc.preview(req)
+    assert preview.feasible is False
+    assert preview.shortfalls == {item_id: 4}
+
+
+def test_preview_purchase_has_no_realized(svc, conn):
+    from conftest import incoming
+
+    req = TransactionRequest(
+        occurred_at="2026-01-01",
+        cash_out_cents=8000,
+        incoming=[incoming("A", 6000), incoming("B", 4000)],
+    )
+    preview = svc.preview(req)
+    assert preview.inferred_type is TransactionType.PURCHASE
+    assert preview.net_consideration_in_cents == 8000
+    assert preview.realized_pl_cents == 0
+    assert preview.value_received_cents == 10000
+
+
+def test_sellable_items_excludes_ripping(svc, conn):
+    from tcginventory.services.inventory import InventoryService
+
+    buy(svc, "Sellable", 1000, 1000, "2026-01-01", intent=Intent.RESALE)
+    buy(svc, "Box", 12000, 12000, "2026-01-02", intent=Intent.RIPPING)
+    names = {item.name for item, _ in InventoryService(conn).sellable_items()}
+    assert "Sellable" in names
+    assert "Box" not in names
+
+
 def test_audit_log_records_create_and_void(svc, conn):
     p = buy(svc, "X", 1000, 1000, "2026-01-01")
     svc.void(p.transaction.id)

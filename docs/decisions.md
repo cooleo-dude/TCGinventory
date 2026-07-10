@@ -4,6 +4,23 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-10 — M4 implementation: dialog-based card entry
+
+- The unified Transaction window adds cards via **modal add-card dialogs**
+  (give / receive) that append to summary tables, rather than fully inline
+  editable table rows. Same ratified behavior and validation (market value
+  required, condition greys out when graded, oversell blocks submit, ripping
+  excluded from the give picker) — the dialog form just handles the conditional
+  grade fields far more robustly than in-cell editors. Inline row editing can be
+  a later refinement.
+- **Edit** pre-loads the transaction and reconstructs the cash split single-
+  sided from the stored net `cash_delta` (only the net is stored); this is exact
+  because allocation and cash both depend only on cards-out and net cash.
+- Live type-inference badge and the summary/margin footer are driven by
+  `TransactionService.preview()` (headless, tested).
+
+---
+
 ### 2026-07-10 — M2 implementation decisions (services & money math)
 
 Three judgment calls made while building the service layer (all in code + tests):

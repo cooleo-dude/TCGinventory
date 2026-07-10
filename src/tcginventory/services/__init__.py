@@ -22,6 +22,7 @@ from tcginventory.services.transactions import (
     IncomingCard,
     OutgoingCard,
     PostResult,
+    TransactionPreview,
     TransactionRequest,
     TransactionService,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "IncomingCard",
     "OutgoingCard",
     "PostResult",
+    "TransactionPreview",
     "TransactionRequest",
     "TransactionService",
 ]

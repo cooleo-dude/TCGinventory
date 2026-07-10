@@ -100,6 +100,25 @@ class PostResult:
     lots: list[Lot]  # incoming lots created
 
 
+@dataclass
+class TransactionPreview:
+    """Read-only preview of what a request would post — powers the live footer.
+
+    Computed without writing anything; ``feasible`` is False (with per-item
+    ``shortfalls``) when an outgoing line would oversell.
+    """
+
+    inferred_type: TransactionType | None
+    proceeds_cents: int  # Σ agreed value of cards out
+    consideration_given_cents: int  # cash_out + proceeds
+    net_consideration_in_cents: int  # consideration_given − cash_in
+    value_received_cents: int  # Σ market value of cards in
+    net_cash_cents: int  # cash_in − cash_out
+    realized_pl_cents: int  # estimated margin on cards out (FIFO)
+    feasible: bool
+    shortfalls: dict[int, int]  # item_id → missing units
+
+
 def _as_date(iso: str) -> str:
     """Reduce an ISO date/datetime to its date part (drives FIFO order / as-of)."""
     return iso[:10] if len(iso) >= 10 else iso
@@ -174,6 +193,70 @@ class TransactionService:
         except Exception:
             self.conn.rollback()
             raise
+
+    def preview(self, request: TransactionRequest) -> TransactionPreview:
+        """Compute the live summary for a request without writing anything."""
+        has_out, has_in = bool(request.outgoing), bool(request.incoming)
+        if has_out and has_in:
+            inferred = TransactionType.TRADE
+        elif has_out:
+            inferred = TransactionType.SALE
+        elif has_in:
+            inferred = TransactionType.PURCHASE
+        else:
+            inferred = None
+
+        proceeds = sum(o.agreed_value_cents * o.quantity for o in request.outgoing)
+        consideration_given = request.cash_out_cents + proceeds
+        net_consideration_in = consideration_given - request.cash_in_cents
+        value_received = sum(
+            i.market_value_cents * i.quantity for i in request.incoming
+        )
+        net_cash = request.cash_in_cents - request.cash_out_cents
+
+        # Simulate FIFO draw-down against a local copy of open non-ripping lots.
+        queues: dict[int, list[list[int]]] = {}
+
+        def queue_for(item_id: int) -> list[list[int]]:
+            if item_id not in queues:
+                queues[item_id] = [
+                    [lot.remaining_qty, lot.unit_cost_cents]
+                    for lot in self.lots.open_lots_for_item(item_id)
+                    if lot.intent is not Intent.RIPPING
+                ]
+            return queues[item_id]
+
+        realized = 0
+        feasible = True
+        shortfalls: dict[int, int] = {}
+        for out in request.outgoing:
+            remaining = out.quantity
+            drawn = 0
+            cost = 0
+            for slot in queue_for(out.item_id):
+                if remaining == 0:
+                    break
+                take = min(slot[0], remaining)
+                slot[0] -= take
+                cost += take * slot[1]
+                drawn += take
+                remaining -= take
+            if remaining > 0:
+                feasible = False
+                shortfalls[out.item_id] = shortfalls.get(out.item_id, 0) + remaining
+            realized += out.agreed_value_cents * drawn - cost
+
+        return TransactionPreview(
+            inferred_type=inferred,
+            proceeds_cents=proceeds,
+            consideration_given_cents=consideration_given,
+            net_consideration_in_cents=net_consideration_in,
+            value_received_cents=value_received,
+            net_cash_cents=net_cash,
+            realized_pl_cents=realized,
+            feasible=feasible,
+            shortfalls=shortfalls,
+        )
 
     def adjust_found(
         self,
