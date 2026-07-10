@@ -80,9 +80,15 @@ cards (see Spec 02).
   - *Purchase* — left side is cash only (your cash out), right side has cards.
   - *Sale* — left side has cards, right side is cash only (their cash in).
   - *Trade* — cards on both sides, optional cash boot either way.
+- **Trade summary (live overview):** a summary panel updates as the transaction
+  is entered, showing **value given · value received · net cash · cost basis
+  drawn (FIFO) · margin**. Margin is the realized P/L on cards given up, shown as
+  **profit in dollars and a gross-margin %** (`margin ÷ proceeds`), colored
+  green/red (with a non-color cue). A pure purchase shows no margin (nothing
+  disposed). This is the at-a-glance "did this deal make money" readout.
 - **Submit → success screen** showing the **inferred cost of each incoming card**
   (consideration-given split by market value; residual cent to the largest line)
-  and any realized P/L on cards given up.
+  and the final **margin** (profit $ + gross-margin %) on cards given up.
 - **On submit** (one atomic DB transaction): consumes outgoing lots FIFO
   (realizing P/L against agreed values), match-or-creates incoming items, writes
   one lot per incoming card, records net cash, and logs an audit entry.

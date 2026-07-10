@@ -4,6 +4,26 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-10 — Margin surfacing + trade summary; two market values clarified
+
+- **Clarified** that the schema holds **two** market values doing different jobs:
+  `lot.acquired_market_value_cents` (frozen market-at-purchase, used only to set
+  cost basis; preserves e.g. $10 vs $15 per lot) and `item.market_value_cents` /
+  `market_value_asof` (current estimate, used only for unrealized valuation on
+  cards still held). Neither is used for margin.
+- **Margin** = realized P/L on cards given up (`proceeds − cost basis`), already
+  stored per `out` line in `realized_pl_cents` — **no new column**. It is
+  measured against cost basis (what you paid), not market value. Displayed as
+  **profit $ + gross-margin %** (`profit ÷ proceeds`); the % is derived, not
+  stored.
+- **Trade summary overview** added to the Transaction window (Spec 04, F-TX-5): a
+  live panel showing value given/received, net cash, cost basis drawn (FIFO), and
+  margin, repeated on the success screen.
+- Spec/docs only (surfacing, not schema). Propagated to specs 02/03/04 and the
+  glossary.
+
+---
+
 ### 2026-07-10 — Add Card # and Language to item identity
 
 - **Language** is a new per-item field (enum: EN | JP | CN | KO | FR | DE | IT |

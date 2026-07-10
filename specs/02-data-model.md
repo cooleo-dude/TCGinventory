@@ -138,6 +138,23 @@ into inventory: it records **cash out** (`cash_delta < 0`) and establishes
 **$0** — you own them at cost. Profit is realized only when cards leave the
 collection (sale/trade), as the difference between what you get and their basis.
 
+### Two market values — do not conflate
+
+The word "market value" appears at two levels doing two different jobs:
+
+- **`lot.acquired_market_value_cents`** — the card's market value **at that
+  specific acquisition**, frozen forever on the lot. This records "what the
+  market was when I bought *this* copy," so two lots of the same card keep, say,
+  $10 and $15 independently. Its only job is to allocate the price paid into
+  **cost basis** at acquisition. It never changes and is **not** used for margin.
+- **`item.market_value_cents` / `market_value_asof`** — the card type's
+  **current** estimate (most-recent entry wins) and the date it was set. Its only
+  job is **unrealized** valuation on cards *still on hand* (collection value,
+  unrealized P/L). It is never used to compute margin on a sale.
+
+Margin on a sale is measured against **cost basis** (what you actually paid),
+which lives on the lot — not against either market-value field.
+
 - **Cost basis (unrealized):** sum of `remaining_qty × unit_cost` over open lots.
 - **Market value (unrealized):** computed **per lot** so intent can override it —
   `remaining_qty × item.market_value_cents` for `personal`/`resale` lots, but
@@ -150,6 +167,12 @@ collection (sale/trade), as the difference between what you get and their basis.
   `lot_consumption` at disposal time; stored on the disposal line. Ripping is
   **not** a disposal — it never touches the realized line; its loss lives in
   unrealized/collection value.
+- **Margin (on a disposal):** the reseller-facing name for realized P/L on the
+  cards given up — `proceeds − cost basis`, stored per `out` line in
+  `realized_pl_cents` (no new column). The **gross-margin %** =
+  `realized_pl_cents / proceeds_cents` is **derived** for display (not stored,
+  per the integer-cents rule). A transaction's total margin is the sum of its
+  `out`-line realized P/L; a pure purchase has no margin (nothing disposed).
 
 ### Feeding the Dashboard (Window 1) line graphs
 

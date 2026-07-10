@@ -44,5 +44,14 @@ Terms used across the app and specs.
   matter what, so it's valued at $0 and shows in inventory as a loss equal to its
   cost basis. Cards pulled from opening are entered separately as an ordinary
   acquisition (no link to the ripped item).
-- **Market value** — a manually maintained estimate of what an item is worth
-  now; used for unrealized P/L (no automatic price feed in V1).
+- **Market value (current)** — `item.market_value_cents` + `market_value_asof`:
+  a manually maintained estimate of what a card type is worth **now** (most-recent
+  entry wins), with the date it was set. Used only for **unrealized** P/L and
+  collection value on cards still on hand. No automatic price feed in V1.
+- **Market value at acquisition** — `lot.acquired_market_value_cents`: the card's
+  market value **when that copy was acquired**, frozen on the lot. Used only to
+  split the price paid into cost basis; two lots of the same card can differ
+  (e.g. $10 vs $15). Never used for margin.
+- **Margin** — realized profit on cards you disposed of: `proceeds − cost basis`
+  (stored as `realized_pl_cents`). Shown as dollars plus a **gross-margin %**
+  (`margin ÷ proceeds`). Measured against what you *paid*, not market value.

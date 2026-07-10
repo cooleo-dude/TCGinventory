@@ -29,6 +29,7 @@ maintained afterward.
 | F-TX-2 | Transaction `type` is inferred (no cards out → purchase; no cards in → sale; both → trade). | MUST |
 | F-TX-3 | Post the whole transaction atomically (all lot/cash/P/L effects in one DB transaction). | MUST |
 | F-TX-4 | Tag each incoming card with an intent per row: **personal / resale / ripping**. | MUST |
+| F-TX-5 | Live transaction summary shows value given/received, net cash, cost basis drawn (FIFO), and **margin** on cards given up (profit $ + gross-margin % = profit ÷ proceeds); repeated on the success screen. | MUST |
 
 ## Purchases (acquisition side)
 
