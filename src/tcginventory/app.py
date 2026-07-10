@@ -17,6 +17,15 @@ def main() -> int:
     log.info("Data directory: %s", data_dir)
     log.info("Database path: %s", config.db_path())
 
+    # Open the DB and run any pending migrations on startup (F-DA-7). The
+    # connection is closed again here; views will open their own from M3 on.
+    from tcginventory.data.db import open_database
+    from tcginventory.data.migrator import current_version
+
+    conn = open_database(config.db_path())
+    log.info("Schema version: %d", current_version(conn))
+    conn.close()
+
     # Imported lazily so headless tooling (tests, tools) can import this module
     # without requiring a Qt display or the PySide6 dependency at import time.
     from PySide6.QtWidgets import QApplication

@@ -1,0 +1,67 @@
+"""Tests for the migration runner and initial schema — pure, no Qt."""
+
+from __future__ import annotations
+
+from tcginventory.data.db import connect
+from tcginventory.data.migrator import (
+    available_migrations,
+    current_version,
+    migrate,
+)
+
+_EXPECTED_TABLES = {
+    "item",
+    "lot",
+    "transaction",
+    "transaction_line",
+    "lot_consumption",
+    "audit_log",
+    "schema_version",
+}
+
+
+def _table_names(conn) -> set[str]:
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+    ).fetchall()
+    return {r["name"] for r in rows}
+
+
+def test_available_migrations_include_init():
+    migrations = available_migrations()
+    assert migrations, "expected at least one bundled migration"
+    assert migrations[0].version == 1
+    assert migrations[0].name == "0001_init.sql"
+    # sorted ascending by version
+    versions = [m.version for m in migrations]
+    assert versions == sorted(versions)
+
+
+def test_fresh_db_starts_at_version_zero():
+    conn = connect(":memory:")
+    assert current_version(conn) == 0
+
+
+def test_migrate_applies_init_and_creates_tables():
+    conn = connect(":memory:")
+    applied = migrate(conn)
+    assert applied == [1]
+    assert current_version(conn) == 1
+    assert _EXPECTED_TABLES <= _table_names(conn)
+
+
+def test_migrate_is_idempotent():
+    conn = connect(":memory:")
+    assert migrate(conn) == [1]
+    # Second run applies nothing and leaves the version untouched.
+    assert migrate(conn) == []
+    assert current_version(conn) == 1
+    rows = conn.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()
+    assert rows["n"] == 1
+
+
+def test_foreign_keys_are_enforced():
+    conn = connect(":memory:")
+    migrate(conn)
+    row = conn.execute("PRAGMA foreign_keys").fetchone()
+    assert row[0] == 1
