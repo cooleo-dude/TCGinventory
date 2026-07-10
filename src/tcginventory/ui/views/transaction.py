@@ -15,6 +15,7 @@ from __future__ import annotations
 import sqlite3
 
 from PySide6.QtCore import QDate, Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDoubleSpinBox,
@@ -81,6 +82,8 @@ class TransactionView(QWidget):
 
         self._badge = QLabel("—")
         self._badge.setStyleSheet("font-size: 16px; font-weight: 700;")
+        self._badge.setToolTip("Type is inferred from which sides carry cards")
+        self._badge.setAccessibleName("Inferred transaction type")
         self._edit_banner = QLabel("")
         self._edit_banner.setStyleSheet("color: #b26a00; font-weight: 600;")
 
@@ -110,7 +113,10 @@ class TransactionView(QWidget):
         self._summary = QLabel("")
         self._summary.setTextFormat(Qt.RichText)
         self._submit = QPushButton("Submit")
+        self._submit.setToolTip("Post this transaction (Ctrl+S)")
         self._submit.clicked.connect(self.submit)
+        self._save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
+        self._save_shortcut.activated.connect(self._submit_via_shortcut)
         clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(self.clear)
         footer = QHBoxLayout()
@@ -291,6 +297,10 @@ class TransactionView(QWidget):
         self._submit.setEnabled(can_submit)
 
     # -- submit / edit ------------------------------------------------------
+
+    def _submit_via_shortcut(self) -> None:
+        if self._submit.isEnabled():
+            self.submit()
 
     def submit(self) -> None:
         request = self.build_request()

@@ -96,10 +96,7 @@ class DashboardView(QWidget):
         self._chart_view.setRenderHint(QPainter.Antialiasing)
         self._chart_view.setMinimumHeight(300)
 
-        self._note = QLabel(
-            "Collection-value-over-time chart arrives with M3 polish; the current "
-            "value is shown above."
-        )
+        self._note = QLabel("")
         self._note.setStyleSheet("color: palette(mid);")
 
         layout = QVBoxLayout(self)
@@ -126,12 +123,23 @@ class DashboardView(QWidget):
         )
         self._tiles["cash"].set_value(money(summary.net_cash_cents))
 
+        money_series = self._reporting.money_movement_series()
         self._chart_view.setChart(
             self._build_chart(
-                self._reporting.money_movement_series(),
+                money_series,
                 self._reporting.realized_profit_series(intent),
             )
         )
+        if money_series:
+            self._note.setText(
+                "Collection-value-over-time chart is planned; the current value "
+                "is shown above."
+            )
+        else:
+            self._note.setText(
+                "No data yet — open the Transaction tab to record your first "
+                "purchase, sale, or trade."
+            )
 
     def _build_chart(
         self, money_pts: list[SeriesPoint], profit_pts: list[SeriesPoint]

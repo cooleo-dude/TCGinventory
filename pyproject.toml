@@ -18,6 +18,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",
+    "pyinstaller>=6.0",
 ]
 
 [project.gui-scripts]
@@ -28,6 +29,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "tcginventory.data" = ["migrations/*.sql"]
+"tcginventory.ui" = ["assets/*.png", "assets/*.ico"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

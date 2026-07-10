@@ -71,11 +71,18 @@ def test_item_detail_dialog_opens(app, seeded_conn):
     dialog.deleteLater()
 
 
+def test_app_icon_loads(app):
+    from tcginventory.ui.assets import app_icon
+
+    assert not app_icon().isNull()
+
+
 def test_main_window_hosts_views(app, seeded_conn):
     from tcginventory.ui.main_window import NAV_ITEMS, MainWindow
 
     window = MainWindow(seeded_conn)
     assert window.windowTitle().startswith("TCGinventory")
+    assert not window.windowIcon().isNull()
     # Visit each nav destination; refresh must not raise.
     for row in range(len(NAV_ITEMS)):
         window._on_nav_changed(row)

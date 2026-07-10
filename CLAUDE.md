@@ -54,8 +54,15 @@ offline; no external price feeds in V1.
   auto-backup, keep-10), a File menu in the main window, and startup auto-backup
   wired in `app.py`. Verified on Python 3.12.10 (ruff clean, 92 tests pass;
   export→wipe→import reproduces the dataset; startup backup confirmed).
-- **Next: M6** (packaging & polish — PyInstaller build, empty states, a11y pass)
-  — see [`specs/05-roadmap.md`](specs/05-roadmap.md).
+- **M6 (packaging & polish): done** — app icon (`ui/assets/`), PyInstaller
+  build (`packaging/tcginventory.spec` + `entry.py`, onedir; see
+  `packaging/README.md`), empty-state notes, Ctrl+S submit + a11y tooltips,
+  finalized user guide. Verified on Python 3.12.10 (ruff clean, 94 tests pass;
+  the frozen 125 MB exe boots on its own — creates the DB, migrates, writes a
+  startup backup, runs the GUI).
+- **V1 is feature-complete (M0–M6).** Post-V1 backlog in [`specs/05-roadmap.md`](specs/05-roadmap.md)
+  (price feeds, explicit rip/open event, dashboard calendar, specific-lot basis,
+  images/scanning, intent-change history, the 30-day void-restore idea, etc.).
 
 ## Source of truth
 

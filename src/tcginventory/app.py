@@ -51,10 +51,12 @@ def main() -> int:
     # without requiring a Qt display or the PySide6 dependency at import time.
     from PySide6.QtWidgets import QApplication
 
+    from tcginventory.ui.assets import app_icon
     from tcginventory.ui.main_window import MainWindow
 
     app = QApplication(sys.argv)
     app.setApplicationName(config.APP_NAME)
+    app.setWindowIcon(app_icon())
     window = MainWindow(conn)
     window.show()
     try:

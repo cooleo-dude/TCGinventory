@@ -26,6 +26,7 @@ from tcginventory.data.backup import backup_database
 from tcginventory.data.db import connect
 from tcginventory.data.migrator import migrate
 from tcginventory.services import importexport
+from tcginventory.ui.assets import app_icon
 from tcginventory.ui.views.dashboard import DashboardView
 from tcginventory.ui.views.history import HistoryView
 from tcginventory.ui.views.inventory import InventoryView
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
         self._conn = conn
 
         self.setWindowTitle(f"TCGinventory {__version__}")
+        self.setWindowIcon(app_icon())
         self.resize(1200, 800)
 
         self._dashboard = DashboardView(conn)

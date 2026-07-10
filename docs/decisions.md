@@ -4,6 +4,20 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-10 — M6 implementation: packaging & polish
+
+- **PyInstaller onedir** is the default build (`packaging/tcginventory.spec`);
+  faster/more debuggable than onefile, still a zip-and-share distributable. A
+  `ONEFILE` flag flips to a single exe. The spec bundles the SQL migrations and
+  icon as data and pins `PySide6.QtCharts` as a hidden import.
+- **App icon** generated programmatically (indigo→teal "TCG"), committed as
+  `icon.png` + `icon.ico`; loaded via `importlib.resources` so it works framed
+  and frozen.
+- Polish: empty-state notes, **Ctrl+S** to submit, accessibility tooltips/names,
+  finalized user guide. Verified the frozen exe boots on its own.
+
+---
+
 ### 2026-07-10 — M5 implementation: import/export & backup
 
 - **Two export families.** Human-readable flat CSVs (items/inventory/
