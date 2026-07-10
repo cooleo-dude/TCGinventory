@@ -35,6 +35,18 @@ def main() -> int:
             seed_demo(conn)
             log.info("Seeded demo data.")
 
+    # Automatic timestamped backup on startup (F-DA-6); never blocks launch.
+    if conn.execute("SELECT COUNT(*) FROM item").fetchone()[0] > 0:
+        try:
+            from tcginventory.data.backup import auto_backup, timestamp_for_filename
+
+            dest = auto_backup(
+                conn, data_dir / "backups", stamp=timestamp_for_filename()
+            )
+            log.info("Startup backup: %s", dest)
+        except Exception:
+            log.exception("Startup backup failed (continuing)")
+
     # Imported lazily so headless tooling (tests, tools) can import this module
     # without requiring a Qt display or the PySide6 dependency at import time.
     from PySide6.QtWidgets import QApplication

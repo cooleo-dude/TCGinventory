@@ -4,6 +4,25 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-10 — M5 implementation: import/export & backup
+
+- **Two export families.** Human-readable flat CSVs (items/inventory/
+  transactions, money in dollars) for spreadsheets, and a **full dump/restore**
+  (`export_all`/`import_all`) that writes every table verbatim so the dataset
+  round-trips exactly (the exit criterion). Empty CSV cells load as SQL NULL
+  (repos never store empty strings, so this is faithful); integer columns rely on
+  SQLite affinity to reconvert.
+- **Portable backup** = the full CSV dump **and** a one-file DB copy via SQLite's
+  online-backup API (`backup_database`). We still never hard-delete, so backup is
+  copy-only.
+- **Import column mapping is header-based** (case-insensitive aliases) with a
+  validation preview, rather than an interactive column-mapper UI — pragmatic for
+  V1; the preview surfaces per-row errors before any write.
+- **Startup auto-backup** (F-DA-6) writes a timestamped copy to
+  `<data_dir>/backups/`, keeps the newest 10, and never blocks launch on failure.
+
+---
+
 ### 2026-07-10 — M4 implementation: dialog-based card entry
 
 - The unified Transaction window adds cards via **modal add-card dialogs**

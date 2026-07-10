@@ -47,7 +47,15 @@ offline; no external price feeds in V1.
   History (edit = atomic void+re-post, warns on P/L change). Verified on Python
   3.12.10 (ruff clean, 81 tests pass incl. a full purchase→sale→trade→rip
   lifecycle + edit + void through the UI; offscreen screenshots confirm).
-- **Next: M5** (import/export & backup) — see [`specs/05-roadmap.md`](specs/05-roadmap.md).
+- **M5 (import/export & backup): done** — `services/importexport.py` (human CSV
+  exports of items/inventory/transactions; full `export_all`/`import_all` dump-
+  restore round-trip; header-mapped item + purchase import with validation
+  preview), `data/backup.py` (SQLite online-backup copy + timestamped startup
+  auto-backup, keep-10), a File menu in the main window, and startup auto-backup
+  wired in `app.py`. Verified on Python 3.12.10 (ruff clean, 92 tests pass;
+  export→wipe→import reproduces the dataset; startup backup confirmed).
+- **Next: M6** (packaging & polish — PyInstaller build, empty states, a11y pass)
+  — see [`specs/05-roadmap.md`](specs/05-roadmap.md).
 
 ## Source of truth
 
