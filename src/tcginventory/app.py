@@ -26,6 +26,13 @@ def main() -> int:
     conn = open_database(config.db_path())
     log.info("Schema version: %d", current_version(conn))
 
+    # Assign SKUs to any pre-existing lots that predate the SKU system.
+    from tcginventory.services.sku import backfill_skus
+
+    filled = backfill_skus(conn)
+    if filled:
+        log.info("Backfilled %d lot SKU(s).", filled)
+
     # Optional demo seeding for a fresh DB (dev/verification only).
     if os.environ.get("TCGINVENTORY_SEED") == "1":
         empty = conn.execute("SELECT COUNT(*) FROM item").fetchone()[0] == 0

@@ -15,9 +15,10 @@ maintained afterward.
 | F-IT-1 | Auto match-or-create an item by its **identity key** (name + set + card number + language + condition + grade + grading company/number) when a card is entered on a transaction row. | MUST |
 | F-IT-2 | Capture grading (company, grade #, cert #); **Condition greys out when graded** (grade identifies the card). | MUST |
 | F-IT-3 | Edit an item (fix identity, notes) and soft-delete it (block delete if lots/lines exist; require adjustment-out instead). | MUST |
-| F-IT-4 | Maintain SKU and location on an item. | SHOULD |
+| F-IT-4 | Auto-generate a unique per-copy **SKU** on the lot at acquisition (`{name}-{set}-{number}-{cond/grade}-{lang}-{seq}`, sequenced per identity); maintain location on the item. | MUST |
 | F-IT-5 | Set/maintain a manual market value with an "as-of" date (most-recent entry wins; drives unrealized P/L). | MUST |
 | F-IT-6 | Store reference links (TCGplayer, eBay) on an item. | MUST |
+| F-IT-7 | Quick-lookup a card by SKU when selling/trading (resolve the entered SKU to its card). | MUST |
 
 > **All three of the below are served by one unified Transaction window**
 > (Spec 04, Window 2): cards/cash out ⇄ cards/cash in, with the `type` inferred

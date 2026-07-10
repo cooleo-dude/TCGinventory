@@ -75,7 +75,6 @@ class ItemRepository:
             grading_company=_opt_enum(GradingCompany, row["grading_company"]),
             grade=row["grade"],
             cert_number=row["cert_number"],
-            sku=row["sku"],
             location=row["location"],
             tcgplayer_url=row["tcgplayer_url"],
             ebay_url=row["ebay_url"],
@@ -95,9 +94,9 @@ class ItemRepository:
             INSERT INTO item (
                 name, game, set_name, set_code, card_number, language, category,
                 condition, is_graded, grading_company, grade, cert_number,
-                sku, location, tcgplayer_url, ebay_url, market_value_cents,
+                location, tcgplayer_url, ebay_url, market_value_cents,
                 market_value_asof, notes, created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 item.name,
@@ -112,7 +111,6 @@ class ItemRepository:
                 item.grading_company.value if item.grading_company else None,
                 item.grade,
                 item.cert_number,
-                item.sku,
                 item.location,
                 item.tcgplayer_url,
                 item.ebay_url,
@@ -167,7 +165,7 @@ class ItemRepository:
             UPDATE item SET
                 name = ?, game = ?, set_name = ?, set_code = ?, card_number = ?,
                 language = ?, category = ?, condition = ?, is_graded = ?,
-                grading_company = ?, grade = ?, cert_number = ?, sku = ?,
+                grading_company = ?, grade = ?, cert_number = ?,
                 location = ?, tcgplayer_url = ?, ebay_url = ?,
                 market_value_cents = ?, market_value_asof = ?, notes = ?,
                 updated_at = ?
@@ -186,7 +184,6 @@ class ItemRepository:
                 item.grading_company.value if item.grading_company else None,
                 item.grade,
                 item.cert_number,
-                item.sku,
                 item.location,
                 item.tcgplayer_url,
                 item.ebay_url,
@@ -219,6 +216,7 @@ class LotRepository:
             unit_cost_cents=row["unit_cost_cents"],
             acquired_market_value_cents=row["acquired_market_value_cents"],
             intent=Intent(row["intent"]),
+            sku=row["sku"],
             source=row["source"],
             notes=row["notes"],
             created_at=row["created_at"],
@@ -231,8 +229,8 @@ class LotRepository:
             INSERT INTO lot (
                 item_id, acquired_txn_line_id, acquired_at, quantity,
                 remaining_qty, unit_cost_cents, acquired_market_value_cents,
-                intent, source, notes, created_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                intent, sku, source, notes, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 lot.item_id,
@@ -243,6 +241,7 @@ class LotRepository:
                 lot.unit_cost_cents,
                 lot.acquired_market_value_cents,
                 lot.intent.value,
+                lot.sku,
                 lot.source,
                 lot.notes,
                 lot.created_at,
@@ -286,6 +285,36 @@ class LotRepository:
         rows = self.conn.execute("SELECT * FROM lot ORDER BY id").fetchall()
         return [self._to_model(r) for r in rows]
 
+    def find_by_sku(self, sku: str) -> Lot | None:
+        row = self.conn.execute(
+            "SELECT * FROM lot WHERE sku = ? LIMIT 1", (sku,)
+        ).fetchone()
+        return self._to_model(row) if row else None
+
+    def exists_sku(self, sku: str) -> bool:
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM lot WHERE sku = ? LIMIT 1", (sku,)
+            ).fetchone()
+            is not None
+        )
+
+    def distinct_sku_count(self, item_id: int) -> int:
+        """How many distinct SKUs already exist for an item (its copy count)."""
+        row = self.conn.execute(
+            "SELECT COUNT(DISTINCT sku) AS n FROM lot "
+            "WHERE item_id = ? AND sku IS NOT NULL",
+            (item_id,),
+        ).fetchone()
+        return row["n"]
+
+    def skus_for_item(self, item_id: int) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT DISTINCT sku FROM lot WHERE item_id = ? AND sku IS NOT NULL",
+            (item_id,),
+        ).fetchall()
+        return [r["sku"] for r in rows]
+
     def update(self, lot: Lot) -> Lot:
         if lot.id is None:
             raise ValueError("cannot update a lot without an id")
@@ -294,7 +323,8 @@ class LotRepository:
             UPDATE lot SET
                 item_id = ?, acquired_txn_line_id = ?, acquired_at = ?,
                 quantity = ?, remaining_qty = ?, unit_cost_cents = ?,
-                acquired_market_value_cents = ?, intent = ?, source = ?, notes = ?
+                acquired_market_value_cents = ?, intent = ?, sku = ?,
+                source = ?, notes = ?
             WHERE id = ?
             """,
             (
@@ -306,6 +336,7 @@ class LotRepository:
                 lot.unit_cost_cents,
                 lot.acquired_market_value_cents,
                 lot.intent.value,
+                lot.sku,
                 lot.source,
                 lot.notes,
                 lot.id,

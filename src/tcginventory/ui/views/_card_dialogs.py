@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
 )
 
+from tcginventory.data.repositories import LotRepository
 from tcginventory.domain.enums import (
     Category,
     Condition,
@@ -34,12 +35,23 @@ def _money_spin() -> QDoubleSpinBox:
 
 
 class OutgoingCardDialog(QDialog):
-    """Pick a card from the collection to give up (in-stock, non-ripping)."""
+    """Pick a card from the collection to give up (in-stock, non-ripping).
 
-    def __init__(self, sellable: list[tuple[Item, int]], parent=None) -> None:
+    A SKU box resolves an entered SKU straight to its card for quick pulling.
+    """
+
+    def __init__(self, sellable: list[tuple[Item, int]], conn, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Add card to give")
         self._sellable = sellable
+        self._conn = conn
+
+        self._sku = QLineEdit()
+        self._sku.setPlaceholderText("Type a SKU and press Enter…")
+        self._sku.returnPressed.connect(self._lookup_sku)
+        self._sku_status = QLineEdit()
+        self._sku_status.setReadOnly(True)
+        self._sku_status.setFrame(False)
 
         self._item = QComboBox()
         for item, available in sellable:
@@ -56,6 +68,8 @@ class OutgoingCardDialog(QDialog):
         self._agreed = _money_spin()
 
         form = QFormLayout(self)
+        form.addRow("SKU lookup:", self._sku)
+        form.addRow("", self._sku_status)
         form.addRow("Card:", self._item)
         form.addRow("Quantity:", self._qty)
         form.addRow("Agreed value (per unit):", self._agreed)
@@ -66,6 +80,21 @@ class OutgoingCardDialog(QDialog):
         form.addRow(buttons)
 
         self._sync_max()
+
+    def _lookup_sku(self) -> None:
+        sku = self._sku.text().strip()
+        if not sku:
+            return
+        lot = LotRepository(self._conn).find_by_sku(sku)
+        if lot is None:
+            self._sku_status.setText(f"No card found for '{sku}'")
+            return
+        index = self._item.findData(lot.item_id)
+        if index >= 0:
+            self._item.setCurrentIndex(index)
+            self._sku_status.setText(f"→ {self._item.currentText().split(' — ')[0]}")
+        else:
+            self._sku_status.setText("That card has no sellable (non-ripping) stock")
 
     def _sync_max(self) -> None:
         idx = self._item.currentIndex()

@@ -33,6 +33,10 @@ Terms used across the app and specs.
   MP (moderately played), HP (heavily played), DMG (damaged).
 - **Card number** — the collector number printed on the card (e.g. `60/107`,
   `GG09/GG12`). Part of item identity.
+- **SKU** — an auto-generated per-**copy** lookup code on the lot, formatted
+  `{name}-{set}-{number}-{cond/grade}-{lang}-{seq}` (e.g. `CHA-CPA-074-NM-EN-0001`).
+  The sequence counts prior copies of the same identity, so NM and LP copies
+  sequence separately. Used to quickly find a card when selling/trading.
 - **Language** — the card's printed language (EN, JP, CN, KO, FR, DE, IT, ES, PT,
   TH, ID, RU); defaults to EN. Part of item identity, so the same card in a
   different language is a distinct item.

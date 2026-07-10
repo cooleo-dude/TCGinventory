@@ -154,6 +154,26 @@ def test_ui_trade_and_rip_lifecycle(app, conn):
     assert box not in {i.id for i, _ in InventoryService(conn).sellable_items()}
 
 
+def test_ui_give_dialog_sku_lookup(app, conn):
+    from conftest import buy
+    from tcginventory.services.inventory import InventoryService
+    from tcginventory.services.transactions import TransactionService
+    from tcginventory.ui.views._card_dialogs import OutgoingCardDialog
+
+    svc = TransactionService(conn)
+    buy(svc, "Snorlax", 1000, 1000, "2026-01-01", set_code="BS", card_number="011/102")
+    lot_sku = InventoryService(conn).inventory_rows()[0].skus[0]
+
+    sellable = InventoryService(conn).sellable_items()
+    dialog = OutgoingCardDialog(sellable, conn)
+    dialog._sku.setText(lot_sku)
+    dialog._lookup_sku()
+    # The combo now points at the looked-up card.
+    card, name = dialog.result_card()
+    assert name == "Snorlax"
+    dialog.deleteLater()
+
+
 def test_ui_edit_reposts_and_history_void(app, conn):
     from tcginventory.ui.views.history import HistoryView
     from tcginventory.ui.views.transaction import TransactionView

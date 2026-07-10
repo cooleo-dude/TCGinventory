@@ -43,6 +43,7 @@ class InventoryRow:
     avg_cost_cents: int
     sold_status: str  # "unsold" | "partial" | "sold"
     intent: str  # an Intent value, "mixed", or "" (no lots)
+    skus: tuple[str, ...] = ()  # the item's lot SKUs (for lookup/search)
 
     @property
     def in_stock(self) -> bool:
@@ -139,6 +140,7 @@ class InventoryService:
 
             intents = {lot.intent for lot in lots}
             intent = next(iter(intents)).value if len(intents) == 1 else "mixed"
+            skus = tuple(sorted({lot.sku for lot in lots if lot.sku}))
 
             rows.append(
                 InventoryRow(
@@ -151,6 +153,7 @@ class InventoryService:
                     avg_cost_cents=avg_cost,
                     sold_status=sold_status,
                     intent=intent,
+                    skus=skus,
                 )
             )
         return rows

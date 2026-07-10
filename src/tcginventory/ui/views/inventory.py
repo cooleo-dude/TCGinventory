@@ -63,7 +63,7 @@ class _InventoryFilterProxy(QSortFilterProxyModel):
             haystack = " ".join(
                 filter(
                     None,
-                    [row.item.name, row.item.set_name, row.item.card_number],
+                    [row.item.name, row.item.set_name, row.item.card_number, *row.skus],
                 )
             ).lower()
             if self._text not in haystack:

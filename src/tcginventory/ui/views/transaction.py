@@ -204,7 +204,7 @@ class TransactionView(QWidget):
                 self, "Nothing to give", "No sellable cards on hand."
             )
             return
-        dialog = OutgoingCardDialog(sellable, parent=self)
+        dialog = OutgoingCardDialog(sellable, self._conn, parent=self)
         if dialog.exec():
             card, name = dialog.result_card()
             self.add_outgoing(card, name)

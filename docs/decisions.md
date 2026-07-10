@@ -4,6 +4,26 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-10 — Per-copy SKUs on the lot (auto-generated)
+
+- **SKUs moved from the item to the lot.** A SKU identifies an acquired *copy*,
+  formatted `{NAME3}-{SET}-{NUMBER}-{COND|GRADE}-{LANG}-{NNNN}` (e.g.
+  `CHA-CPA-074-NM-EN-0001`). This matches the user's spec: each new card gets a
+  new SKU, and `NNNN` sequences per identity (NM separate from LP). Because our
+  model merges identical copies into one *item* (with multiple lots), the SKU
+  had to live on the **lot** for the sequence to mean "how many copies exist."
+- **The old manual `item.sku` was retired** (migration `0003_lot_sku.sql`:
+  `lot.sku` + partial unique index; `item.sku` dropped). Existing lots are
+  backfilled with SKUs on startup (`services/sku.backfill_skus`).
+- **Sequence** = distinct existing SKUs for the identity + 1, bumped on the rare
+  cross-identity collision (from name truncation) to stay globally unique.
+- **Lookup**: `LotRepository.find_by_sku`; the give dialog resolves a typed SKU
+  to its card, and the Inventory search matches SKUs. Set/number/grade segments
+  fall back to `NA`/`GR` when absent (e.g. a sealed box → `BRI-NA-NA-SEALED-EN-…`).
+- Work is on `main` directly (no feature branch), per the new workflow.
+
+---
+
 ### 2026-07-10 — M6 implementation: packaging & polish
 
 - **PyInstaller onedir** is the default build (`packaging/tcginventory.spec`);

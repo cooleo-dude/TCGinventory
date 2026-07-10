@@ -39,7 +39,6 @@ class Item:
     grading_company: GradingCompany | None = None
     grade: str | None = None
     cert_number: str | None = None
-    sku: str | None = None
     location: str | None = None
     tcgplayer_url: str | None = None
     ebay_url: str | None = None
@@ -62,6 +61,7 @@ class Lot:
     unit_cost_cents: int
     acquired_market_value_cents: int
     intent: Intent
+    sku: str | None = None  # auto-generated per-copy lookup SKU
     acquired_txn_line_id: int | None = None
     source: str | None = None
     notes: str | None = None

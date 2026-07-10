@@ -101,6 +101,7 @@ class ItemDetailDialog(QDialog):
     def _lots_table(self, item_id: int) -> QTableWidget:
         lots = LotRepository(self._conn).list_for_item(item_id)
         headers = [
+            "SKU",
             "Acquired",
             "Qty",
             "Remaining",
@@ -112,19 +113,20 @@ class ItemDetailDialog(QDialog):
         table = QTableWidget(len(lots), len(headers))
         table.setHorizontalHeaderLabels(headers)
         for r, lot in enumerate(lots):
-            table.setItem(r, 0, _readonly_item(lot.acquired_at))
-            table.setItem(r, 1, _readonly_item(str(lot.quantity), numeric=True))
-            table.setItem(r, 2, _readonly_item(str(lot.remaining_qty), numeric=True))
+            table.setItem(r, 0, _readonly_item(lot.sku or ""))
+            table.setItem(r, 1, _readonly_item(lot.acquired_at))
+            table.setItem(r, 2, _readonly_item(str(lot.quantity), numeric=True))
+            table.setItem(r, 3, _readonly_item(str(lot.remaining_qty), numeric=True))
             table.setItem(
-                r, 3, _readonly_item(money(lot.unit_cost_cents), numeric=True)
+                r, 4, _readonly_item(money(lot.unit_cost_cents), numeric=True)
             )
             table.setItem(
                 r,
-                4,
+                5,
                 _readonly_item(money(lot.acquired_market_value_cents), numeric=True),
             )
-            table.setItem(r, 5, _readonly_item(lot.intent.value))
-            table.setItem(r, 6, _readonly_item(lot.source or ""))
+            table.setItem(r, 6, _readonly_item(lot.intent.value))
+            table.setItem(r, 7, _readonly_item(lot.source or ""))
         _tidy(table)
         return table
 

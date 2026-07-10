@@ -47,6 +47,7 @@ from tcginventory.services.exceptions import (
     RippingNotSellableError,
     TransactionStateError,
 )
+from tcginventory.services.sku import generate_sku
 
 # ---------------------------------------------------------------------------
 # Request / result DTOs
@@ -290,6 +291,7 @@ class TransactionService:
                     notes=notes,
                 )
             )
+            item = self.items.get(item_id)
             self.lots.add(
                 Lot(
                     item_id=item_id,
@@ -300,6 +302,7 @@ class TransactionService:
                     unit_cost_cents=unit_cost_cents,
                     acquired_market_value_cents=unit_cost_cents,
                     intent=intent,
+                    sku=generate_sku(self.conn, item) if item else None,
                     source="adjustment",
                     notes=notes,
                 )
@@ -452,6 +455,8 @@ class TransactionService:
                     )
                 )
                 lines.append(line)
+                # One SKU per acquired copy (line); shared by any split lots.
+                sku = generate_sku(self.conn, item)
                 for lot_cost in alloc.lots:
                     lot = self.lots.add(
                         Lot(
@@ -463,6 +468,7 @@ class TransactionService:
                             unit_cost_cents=lot_cost.unit_cost_cents,
                             acquired_market_value_cents=inc.market_value_cents,
                             intent=inc.intent,
+                            sku=sku,
                             source=inc.source,
                             notes=inc.notes,
                         )

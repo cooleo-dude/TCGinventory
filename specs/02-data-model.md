@@ -210,7 +210,6 @@ CREATE TABLE item (
     grading_company    TEXT,                   -- enum: PSA | BGS | CGC | SGC | null
     grade              TEXT,                   -- "10", "9.5"
     cert_number        TEXT,                   -- slab cert #
-    sku                TEXT,                   -- user's own SKU/label
     location           TEXT,                   -- "Binder A", "Safe", "Box 3"
     tcgplayer_url      TEXT,                   -- reference link
     ebay_url           TEXT,                   -- reference link
@@ -234,11 +233,20 @@ CREATE TABLE lot (
     unit_cost_cents     INTEGER NOT NULL,      -- inferred basis / unit (market-value-weighted split)
     acquired_market_value_cents INTEGER NOT NULL, -- per-unit market value at acquisition (allocation snapshot)
     intent              TEXT    NOT NULL,      -- enum: personal | resale | ripping (editable, no history in V1)
+    sku                 TEXT,                  -- auto-generated per-copy lookup SKU (added in 0003)
     source              TEXT,                  -- vendor/seller/friend
     notes               TEXT,                  -- acquisition notes (per this lot)
     created_at          TEXT    NOT NULL
 );
 CREATE INDEX idx_lot_item_open ON lot(item_id, remaining_qty);
+CREATE UNIQUE INDEX idx_lot_sku ON lot(sku) WHERE sku IS NOT NULL;
+
+-- SKUs identify an acquired copy for quick lookup while selling/trading. Format:
+--   {NAME3}-{SET}-{NUMBER}-{COND|GRADE}-{LANG}-{NNNN}   e.g. CHA-CPA-074-NM-EN-0001
+-- The NNNN sequence counts prior copies of the same identity, so a NM copy
+-- sequences independently from an LP copy. Auto-generated on acquisition (see
+-- services/sku.py); SKUs are per-lot, not per-item. (Migrated from the old
+-- manual item.sku in 0003.)
 
 -- An inventory/value-affecting event
 CREATE TABLE "transaction" (

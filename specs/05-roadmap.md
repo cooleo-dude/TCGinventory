@@ -62,7 +62,7 @@ The correctness core, proven headlessly before any UI exists.
   footer, per-row intent, incoming-market-value-required + oversell-blocked
   validation, ripping lots excluded from the out picker, success screen.
 - **Item editor** (edit/maintain only — creation is automatic): links, market
-  value, SKU/location, soft-delete.
+  value, location, soft-delete. (SKUs are auto-generated per lot, not edited.)
 - **Void / Edit** actions wired from History (atomic reverse+re-post; warns on
   P/L change).
 - **Exit:** full purchase→sale→trade→rip lifecycle done entirely through the UI,
