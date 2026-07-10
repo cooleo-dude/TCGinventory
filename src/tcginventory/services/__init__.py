@@ -8,7 +8,11 @@ from tcginventory.services.exceptions import (
     ServiceError,
     TransactionStateError,
 )
-from tcginventory.services.inventory import InventoryService, Position
+from tcginventory.services.inventory import (
+    InventoryRow,
+    InventoryService,
+    Position,
+)
 from tcginventory.services.reporting import (
     PortfolioSummary,
     ReportingService,
@@ -29,6 +33,7 @@ __all__ = [
     "RippingNotSellableError",
     "ServiceError",
     "TransactionStateError",
+    "InventoryRow",
     "InventoryService",
     "Position",
     "PortfolioSummary",

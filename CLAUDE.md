@@ -31,7 +31,15 @@ offline; no external price feeds in V1.
   All 5 acceptance scenarios covered. Verified on Python 3.12.10 (ruff clean, 65
   tests pass, zero Qt in domain/services). Historical collection-value series
   deferred to M3 (see decisions log).
-- **Next: M3** (read-only UI over real data) — see [`specs/05-roadmap.md`](specs/05-roadmap.md).
+- **M3 (read-only UI over real data): done** — main window hosts live Dashboard
+  (QtCharts money-movement/realized-profit + summary tiles, intent filter),
+  Inventory grid (`ui/models/inventory_model.py`, sortable + filter bar), History
+  (transaction log + detail drill-down), and Item detail dialog. Backed by
+  `InventoryService.inventory_rows()` and a demo `data/seed.py`
+  (`TCGINVENTORY_SEED=1`). Verified on Python 3.12.10 (ruff clean, 79 tests pass,
+  offscreen screenshots render all views; ripping lot shows as a loss). The
+  Transaction nav item is a placeholder until M4.
+- **Next: M4** (write UI — the unified Transaction window) — see [`specs/05-roadmap.md`](specs/05-roadmap.md).
 
 ## Source of truth
 

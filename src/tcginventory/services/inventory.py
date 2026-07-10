@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from tcginventory.data.repositories import ItemRepository, LotRepository
 from tcginventory.domain.enums import Intent
+from tcginventory.domain.models import Item
 
 
 @dataclass
@@ -24,6 +25,28 @@ class Position:
     cost_basis_cents: int
     market_value_cents: int
     unrealized_pl_cents: int
+
+
+@dataclass
+class InventoryRow:
+    """A full inventory-grid row: the item plus its aggregate stats.
+
+    Values are raw (cents / ints / codes); the UI formats them for display.
+    """
+
+    item: Item
+    on_hand: int
+    acquired_qty: int
+    cost_basis_cents: int
+    market_value_cents: int
+    unrealized_pl_cents: int
+    avg_cost_cents: int
+    sold_status: str  # "unsold" | "partial" | "sold"
+    intent: str  # an Intent value, "mixed", or "" (no lots)
+
+    @property
+    def in_stock(self) -> bool:
+        return self.on_hand > 0
 
 
 class InventoryService:
@@ -68,3 +91,49 @@ class InventoryService:
             if pos.remaining_qty > 0:
                 positions.append(pos)
         return positions
+
+    def inventory_rows(self) -> list[InventoryRow]:
+        """One aggregate row per item that has ever had a lot (incl. sold-out).
+
+        Powers the Inventory grid; includes fully-sold items so a sold-status
+        filter has something to show.
+        """
+        rows: list[InventoryRow] = []
+        for item in self.items.list_all():
+            lots = self.lots.list_for_item(item.id)
+            if not lots:
+                continue
+            acquired = sum(lot.quantity for lot in lots)
+            on_hand = sum(lot.remaining_qty for lot in lots)
+            current_mv = item.market_value_cents or 0
+            cost = sum(lot.remaining_qty * lot.unit_cost_cents for lot in lots)
+            market = sum(
+                0 if lot.intent is Intent.RIPPING else lot.remaining_qty * current_mv
+                for lot in lots
+            )
+            avg_cost = cost // on_hand if on_hand else 0
+
+            if on_hand == 0:
+                sold_status = "sold"
+            elif on_hand == acquired:
+                sold_status = "unsold"
+            else:
+                sold_status = "partial"
+
+            intents = {lot.intent for lot in lots}
+            intent = next(iter(intents)).value if len(intents) == 1 else "mixed"
+
+            rows.append(
+                InventoryRow(
+                    item=item,
+                    on_hand=on_hand,
+                    acquired_qty=acquired,
+                    cost_basis_cents=cost,
+                    market_value_cents=market,
+                    unrealized_pl_cents=market - cost,
+                    avg_cost_cents=avg_cost,
+                    sold_status=sold_status,
+                    intent=intent,
+                )
+            )
+        return rows

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import buy
+from conftest import buy, sell
 from tcginventory.domain.enums import Intent
 from tcginventory.services.inventory import InventoryService
 from tcginventory.services.transactions import TransactionService
@@ -54,3 +54,27 @@ def test_on_hand_and_intent_filter(svc, inv, conn):
 def test_on_hand_counts_units(svc, inv):
     result = buy(svc, "Common", 3000, 1000, "2026-01-01", quantity=3)
     assert inv.on_hand(result.lots[0].item_id) == 3
+
+
+def test_inventory_rows_sold_status_and_intent(svc, inv):
+    # A resale card, fully sold.
+    p = buy(svc, "Flip", 1000, 1000, "2026-01-01", intent=Intent.RESALE)
+    sell(svc, p.lots[0].item_id, 1, 1500, "2026-02-01")
+    # A personal keeper still held.
+    buy(svc, "Keeper", 2000, 2000, "2026-01-02", intent=Intent.PERSONAL)
+
+    rows = {r.item.name: r for r in inv.inventory_rows()}
+    assert rows["Flip"].sold_status == "sold"
+    assert rows["Flip"].on_hand == 0
+    assert rows["Flip"].intent == "resale"
+    assert rows["Keeper"].sold_status == "unsold"
+    assert rows["Keeper"].intent == "personal"
+
+
+def test_inventory_rows_partial_sale(svc, inv):
+    p = buy(svc, "Box", 3000, 1000, "2026-01-01", quantity=3)
+    sell(svc, p.lots[0].item_id, 1, 1500, "2026-02-01")
+    (row,) = inv.inventory_rows()
+    assert row.on_hand == 2
+    assert row.acquired_qty == 3
+    assert row.sold_status == "partial"
