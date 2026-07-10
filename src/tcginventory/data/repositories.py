@@ -274,6 +274,18 @@ class LotRepository:
         ).fetchall()
         return [self._to_model(r) for r in rows]
 
+    def list_for_acquired_line(self, transaction_line_id: int) -> list[Lot]:
+        """Lots created by a given incoming transaction line (for void/edit)."""
+        rows = self.conn.execute(
+            "SELECT * FROM lot WHERE acquired_txn_line_id = ? ORDER BY id",
+            (transaction_line_id,),
+        ).fetchall()
+        return [self._to_model(r) for r in rows]
+
+    def list_all(self) -> list[Lot]:
+        rows = self.conn.execute("SELECT * FROM lot ORDER BY id").fetchall()
+        return [self._to_model(r) for r in rows]
+
     def update(self, lot: Lot) -> Lot:
         if lot.id is None:
             raise ValueError("cannot update a lot without an id")

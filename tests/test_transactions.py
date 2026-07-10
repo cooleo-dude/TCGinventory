@@ -1,0 +1,274 @@
+"""TransactionService tests — the acceptance scenarios plus void/edit/adjust."""
+
+from __future__ import annotations
+
+import pytest
+
+from conftest import buy, incoming, make_item, sell
+from tcginventory.data.repositories import (
+    AuditLogRepository,
+    ItemRepository,
+    LotRepository,
+    TransactionRepository,
+)
+from tcginventory.domain.enums import (
+    AuditAction,
+    Intent,
+    TransactionStatus,
+    TransactionType,
+)
+from tcginventory.services.exceptions import (
+    EmptyTransactionError,
+    InsufficientQuantityError,
+    InvalidTransactionError,
+    RippingNotSellableError,
+    TransactionStateError,
+)
+from tcginventory.services.transactions import (
+    OutgoingCard,
+    TransactionRequest,
+    TransactionService,
+)
+
+
+@pytest.fixture()
+def svc(conn):
+    return TransactionService(conn)
+
+
+# -- acceptance scenarios ---------------------------------------------------
+
+
+def test_scenario_1_multi_card_acquisition_split(svc, conn):
+    req = TransactionRequest(
+        occurred_at="2026-01-01",
+        cash_out_cents=8000,
+        incoming=[
+            incoming("A", 6000, intent=Intent.RESALE),
+            incoming("B", 3000, intent=Intent.PERSONAL),
+            incoming("C", 1000, intent=Intent.RESALE),
+        ],
+    )
+    result = svc.post(req)
+
+    assert result.transaction.type is TransactionType.PURCHASE
+    assert result.transaction.cash_delta_cents == -8000
+    assert result.realized_pl_cents == 0
+    assert result.net_consideration_in_cents == 8000
+    assert sorted(lot.unit_cost_cents for lot in result.lots) == [800, 2400, 4800]
+    # Invariant 6: allocated basis sums exactly to net consideration.
+    assert sum(lot.unit_cost_cents * lot.quantity for lot in result.lots) == 8000
+    # One item created per distinct card.
+    assert len(ItemRepository(conn).list_all()) == 3
+
+
+def test_scenario_2_two_lots_fifo_sale(svc, conn):
+    first = buy(svc, "Charizard X", 9000, 9000, "2026-01-01")
+    buy(svc, "Charizard X", 7500, 7500, "2026-02-01")
+    item_id = first.lots[0].item_id
+
+    # one item, two lots
+    assert len(ItemRepository(conn).list_all()) == 1
+    assert len(LotRepository(conn).list_for_item(item_id)) == 2
+
+    result = sell(svc, item_id, 1, 12000, "2026-03-01")
+    assert result.transaction.type is TransactionType.SALE
+    assert result.realized_pl_cents == 3000  # 12000 − 9000 (FIFO took the $90 lot)
+
+    # The $75 lot remains on hand; the $90 lot is exhausted.
+    open_lots = LotRepository(conn).open_lots_for_item(item_id)
+    assert [lot.unit_cost_cents for lot in open_lots] == [7500]
+    assert open_lots[0].remaining_qty == 1
+
+
+def test_scenario_3_rounding_residual(svc):
+    req = TransactionRequest(
+        occurred_at="2026-01-01",
+        cash_out_cents=10000,
+        incoming=[
+            incoming("A", 1200),
+            incoming("B", 1100),
+            incoming("C", 1000),
+        ],
+    )
+    result = svc.post(req)
+    costs = sorted(lot.unit_cost_cents for lot in result.lots)
+    assert costs == [3030, 3333, 3637]  # residual cent to the $12 line
+    assert sum(lot.unit_cost_cents * lot.quantity for lot in result.lots) == 10000
+
+
+def test_scenario_4_trade_with_cash_back(svc, conn):
+    a = buy(svc, "Card A", 2000, 2000, "2026-01-01")
+    item_a = a.lots[0].item_id
+
+    req = TransactionRequest(
+        occurred_at="2026-03-01",
+        outgoing=[OutgoingCard(item_id=item_a, quantity=1, agreed_value_cents=5000)],
+        incoming=[incoming("Card B", 4000, intent=Intent.RESALE)],
+        cash_in_cents=1000,  # cash back
+    )
+    result = svc.post(req)
+
+    assert result.transaction.type is TransactionType.TRADE
+    assert result.net_consideration_in_cents == 4000  # 5000 − 1000
+    assert result.realized_pl_cents == 3000  # 5000 − 2000 basis on A
+    assert result.transaction.cash_delta_cents == 1000
+    # Card B's basis = net consideration = $40.
+    (b_lot,) = result.lots
+    assert b_lot.unit_cost_cents == 4000
+
+
+def test_scenario_5_oversell_guard_is_atomic(svc, conn):
+    result = buy(svc, "Common", 3000, 1000, "2026-01-01", quantity=3)
+    item_id = result.lots[0].item_id
+    txns_before = len(TransactionRepository(conn).list_all())
+
+    with pytest.raises(InsufficientQuantityError):
+        sell(svc, item_id, 5, 5000, "2026-02-01")
+
+    # Nothing was written: no new transaction, lot untouched.
+    assert len(TransactionRepository(conn).list_all()) == txns_before
+    assert LotRepository(conn).open_lots_for_item(item_id)[0].remaining_qty == 3
+
+
+# -- type inference & validation -------------------------------------------
+
+
+def test_pure_purchase_type_and_cash(svc):
+    result = buy(svc, "X", 5000, 5000, "2026-01-01")
+    assert result.transaction.type is TransactionType.PURCHASE
+    assert result.transaction.cash_delta_cents == -5000
+
+
+def test_empty_transaction_rejected(svc):
+    with pytest.raises(EmptyTransactionError):
+        svc.post(TransactionRequest(occurred_at="2026-01-01"))
+
+
+def test_incoming_requires_market_value(svc):
+    req = TransactionRequest(
+        occurred_at="2026-01-01",
+        cash_out_cents=1000,
+        incoming=[incoming("X", 0)],
+    )
+    with pytest.raises(InvalidTransactionError):
+        svc.post(req)
+
+
+# -- match-or-create --------------------------------------------------------
+
+
+def test_same_identity_matches_one_item_two_lots(svc, conn):
+    buy(svc, "Pikachu", 1000, 1000, "2026-01-01", set_name="Base", card_number="58/102")
+    buy(svc, "Pikachu", 1200, 1200, "2026-02-01", set_name="Base", card_number="58/102")
+    items = ItemRepository(conn).list_all()
+    assert len(items) == 1
+    assert len(LotRepository(conn).list_for_item(items[0].id)) == 2
+    # Most-recent market value wins on the shared item.
+    assert items[0].market_value_cents == 1200
+
+
+# -- void -------------------------------------------------------------------
+
+
+def test_void_sale_restores_consumed_lot(svc, conn):
+    p = buy(svc, "X", 9000, 9000, "2026-01-01")
+    item_id = p.lots[0].item_id
+    s = sell(svc, item_id, 1, 12000, "2026-02-01")
+
+    svc.void(s.transaction.id)
+
+    lots = LotRepository(conn).open_lots_for_item(item_id)
+    assert lots[0].remaining_qty == 1  # restored
+    voided = TransactionRepository(conn).get(s.transaction.id)
+    assert voided.status is TransactionStatus.VOIDED
+    assert voided.voided_at is not None
+
+
+def test_void_purchase_deletes_created_lots(svc, conn):
+    p = buy(svc, "X", 9000, 9000, "2026-01-01")
+    item_id = p.lots[0].item_id
+    svc.void(p.transaction.id)
+    assert LotRepository(conn).list_for_item(item_id) == []
+
+
+def test_cannot_void_purchase_with_partially_sold_lot(svc, conn):
+    p = buy(svc, "X", 9000, 9000, "2026-01-01", quantity=2)
+    item_id = p.lots[0].item_id
+    sell(svc, item_id, 1, 6000, "2026-02-01")
+    with pytest.raises(TransactionStateError):
+        svc.void(p.transaction.id)
+
+
+def test_cannot_void_twice(svc):
+    p = buy(svc, "X", 1000, 1000, "2026-01-01")
+    svc.void(p.transaction.id)
+    with pytest.raises(TransactionStateError):
+        svc.void(p.transaction.id)
+
+
+# -- edit -------------------------------------------------------------------
+
+
+def test_edit_voids_old_and_posts_new(svc, conn):
+    p = buy(svc, "X", 8000, 8000, "2026-01-01")
+    old_id = p.transaction.id
+
+    new_req = TransactionRequest(
+        occurred_at="2026-01-01",
+        cash_out_cents=9000,
+        incoming=[incoming("X", 8000)],
+    )
+    result = svc.edit(old_id, new_req)
+
+    assert result.transaction.id != old_id
+    assert TransactionRepository(conn).get(old_id).status is TransactionStatus.VOIDED
+    assert result.transaction.status is TransactionStatus.POSTED
+    # New basis reflects the corrected price.
+    assert sum(lot.unit_cost_cents * lot.quantity for lot in result.lots) == 9000
+
+
+# -- adjustments ------------------------------------------------------------
+
+
+def test_adjust_found_adds_inventory(svc, conn):
+    item = ItemRepository(conn).add(make_item("Found"))
+    txn = svc.adjust_found(item.id, 2, "2026-01-01", unit_cost_cents=500)
+    assert txn.type is TransactionType.ADJUSTMENT
+    lots = LotRepository(conn).open_lots_for_item(item.id)
+    assert sum(lot.remaining_qty for lot in lots) == 2
+
+
+def test_adjust_writeoff_realizes_loss(svc, conn):
+    p = buy(svc, "X", 1000, 1000, "2026-01-01")
+    item_id = p.lots[0].item_id
+    txn = svc.adjust_writeoff(item_id, 1, "2026-02-01")
+    line = next(
+        ln
+        for ln in svc.lines.list_for_transaction(txn.id)
+        if ln.direction.value == "out"
+    )
+    assert line.realized_pl_cents == -1000  # full cost written off
+    assert LotRepository(conn).open_lots_for_item(item_id) == []
+
+
+# -- ripping ----------------------------------------------------------------
+
+
+def test_ripping_lot_cannot_be_sold(svc, conn):
+    p = buy(svc, "Booster Box", 12000, 12000, "2026-01-01", intent=Intent.RIPPING)
+    item_id = p.lots[0].item_id
+    with pytest.raises(RippingNotSellableError):
+        sell(svc, item_id, 1, 15000, "2026-02-01")
+
+
+# -- audit ------------------------------------------------------------------
+
+
+def test_audit_log_records_create_and_void(svc, conn):
+    p = buy(svc, "X", 1000, 1000, "2026-01-01")
+    svc.void(p.transaction.id)
+    entries = AuditLogRepository(conn).list_for_entity("transaction", p.transaction.id)
+    actions = [e.action for e in entries]
+    assert AuditAction.CREATE in actions
+    assert AuditAction.VOID in actions

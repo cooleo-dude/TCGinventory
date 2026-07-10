@@ -4,6 +4,28 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-10 — M2 implementation decisions (services & money math)
+
+Three judgment calls made while building the service layer (all in code + tests):
+
+- **Indivisible qty>1 allocation splits a line into two lots.** When a line's
+  allocated total doesn't divide evenly by its quantity, it yields two lots —
+  `qty − r` units at the base unit cost and `r` at base+1 — so
+  `Σ(unit_cost × qty)` still equals the total exactly (invariant 6). Quantity-1
+  lines (the common case) always yield a single lot. Keeps unit costs integer
+  without rounding drift.
+- **Negative `net_consideration_in` clamps to $0.** If you're paid more cash than
+  the value you gave up (rare), incoming cards get a $0 basis rather than a
+  negative one. The cash is still captured in `cash_delta`. Revisit if real usage
+  wants negative basis.
+- **Historical collection-value series deferred to M3.** The two exact,
+  event-based dashboard series (money-movement, realized-profit) are implemented
+  now; a true market-value-of-holdings-over-time series needs a market-value
+  history the schema doesn't record. `collection_value_cents` gives the current
+  point-in-time figure. To be built with the chart in M3.
+
+---
+
 ### 2026-07-10 — Margin surfacing + trade summary; two market values clarified
 
 - **Clarified** that the schema holds **two** market values doing different jobs:

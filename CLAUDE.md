@@ -23,7 +23,15 @@ offline; no external price feeds in V1.
   (CRUD per entity, match-or-create identity lookup, FIFO open-lot query).
   Migrations run on startup. Verified on Python 3.12.10 (ruff clean, 21 tests
   pass, fresh DB created at schema version 1).
-- **Next: M2** (core services & money math) — see [`specs/05-roadmap.md`](specs/05-roadmap.md).
+- **M2 (core services & money math): done** — `services/allocation.py` (pure
+  market-value split), `services/transactions.py` (unified post/void/edit/adjust,
+  FIFO, audit), `services/inventory.py` (per-lot valuation, ripping at $0),
+  `services/reporting.py` (realized/unrealized P/L, margin + gross-margin %,
+  money-movement & realized-profit series). Typed exceptions; headless guard test.
+  All 5 acceptance scenarios covered. Verified on Python 3.12.10 (ruff clean, 65
+  tests pass, zero Qt in domain/services). Historical collection-value series
+  deferred to M3 (see decisions log).
+- **Next: M3** (read-only UI over real data) — see [`specs/05-roadmap.md`](specs/05-roadmap.md).
 
 ## Source of truth
 

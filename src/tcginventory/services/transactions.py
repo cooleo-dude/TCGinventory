@@ -1,0 +1,538 @@
+"""TransactionService — the one unified posting algorithm (Spec 02).
+
+Purchases, sales, and trades are posted by the *same* procedure; ``type`` is
+inferred from which sides carry cards. Void and Edit (void + re-post) reverse
+effects atomically and write to the append-only ``audit_log``. Every public
+method runs its writes inside a single DB transaction (commit on success,
+rollback on any error), so inventory and the ledger can never diverge.
+
+Qt-free and SQL-free except through repositories.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import dataclass, field, replace
+
+from tcginventory.data.db import now_iso
+from tcginventory.data.repositories import (
+    AuditLogRepository,
+    ItemRepository,
+    LotConsumptionRepository,
+    LotRepository,
+    TransactionLineRepository,
+    TransactionRepository,
+)
+from tcginventory.domain.enums import (
+    AuditAction,
+    Direction,
+    Intent,
+    TransactionStatus,
+    TransactionType,
+)
+from tcginventory.domain.models import (
+    AuditLogEntry,
+    Item,
+    Lot,
+    LotConsumption,
+    Transaction,
+    TransactionLine,
+)
+from tcginventory.services.allocation import AllocationInput, allocate_cost
+from tcginventory.services.exceptions import (
+    EmptyTransactionError,
+    InsufficientQuantityError,
+    InvalidTransactionError,
+    RippingNotSellableError,
+    TransactionStateError,
+)
+
+# ---------------------------------------------------------------------------
+# Request / result DTOs
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OutgoingCard:
+    """A card you give up. ``agreed_value_cents`` is its per-unit proceeds."""
+
+    item_id: int
+    quantity: int
+    agreed_value_cents: int
+    notes: str | None = None
+
+
+@dataclass
+class IncomingCard:
+    """A card you receive. ``item`` carries identity/attributes for match-or-create.
+
+    ``market_value_cents`` (per unit, required, > 0) is the acquisition snapshot
+    used to allocate cost and to refresh the item's current market value.
+    """
+
+    item: Item
+    quantity: int
+    market_value_cents: int
+    intent: Intent
+    source: str | None = None
+    notes: str | None = None
+
+
+@dataclass
+class TransactionRequest:
+    occurred_at: str
+    outgoing: list[OutgoingCard] = field(default_factory=list)
+    incoming: list[IncomingCard] = field(default_factory=list)
+    cash_in_cents: int = 0  # cash you received
+    cash_out_cents: int = 0  # cash you paid
+    counterparty: str | None = None
+    reference: str | None = None
+    notes: str | None = None
+
+
+@dataclass
+class PostResult:
+    transaction: Transaction
+    net_consideration_in_cents: int
+    realized_pl_cents: int  # total realized on the outgoing side
+    lines: list[TransactionLine]
+    lots: list[Lot]  # incoming lots created
+
+
+def _as_date(iso: str) -> str:
+    """Reduce an ISO date/datetime to its date part (drives FIFO order / as-of)."""
+    return iso[:10] if len(iso) >= 10 else iso
+
+
+class TransactionService:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+        self.items = ItemRepository(conn)
+        self.lots = LotRepository(conn)
+        self.txns = TransactionRepository(conn)
+        self.lines = TransactionLineRepository(conn)
+        self.consumptions = LotConsumptionRepository(conn)
+        self.audit = AuditLogRepository(conn)
+
+    # -- public API ---------------------------------------------------------
+
+    def post(self, request: TransactionRequest) -> PostResult:
+        """Post a purchase / sale / trade (type inferred). Atomic."""
+        self._validate(request)
+        try:
+            result = self._post(request)
+            self._write_audit(
+                result.transaction.id,
+                AuditAction.CREATE,
+                after=self._snapshot(result.transaction.id),
+            )
+            self.conn.commit()
+            return result
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def void(self, transaction_id: int) -> Transaction:
+        """Soft-void a transaction, reversing all its effects. Atomic."""
+        txn = self.txns.get(transaction_id)
+        if txn is None:
+            raise TransactionStateError(f"no transaction {transaction_id}")
+        if txn.status is TransactionStatus.VOIDED:
+            raise TransactionStateError(f"transaction {transaction_id} already voided")
+        try:
+            before = self._snapshot(transaction_id)
+            voided = self._void(txn)
+            self._write_audit(transaction_id, AuditAction.VOID, before=before)
+            self.conn.commit()
+            return voided
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def edit(self, transaction_id: int, request: TransactionRequest) -> PostResult:
+        """Edit = void the original + re-post the new data, in one transaction."""
+        old = self.txns.get(transaction_id)
+        if old is None:
+            raise TransactionStateError(f"no transaction {transaction_id}")
+        if old.status is TransactionStatus.VOIDED:
+            raise TransactionStateError(f"transaction {transaction_id} is voided")
+        self._validate(request)
+        try:
+            before = self._snapshot(transaction_id)
+            self._void(old)
+            result = self._post(request)
+            self._write_audit(
+                result.transaction.id,
+                AuditAction.EDIT,
+                before=before,
+                after=self._snapshot(result.transaction.id),
+                note=f"edit of transaction {transaction_id}",
+            )
+            self.conn.commit()
+            return result
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def adjust_found(
+        self,
+        item_id: int,
+        quantity: int,
+        occurred_at: str,
+        unit_cost_cents: int = 0,
+        intent: Intent = Intent.PERSONAL,
+        notes: str | None = None,
+    ) -> Transaction:
+        """Adjustment-in: record found/miscounted inventory as a new lot. Atomic."""
+        if quantity < 1:
+            raise InvalidTransactionError("adjustment quantity must be >= 1")
+        if unit_cost_cents < 0:
+            raise InvalidTransactionError("unit cost cannot be negative")
+        try:
+            txn = self.txns.add(
+                Transaction(
+                    type=TransactionType.ADJUSTMENT,
+                    occurred_at=occurred_at,
+                    notes=notes,
+                )
+            )
+            line = self.lines.add(
+                TransactionLine(
+                    transaction_id=txn.id,
+                    item_id=item_id,
+                    direction=Direction.IN,
+                    quantity=quantity,
+                    unit_price_cents=unit_cost_cents,
+                    notes=notes,
+                )
+            )
+            self.lots.add(
+                Lot(
+                    item_id=item_id,
+                    acquired_txn_line_id=line.id,
+                    acquired_at=_as_date(occurred_at),
+                    quantity=quantity,
+                    remaining_qty=quantity,
+                    unit_cost_cents=unit_cost_cents,
+                    acquired_market_value_cents=unit_cost_cents,
+                    intent=intent,
+                    source="adjustment",
+                    notes=notes,
+                )
+            )
+            self._write_audit(txn.id, AuditAction.CREATE, after=self._snapshot(txn.id))
+            self.conn.commit()
+            return txn
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def adjust_writeoff(
+        self,
+        item_id: int,
+        quantity: int,
+        occurred_at: str,
+        notes: str | None = None,
+    ) -> Transaction:
+        """Adjustment-out: write off inventory (damage/shrinkage) at $0 proceeds.
+
+        Realized P/L is the loss (``−consumed cost``). Atomic.
+        """
+        if quantity < 1:
+            raise InvalidTransactionError("adjustment quantity must be >= 1")
+        try:
+            txn = self.txns.add(
+                Transaction(
+                    type=TransactionType.ADJUSTMENT,
+                    occurred_at=occurred_at,
+                    notes=notes,
+                )
+            )
+            line = self.lines.add(
+                TransactionLine(
+                    transaction_id=txn.id,
+                    item_id=item_id,
+                    direction=Direction.OUT,
+                    quantity=quantity,
+                    unit_price_cents=0,
+                    notes=notes,
+                )
+            )
+            consumed_cost = self._consume_fifo(item_id, quantity, line.id)
+            line.realized_pl_cents = -consumed_cost
+            self.lines.update(line)
+            self._write_audit(txn.id, AuditAction.CREATE, after=self._snapshot(txn.id))
+            self.conn.commit()
+            return txn
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    # -- internal (no commit) ----------------------------------------------
+
+    def _validate(self, request: TransactionRequest) -> None:
+        if not request.outgoing and not request.incoming:
+            raise EmptyTransactionError("a transaction needs at least one card")
+        if request.cash_in_cents < 0 or request.cash_out_cents < 0:
+            raise InvalidTransactionError("cash amounts cannot be negative")
+        for out in request.outgoing:
+            if out.quantity < 1:
+                raise InvalidTransactionError("outgoing quantity must be >= 1")
+            if out.agreed_value_cents < 0:
+                raise InvalidTransactionError("agreed value cannot be negative")
+        for inc in request.incoming:
+            if inc.quantity < 1:
+                raise InvalidTransactionError("incoming quantity must be >= 1")
+            if inc.market_value_cents <= 0:
+                raise InvalidTransactionError(
+                    "every incoming card needs a positive market value"
+                )
+
+    @staticmethod
+    def _infer_type(request: TransactionRequest) -> TransactionType:
+        has_out = bool(request.outgoing)
+        has_in = bool(request.incoming)
+        if has_out and has_in:
+            return TransactionType.TRADE
+        if has_out:
+            return TransactionType.SALE
+        return TransactionType.PURCHASE  # has_in only (empty handled by _validate)
+
+    def _post(self, request: TransactionRequest) -> PostResult:
+        txn_type = self._infer_type(request)
+        txn = self.txns.add(
+            Transaction(
+                type=txn_type,
+                occurred_at=request.occurred_at,
+                counterparty=request.counterparty,
+                reference=request.reference,
+                cash_delta_cents=request.cash_in_cents - request.cash_out_cents,
+                status=TransactionStatus.POSTED,
+                notes=request.notes,
+            )
+        )
+
+        lines: list[TransactionLine] = []
+        total_realized = 0
+
+        # Outgoing side: FIFO draw-down, realize P/L.
+        for out in request.outgoing:
+            line = self.lines.add(
+                TransactionLine(
+                    transaction_id=txn.id,
+                    item_id=out.item_id,
+                    direction=Direction.OUT,
+                    quantity=out.quantity,
+                    unit_price_cents=out.agreed_value_cents,
+                    notes=out.notes,
+                )
+            )
+            consumed_cost = self._consume_fifo(out.item_id, out.quantity, line.id)
+            line.realized_pl_cents = (
+                out.agreed_value_cents * out.quantity - consumed_cost
+            )
+            self.lines.update(line)
+            total_realized += line.realized_pl_cents
+            lines.append(line)
+
+        # Net consideration paid for incoming cards.
+        cards_out_value = sum(
+            out.agreed_value_cents * out.quantity for out in request.outgoing
+        )
+        net_consideration_in = (
+            request.cash_out_cents + cards_out_value - request.cash_in_cents
+        )
+
+        # Incoming side: match-or-create items, allocate cost, create lots.
+        created_lots: list[Lot] = []
+        if request.incoming:
+            allocations = allocate_cost(
+                net_consideration_in,
+                [
+                    AllocationInput(inc.market_value_cents, inc.quantity)
+                    for inc in request.incoming
+                ],
+            )
+            occurred_date = _as_date(request.occurred_at)
+            for inc, alloc in zip(request.incoming, allocations, strict=True):
+                item = self._match_or_create_item(inc, occurred_date)
+                base_unit_cost = alloc.total_cents // inc.quantity
+                line = self.lines.add(
+                    TransactionLine(
+                        transaction_id=txn.id,
+                        item_id=item.id,
+                        direction=Direction.IN,
+                        quantity=inc.quantity,
+                        unit_price_cents=base_unit_cost,
+                        notes=inc.notes,
+                    )
+                )
+                lines.append(line)
+                for lot_cost in alloc.lots:
+                    lot = self.lots.add(
+                        Lot(
+                            item_id=item.id,
+                            acquired_txn_line_id=line.id,
+                            acquired_at=occurred_date,
+                            quantity=lot_cost.quantity,
+                            remaining_qty=lot_cost.quantity,
+                            unit_cost_cents=lot_cost.unit_cost_cents,
+                            acquired_market_value_cents=inc.market_value_cents,
+                            intent=inc.intent,
+                            source=inc.source,
+                            notes=inc.notes,
+                        )
+                    )
+                    created_lots.append(lot)
+
+        return PostResult(
+            transaction=txn,
+            net_consideration_in_cents=net_consideration_in,
+            realized_pl_cents=total_realized,
+            lines=lines,
+            lots=created_lots,
+        )
+
+    def _consume_fifo(self, item_id: int, quantity: int, line_id: int) -> int:
+        """Consume ``quantity`` units FIFO from non-ripping open lots.
+
+        Records ``lot_consumption`` rows, decrements ``remaining_qty``, and
+        returns the total consumed cost in cents. Raises before any write if
+        there is not enough sellable inventory.
+        """
+        open_lots = self.lots.open_lots_for_item(item_id)
+        sellable = [lot for lot in open_lots if lot.intent is not Intent.RIPPING]
+        available = sum(lot.remaining_qty for lot in sellable)
+        if available < quantity:
+            ripping_qty = sum(
+                lot.remaining_qty for lot in open_lots if lot.intent is Intent.RIPPING
+            )
+            if ripping_qty > 0 and available + ripping_qty >= quantity:
+                raise RippingNotSellableError(
+                    f"item {item_id}: {quantity} requested but only {available} "
+                    f"sellable ({ripping_qty} held as ripping, never sold)"
+                )
+            raise InsufficientQuantityError(
+                f"item {item_id}: {quantity} requested but only {available} on hand"
+            )
+
+        remaining = quantity
+        consumed_cost = 0
+        for lot in sellable:
+            if remaining == 0:
+                break
+            take = min(lot.remaining_qty, remaining)
+            self.consumptions.add(
+                LotConsumption(
+                    transaction_line_id=line_id,
+                    lot_id=lot.id,
+                    quantity=take,
+                    unit_cost_cents=lot.unit_cost_cents,
+                )
+            )
+            lot.remaining_qty -= take
+            self.lots.update(lot)
+            consumed_cost += take * lot.unit_cost_cents
+            remaining -= take
+        return consumed_cost
+
+    def _match_or_create_item(self, inc: IncomingCard, occurred_date: str) -> Item:
+        """Match the incoming card to an existing item or create one; refresh value."""
+        existing = self.items.find_by_identity(inc.item)
+        if existing is not None:
+            existing.market_value_cents = inc.market_value_cents
+            existing.market_value_asof = occurred_date
+            if inc.item.tcgplayer_url:
+                existing.tcgplayer_url = inc.item.tcgplayer_url
+            if inc.item.ebay_url:
+                existing.ebay_url = inc.item.ebay_url
+            self.items.update(existing)
+            return existing
+        # Create a fresh item from the request, seeded with the entered value.
+        new_item = replace(
+            inc.item,
+            id=None,
+            market_value_cents=inc.market_value_cents,
+            market_value_asof=occurred_date,
+        )
+        return self.items.add(new_item)
+
+    def _void(self, txn: Transaction) -> Transaction:
+        lines = self.lines.list_for_transaction(txn.id)
+
+        # 1. Restore lots consumed by outgoing lines.
+        for line in lines:
+            if line.direction is Direction.OUT:
+                for cons in self.consumptions.list_for_line(line.id):
+                    lot = self.lots.get(cons.lot_id)
+                    lot.remaining_qty += cons.quantity
+                    self.lots.update(lot)
+                    self.consumptions.delete(cons.id)
+
+        # 2. Delete lots this transaction created — only if still fully intact.
+        for line in lines:
+            if line.direction is Direction.IN:
+                for lot in self.lots.list_for_acquired_line(line.id):
+                    if lot.remaining_qty != lot.quantity:
+                        raise TransactionStateError(
+                            f"lot {lot.id} created by transaction {txn.id} has been "
+                            "partially sold; void the dependent transaction first"
+                        )
+                    self.lots.delete(lot.id)
+
+        txn.status = TransactionStatus.VOIDED
+        txn.voided_at = now_iso()
+        self.txns.update(txn)
+        return txn
+
+    # -- audit --------------------------------------------------------------
+
+    def _snapshot(self, transaction_id: int) -> str:
+        """JSON snapshot of a transaction and its lines for the audit log."""
+        txn = self.txns.get(transaction_id)
+        lines = self.lines.list_for_transaction(transaction_id)
+        payload = {
+            "transaction": {
+                "id": txn.id,
+                "type": txn.type.value,
+                "occurred_at": txn.occurred_at,
+                "counterparty": txn.counterparty,
+                "reference": txn.reference,
+                "cash_delta_cents": txn.cash_delta_cents,
+                "status": txn.status.value,
+                "notes": txn.notes,
+            },
+            "lines": [
+                {
+                    "id": ln.id,
+                    "item_id": ln.item_id,
+                    "direction": ln.direction.value,
+                    "quantity": ln.quantity,
+                    "unit_price_cents": ln.unit_price_cents,
+                    "realized_pl_cents": ln.realized_pl_cents,
+                }
+                for ln in lines
+            ],
+        }
+        return json.dumps(payload, sort_keys=True)
+
+    def _write_audit(
+        self,
+        entity_id: int,
+        action: AuditAction,
+        *,
+        before: str | None = None,
+        after: str | None = None,
+        note: str | None = None,
+    ) -> None:
+        self.audit.add(
+            AuditLogEntry(
+                entity="transaction",
+                entity_id=entity_id,
+                action=action,
+                before_json=before,
+                after_json=after,
+                note=note,
+            )
+        )
