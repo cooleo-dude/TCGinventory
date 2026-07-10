@@ -17,7 +17,13 @@ offline; no external price feeds in V1.
   [`specs/README.md`](specs/README.md) for the section-by-section sign-off.
 - **M0 (scaffolding): done** — package skeleton, config, blank main window,
   tests. Verified on Python 3.10.10 (ruff clean, tests pass, window launches).
-- **Next: M1** (data layer & migrations) — see [`specs/05-roadmap.md`](specs/05-roadmap.md).
+- **M1 (data layer & migrations): done** — `data/db.py` (WAL + FK connection),
+  `data/migrator.py` + `data/migrations/0001_init.sql` (forward-only runner,
+  `schema_version`), `domain/models.py` dataclasses, `data/repositories.py`
+  (CRUD per entity, match-or-create identity lookup, FIFO open-lot query).
+  Migrations run on startup. Verified on Python 3.12.10 (ruff clean, 21 tests
+  pass, fresh DB created at schema version 1).
+- **Next: M2** (core services & money math) — see [`specs/05-roadmap.md`](specs/05-roadmap.md).
 
 ## Source of truth
 
@@ -44,19 +50,29 @@ offline; no external price feeds in V1.
 
 ## Dev environment
 
-- **Python 3.10+** (developed on 3.10.10 via pyenv). PySide6.
+- **Python 3.10+.** macOS: 3.10.10 via pyenv. Windows: 3.12.10 via winget
+  (`winget install Python.Python.3.12`, at
+  `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`).
 - A local `.venv` is gitignored — recreate it on a new machine:
 
 ```bash
-# from repo root, with a 3.10+ interpreter (e.g. pyenv's 3.10.10)
+# POSIX (macOS/Linux), from repo root with a 3.10+ interpreter
 python -m venv .venv
 .venv/bin/python -m pip install -U pip
 .venv/bin/python -m pip install -e ".[dev]"
 ```
 
-- **Run:** `.venv/bin/python -m tcginventory` (launches the GUI)
-- **Test:** `.venv/bin/python -m pytest`
-- **Lint/format:** `.venv/bin/ruff check .` and `.venv/bin/ruff format .`
+```powershell
+# Windows (PowerShell), from repo root
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -U pip
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+```
+
+- **Run:** `.venv/bin/python -m tcginventory` (POSIX) /
+  `.\.venv\Scripts\python.exe -m tcginventory` (Windows) — launches the GUI.
+- **Test:** `python -m pytest` from the venv. **Lint/format:**
+  `ruff check .` and `ruff format .` (venv's `ruff`).
 - **Headless GUI checks:** set `QT_QPA_PLATFORM=offscreen`. DB path overrides:
   `TCGINVENTORY_DATA_DIR` / `TCGINVENTORY_DB`.
 
