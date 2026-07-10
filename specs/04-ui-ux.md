@@ -51,26 +51,31 @@ right. The user never chooses a type; it is inferred from which sides carry
 cards (see Spec 02).
 
 ```
-┌───────────── YOU GIVE (out) ─────────────┬───────────── YOU RECEIVE (in) ─────────────┐
+┌───────────── YOU GIVE (out) ──────────────┬───────────── YOU RECEIVE (in) ──────────────┐
 │  Pick cards from your collection:         │  Card rows (`+ add row`):                   │
-│   • item picker (in-stock only)           │   • Name, Set, TCGplayer/eBay links,        │
-│   • qty (capped at on-hand)               │     Market Value (required),                │
-│   • agreed value each                     │     Condition, Grade(+company/#/cert),      │
-│  + your cash out:  $[____]                │     Notes, intent (Pers/Resale/Rip)         │
+│   • item picker (in-stock only)           │   • Name, Set, Card # (60/107, GG09/GG12),  │
+│   • qty (capped at on-hand)               │     Language (EN/JP/CN/…),                  │
+│   • agreed value each                     │     TCGplayer / eBay links,                 │
+│  + your cash out:  $[____]                │     Market Value (required),                │
+│                                           │     Condition, Grade (+company/#/cert),     │
+│                                           │     Notes, intent (Pers/Resale/Rip)         │
 │                                           │  + their cash in:  $[____]                  │
-├───────────────────────────────────────────┴─────────────────────────────────────────┤
-│  Balance footer: consideration given · value in · net cash · est. realized P/L (FIFO) │
-│  [ Submit ]                                                                            │
-└────────────────────────────────────────────────────────────────────────────────────┘
+├───────────────────────────────────────────┴─────────────────────────────────────────────┤
+│  Balance footer: consideration given · value in · net cash · est. realized P/L (FIFO)   │
+│  [ Submit ]                                                                             │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **Header:** date, counterparty (optional).
 - **Left (out):** cards selected from the collection (qty capped at on-hand,
   oversell blocked inline) each with an agreed value, plus optional cash you add.
   **Ripping-intent lots are excluded** from the picker — they are never sold.
-- **Right (in):** incoming card rows with the full field set, including a per-row
-  **intent (Personal / Resale / Ripping)**, plus optional cash the other party
-  provides. Market value **required** on every incoming row.
+- **Right (in):** incoming card rows with the full field set — Name, Set,
+  **Card #** (e.g. `60/107`, `GG09/GG12`), **Language** (EN/JP/CN/…), links,
+  Market Value, Condition, Grade, Notes — including a per-row **intent (Personal
+  / Resale / Ripping)**, plus optional cash the other party provides. Card # and
+  Language are part of item identity, so they steer match-or-create. Market value
+  **required** on every incoming row.
 - **Corner cases the one screen covers:**
   - *Purchase* — left side is cash only (your cash out), right side has cards.
   - *Sale* — left side has cards, right side is cash only (their cash in).
@@ -84,7 +89,7 @@ cards (see Spec 02).
 
 ## Window 3 — Inventory (`F-VW-1`, `F-VW-5`, `F-VW-9`)
 
-Full collection view. Columns: Name · Set · # · Cond/Grade · Intent · Qty ·
+Full collection view. Columns: Name · Set · # · Lang · Cond/Grade · Intent · Qty ·
 Avg cost · Cost basis · Market · Unrealized P/L · Sold status · Location.
 Features:
 - **Every column is both sortable and filterable** (`F-VW-9`) — including sold

@@ -22,6 +22,7 @@ from tcginventory.domain.enums import (
     Direction,
     GradingCompany,
     Intent,
+    Language,
     TransactionStatus,
     TransactionType,
 )
@@ -41,6 +42,7 @@ _ITEM_IDENTITY_COLUMNS = (
     "set_name",
     "set_code",
     "card_number",
+    "language",
     "condition",
     "is_graded",
     "grading_company",
@@ -66,6 +68,7 @@ class ItemRepository:
             set_name=row["set_name"],
             set_code=row["set_code"],
             card_number=row["card_number"],
+            language=Language(row["language"]),
             category=Category(row["category"]),
             condition=_opt_enum(Condition, row["condition"]),
             is_graded=bool(row["is_graded"]),
@@ -90,11 +93,11 @@ class ItemRepository:
         cur = self.conn.execute(
             """
             INSERT INTO item (
-                name, game, set_name, set_code, card_number, category,
+                name, game, set_name, set_code, card_number, language, category,
                 condition, is_graded, grading_company, grade, cert_number,
                 sku, location, tcgplayer_url, ebay_url, market_value_cents,
                 market_value_asof, notes, created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 item.name,
@@ -102,6 +105,7 @@ class ItemRepository:
                 item.set_name,
                 item.set_code,
                 item.card_number,
+                item.language.value,
                 item.category.value,
                 item.condition.value if item.condition else None,
                 int(item.is_graded),
@@ -143,6 +147,7 @@ class ItemRepository:
             item.set_name,
             item.set_code,
             item.card_number,
+            item.language.value,
             item.condition.value if item.condition else None,
             int(item.is_graded),
             item.grading_company.value if item.grading_company else None,
@@ -161,10 +166,11 @@ class ItemRepository:
             """
             UPDATE item SET
                 name = ?, game = ?, set_name = ?, set_code = ?, card_number = ?,
-                category = ?, condition = ?, is_graded = ?, grading_company = ?,
-                grade = ?, cert_number = ?, sku = ?, location = ?,
-                tcgplayer_url = ?, ebay_url = ?, market_value_cents = ?,
-                market_value_asof = ?, notes = ?, updated_at = ?
+                language = ?, category = ?, condition = ?, is_graded = ?,
+                grading_company = ?, grade = ?, cert_number = ?, sku = ?,
+                location = ?, tcgplayer_url = ?, ebay_url = ?,
+                market_value_cents = ?, market_value_asof = ?, notes = ?,
+                updated_at = ?
             WHERE id = ?
             """,
             (
@@ -173,6 +179,7 @@ class ItemRepository:
                 item.set_name,
                 item.set_code,
                 item.card_number,
+                item.language.value,
                 item.category.value,
                 item.condition.value if item.condition else None,
                 int(item.is_graded),

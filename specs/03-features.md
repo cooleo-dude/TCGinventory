@@ -12,7 +12,7 @@ maintained afterward.
 
 | ID | Req | Priority |
 |----|-----|----------|
-| F-IT-1 | Auto match-or-create an item by its **identity key** (name + set + card number + condition + grade + grading company/number) when a card is entered on a transaction row. | MUST |
+| F-IT-1 | Auto match-or-create an item by its **identity key** (name + set + card number + language + condition + grade + grading company/number) when a card is entered on a transaction row. | MUST |
 | F-IT-2 | Capture grading (company, grade #, cert #); **Condition greys out when graded** (grade identifies the card). | MUST |
 | F-IT-3 | Edit an item (fix identity, notes) and soft-delete it (block delete if lots/lines exist; require adjustment-out instead). | MUST |
 | F-IT-4 | Maintain SKU and location on an item. | SHOULD |

@@ -11,10 +11,10 @@ transaction history at all times.
   condition/grade, or a specific sealed product. "Charizard VMAX #074 Champion's
   Path, PSA 10" is one item; the same card raw NM is a different item. Items are
   **auto match-or-create**: during acquisition the app matches an existing item
-  by its **identity key** (name + set + condition + grade + grading
-  company/number when graded) or creates a new one — there is no separate
-  "add to catalog" step. Item-level attributes (TCGplayer/eBay links, current
-  market value) live here; per-acquisition data lives on the lot.
+  by its **identity key** (name + set + card number + language + condition +
+  grade + grading company/number when graded) or creates a new one — there is no
+  separate "add to catalog" step. Item-level attributes (TCGplayer/eBay links,
+  current market value) live here; per-acquisition data lives on the lot.
 - **Lot (acquisition lot)** — a batch of units of one item that entered the
   inventory via one acquisition event, at one unit cost. Cost basis lives on the
   lot. Selling draws down lots. Each lot also carries its **intent**
@@ -179,7 +179,8 @@ CREATE TABLE item (
     game               TEXT    NOT NULL DEFAULT 'pokemon',
     set_name           TEXT,                   -- "Champion's Path"
     set_code           TEXT,                   -- "CPA"
-    card_number        TEXT,                   -- "074/073"
+    card_number        TEXT,                   -- "60/107", "GG09/GG12"
+    language           TEXT    NOT NULL DEFAULT 'EN', -- enum: EN|JP|CN|KO|FR|DE|IT|ES|PT|TH|ID|RU (added in 0002)
     category           TEXT    NOT NULL,       -- enum: single | sealed | accessory | other
     condition          TEXT,                   -- enum: NM | LP | MP | HP | DMG | sealed; NULL when graded
     is_graded          INTEGER NOT NULL DEFAULT 0,  -- graded cards are identified by grade, not condition

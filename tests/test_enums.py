@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-from tcginventory.domain.enums import Intent, TransactionType
+from tcginventory.domain.enums import Intent, Language, TransactionType
 
 
 def test_intent_values():
     assert {i.value for i in Intent} == {"personal", "resale", "ripping"}
+
+
+def test_language_default_and_codes():
+    assert Language.EN.value == "EN"
+    # Codes are stored verbatim (uppercase); at least the common ones exist.
+    assert {"EN", "JP", "CN"} <= {lang.value for lang in Language}
 
 
 def test_transaction_type_values():

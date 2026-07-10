@@ -42,22 +42,32 @@ def test_fresh_db_starts_at_version_zero():
     assert current_version(conn) == 0
 
 
-def test_migrate_applies_init_and_creates_tables():
+def test_migrate_applies_all_and_creates_tables():
     conn = connect(":memory:")
     applied = migrate(conn)
-    assert applied == [1]
-    assert current_version(conn) == 1
+    latest = available_migrations()[-1].version
+    assert applied == [m.version for m in available_migrations()]
+    assert current_version(conn) == latest
     assert _EXPECTED_TABLES <= _table_names(conn)
+
+
+def test_language_column_added_by_0002():
+    conn = connect(":memory:")
+    migrate(conn)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(item)")}
+    assert "language" in cols
 
 
 def test_migrate_is_idempotent():
     conn = connect(":memory:")
-    assert migrate(conn) == [1]
+    first = migrate(conn)
+    assert first  # applied at least the initial migration
+    latest = available_migrations()[-1].version
     # Second run applies nothing and leaves the version untouched.
     assert migrate(conn) == []
-    assert current_version(conn) == 1
+    assert current_version(conn) == latest
     rows = conn.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()
-    assert rows["n"] == 1
+    assert rows["n"] == len(available_migrations())
 
 
 def test_foreign_keys_are_enforced():

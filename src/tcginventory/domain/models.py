@@ -17,6 +17,7 @@ from tcginventory.domain.enums import (
     Direction,
     GradingCompany,
     Intent,
+    Language,
     TransactionStatus,
     TransactionType,
 )
@@ -31,7 +32,8 @@ class Item:
     game: str = "pokemon"
     set_name: str | None = None
     set_code: str | None = None
-    card_number: str | None = None
+    card_number: str | None = None  # "60/107", "GG09/GG12"
+    language: Language = Language.EN
     condition: Condition | None = None  # NULL when graded
     is_graded: bool = False
     grading_company: GradingCompany | None = None

@@ -4,6 +4,20 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-10 — Add Card # and Language to item identity
+
+- **Language** is a new per-item field (enum: EN | JP | CN | KO | FR | DE | IT |
+  ES | PT | TH | ID | RU; default EN) and joins the **item identity key** — the
+  same card in a different language is a distinct item. Added to the DB via
+  migration `0002_add_language.sql` (additive `ALTER TABLE`, forward-only).
+- **Card #** already existed on `item` and in the identity key; this change
+  surfaces it (and Language) as explicit **Transaction-window row fields** and an
+  Inventory column. Both are filterable/sortable under F-VW-9.
+- Done at M1 (data layer). Propagated to specs 02/03/04, the enums/models/repos,
+  the glossary, and tests.
+
+---
+
 ### 2026-07-10 — Spec 05 ratified; baseline complete
 
 - Roadmap reworked to the ratified model (unified posting algorithm, intents incl.

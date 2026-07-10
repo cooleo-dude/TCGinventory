@@ -23,6 +23,7 @@ from tcginventory.domain.enums import (
     Direction,
     GradingCompany,
     Intent,
+    Language,
     TransactionStatus,
     TransactionType,
 )
@@ -100,6 +101,18 @@ def test_item_update_and_delete(conn):
     assert repo.get(item.id) is None
 
 
+def test_item_defaults_to_english(conn):
+    repo = ItemRepository(conn)
+    item = repo.add(_raw_item())  # no language given
+    assert repo.get(item.id).language is Language.EN
+
+
+def test_item_round_trips_language(conn):
+    repo = ItemRepository(conn)
+    jp = repo.add(_raw_item(language=Language.JP))
+    assert repo.get(jp.id).language is Language.JP
+
+
 def test_item_find_by_identity_matches_and_distinguishes(conn):
     repo = ItemRepository(conn)
     raw_nm = repo.add(_raw_item(condition=Condition.NM))
@@ -108,6 +121,8 @@ def test_item_find_by_identity_matches_and_distinguishes(conn):
     assert match is not None and match.id == raw_nm.id
     # Different condition → a distinct item, no match yet.
     assert repo.find_by_identity(_raw_item(condition=Condition.LP)) is None
+    # Different language → also a distinct item (language is part of identity).
+    assert repo.find_by_identity(_raw_item(language=Language.JP)) is None
 
 
 def test_lot_add_list_and_open_lots_fifo(conn):

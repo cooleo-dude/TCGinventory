@@ -61,6 +61,27 @@ class GradingCompany(str, Enum):
     SGC = "SGC"
 
 
+class Language(str, Enum):
+    """Printing language of a card. EN default; part of item identity.
+
+    A card printed in a different language is a distinct item. Covers the
+    Pokémon TCG's release languages; extend additively as needed.
+    """
+
+    EN = "EN"  # English
+    JP = "JP"  # Japanese
+    CN = "CN"  # Chinese
+    KO = "KO"  # Korean
+    FR = "FR"  # French
+    DE = "DE"  # German
+    IT = "IT"  # Italian
+    ES = "ES"  # Spanish
+    PT = "PT"  # Portuguese
+    TH = "TH"  # Thai
+    ID = "ID"  # Indonesian
+    RU = "RU"  # Russian
+
+
 class AuditAction(str, Enum):
     CREATE = "create"
     EDIT = "edit"

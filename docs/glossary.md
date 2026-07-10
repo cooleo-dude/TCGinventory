@@ -31,6 +31,11 @@ Terms used across the app and specs.
   SGC) with a numeric grade and a cert number identifying the slab.
 - **Condition** — for ungraded cards: NM (near mint), LP (lightly played),
   MP (moderately played), HP (heavily played), DMG (damaged).
+- **Card number** — the collector number printed on the card (e.g. `60/107`,
+  `GG09/GG12`). Part of item identity.
+- **Language** — the card's printed language (EN, JP, CN, KO, FR, DE, IT, ES, PT,
+  TH, ID, RU); defaults to EN. Part of item identity, so the same card in a
+  different language is a distinct item.
 - **Sealed product** — unopened product (booster boxes, ETBs, packs) tracked as
   items with `category = sealed`.
 - **Intent** — why a card is held: **personal** (keeper), **resale** (business),
