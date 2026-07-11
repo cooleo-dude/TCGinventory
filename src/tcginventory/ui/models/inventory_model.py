@@ -77,7 +77,7 @@ _COLUMNS: list[_Column] = [
     _Column("Intent", lambda r: r.intent, lambda r: r.intent),
     _Column("Qty", lambda r: str(r.on_hand), lambda r: r.on_hand, numeric=True),
     _Column(
-        "Cost Basis",
+        "Purchase Price",
         lambda r: money(r.cost_basis_cents),
         lambda r: r.cost_basis_cents,
         numeric=True,
