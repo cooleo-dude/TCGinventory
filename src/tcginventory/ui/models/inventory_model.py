@@ -30,26 +30,20 @@ def _cond_grade(item: Item) -> str:
 
 
 def _current_display(r: InventoryRow) -> str:
-    return money(r.current_value_cents) if r.current_value_cents is not None else "—"
+    return money(r.current_price_cents) if r.current_price_cents is not None else "—"
 
 
 def _current_sort(r: InventoryRow) -> int:
-    return r.current_value_cents if r.current_value_cents is not None else -1
-
-
-def _upl(r: InventoryRow) -> int | None:
-    if r.current_value_cents is None:
-        return None
-    return r.current_value_cents - r.cost_basis_cents
+    return r.current_price_cents if r.current_price_cents is not None else -1
 
 
 def _upl_display(r: InventoryRow) -> str:
-    value = _upl(r)
+    value = r.unrealized_cents
     return money(value) if value is not None else "—"
 
 
 def _upl_sort(r: InventoryRow) -> int:
-    value = _upl(r)
+    value = r.unrealized_cents
     return value if value is not None else 0
 
 
@@ -63,6 +57,7 @@ class _Column:
 
 
 _COLUMNS: list[_Column] = [
+    _Column("SKU", lambda r: r.sku, lambda r: r.sku),
     _Column("Name", lambda r: r.item.name, lambda r: r.item.name.lower()),
     _Column(
         "Set",
@@ -75,11 +70,10 @@ _COLUMNS: list[_Column] = [
     _Column("Lang", lambda r: r.item.language.value, lambda r: r.item.language.value),
     _Column("Cond/Grade", lambda r: _cond_grade(r.item), lambda r: _cond_grade(r.item)),
     _Column("Intent", lambda r: r.intent, lambda r: r.intent),
-    _Column("Qty", lambda r: str(r.on_hand), lambda r: r.on_hand, numeric=True),
     _Column(
         "Purchase Price",
-        lambda r: money(r.cost_basis_cents),
-        lambda r: r.cost_basis_cents,
+        lambda r: money(r.purchase_price_cents),
+        lambda r: r.purchase_price_cents,
         numeric=True,
     ),
     _Column(
@@ -107,7 +101,7 @@ class InventoryTableModel(QAbstractTableModel):
     def __init__(
         self,
         rows: list[InventoryRow] | None = None,
-        on_edit_price=None,  # (item_id, total_cents, on_hand) -> None
+        on_edit_price=None,  # (item_id, per_unit_cents) -> None
     ) -> None:
         super().__init__()
         self._rows: list[InventoryRow] = rows or []
@@ -154,7 +148,7 @@ class InventoryTableModel(QAbstractTableModel):
         if role == REVIEW_ROLE:
             return row.review
         if index.column() == MARKET_CURRENT_COL and role == Qt.EditRole:
-            return (row.current_value_cents or 0) / 100.0
+            return (row.current_price_cents or 0) / 100.0
         if (
             role == Qt.BackgroundRole
             and index.column() == MARKET_CURRENT_COL
@@ -174,9 +168,9 @@ class InventoryTableModel(QAbstractTableModel):
             return False
         row = self._rows[index.row()]
         try:
-            total_cents = round(float(value) * 100)
+            per_unit_cents = round(float(value) * 100)
         except (TypeError, ValueError):
             return False
         if self._on_edit_price is not None:
-            self._on_edit_price(row.item.id, total_cents, row.on_hand)
+            self._on_edit_price(row.item.id, per_unit_cents)
         return True

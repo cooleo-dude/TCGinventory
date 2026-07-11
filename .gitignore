@@ -27,3 +27,6 @@ htmlcov/
 *.swp
 .idea/
 .vscode/
+
+# Exported session transcripts
+20??-??-??-*.txt

@@ -82,7 +82,7 @@ class _InventoryFilterProxy(QSortFilterProxyModel):
             haystack = " ".join(
                 filter(
                     None,
-                    [row.item.name, row.item.set_name, row.item.card_number, *row.skus],
+                    [row.item.name, row.item.set_name, row.item.card_number, row.sku],
                 )
             ).lower()
             if self._text not in haystack:
@@ -210,14 +210,12 @@ class InventoryView(QWidget):
         ItemDetailDialog(self._conn, row.item.id, parent=self).exec()
         self.refresh()  # reflect any edits made in the detail/editor
 
-    def _set_manual_price(self, item_id: int, total_cents: int, on_hand: int) -> None:
+    def _set_manual_price(self, item_id: int, per_unit_cents: int) -> None:
         """Inline-edit handler: store the manual per-unit price (stays marked)."""
         item = ItemRepository(self._conn).get(item_id)
         if item is None:
             return
-        item.market_value_cents = (
-            round(total_cents / on_hand) if on_hand else total_cents
-        )
+        item.market_value_cents = per_unit_cents
         item.market_value_asof = now_iso()[:10]
         ItemRepository(self._conn).update(item)
         self._conn.commit()

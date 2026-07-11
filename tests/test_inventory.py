@@ -75,7 +75,7 @@ def test_inventory_rows_market_at_purchase(svc, inv):
     # Paid $80 for a card whose entered market was $100 (an 80%-of-market buy).
     buy(svc, "Deal", 8000, 10000, "2026-01-01")
     (row,) = inv.inventory_rows()
-    assert row.cost_basis_cents == 8000  # what you paid
+    assert row.purchase_price_cents == 8000  # per-unit price you paid
     assert row.market_at_purchase_cents == 10000  # market when entered
 
 

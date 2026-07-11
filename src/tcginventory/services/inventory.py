@@ -33,30 +33,35 @@ class Position:
 
 @dataclass
 class InventoryRow:
-    """A full inventory-grid row: the item plus its aggregate stats.
+    """One inventory-grid row per **lot** (per SKU / acquired copy).
 
-    Values are raw (cents / ints / codes); the UI formats them for display.
+    Each acquired card is its own row, keyed by its SKU. All money values are
+    **per unit**; the UI formats them for display.
     """
 
     item: Item
-    on_hand: int
-    acquired_qty: int
-    cost_basis_cents: int  # what you paid for the on-hand units
-    market_at_purchase_cents: int  # entered market value at acquisition (per lot)
-    market_value_cents: int  # current market (deferred: last-entered, not live)
-    unrealized_pl_cents: int
-    avg_cost_cents: int
+    lot_id: int
+    sku: str
+    intent: str  # this lot's intent value
+    on_hand: int  # lot.remaining_qty
+    acquired_qty: int  # lot.quantity
+    purchase_price_cents: int  # per-unit price paid
+    market_at_purchase_cents: int  # per-unit market value at acquisition
+    # Per-unit current market: None if unpriced; $0 for ripping; the manual
+    # value for reviewed items; otherwise the latest polled price.
+    current_price_cents: int | None
+    review: bool  # item marked for manual review (poll-protected, highlighted)
     sold_status: str  # "unsold" | "partial" | "sold"
-    intent: str  # an Intent value, "mixed", or "" (no lots)
-    # Total current market of on-hand units; None if never priced (ripping = $0).
-    # For reviewed items this is the manual value; otherwise the latest poll.
-    current_value_cents: int | None = None
-    review: bool = False  # marked for manual review (poll-protected, highlighted)
-    skus: tuple[str, ...] = ()  # the item's lot SKUs (for lookup/search)
 
     @property
     def in_stock(self) -> bool:
         return self.on_hand > 0
+
+    @property
+    def unrealized_cents(self) -> int | None:
+        if self.current_price_cents is None:
+            return None
+        return self.current_price_cents - self.purchase_price_cents
 
 
 class InventoryService:
@@ -121,72 +126,48 @@ class InventoryService:
         return out
 
     def inventory_rows(self) -> list[InventoryRow]:
-        """One aggregate row per item that has ever had a lot (incl. sold-out).
+        """One row per lot (per SKU / acquired copy), including sold-out lots.
 
-        Powers the Inventory grid; includes fully-sold items so a sold-status
-        filter has something to show.
+        Powers the Inventory grid; per-unit money. A sold-status filter still has
+        content because fully-consumed lots remain as rows.
         """
         rows: list[InventoryRow] = []
         latest_prices = self.prices.latest_prices()
-        for item in self.items.list_all():
-            lots = self.lots.list_for_item(item.id)
-            if not lots:
+        items_by_id = {item.id: item for item in self.items.list_all()}
+        for lot in self.lots.list_all():
+            item = items_by_id.get(lot.item_id)
+            if item is None:
                 continue
-            acquired = sum(lot.quantity for lot in lots)
-            on_hand = sum(lot.remaining_qty for lot in lots)
-            current_mv = item.market_value_cents or 0
-            cost = sum(lot.remaining_qty * lot.unit_cost_cents for lot in lots)
-            market_at_purchase = sum(
-                lot.remaining_qty * lot.acquired_market_value_cents for lot in lots
-            )
-            market = sum(
-                0 if lot.intent is Intent.RIPPING else lot.remaining_qty * current_mv
-                for lot in lots
-            )
-            avg_cost = cost // on_hand if on_hand else 0
 
-            if on_hand == 0:
+            # Per-unit current market: ripping is nil; reviewed items use their
+            # manual value; others use the latest polled price.
+            if lot.intent is Intent.RIPPING:
+                current = 0
+            elif item.review:
+                current = item.market_value_cents
+            else:
+                current = latest_prices.get(item.id)
+
+            if lot.remaining_qty == 0:
                 sold_status = "sold"
-            elif on_hand == acquired:
+            elif lot.remaining_qty == lot.quantity:
                 sold_status = "unsold"
             else:
                 sold_status = "partial"
 
-            intents = {lot.intent for lot in lots}
-            intent = next(iter(intents)).value if len(intents) == 1 else "mixed"
-            skus = tuple(sorted({lot.sku for lot in lots if lot.sku}))
-
-            # Reviewed items keep their manual current value (poll-protected);
-            # others use the latest polled price.
-            if item.review:
-                current_unit = item.market_value_cents
-            else:
-                current_unit = latest_prices.get(item.id)
-            if current_unit is None:
-                current_value = None
-            else:
-                current_value = sum(
-                    0
-                    if lot.intent is Intent.RIPPING
-                    else lot.remaining_qty * current_unit
-                    for lot in lots
-                )
-
             rows.append(
                 InventoryRow(
                     item=item,
-                    on_hand=on_hand,
-                    acquired_qty=acquired,
-                    cost_basis_cents=cost,
-                    market_at_purchase_cents=market_at_purchase,
-                    market_value_cents=market,
-                    unrealized_pl_cents=market - cost,
-                    avg_cost_cents=avg_cost,
-                    sold_status=sold_status,
-                    intent=intent,
-                    current_value_cents=current_value,
+                    lot_id=lot.id,
+                    sku=lot.sku or "",
+                    intent=lot.intent.value,
+                    on_hand=lot.remaining_qty,
+                    acquired_qty=lot.quantity,
+                    purchase_price_cents=lot.unit_cost_cents,
+                    market_at_purchase_cents=lot.acquired_market_value_cents,
+                    current_price_cents=current,
                     review=item.review,
-                    skus=skus,
+                    sold_status=sold_status,
                 )
             )
         return rows

@@ -80,8 +80,8 @@ def test_ui_purchase_infers_type_and_allocates(app, conn):
     view.submit()
 
     rows = {r.item.name: r for r in InventoryService(conn).inventory_rows()}
-    assert rows["A"].cost_basis_cents == 4800  # 80 × 60/100
-    assert rows["B"].cost_basis_cents == 3200  # 80 × 40/100
+    assert rows["A"].purchase_price_cents == 4800  # 80 × 60/100
+    assert rows["B"].purchase_price_cents == 3200  # 80 × 40/100
     # Form cleared after a successful post.
     assert view._badge.text() == "—"
 
@@ -203,7 +203,7 @@ def test_ui_give_dialog_sku_lookup(app, conn):
 
     svc = TransactionService(conn)
     buy(svc, "Snorlax", 1000, 1000, "2026-01-01", set_code="BS", card_number="011/102")
-    lot_sku = InventoryService(conn).inventory_rows()[0].skus[0]
+    lot_sku = InventoryService(conn).inventory_rows()[0].sku
 
     sellable = InventoryService(conn).sellable_items()
     dialog = OutgoingCardDialog(sellable, conn)

@@ -160,8 +160,10 @@ def export_items_csv(conn, path) -> Path:
 
 
 def export_inventory_csv(conn, path) -> Path:
+    """One row per lot (per SKU); per-unit money."""
     path = Path(path)
     headers = [
+        "sku",
         "name",
         "set_name",
         "card_number",
@@ -169,12 +171,11 @@ def export_inventory_csv(conn, path) -> Path:
         "cond_grade",
         "intent",
         "on_hand",
-        "avg_cost",
-        "cost_basis",
-        "market_value",
-        "unrealized_pl",
+        "purchase_price",
+        "market_at_purchase",
+        "current_market",
+        "unrealized",
         "sold_status",
-        "location",
     ]
     rows = []
     for row in InventoryService(conn).inventory_rows():
@@ -186,6 +187,7 @@ def export_inventory_csv(conn, path) -> Path:
             cond_grade = item.condition.value if item.condition else ""
         rows.append(
             [
+                row.sku,
                 item.name,
                 item.set_name or "",
                 item.card_number or "",
@@ -193,12 +195,11 @@ def export_inventory_csv(conn, path) -> Path:
                 cond_grade,
                 row.intent,
                 row.on_hand,
-                _dollars(row.avg_cost_cents),
-                _dollars(row.cost_basis_cents),
-                _dollars(row.market_value_cents),
-                _dollars(row.unrealized_pl_cents),
+                _dollars(row.purchase_price_cents),
+                _dollars(row.market_at_purchase_cents),
+                _dollars(row.current_price_cents),
+                _dollars(row.unrealized_cents),
                 row.sold_status,
-                item.location or "",
             ]
         )
     _write_csv(path, headers, rows)

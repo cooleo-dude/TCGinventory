@@ -29,11 +29,11 @@ def _fresh():
 def _snapshot(conn):
     inv = sorted(
         (
+            r.sku,
             r.item.name,
             r.on_hand,
-            r.cost_basis_cents,
-            r.market_value_cents,
-            r.intent,
+            r.purchase_price_cents,
+            r.market_at_purchase_cents,
             r.sold_status,
         )
         for r in InventoryService(conn).inventory_rows()
@@ -67,7 +67,7 @@ def test_human_exports_write_headers_and_rows(tmp_path, conn):
     inv = export_inventory_csv(conn, tmp_path / "inv.csv")
     txns = export_transactions_csv(conn, tmp_path / "txns.csv")
 
-    for path, first_header in [(items, "name"), (inv, "name"), (txns, "id")]:
+    for path, first_header in [(items, "name"), (inv, "sku"), (txns, "id")]:
         lines = path.read_text(encoding="utf-8").splitlines()
         assert lines[0].startswith(first_header)
         assert len(lines) > 1  # header + at least one row
@@ -122,7 +122,7 @@ def test_purchase_import_posts_transactions(tmp_path, conn):
     rows = InventoryService(conn).inventory_rows()
     assert len(rows) == 1
     assert rows[0].item.name == "Mewtwo"
-    assert rows[0].cost_basis_cents == 3000  # single card → basis = price paid
+    assert rows[0].purchase_price_cents == 3000  # single card → per-unit price paid
     assert ReportingService(conn).realized_pl_cents() == 0
 
 

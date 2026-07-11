@@ -86,7 +86,7 @@ def test_inventory_row_reviewed_uses_manual_value_without_polling(conn):
     _post_pikachu(conn, review=True)
     (row,) = InventoryService(conn).inventory_rows()
     assert row.review is True
-    assert row.current_value_cents == 3000  # manual value, no poll required
+    assert row.current_price_cents == 3000  # manual value, no poll required
 
 
 @pytest.fixture()
@@ -112,7 +112,7 @@ def test_view_manual_price_and_unmark(app, conn):
     assert view._model.data(idx, REVIEW_ROLE) is True
 
     # Inline edit keeps the card marked and sets its price.
-    view._set_manual_price(item.id, 5000, 1)
+    view._set_manual_price(item.id, 5000)
     edited = ItemRepository(conn).get(item.id)
     assert edited.market_value_cents == 5000
     assert edited.review is True

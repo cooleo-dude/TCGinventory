@@ -81,7 +81,7 @@ def test_inventory_rows_expose_skus(conn):
     svc = TransactionService(conn)
     _charizard(svc, "2026-01-01")
     (row,) = InventoryService(conn).inventory_rows()
-    assert row.skus == ("CHA-CPA-074-NM-EN-0001",)
+    assert row.sku == "CHA-CPA-074-NM-EN-0001"
 
 
 def test_backfill_assigns_missing_skus(conn):
