@@ -212,7 +212,7 @@ class HistoryView(QWidget):
         parts.append(
             "<table width='100%' cellpadding='4'><tr>"
             "<th align='left'>Dir</th><th align='left'>Item</th>"
-            "<th align='right'>Qty</th><th align='right'>Unit price</th>"
+            "<th align='right'>Qty</th><th align='right'>Unit Price</th>"
             "<th align='right'>Realized</th></tr>"
         )
         for line in self._lines.list_for_transaction(txn.id):

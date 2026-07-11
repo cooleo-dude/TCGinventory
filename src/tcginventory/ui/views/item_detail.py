@@ -105,8 +105,8 @@ class ItemDetailDialog(QDialog):
             "Acquired",
             "Qty",
             "Remaining",
-            "Unit cost",
-            "Mkt @ acq",
+            "Unit Cost",
+            "Mkt @ Acq",
             "Intent",
             "Source",
         ]
@@ -133,7 +133,7 @@ class ItemDetailDialog(QDialog):
     def _history_table(self, item_id: int) -> QTableWidget:
         lines = TransactionLineRepository(self._conn).list_for_item(item_id)
         txn_repo = TransactionRepository(self._conn)
-        headers = ["Date", "Type", "Dir", "Qty", "Unit price", "Realized", "Status"]
+        headers = ["Date", "Type", "Dir", "Qty", "Unit Price", "Realized", "Status"]
         table = QTableWidget(len(lines), len(headers))
         table.setHorizontalHeaderLabels(headers)
         for r, line in enumerate(lines):

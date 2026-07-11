@@ -136,7 +136,7 @@ class TransactionView(QWidget):
     def _build_give_side(self) -> QGroupBox:
         box = QGroupBox("You give (out)")
         self._out_table = QTableWidget(0, 3)
-        self._out_table.setHorizontalHeaderLabels(["Item", "Qty", "Agreed value"])
+        self._out_table.setHorizontalHeaderLabels(["Item", "Qty", "Agreed Value"])
         _tidy(self._out_table)
 
         add = QPushButton("Add card to give…")

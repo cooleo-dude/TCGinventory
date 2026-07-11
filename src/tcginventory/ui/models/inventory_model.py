@@ -53,13 +53,13 @@ _COLUMNS: list[_Column] = [
     _Column("Intent", lambda r: r.intent, lambda r: r.intent),
     _Column("Qty", lambda r: str(r.on_hand), lambda r: r.on_hand, numeric=True),
     _Column(
-        "Avg cost",
+        "Avg Cost",
         lambda r: money(r.avg_cost_cents),
         lambda r: r.avg_cost_cents,
         numeric=True,
     ),
     _Column(
-        "Cost basis",
+        "Cost Basis",
         lambda r: money(r.cost_basis_cents),
         lambda r: r.cost_basis_cents,
         numeric=True,
