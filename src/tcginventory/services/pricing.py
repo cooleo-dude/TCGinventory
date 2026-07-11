@@ -13,6 +13,7 @@ so the service is testable offline.
 
 from __future__ import annotations
 
+import difflib
 import re
 import sqlite3
 from collections.abc import Callable
@@ -25,6 +26,10 @@ from tcginventory.domain.models import Item, PriceSnapshot
 _CATEGORY_POKEMON = 3
 _BASE_URL = "https://tcgcsv.com/tcgplayer"
 _PRODUCT_RE = re.compile(r"/product/(\d+)")
+# Minimum similarity for the closest-match set fallback. Kept modest because
+# the price join is by product ID: a wrong group simply yields no price (never
+# a wrong one), so leaning in favours resolving real sets over false misses.
+_FUZZY_THRESHOLD = 0.6
 
 
 def _httpx_get_json(url: str):  # pragma: no cover - real network
@@ -62,6 +67,7 @@ class TcgcsvProvider:
     def __init__(self, fetch_json: Callable[[str], object] | None = None) -> None:
         self._fetch = fetch_json or _httpx_get_json
         self._group_index: dict[str, int] | None = None
+        self._group_candidates: list[tuple[str, int]] = []
         self._price_cache: dict[int, dict[int, int]] = {}
 
     def quotes_for(self, items: list[Item]) -> list[PriceQuote]:
@@ -95,17 +101,33 @@ class TcgcsvProvider:
 
     def _group_id(self, item: Item) -> int | None:
         index = self._groups()
+        # 1. Exact (normalized) match on set_code then set_name.
         for key in (item.set_code, item.set_name):
             if key:
                 group_id = index.get(_norm(key))
                 if group_id is not None:
                     return group_id
-        return None
+        # 2. Closest-match fallback. Set names are recorded inconsistently
+        #    ("Journey Together" vs tcgcsv's "SV09: Journey Together"), so pick
+        #    the best fuzzy match. A substring hit is treated as a strong match.
+        best_gid, best_score = None, 0.0
+        for key in (item.set_name, item.set_code):
+            nkey = _norm(key)
+            if len(nkey) < 3:
+                continue
+            for cand_norm, gid in self._group_candidates:
+                score = difflib.SequenceMatcher(None, nkey, cand_norm).ratio()
+                if len(nkey) >= 4 and (nkey in cand_norm or cand_norm in nkey):
+                    score = max(score, 0.9)
+                if score > best_score:
+                    best_gid, best_score = gid, score
+        return best_gid if best_score >= _FUZZY_THRESHOLD else None
 
     def _groups(self) -> dict[str, int]:
         if self._group_index is None:
             data = self._fetch(f"{_BASE_URL}/{_CATEGORY_POKEMON}/groups")
             index: dict[str, int] = {}
+            candidates: list[tuple[str, int]] = []
             for grp in _results(data):
                 gid = grp.get("groupId")
                 if gid is None:
@@ -121,7 +143,9 @@ class TcgcsvProvider:
                     norm = _norm(key)
                     if norm:
                         index.setdefault(norm, gid)
+                        candidates.append((norm, gid))
             self._group_index = index
+            self._group_candidates = candidates
         return self._group_index
 
     def _prices_for_group(self, group_id: int) -> dict[int, int]:

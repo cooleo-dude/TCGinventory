@@ -125,6 +125,38 @@ def test_group_resolves_despite_setcode_prefix(conn):
     assert quotes[0].price_cents == 610
 
 
+def test_group_resolves_by_closest_match(conn):
+    """A set_name that isn't an exact match still resolves to the nearest
+    group (fuzzy fallback); the price join by product ID stays correct."""
+
+    def fetch(url: str):
+        if url.endswith("/groups"):
+            return {
+                "results": [
+                    {"groupId": 100, "name": "SV: Scarlet & Violet 151"},
+                    {"groupId": 24073, "name": "SV09: Journey Together"},
+                ]
+            }
+        if url.endswith("/24073/prices"):
+            return {"results": [{"productId": 623590, "marketPrice": 6.10}]}
+        if url.endswith("/100/prices"):
+            return {"results": []}
+        raise AssertionError(f"unexpected url: {url}")
+
+    item = ItemRepository(conn).add(
+        Item(
+            name="Kilowattrel",
+            category=Category.SINGLE,
+            set_name="Journey Togethar",  # typo, no set_code, non-exact
+            card_number="163/159",
+            tcgplayer_url="https://www.tcgplayer.com/product/623590/x",
+        )
+    )
+    quotes = TcgcsvProvider(fetch_json=fetch).quotes_for([item])
+    assert len(quotes) == 1
+    assert quotes[0].price_cents == 610
+
+
 def test_latest_prices_and_history_since(conn):
     item = ItemRepository(conn).add(_pikachu())
     snaps = PriceSnapshotRepository(conn)
