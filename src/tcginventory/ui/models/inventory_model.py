@@ -89,14 +89,14 @@ _COLUMNS: list[_Column] = [
         numeric=True,
     ),
     # Live once prices are polled; "—" for items not yet priced.
-    _Column("Market Price Current", _current_display, _current_sort, numeric=True),
+    _Column("Current Market", _current_display, _current_sort, numeric=True),
     _Column("Unrealized P/L", _upl_display, _upl_sort, numeric=True, pl=True),
     _Column("Sold", lambda r: r.sold_status, lambda r: r.sold_status),
 ]
 
 
-# Column index of "Market Price Current" (the review-editable column).
-MARKET_CURRENT_COL = [c.header for c in _COLUMNS].index("Market Price Current")
+# Column index of "Current Market" (the review-editable column).
+MARKET_CURRENT_COL = [c.header for c in _COLUMNS].index("Current Market")
 # Extra roles the review delegate reads (sort role is UserRole; keep clear of it).
 ITEM_ID_ROLE = Qt.UserRole + 1
 REVIEW_ROLE = Qt.UserRole + 2
