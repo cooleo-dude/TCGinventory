@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-import pytest
-
 from conftest import buy, incoming, sell
 from tcginventory.data.repositories import (
     ItemRepository,
+    LotConsumptionRepository,
     LotRepository,
     TransactionRepository,
 )
-from tcginventory.services.exceptions import TransactionStateError
 from tcginventory.services.inventory import InventoryService
 from tcginventory.services.reporting import ReportingService
-from tcginventory.services.transactions import TransactionRequest, TransactionService
+from tcginventory.services.transactions import (
+    OutgoingCard,
+    TransactionRequest,
+    TransactionService,
+)
 
 
 def _item_id(conn, name):
@@ -59,13 +61,42 @@ def test_delete_one_card_from_multicard_purchase_adjusts_cash(conn):
     assert txn.cash_delta_cents == -3200
 
 
-def test_delete_blocked_when_units_sold(conn):
+def test_delete_sold_lot_succeeds_and_stays_consistent(conn):
+    # A lot that has been sold can still be deleted (no guardrails); its
+    # consumption record is cleaned up so no dangling references remain.
     svc = TransactionService(conn)
     result = buy(svc, "Sold", 1000, 1000, "2026-01-01")
     item_id = result.lots[0].item_id
-    sell(svc, item_id, 1, 1500, "2026-02-01")
+    sale = sell(svc, item_id, 1, 1500, "2026-02-01")
+    lot_id = result.lots[0].id
 
-    with pytest.raises(TransactionStateError):
-        svc.delete_inventory_entry(result.lots[0].id)
-    # Nothing removed.
-    assert LotRepository(conn).get(result.lots[0].id) is not None
+    svc.delete_inventory_entry(lot_id)
+
+    assert LotRepository(conn).get(lot_id) is None
+    assert LotConsumptionRepository(conn).list_for_lot(lot_id) == []
+    # The sale transaction is left intact (only the cost-basis link is gone).
+    assert TransactionRepository(conn).get(sale.transaction.id) is not None
+
+
+def test_delete_from_trade_succeeds(conn):
+    # Previously blocked ("came from a trade or a transaction with cash
+    # received"); now it just deletes.
+    svc = TransactionService(conn)
+    buy(svc, "Give", 1000, 1000, "2026-01-01")
+    give_id = _item_id(conn, "Give")
+    svc.post(
+        TransactionRequest(
+            occurred_at="2026-02-01",
+            outgoing=[
+                OutgoingCard(item_id=give_id, quantity=1, agreed_value_cents=1500)
+            ],
+            incoming=[incoming("Get", 1200)],
+            cash_in_cents=300,  # cash received → cash_delta > 0
+        )
+    )
+    get_lot = LotRepository(conn).list_for_item(_item_id(conn, "Get"))[0]
+
+    svc.delete_inventory_entry(get_lot.id)
+
+    assert LotRepository(conn).get(get_lot.id) is None
+    assert "Get" not in {i.name for i in ItemRepository(conn).list_all()}
