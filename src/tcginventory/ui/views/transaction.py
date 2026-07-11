@@ -254,7 +254,7 @@ class TransactionView(QWidget):
             self._in_table.setItem(
                 r, 4, _cell(money(card.market_value_cents), numeric=True)
             )
-            self._in_table.setItem(r, 5, _cell(card.intent.value))
+            self._in_table.setItem(r, 5, _cell(card.intent.value.capitalize()))
         self._update_summary()
 
     def build_request(self) -> TransactionRequest:

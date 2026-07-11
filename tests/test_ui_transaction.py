@@ -154,6 +154,47 @@ def test_ui_trade_and_rip_lifecycle(app, conn):
     assert box not in {i.id for i, _ in InventoryService(conn).sellable_items()}
 
 
+def test_incoming_dialog_returns_enums_and_defaults_resale(app):
+    from tcginventory.domain.enums import Category, Condition, Language
+    from tcginventory.ui.views._card_dialogs import IncomingCardDialog
+
+    dlg = IncomingCardDialog()
+    dlg._name.setText("Test Card")
+    dlg._market.setValue(50.0)
+    card = dlg.result_card()
+
+    assert card.intent is Intent.RESALE  # default is Resale
+    # Real enums, not the plain strings QComboBox.currentData() hands back.
+    assert isinstance(card.item.category, Category)
+    assert isinstance(card.item.condition, Condition)
+    assert isinstance(card.item.language, Language)
+    assert card.market_value_cents == 5000
+    dlg.deleteLater()
+
+
+def test_incoming_card_renders_and_posts_via_dialog(app, conn):
+    from tcginventory.data.repositories import ItemRepository
+    from tcginventory.ui.views._card_dialogs import IncomingCardDialog
+    from tcginventory.ui.views.transaction import TransactionView
+
+    view = TransactionView(conn)
+    dlg = IncomingCardDialog()
+    dlg._name.setText("Blastoise")
+    dlg._set_name.setText("Base")
+    dlg._market.setValue(50.0)
+    view.add_incoming(dlg.result_card())
+
+    # Regression: Cond/Grade, Market and Intent were blank (render crashed).
+    assert view._in_table.item(0, 3).text() == "NM"
+    assert view._in_table.item(0, 4).text() == "$50.00"
+    assert view._in_table.item(0, 5).text() == "Resale"
+
+    view._cash_out.setValue(50.0)
+    view.submit()
+    assert any(i.name == "Blastoise" for i in ItemRepository(conn).list_all())
+    dlg.deleteLater()
+
+
 def test_ui_give_dialog_sku_lookup(app, conn):
     from conftest import buy
     from tcginventory.services.inventory import InventoryService

@@ -121,27 +121,30 @@ class IncomingCardDialog(QDialog):
         self._name = QLineEdit()
         self._name.textChanged.connect(self._sync_ok)
 
+        # Combos store the enum's *value string* as data (PySide converts our
+        # str-subclass enums to plain str anyway) and show a capitalized label;
+        # result_card() rebuilds the enum from the value.
         self._category = QComboBox()
         for cat in Category:
-            self._category.addItem(cat.value, cat)
+            self._category.addItem(cat.value.capitalize(), cat.value)
 
         self._set_name = QLineEdit()
         self._card_number = QLineEdit()
 
         self._language = QComboBox()
         for lang in Language:
-            self._language.addItem(lang.value, lang)
+            self._language.addItem(lang.value, lang.value)  # codes already caps
 
         self._graded = QCheckBox("Graded")
         self._graded.toggled.connect(self._toggle_graded)
 
         self._condition = QComboBox()
         for cond in Condition:
-            self._condition.addItem(cond.value, cond)
+            self._condition.addItem(cond.value, cond.value)  # NM/LP… already caps
 
         self._company = QComboBox()
         for company in GradingCompany:
-            self._company.addItem(company.value, company)
+            self._company.addItem(company.value, company.value)  # PSA… already caps
         self._grade = QLineEdit()
         self._cert = QLineEdit()
 
@@ -153,7 +156,8 @@ class IncomingCardDialog(QDialog):
 
         self._intent = QComboBox()
         for intent in Intent:
-            self._intent.addItem(intent.value, intent)
+            self._intent.addItem(intent.value.capitalize(), intent.value)
+        self._intent.setCurrentIndex(self._intent.findData(Intent.RESALE.value))
 
         self._tcgplayer = QLineEdit()
         self._ebay = QLineEdit()
@@ -200,13 +204,15 @@ class IncomingCardDialog(QDialog):
         graded = self._graded.isChecked()
         item = Item(
             name=self._name.text().strip(),
-            category=self._category.currentData(),
+            category=Category(self._category.currentData()),
             set_name=self._set_name.text().strip() or None,
             card_number=self._card_number.text().strip() or None,
-            language=self._language.currentData(),
-            condition=None if graded else self._condition.currentData(),
+            language=Language(self._language.currentData()),
+            condition=None if graded else Condition(self._condition.currentData()),
             is_graded=graded,
-            grading_company=self._company.currentData() if graded else None,
+            grading_company=(
+                GradingCompany(self._company.currentData()) if graded else None
+            ),
             grade=self._grade.text().strip() or None if graded else None,
             cert_number=self._cert.text().strip() or None if graded else None,
             tcgplayer_url=self._tcgplayer.text().strip() or None,
@@ -217,5 +223,5 @@ class IncomingCardDialog(QDialog):
             item=item,
             quantity=self._quantity.value(),
             market_value_cents=round(self._market.value() * 100),
-            intent=self._intent.currentData(),
+            intent=Intent(self._intent.currentData()),
         )
