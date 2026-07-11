@@ -4,6 +4,24 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-10 — "Mark for Review" (manual, poll-protected prices)
+
+- New `item.review` flag (migration `0005`), set by a checkbox at card entry.
+  For a reviewed item, auto-refresh **still records price_snapshots** (history/
+  chart keep filling) but **does not overwrite its shown Market Price Current** —
+  the value is user-maintained (for cards tcgcsv can't price: LP/MP, JP, graded,
+  sealed).
+- Inventory current source: reviewed items use their manual
+  `item.market_value_cents`; others use the latest poll. Reviewed cells are
+  amber-highlighted and the Market Price Current cell is **inline-editable**.
+- Each reviewed cell has a **two-stage button**: click 1 arms it (previews the
+  unmark — highlight off, label → "Refresh"); click 2 commits (unmark + adopt the
+  latest polled price). It reverts to stage one if the selection moves or the
+  page changes. Implemented as a `QStyledItemDelegate` (survives sort/filter/
+  scroll, unlike per-cell index widgets).
+
+---
+
 ### 2026-07-10 — Live market pricing via tcgcsv + price history
 
 - **Source: tcgcsv.com**, a free JSON mirror of TCGplayer's pricing, joined by

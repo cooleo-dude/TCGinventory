@@ -173,8 +173,10 @@ class PricingService:
                         as_of=as_of,
                     )
                 )
+                # History is always recorded; a reviewed item's shown current
+                # value is user-maintained, so don't overwrite it.
                 item = self.items.get(quote.item_id)
-                if item is not None:
+                if item is not None and not item.review:
                     item.market_value_cents = quote.price_cents
                     item.market_value_asof = as_of[:10]
                     self.items.update(item)

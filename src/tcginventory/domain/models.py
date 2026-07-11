@@ -44,6 +44,7 @@ class Item:
     ebay_url: str | None = None
     market_value_cents: int | None = None
     market_value_asof: str | None = None
+    review: bool = False  # marked for review: current price is manual, poll-protected
     notes: str | None = None
     created_at: str | None = None
     updated_at: str | None = None

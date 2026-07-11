@@ -81,6 +81,7 @@ class ItemRepository:
             ebay_url=row["ebay_url"],
             market_value_cents=row["market_value_cents"],
             market_value_asof=row["market_value_asof"],
+            review=bool(row["review"]),
             notes=row["notes"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -96,8 +97,8 @@ class ItemRepository:
                 name, game, set_name, set_code, card_number, language, category,
                 condition, is_graded, grading_company, grade, cert_number,
                 location, tcgplayer_url, ebay_url, market_value_cents,
-                market_value_asof, notes, created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                market_value_asof, review, notes, created_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 item.name,
@@ -117,6 +118,7 @@ class ItemRepository:
                 item.ebay_url,
                 item.market_value_cents,
                 item.market_value_asof,
+                int(item.review),
                 item.notes,
                 item.created_at,
                 item.updated_at,
@@ -168,8 +170,8 @@ class ItemRepository:
                 language = ?, category = ?, condition = ?, is_graded = ?,
                 grading_company = ?, grade = ?, cert_number = ?,
                 location = ?, tcgplayer_url = ?, ebay_url = ?,
-                market_value_cents = ?, market_value_asof = ?, notes = ?,
-                updated_at = ?
+                market_value_cents = ?, market_value_asof = ?, review = ?,
+                notes = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -190,6 +192,7 @@ class ItemRepository:
                 item.ebay_url,
                 item.market_value_cents,
                 item.market_value_asof,
+                int(item.review),
                 item.notes,
                 item.updated_at,
                 item.id,

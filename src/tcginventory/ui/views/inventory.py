@@ -28,9 +28,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from tcginventory.data.db import now_iso
+from tcginventory.data.repositories import ItemRepository, PriceSnapshotRepository
 from tcginventory.domain.models import PriceSnapshot
 from tcginventory.services.inventory import InventoryRow, InventoryService
-from tcginventory.ui.models.inventory_model import InventoryTableModel
+from tcginventory.ui.models.inventory_model import (
+    MARKET_CURRENT_COL,
+    InventoryTableModel,
+)
+from tcginventory.ui.views._review_delegate import ReviewPriceDelegate
 from tcginventory.ui.views.item_detail import ItemDetailDialog
 
 _HISTORY_DAYS = 90
@@ -89,7 +95,7 @@ class InventoryView(QWidget):
         super().__init__()
         self._conn = conn
         self._service = InventoryService(conn)
-        self._model = InventoryTableModel()
+        self._model = InventoryTableModel(on_edit_price=self._set_manual_price)
         self._proxy = _InventoryFilterProxy()
         self._proxy.setSourceModel(self._model)
 
@@ -123,13 +129,19 @@ class InventoryView(QWidget):
         self._table.setSortingEnabled(True)
         self._table.sortByColumn(0, Qt.AscendingOrder)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setEditTriggers(QAbstractItemView.DoubleClicked)
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.doubleClicked.connect(self._open_detail)
         self._table.selectionModel().selectionChanged.connect(self._on_selection)
+
+        # Review column: amber highlight + inline editor + two-stage button.
+        self._review_delegate = ReviewPriceDelegate(
+            self._table, self._unmark_and_refresh
+        )
+        self._table.setItemDelegateForColumn(MARKET_CURRENT_COL, self._review_delegate)
 
         self._empty = QLabel("Nothing here yet — record your first purchase.")
         self._empty.setAlignment(Qt.AlignCenter)
@@ -159,6 +171,7 @@ class InventoryView(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
+        self._review_delegate.disarm()
         rows = self._service.inventory_rows()
         self._model.set_rows(rows)
         self._table.resizeColumnsToContents()
@@ -175,6 +188,7 @@ class InventoryView(QWidget):
 
     def _on_selection(self, *_args) -> None:
         row = self._selected_row()
+        self._review_delegate.note_selected_item(row.item.id if row else None)
         if row is None:
             self._show_chart_message("Select a card to see its price history.")
             return
@@ -190,8 +204,38 @@ class InventoryView(QWidget):
     def _open_detail(self, proxy_index: QModelIndex) -> None:
         source_index = self._proxy.mapToSource(proxy_index)
         row = self._model.row_at(source_index.row())
+        # Double-clicking a marked price cell edits it inline instead.
+        if proxy_index.column() == MARKET_CURRENT_COL and row.review:
+            return
         ItemDetailDialog(self._conn, row.item.id, parent=self).exec()
         self.refresh()  # reflect any edits made in the detail/editor
+
+    def _set_manual_price(self, item_id: int, total_cents: int, on_hand: int) -> None:
+        """Inline-edit handler: store the manual per-unit price (stays marked)."""
+        item = ItemRepository(self._conn).get(item_id)
+        if item is None:
+            return
+        item.market_value_cents = (
+            round(total_cents / on_hand) if on_hand else total_cents
+        )
+        item.market_value_asof = now_iso()[:10]
+        ItemRepository(self._conn).update(item)
+        self._conn.commit()
+        self.refresh()
+
+    def _unmark_and_refresh(self, item_id: int) -> None:
+        """Second-click handler: unmark and adopt the latest polled price."""
+        item = ItemRepository(self._conn).get(item_id)
+        if item is None:
+            return
+        latest = PriceSnapshotRepository(self._conn).latest_prices().get(item_id)
+        if latest is not None:
+            item.market_value_cents = latest
+            item.market_value_asof = now_iso()[:10]
+        item.review = False
+        ItemRepository(self._conn).update(item)
+        self._conn.commit()
+        self.refresh()
 
 
 def _to_msecs(iso: str) -> float:

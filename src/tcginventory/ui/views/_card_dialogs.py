@@ -159,6 +159,8 @@ class IncomingCardDialog(QDialog):
             self._intent.addItem(intent.value.capitalize(), intent.value)
         self._intent.setCurrentIndex(self._intent.findData(Intent.RESALE.value))
 
+        self._review = QCheckBox("Mark for review (I'll set its price manually)")
+
         self._tcgplayer = QLineEdit()
         self._ebay = QLineEdit()
         self._notes = QLineEdit()
@@ -177,6 +179,7 @@ class IncomingCardDialog(QDialog):
         form.addRow("Market value* (per unit):", self._market)
         form.addRow("Quantity:", self._quantity)
         form.addRow("Intent:", self._intent)
+        form.addRow("", self._review)
         form.addRow("TCGplayer URL:", self._tcgplayer)
         form.addRow("eBay URL:", self._ebay)
         form.addRow("Notes:", self._notes)
@@ -224,4 +227,5 @@ class IncomingCardDialog(QDialog):
             quantity=self._quantity.value(),
             market_value_cents=round(self._market.value() * 100),
             intent=Intent(self._intent.currentData()),
+            review=self._review.isChecked(),
         )

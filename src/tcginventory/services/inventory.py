@@ -48,9 +48,10 @@ class InventoryRow:
     avg_cost_cents: int
     sold_status: str  # "unsold" | "partial" | "sold"
     intent: str  # an Intent value, "mixed", or "" (no lots)
-    # Total current market of on-hand units from the latest poll; None if the
-    # item has never been priced (ripping units count as $0).
+    # Total current market of on-hand units; None if never priced (ripping = $0).
+    # For reviewed items this is the manual value; otherwise the latest poll.
     current_value_cents: int | None = None
+    review: bool = False  # marked for manual review (poll-protected, highlighted)
     skus: tuple[str, ...] = ()  # the item's lot SKUs (for lookup/search)
 
     @property
@@ -155,7 +156,12 @@ class InventoryService:
             intent = next(iter(intents)).value if len(intents) == 1 else "mixed"
             skus = tuple(sorted({lot.sku for lot in lots if lot.sku}))
 
-            current_unit = latest_prices.get(item.id)
+            # Reviewed items keep their manual current value (poll-protected);
+            # others use the latest polled price.
+            if item.review:
+                current_unit = item.market_value_cents
+            else:
+                current_unit = latest_prices.get(item.id)
             if current_unit is None:
                 current_value = None
             else:
@@ -179,6 +185,7 @@ class InventoryService:
                     sold_status=sold_status,
                     intent=intent,
                     current_value_cents=current_value,
+                    review=item.review,
                     skus=skus,
                 )
             )

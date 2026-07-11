@@ -76,6 +76,7 @@ class IncomingCard:
     quantity: int
     market_value_cents: int
     intent: Intent
+    review: bool = False  # mark the item for manual price review
     source: str | None = None
     notes: str | None = None
 
@@ -532,6 +533,7 @@ class TransactionService:
         if existing is not None:
             existing.market_value_cents = inc.market_value_cents
             existing.market_value_asof = occurred_date
+            existing.review = inc.review
             if inc.item.tcgplayer_url:
                 existing.tcgplayer_url = inc.item.tcgplayer_url
             if inc.item.ebay_url:
@@ -544,6 +546,7 @@ class TransactionService:
             id=None,
             market_value_cents=inc.market_value_cents,
             market_value_asof=occurred_date,
+            review=inc.review,
         )
         return self.items.add(new_item)
 

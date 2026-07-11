@@ -95,10 +95,23 @@ _COLUMNS: list[_Column] = [
 ]
 
 
+# Column index of "Market Price Current" (the review-editable column).
+MARKET_CURRENT_COL = [c.header for c in _COLUMNS].index("Market Price Current")
+# Extra roles the review delegate reads (sort role is UserRole; keep clear of it).
+ITEM_ID_ROLE = Qt.UserRole + 1
+REVIEW_ROLE = Qt.UserRole + 2
+_AMBER = QColor("#fff3cd")
+
+
 class InventoryTableModel(QAbstractTableModel):
-    def __init__(self, rows: list[InventoryRow] | None = None) -> None:
+    def __init__(
+        self,
+        rows: list[InventoryRow] | None = None,
+        on_edit_price=None,  # (item_id, total_cents, on_hand) -> None
+    ) -> None:
         super().__init__()
         self._rows: list[InventoryRow] = rows or []
+        self._on_edit_price = on_edit_price
 
     def set_rows(self, rows: list[InventoryRow]) -> None:
         self.beginResetModel()
@@ -136,4 +149,34 @@ class InventoryTableModel(QAbstractTableModel):
             value = col.sort_key(row)
             if isinstance(value, int) and value != 0:
                 return QBrush(_GREEN if value > 0 else _RED)
+        if role == ITEM_ID_ROLE:
+            return row.item.id
+        if role == REVIEW_ROLE:
+            return row.review
+        if index.column() == MARKET_CURRENT_COL and role == Qt.EditRole:
+            return (row.current_value_cents or 0) / 100.0
+        if (
+            role == Qt.BackgroundRole
+            and index.column() == MARKET_CURRENT_COL
+            and row.review
+        ):
+            return QBrush(_AMBER)
         return None
+
+    def flags(self, index: QModelIndex):
+        base = super().flags(index)
+        if index.column() == MARKET_CURRENT_COL and self._rows[index.row()].review:
+            base |= Qt.ItemIsEditable
+        return base
+
+    def setData(self, index: QModelIndex, value, role=Qt.EditRole) -> bool:
+        if index.column() != MARKET_CURRENT_COL or role != Qt.EditRole:
+            return False
+        row = self._rows[index.row()]
+        try:
+            total_cents = round(float(value) * 100)
+        except (TypeError, ValueError):
+            return False
+        if self._on_edit_price is not None:
+            self._on_edit_price(row.item.id, total_cents, row.on_hand)
+        return True
