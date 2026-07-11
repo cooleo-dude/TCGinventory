@@ -91,9 +91,12 @@ _COLUMNS: list[_Column] = [
 
 # Column index of "Current Market" (the review-editable column).
 MARKET_CURRENT_COL = [c.header for c in _COLUMNS].index("Current Market")
+# Column index of "Intent" (edited inline via a combo-box delegate).
+INTENT_COL = [c.header for c in _COLUMNS].index("Intent")
 # Extra roles the review delegate reads (sort role is UserRole; keep clear of it).
 ITEM_ID_ROLE = Qt.UserRole + 1
 REVIEW_ROLE = Qt.UserRole + 2
+LOT_ID_ROLE = Qt.UserRole + 3
 _AMBER = QColor("#fff3cd")
 
 
@@ -102,10 +105,12 @@ class InventoryTableModel(QAbstractTableModel):
         self,
         rows: list[InventoryRow] | None = None,
         on_edit_price=None,  # (item_id, per_unit_cents) -> None
+        on_edit_intent=None,  # (lot_id, intent_str) -> None
     ) -> None:
         super().__init__()
         self._rows: list[InventoryRow] = rows or []
         self._on_edit_price = on_edit_price
+        self._on_edit_intent = on_edit_intent
 
     def set_rows(self, rows: list[InventoryRow]) -> None:
         self.beginResetModel()
@@ -147,8 +152,12 @@ class InventoryTableModel(QAbstractTableModel):
             return row.item.id
         if role == REVIEW_ROLE:
             return row.review
+        if role == LOT_ID_ROLE:
+            return row.lot_id
         if index.column() == MARKET_CURRENT_COL and role == Qt.EditRole:
             return (row.current_price_cents or 0) / 100.0
+        if index.column() == INTENT_COL and role == Qt.EditRole:
+            return row.intent
         if (
             role == Qt.BackgroundRole
             and index.column() == MARKET_CURRENT_COL
@@ -159,18 +168,27 @@ class InventoryTableModel(QAbstractTableModel):
 
     def flags(self, index: QModelIndex):
         base = super().flags(index)
-        if index.column() == MARKET_CURRENT_COL and self._rows[index.row()].review:
+        col = index.column()
+        if col == MARKET_CURRENT_COL and self._rows[index.row()].review:
+            base |= Qt.ItemIsEditable
+        if col == INTENT_COL:
             base |= Qt.ItemIsEditable
         return base
 
     def setData(self, index: QModelIndex, value, role=Qt.EditRole) -> bool:
-        if index.column() != MARKET_CURRENT_COL or role != Qt.EditRole:
+        if role != Qt.EditRole:
             return False
         row = self._rows[index.row()]
-        try:
-            per_unit_cents = round(float(value) * 100)
-        except (TypeError, ValueError):
-            return False
-        if self._on_edit_price is not None:
-            self._on_edit_price(row.item.id, per_unit_cents)
-        return True
+        if index.column() == INTENT_COL:
+            if self._on_edit_intent is not None:
+                self._on_edit_intent(row.lot_id, str(value))
+            return True
+        if index.column() == MARKET_CURRENT_COL:
+            try:
+                per_unit_cents = round(float(value) * 100)
+            except (TypeError, ValueError):
+                return False
+            if self._on_edit_price is not None:
+                self._on_edit_price(row.item.id, per_unit_cents)
+            return True
+        return False

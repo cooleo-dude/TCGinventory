@@ -29,13 +29,20 @@ from PySide6.QtWidgets import (
 )
 
 from tcginventory.data.db import now_iso
-from tcginventory.data.repositories import ItemRepository, PriceSnapshotRepository
+from tcginventory.data.repositories import (
+    ItemRepository,
+    LotRepository,
+    PriceSnapshotRepository,
+)
+from tcginventory.domain.enums import Intent
 from tcginventory.domain.models import PriceSnapshot
 from tcginventory.services.inventory import InventoryRow, InventoryService
 from tcginventory.ui.models.inventory_model import (
+    INTENT_COL,
     MARKET_CURRENT_COL,
     InventoryTableModel,
 )
+from tcginventory.ui.views._intent_delegate import IntentDelegate
 from tcginventory.ui.views._review_delegate import ReviewPriceDelegate
 from tcginventory.ui.views.item_detail import ItemDetailDialog
 
@@ -95,7 +102,10 @@ class InventoryView(QWidget):
         super().__init__()
         self._conn = conn
         self._service = InventoryService(conn)
-        self._model = InventoryTableModel(on_edit_price=self._set_manual_price)
+        self._model = InventoryTableModel(
+            on_edit_price=self._set_manual_price,
+            on_edit_intent=self._set_lot_intent,
+        )
         self._proxy = _InventoryFilterProxy()
         self._proxy.setSourceModel(self._model)
 
@@ -142,6 +152,10 @@ class InventoryView(QWidget):
             self._table, self._unmark_and_refresh
         )
         self._table.setItemDelegateForColumn(MARKET_CURRENT_COL, self._review_delegate)
+
+        # Intent column: edit inline with a drop-down (personal/resale/ripping).
+        self._intent_delegate = IntentDelegate(self._table)
+        self._table.setItemDelegateForColumn(INTENT_COL, self._intent_delegate)
 
         self._empty = QLabel("Nothing here yet — record your first purchase.")
         self._empty.setAlignment(Qt.AlignCenter)
@@ -204,8 +218,11 @@ class InventoryView(QWidget):
     def _open_detail(self, proxy_index: QModelIndex) -> None:
         source_index = self._proxy.mapToSource(proxy_index)
         row = self._model.row_at(source_index.row())
-        # Double-clicking a marked price cell edits it inline instead.
+        # Double-clicking an inline-editable cell edits it instead of opening
+        # the detail dialog (marked price cell, or the Intent drop-down).
         if proxy_index.column() == MARKET_CURRENT_COL and row.review:
+            return
+        if proxy_index.column() == INTENT_COL:
             return
         ItemDetailDialog(self._conn, row.item.id, parent=self).exec()
         self.refresh()  # reflect any edits made in the detail/editor
@@ -218,6 +235,20 @@ class InventoryView(QWidget):
         item.market_value_cents = per_unit_cents
         item.market_value_asof = now_iso()[:10]
         ItemRepository(self._conn).update(item)
+        self._conn.commit()
+        self.refresh()
+
+    def _set_lot_intent(self, lot_id: int, intent_str: str) -> None:
+        """Inline-edit handler: change a single lot's intent (per-lot, Spec 02)."""
+        lots = LotRepository(self._conn)
+        lot = lots.get(lot_id)
+        if lot is None:
+            return
+        new_intent = Intent(intent_str)
+        if lot.intent is new_intent:
+            return
+        lot.intent = new_intent
+        lots.update(lot)
         self._conn.commit()
         self.refresh()
 
@@ -264,11 +295,10 @@ def _history_chart(row: InventoryRow, snapshots: list[PriceSnapshot]) -> QChart:
 
     # Flat per-unit reference lines across the same date span.
     x0, x1 = min(xs), max(xs)
-    flat_values = [("Cost", row.avg_cost_cents / 100.0)]
-    if row.on_hand:
-        flat_values.append(
-            ("Market at ToP", row.market_at_purchase_cents / row.on_hand / 100.0)
-        )
+    flat_values = [
+        ("Cost", row.purchase_price_cents / 100.0),
+        ("Market at ToP", row.market_at_purchase_cents / 100.0),
+    ]
     flat_series = []
     for label, value in flat_values:
         line = QLineSeries()
