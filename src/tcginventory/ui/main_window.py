@@ -49,6 +49,8 @@ class _PriceRefreshWorker(QThread):
         self._db_path = db_path
 
     def run(self) -> None:
+        import logging
+
         from tcginventory.data.db import open_database
         from tcginventory.services.pricing import PricingService, RefreshSummary
 
@@ -60,6 +62,12 @@ class _PriceRefreshWorker(QThread):
                 conn.close()
         except Exception as exc:  # never crash the thread
             summary = RefreshSummary(errors=[str(exc)])
+        logging.getLogger(__name__).info(
+            "price refresh: priced=%d unmapped=%d errors=%s",
+            summary.priced,
+            len(summary.unmapped),
+            summary.errors,
+        )
         self.done.emit(summary)
 
 
