@@ -64,9 +64,16 @@ _COLUMNS: list[_Column] = [
         lambda r: r.market_at_purchase_cents,
         numeric=True,
     ),
-    # Deferred until a live price-polling system exists (see roadmap).
+    # Both deferred until a live price-polling system exists (see roadmap):
+    # Unrealized P/L = Market Price Current − Cost Basis, which needs live prices.
     _Column(
         "Market Price Current",
+        lambda r: "—",
+        lambda r: 0,
+        numeric=True,
+    ),
+    _Column(
+        "Unrealized P/L",
         lambda r: "—",
         lambda r: 0,
         numeric=True,
