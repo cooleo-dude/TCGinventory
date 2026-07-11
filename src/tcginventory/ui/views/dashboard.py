@@ -52,7 +52,9 @@ class _Tile(QFrame):
         self.setMinimumWidth(150)
         layout = QVBoxLayout(self)
         self._title = QLabel(title)
-        self._title.setStyleSheet("color: palette(mid);")
+        self._title.setStyleSheet(
+            "color: palette(windowText); font-size: 11px; font-weight: 600;"
+        )
         self._value = QLabel("—")
         self._value.setStyleSheet("font-size: 18px; font-weight: 600;")
         layout.addWidget(self._title)
@@ -80,12 +82,12 @@ class DashboardView(QWidget):
         self._tiles = {
             key: _Tile(label)
             for key, label in [
-                ("cost", "Cost basis"),
-                ("market", "Market value"),
-                ("unrealized", "Unrealized P/L"),
-                ("realized", "Realized P/L"),
-                ("collection", "Collection value"),
-                ("cash", "Net cash"),
+                ("cost", "Cost Basis"),
+                ("market", "Market Value"),
+                ("unrealized", "Unrealized Gain/Loss"),
+                ("realized", "Realized Gain/Loss"),
+                ("collection", "Collection Value"),
+                ("cash", "Net Cash"),
             ]
         }
         tile_grid = QGridLayout()
