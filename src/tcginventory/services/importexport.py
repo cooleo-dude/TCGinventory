@@ -44,6 +44,7 @@ _ALL_TABLES = [
     "lot",
     "lot_consumption",
     "audit_log",
+    "price_snapshot",
     "schema_version",
 ]
 

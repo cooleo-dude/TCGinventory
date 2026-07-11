@@ -4,6 +4,29 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-10 — Live market pricing via tcgcsv + price history
+
+- **Source: tcgcsv.com**, a free JSON mirror of TCGplayer's pricing, joined by
+  the TCGplayer **product ID** parsed from `item.tcgplayer_url` (set → tcgcsv
+  group resolved from the item's set code/name). Chosen over scraping
+  tcgplayer.com (JS-rendered, ToS, Cloudflare, heavy) and over pokemontcg.io.
+  The `PriceProvider` abstraction lets another source slot in later.
+  - **Limits:** product-level market price only (≈ NM English); no per-condition
+    (LP/MP) and no Japanese; ripping stays $0.
+- **History stored** in `price_snapshot` (migration `0004`) — one row per item
+  per refresh. Drives the live "Market Price Current"/"Unrealized P/L" columns
+  and the Inventory price-history chart, and will unlock the deferred
+  collection-value-over-time dashboard series.
+- **Refresh: both** — a throttled auto-refresh on startup (skipped if the newest
+  snapshot is <12h old) plus a manual **File ▸ Refresh prices**. Runs on a
+  background `QThread` with its own DB connection so the UI never blocks;
+  network/parse failures are captured, never fatal.
+- **Inventory price plot:** selecting a card shows its market price over the last
+  90 days with flat **Cost** and **Market at ToP** reference lines.
+- Dependency added: `httpx` (plain JSON; no headless browser).
+
+---
+
 ### 2026-07-10 — Per-copy SKUs on the lot (auto-generated)
 
 - **SKUs moved from the item to the lot.** A SKU identifies an acquired *copy*,

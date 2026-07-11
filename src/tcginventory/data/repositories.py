@@ -31,6 +31,7 @@ from tcginventory.domain.models import (
     Item,
     Lot,
     LotConsumption,
+    PriceSnapshot,
     Transaction,
     TransactionLine,
 )
@@ -609,3 +610,68 @@ class AuditLogRepository:
             (entity, entity_id),
         ).fetchall()
         return [self._to_model(r) for r in rows]
+
+
+class PriceSnapshotRepository:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    @staticmethod
+    def _to_model(row: sqlite3.Row) -> PriceSnapshot:
+        return PriceSnapshot(
+            id=row["id"],
+            item_id=row["item_id"],
+            source=row["source"],
+            price_cents=row["price_cents"],
+            currency=row["currency"],
+            as_of=row["as_of"],
+            note=row["note"],
+        )
+
+    def add(self, snapshot: PriceSnapshot) -> PriceSnapshot:
+        snapshot.as_of = snapshot.as_of or now_iso()
+        cur = self.conn.execute(
+            """
+            INSERT INTO price_snapshot (
+                item_id, source, price_cents, currency, as_of, note
+            ) VALUES (?,?,?,?,?,?)
+            """,
+            (
+                snapshot.item_id,
+                snapshot.source,
+                snapshot.price_cents,
+                snapshot.currency,
+                snapshot.as_of,
+                snapshot.note,
+            ),
+        )
+        snapshot.id = cur.lastrowid
+        return snapshot
+
+    def history_for_item(
+        self, item_id: int, since: str | None = None
+    ) -> list[PriceSnapshot]:
+        """Snapshots for an item (oldest first), optionally from ``since`` onward."""
+        if since is None:
+            rows = self.conn.execute(
+                "SELECT * FROM price_snapshot WHERE item_id = ? ORDER BY as_of, id",
+                (item_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM price_snapshot WHERE item_id = ? AND as_of >= ? "
+                "ORDER BY as_of, id",
+                (item_id, since),
+            ).fetchall()
+        return [self._to_model(r) for r in rows]
+
+    def latest_prices(self) -> dict[int, int]:
+        """Map item_id → most-recent per-unit price across all polled items."""
+        rows = self.conn.execute(
+            "SELECT item_id, price_cents, as_of FROM price_snapshot "
+            "ORDER BY item_id, as_of, id"
+        ).fetchall()
+        latest: dict[int, int] = {}
+        for r in rows:  # ascending order → last write per item wins
+            latest[r["item_id"]] = r["price_cents"]
+        return latest

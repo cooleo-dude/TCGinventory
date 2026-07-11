@@ -29,6 +29,30 @@ def _cond_grade(item: Item) -> str:
     return item.condition.value if item.condition else ""
 
 
+def _current_display(r: InventoryRow) -> str:
+    return money(r.current_value_cents) if r.current_value_cents is not None else "—"
+
+
+def _current_sort(r: InventoryRow) -> int:
+    return r.current_value_cents if r.current_value_cents is not None else -1
+
+
+def _upl(r: InventoryRow) -> int | None:
+    if r.current_value_cents is None:
+        return None
+    return r.current_value_cents - r.cost_basis_cents
+
+
+def _upl_display(r: InventoryRow) -> str:
+    value = _upl(r)
+    return money(value) if value is not None else "—"
+
+
+def _upl_sort(r: InventoryRow) -> int:
+    value = _upl(r)
+    return value if value is not None else 0
+
+
 @dataclass(frozen=True)
 class _Column:
     header: str
@@ -64,20 +88,9 @@ _COLUMNS: list[_Column] = [
         lambda r: r.market_at_purchase_cents,
         numeric=True,
     ),
-    # Both deferred until a live price-polling system exists (see roadmap):
-    # Unrealized P/L = Market Price Current − Cost Basis, which needs live prices.
-    _Column(
-        "Market Price Current",
-        lambda r: "—",
-        lambda r: 0,
-        numeric=True,
-    ),
-    _Column(
-        "Unrealized P/L",
-        lambda r: "—",
-        lambda r: 0,
-        numeric=True,
-    ),
+    # Live once prices are polled; "—" for items not yet priced.
+    _Column("Market Price Current", _current_display, _current_sort, numeric=True),
+    _Column("Unrealized P/L", _upl_display, _upl_sort, numeric=True, pl=True),
     _Column("Sold", lambda r: r.sold_status, lambda r: r.sold_status),
 ]
 

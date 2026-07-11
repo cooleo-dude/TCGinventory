@@ -111,6 +111,19 @@ class LotConsumption:
 
 
 @dataclass
+class PriceSnapshot:
+    """A polled market price for an item at a point in time (per unit)."""
+
+    item_id: int
+    price_cents: int
+    source: str  # e.g. "tcgcsv"
+    as_of: str  # ISO datetime of the poll
+    currency: str = "USD"
+    note: str | None = None
+    id: int | None = None
+
+
+@dataclass
 class AuditLogEntry:
     """An append-only record of a create / edit / void on some entity."""
 

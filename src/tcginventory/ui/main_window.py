@@ -8,7 +8,9 @@ Posting/void/edit refresh the read views so everything stays in sync.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
+from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -34,6 +36,31 @@ from tcginventory.ui.views.transaction import TransactionView
 
 NAV_ITEMS = ["Dashboard", "Transaction", "Inventory", "History"]
 _TRANSACTION_INDEX = 1
+_REFRESH_STALE_HOURS = 12  # startup auto-refresh only if older than this
+
+
+class _PriceRefreshWorker(QThread):
+    """Runs a price refresh off the UI thread with its own DB connection."""
+
+    done = Signal(object)  # RefreshSummary
+
+    def __init__(self, db_path) -> None:
+        super().__init__()
+        self._db_path = db_path
+
+    def run(self) -> None:
+        from tcginventory.data.db import open_database
+        from tcginventory.services.pricing import PricingService, RefreshSummary
+
+        try:
+            conn = open_database(self._db_path)
+            try:
+                summary = PricingService(conn).refresh()
+            finally:
+                conn.close()
+        except Exception as exc:  # never crash the thread
+            summary = RefreshSummary(errors=[str(exc)])
+        self.done.emit(summary)
 
 
 class MainWindow(QMainWindow):
@@ -44,6 +71,8 @@ class MainWindow(QMainWindow):
             conn = connect(":memory:")
             migrate(conn)
         self._conn = conn
+        self._db_file = self._resolve_db_file()  # None for in-memory (tests)
+        self._price_worker: _PriceRefreshWorker | None = None
 
         self.setWindowTitle(f"TCGinventory {__version__}")
         self.setWindowIcon(app_icon())
@@ -86,6 +115,67 @@ class MainWindow(QMainWindow):
         self._update_status()
 
         self._nav.setCurrentRow(0)
+        # Throttled auto-refresh shortly after the window shows (file DB only).
+        QTimer.singleShot(0, self._maybe_startup_refresh)
+
+    # -- price refresh ------------------------------------------------------
+
+    def _resolve_db_file(self) -> str | None:
+        for _seq, name, file in self._conn.execute("PRAGMA database_list").fetchall():
+            if name == "main":
+                return file or None  # empty string for :memory:
+        return None
+
+    def _prices_are_stale(self) -> bool:
+        row = self._conn.execute("SELECT MAX(as_of) FROM price_snapshot").fetchone()
+        last = row[0]
+        if not last:
+            return True
+        try:
+            last_dt = datetime.fromisoformat(last)
+        except ValueError:
+            return True
+        return datetime.now(timezone.utc) - last_dt > timedelta(
+            hours=_REFRESH_STALE_HOURS
+        )
+
+    def _maybe_startup_refresh(self) -> None:
+        if not self._db_file:
+            return
+        has_items = self._conn.execute("SELECT COUNT(*) FROM item").fetchone()[0] > 0
+        if has_items and self._prices_are_stale():
+            self._refresh_prices(silent=True)
+
+    def _refresh_prices(self, silent: bool = False) -> None:
+        if not self._db_file:
+            if not silent:
+                QMessageBox.information(
+                    self, "Refresh prices", "Not available for an in-memory database."
+                )
+            return
+        if self._price_worker is not None and self._price_worker.isRunning():
+            return
+        self._refresh_silent = silent
+        self._refresh_action.setEnabled(False)
+        self.statusBar().showMessage("Refreshing prices…")
+        self._price_worker = _PriceRefreshWorker(self._db_file)
+        self._price_worker.done.connect(self._on_prices_refreshed)
+        self._price_worker.start()
+
+    def _on_prices_refreshed(self, summary) -> None:
+        self._refresh_action.setEnabled(True)
+        self._price_worker = None
+        self._on_ledger_changed()  # re-read views (prices now live)
+        if not self._refresh_silent:
+            msg = f"Priced {summary.priced} item(s)."
+            if summary.unmapped:
+                msg += (
+                    f"\n{len(summary.unmapped)} not priced "
+                    "(missing TCGplayer link or unmatched set)."
+                )
+            if summary.errors:
+                msg += "\nErrors: " + "; ".join(summary.errors)
+            QMessageBox.information(self, "Prices refreshed", msg)
 
     # -- menu (import / export / backup) ------------------------------------
 
@@ -98,6 +188,10 @@ class MainWindow(QMainWindow):
         self._file_menu.addAction("Export inventory to CSV…", self._export_inventory)
         self._file_menu.addAction("Export full backup (CSV folder)…", self._export_all)
         self._file_menu.addAction("Backup database…", self._backup_database)
+        self._file_menu.addSeparator()
+        self._refresh_action = self._file_menu.addAction(
+            "Refresh prices…", lambda: self._refresh_prices(silent=False)
+        )
 
     def _backup_database(self) -> None:
         default = str(config.data_dir() / "inventory-backup.db")

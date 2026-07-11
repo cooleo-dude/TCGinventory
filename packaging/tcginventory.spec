@@ -30,7 +30,9 @@ a = Analysis(
     pathex=[src],
     binaries=[],
     datas=datas,
-    hiddenimports=["PySide6.QtCharts"],
+    # httpx is imported lazily (in the price fetcher), so name it explicitly;
+    # PyInstaller then follows its deps (httpcore, certifi, anyio, …).
+    hiddenimports=["PySide6.QtCharts", "httpx"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

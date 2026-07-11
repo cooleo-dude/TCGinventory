@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import QModelIndex, QSortFilterProxyModel, Qt
+from PySide6.QtCharts import (
+    QChart,
+    QChartView,
+    QDateTimeAxis,
+    QLineSeries,
+    QValueAxis,
+)
+from PySide6.QtCore import QDateTime, QModelIndex, QSortFilterProxyModel, Qt
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -13,14 +22,18 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QSplitter,
     QTableView,
     QVBoxLayout,
     QWidget,
 )
 
-from tcginventory.services.inventory import InventoryService
+from tcginventory.domain.models import PriceSnapshot
+from tcginventory.services.inventory import InventoryRow, InventoryService
 from tcginventory.ui.models.inventory_model import InventoryTableModel
 from tcginventory.ui.views.item_detail import ItemDetailDialog
+
+_HISTORY_DAYS = 90
 
 _INTENTS = ["All", "personal", "resale", "ripping", "mixed"]
 _SOLD = ["All", "unsold", "partial", "sold"]
@@ -116,15 +129,32 @@ class InventoryView(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.doubleClicked.connect(self._open_detail)
+        self._table.selectionModel().selectionChanged.connect(self._on_selection)
 
         self._empty = QLabel("Nothing here yet — record your first purchase.")
         self._empty.setAlignment(Qt.AlignCenter)
         self._empty.setVisible(False)
 
+        # -- price-history chart (last ~3 months) for the selected card
+        self._chart_view = QChartView()
+        self._chart_view.setRenderHint(QPainter.Antialiasing)
+        self._chart_view.setMinimumHeight(220)
+        self._show_chart_message("Select a card to see its price history.")
+
+        splitter = QSplitter(Qt.Vertical)
+        table_box = QWidget()
+        table_layout = QVBoxLayout(table_box)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        table_layout.addWidget(self._table)
+        table_layout.addWidget(self._empty)
+        splitter.addWidget(table_box)
+        splitter.addWidget(self._chart_view)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+
         layout = QVBoxLayout(self)
         layout.addLayout(filter_bar)
-        layout.addWidget(self._table)
-        layout.addWidget(self._empty)
+        layout.addWidget(splitter)
 
         self.refresh()
 
@@ -134,9 +164,95 @@ class InventoryView(QWidget):
         self._table.resizeColumnsToContents()
         self._empty.setVisible(not rows)
         self._table.setVisible(bool(rows))
+        self._on_selection()
+
+    def _selected_row(self) -> InventoryRow | None:
+        indexes = self._table.selectionModel().selectedRows()
+        if not indexes:
+            return None
+        source = self._proxy.mapToSource(indexes[0])
+        return self._model.row_at(source.row())
+
+    def _on_selection(self, *_args) -> None:
+        row = self._selected_row()
+        if row is None:
+            self._show_chart_message("Select a card to see its price history.")
+            return
+        since = (datetime.now(timezone.utc) - timedelta(days=_HISTORY_DAYS)).isoformat()
+        history = self._service.prices.history_for_item(row.item.id, since=since)
+        self._chart_view.setChart(_history_chart(row, history))
+
+    def _show_chart_message(self, text: str) -> None:
+        chart = QChart()
+        chart.setTitle(text)
+        self._chart_view.setChart(chart)
 
     def _open_detail(self, proxy_index: QModelIndex) -> None:
         source_index = self._proxy.mapToSource(proxy_index)
         row = self._model.row_at(source_index.row())
         ItemDetailDialog(self._conn, row.item.id, parent=self).exec()
         self.refresh()  # reflect any edits made in the detail/editor
+
+
+def _to_msecs(iso: str) -> float:
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        dt = datetime.fromisoformat(iso[:10])
+    return dt.timestamp() * 1000.0
+
+
+def _history_chart(row: InventoryRow, snapshots: list[PriceSnapshot]) -> QChart:
+    chart = QChart()
+    name = row.item.name
+    if not snapshots:
+        chart.setTitle(f"{name} — no price history yet (use File ▸ Refresh prices)")
+        return chart
+    chart.setTitle(f"{name} — market price, last {_HISTORY_DAYS} days")
+
+    price = QLineSeries()
+    price.setName("Market price")
+    price.setPointsVisible(True)
+    xs = []
+    for snap in snapshots:
+        x = _to_msecs(snap.as_of)
+        xs.append(x)
+        price.append(x, snap.price_cents / 100.0)
+    chart.addSeries(price)
+
+    # Flat per-unit reference lines across the same date span.
+    x0, x1 = min(xs), max(xs)
+    flat_values = [("Cost", row.avg_cost_cents / 100.0)]
+    if row.on_hand:
+        flat_values.append(
+            ("Market at ToP", row.market_at_purchase_cents / row.on_hand / 100.0)
+        )
+    flat_series = []
+    for label, value in flat_values:
+        line = QLineSeries()
+        line.setName(label)
+        line.append(x0, value)
+        line.append(x1, value)
+        chart.addSeries(line)
+        flat_series.append(line)
+
+    axis_x = QDateTimeAxis()
+    axis_x.setFormat("MMM d")
+    axis_x.setTitleText("Date")
+    chart.addAxis(axis_x, Qt.AlignBottom)
+    axis_y = QValueAxis()
+    axis_y.setTitleText("USD")
+    chart.addAxis(axis_y, Qt.AlignLeft)
+    for series in (price, *flat_series):
+        series.attachAxis(axis_x)
+        series.attachAxis(axis_y)
+
+    ys = [s.price_cents / 100.0 for s in snapshots] + [v for _, v in flat_values]
+    axis_x.setRange(
+        QDateTime.fromMSecsSinceEpoch(int(min(xs))),
+        QDateTime.fromMSecsSinceEpoch(int(max(xs))),
+    )
+    low, high = min(ys), max(ys)
+    pad = max(1.0, (high - low) * 0.1)
+    axis_y.setRange(low - pad, high + pad)
+    return chart

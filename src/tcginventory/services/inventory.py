@@ -11,7 +11,11 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from tcginventory.data.repositories import ItemRepository, LotRepository
+from tcginventory.data.repositories import (
+    ItemRepository,
+    LotRepository,
+    PriceSnapshotRepository,
+)
 from tcginventory.domain.enums import Intent
 from tcginventory.domain.models import Item
 
@@ -44,6 +48,9 @@ class InventoryRow:
     avg_cost_cents: int
     sold_status: str  # "unsold" | "partial" | "sold"
     intent: str  # an Intent value, "mixed", or "" (no lots)
+    # Total current market of on-hand units from the latest poll; None if the
+    # item has never been priced (ripping units count as $0).
+    current_value_cents: int | None = None
     skus: tuple[str, ...] = ()  # the item's lot SKUs (for lookup/search)
 
     @property
@@ -55,6 +62,7 @@ class InventoryService:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.items = ItemRepository(conn)
         self.lots = LotRepository(conn)
+        self.prices = PriceSnapshotRepository(conn)
 
     def on_hand(self, item_id: int, intent: Intent | None = None) -> int:
         """Units currently on hand for an item (optionally filtered by intent)."""
@@ -118,6 +126,7 @@ class InventoryService:
         filter has something to show.
         """
         rows: list[InventoryRow] = []
+        latest_prices = self.prices.latest_prices()
         for item in self.items.list_all():
             lots = self.lots.list_for_item(item.id)
             if not lots:
@@ -146,6 +155,17 @@ class InventoryService:
             intent = next(iter(intents)).value if len(intents) == 1 else "mixed"
             skus = tuple(sorted({lot.sku for lot in lots if lot.sku}))
 
+            current_unit = latest_prices.get(item.id)
+            if current_unit is None:
+                current_value = None
+            else:
+                current_value = sum(
+                    0
+                    if lot.intent is Intent.RIPPING
+                    else lot.remaining_qty * current_unit
+                    for lot in lots
+                )
+
             rows.append(
                 InventoryRow(
                     item=item,
@@ -158,6 +178,7 @@ class InventoryService:
                     avg_cost_cents=avg_cost,
                     sold_status=sold_status,
                     intent=intent,
+                    current_value_cents=current_value,
                     skus=skus,
                 )
             )
