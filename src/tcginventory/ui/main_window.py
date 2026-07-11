@@ -100,6 +100,7 @@ class MainWindow(QMainWindow):
         # Keep read views current as the ledger changes.
         self._transaction.posted.connect(self._on_ledger_changed)
         self._history.changed.connect(self._on_ledger_changed)
+        self._inventory.changed.connect(self._on_ledger_changed)
         self._history.edit_requested.connect(self._start_edit)
 
         self._nav = QListWidget()

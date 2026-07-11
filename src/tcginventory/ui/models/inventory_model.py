@@ -70,6 +70,7 @@ _COLUMNS: list[_Column] = [
     _Column("Lang", lambda r: r.item.language.value, lambda r: r.item.language.value),
     _Column("Cond/Grade", lambda r: _cond_grade(r.item), lambda r: _cond_grade(r.item)),
     _Column("Intent", lambda r: r.intent, lambda r: r.intent),
+    _Column("Acquired", lambda r: r.acquired_at, lambda r: r.acquired_at),
     _Column(
         "Purchase Price",
         lambda r: money(r.purchase_price_cents),

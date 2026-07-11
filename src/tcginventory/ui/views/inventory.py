@@ -12,7 +12,13 @@ from PySide6.QtCharts import (
     QLineSeries,
     QValueAxis,
 )
-from PySide6.QtCore import QDateTime, QModelIndex, QSortFilterProxyModel, Qt
+from PySide6.QtCore import (
+    QDateTime,
+    QModelIndex,
+    QSortFilterProxyModel,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -22,6 +28,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
+    QPushButton,
     QSplitter,
     QTableView,
     QVBoxLayout,
@@ -36,7 +44,9 @@ from tcginventory.data.repositories import (
 )
 from tcginventory.domain.enums import Intent
 from tcginventory.domain.models import PriceSnapshot
+from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inventory import InventoryRow, InventoryService
+from tcginventory.services.transactions import TransactionService
 from tcginventory.ui.models.inventory_model import (
     INTENT_COL,
     MARKET_CURRENT_COL,
@@ -98,6 +108,8 @@ class _InventoryFilterProxy(QSortFilterProxyModel):
 
 
 class InventoryView(QWidget):
+    changed = Signal()  # a hard-delete changed the ledger
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         super().__init__()
         self._conn = conn
@@ -125,6 +137,12 @@ class InventoryView(QWidget):
         self._in_stock = QCheckBox("In stock only")
         self._in_stock.toggled.connect(self._proxy.set_in_stock_only)
 
+        self._delete_btn = QPushButton("Delete entry…")
+        self._delete_btn.setToolTip(
+            "Permanently delete the selected entry (for correcting a mistake)"
+        )
+        self._delete_btn.clicked.connect(self._delete_selected_entry)
+
         filter_bar = QHBoxLayout()
         filter_bar.addWidget(self._search, 1)
         filter_bar.addWidget(QLabel("Intent:"))
@@ -132,6 +150,7 @@ class InventoryView(QWidget):
         filter_bar.addWidget(QLabel("Sold:"))
         filter_bar.addWidget(self._sold)
         filter_bar.addWidget(self._in_stock)
+        filter_bar.addWidget(self._delete_btn)
 
         # -- table
         self._table = QTableView()
@@ -237,6 +256,33 @@ class InventoryView(QWidget):
         ItemRepository(self._conn).update(item)
         self._conn.commit()
         self.refresh()
+
+    def _delete_selected_entry(self) -> None:
+        row = self._selected_row()
+        if row is None:
+            QMessageBox.information(
+                self, "Delete entry", "Select an inventory entry to delete."
+            )
+            return
+        label = f"{row.sku or row.item.name}"
+        confirm = QMessageBox.warning(
+            self,
+            "Delete entry permanently",
+            f"Permanently delete {label} ({row.item.name})?\n\n"
+            "This removes the entry and its purchase line for good — it is not "
+            "a void and cannot be undone. Use this only to fix a mistake.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            TransactionService(self._conn).delete_inventory_entry(row.lot_id)
+        except ServiceError as exc:
+            QMessageBox.warning(self, "Could not delete", str(exc))
+            return
+        self.refresh()
+        self.changed.emit()
 
     def _set_lot_intent(self, lot_id: int, intent_str: str) -> None:
         """Inline-edit handler: change a single lot's intent (per-lot, Spec 02)."""

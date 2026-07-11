@@ -43,6 +43,7 @@ class InventoryRow:
     lot_id: int
     sku: str
     intent: str  # this lot's intent value
+    acquired_at: str  # date this lot was received (ISO date)
     on_hand: int  # lot.remaining_qty
     acquired_qty: int  # lot.quantity
     purchase_price_cents: int  # per-unit price paid
@@ -161,6 +162,7 @@ class InventoryService:
                     lot_id=lot.id,
                     sku=lot.sku or "",
                     intent=lot.intent.value,
+                    acquired_at=lot.acquired_at,
                     on_hand=lot.remaining_qty,
                     acquired_qty=lot.quantity,
                     purchase_price_cents=lot.unit_cost_cents,

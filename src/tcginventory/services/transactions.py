@@ -171,6 +171,97 @@ class TransactionService:
             self.conn.rollback()
             raise
 
+    def delete_inventory_entry(self, lot_id: int) -> None:
+        """Permanently delete one inventory entry — a mistaken lot and its
+        purchase line — then drop the item if nothing else references it.
+
+        This is a **hard delete** (not a void): the rows are gone, for fixing a
+        blatant data-entry mistake. The purchase's cash is reduced by the
+        removed card's cost basis so the remaining lines still reconcile with
+        the transaction's cash (invariant: Σ basis = net consideration).
+
+        Guarded — raises :class:`TransactionStateError` if:
+          * the lot has had units sold/traded away (not fully intact), or
+          * it came from a trade or a transaction with cash received (where a
+            single-line delete can't be reconciled cleanly — void/edit instead).
+        """
+        lot = self.lots.get(lot_id)
+        if lot is None:
+            raise TransactionStateError(f"no lot {lot_id}")
+        if lot.remaining_qty != lot.quantity or self.consumptions.list_for_lot(lot.id):
+            raise TransactionStateError(
+                "This entry has units that were sold or traded away. Void the "
+                "dependent sale/trade first, or edit the purchase instead."
+            )
+
+        item_id = lot.item_id
+        line_id = lot.acquired_txn_line_id
+        before = json.dumps(
+            {
+                "lot_id": lot.id,
+                "item_id": item_id,
+                "sku": lot.sku,
+                "quantity": lot.quantity,
+                "unit_cost_cents": lot.unit_cost_cents,
+                "acquired_txn_line_id": line_id,
+            }
+        )
+        try:
+            if line_id is None:
+                # A lot with no acquiring line (e.g. seeded) — just remove it.
+                self.lots.delete(lot.id)
+            else:
+                line = self.lines.get(line_id)
+                txn = self.txns.get(line.transaction_id)
+                all_lines = self.lines.list_for_transaction(txn.id)
+                has_out = any(ln.direction is Direction.OUT for ln in all_lines)
+                if has_out or txn.cash_delta_cents > 0:
+                    raise TransactionStateError(
+                        "This entry came from a trade or a transaction with cash "
+                        "received; a single-entry delete can't be reconciled "
+                        "here. Void or edit the transaction instead."
+                    )
+                line_lots = self.lots.list_for_acquired_line(line_id)
+                for lt in line_lots:
+                    intact = lt.remaining_qty == lt.quantity
+                    if not intact or self.consumptions.list_for_lot(lt.id):
+                        raise TransactionStateError(
+                            "This entry has units that were sold or traded away. "
+                            "Void the dependent sale/trade first, or edit the "
+                            "purchase instead."
+                        )
+                basis = sum(lt.quantity * lt.unit_cost_cents for lt in line_lots)
+                for lt in line_lots:
+                    self.lots.delete(lt.id)
+                self.lines.delete(line_id)
+                remaining = [ln for ln in all_lines if ln.id != line_id]
+                if remaining:
+                    # Reduce recorded cash-out by the removed card's basis.
+                    txn.cash_delta_cents = min(0, txn.cash_delta_cents + basis)
+                    self.txns.update(txn)
+                else:
+                    self.txns.delete(txn.id)  # nothing left — remove the txn
+
+            # Orphan cleanup: drop the item if no lot/line references it anymore.
+            if not self.lots.list_for_item(item_id) and not self.lines.list_for_item(
+                item_id
+            ):
+                self.items.delete(item_id)
+
+            self.audit.add(
+                AuditLogEntry(
+                    entity="lot",
+                    entity_id=lot_id,
+                    action=AuditAction.DELETE,
+                    before_json=before,
+                    note="inventory entry permanently deleted",
+                )
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
     def edit(self, transaction_id: int, request: TransactionRequest) -> PostResult:
         """Edit = void the original + re-post the new data, in one transaction."""
         old = self.txns.get(transaction_id)

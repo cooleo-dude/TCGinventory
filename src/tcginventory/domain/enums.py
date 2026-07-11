@@ -86,3 +86,4 @@ class AuditAction(str, Enum):
     CREATE = "create"
     EDIT = "edit"
     VOID = "void"
+    DELETE = "delete"  # permanent hard-delete of a mistaken entry (owner-initiated)

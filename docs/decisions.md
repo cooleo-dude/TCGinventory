@@ -4,6 +4,44 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-11 — Hard-delete a mistaken inventory entry (exception to soft-void)
+
+- **Decision:** Add `TransactionService.delete_inventory_entry(lot_id)` — a
+  true hard delete of a single lot and its purchase line, invoked from a
+  "Delete entry…" button in the Inventory view. It removes the rows for good
+  (not a void), reduces the purchase's `cash_delta` by the removed card's cost
+  basis so the remaining lines still reconcile with cash, and deletes the item
+  if it becomes orphaned. Recorded in `audit_log` as a new `AuditAction.DELETE`.
+- **Context / why:** The architecture rule is "transactions are never
+  hard-deleted." But the owner needs to erase a *blatant data-entry mistake*
+  entirely; a soft-void leaves it cluttering History. Real purchases here are
+  multi-card, so deleting the whole transaction to remove one bad row would
+  destroy good data — hence per-lot granularity.
+- **Guards:** blocked if the lot has units sold/traded away (fix the dependent
+  disposal first) or if it came from a trade / a cash-in transaction (a
+  single-line delete can't be reconciled there — void or edit instead).
+- **Consequences:** History no longer perfectly reproduces every entry ever
+  made; the append-only `audit_log` keeps a `before_json` record so the deletion
+  itself is still traceable. Surgical changes to multi-card trades stay the job
+  of Edit.
+
+### 2026-07-11 — Closest-match set→group resolution for pricing
+
+- **Decision:** When resolving an item's set to a tcgcsv group, try an exact
+  normalized match first (on `set_code` then `set_name`, plus the name after any
+  `SVxx:` prefix), then fall back to the **closest fuzzy match**
+  (`difflib` ratio ≥ 0.6, with substring hits treated as strong). 
+- **Context / why:** tcgcsv names sets inconsistently ("SV09: Journey Together")
+  and users type them loosely ("Journey Together"), so exact matching silently
+  dropped whole sets from pricing.
+- **Why it's safe:** the price join is by **product ID** (from the item's
+  TCGplayer URL), and a product belongs to exactly one group — so a wrong fuzzy
+  match yields *no* price, never a wrong one. Fuzzy matching only ever helps.
+- **Consequences:** far fewer unmapped items; the group lookup is just a
+  performance narrowing over which price file to download.
+
+---
+
 ### 2026-07-10 — "Mark for Review" (manual, poll-protected prices)
 
 - New `item.review` flag (migration `0005`), set by a checkbox at card entry.
