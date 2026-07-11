@@ -90,7 +90,7 @@ _COLUMNS: list[_Column] = [
     ),
     # Live once prices are polled; "—" for items not yet priced.
     _Column("Current Market", _current_display, _current_sort, numeric=True),
-    _Column("Unrealized P/L", _upl_display, _upl_sort, numeric=True, pl=True),
+    _Column("Unrealized Gain/Loss", _upl_display, _upl_sort, numeric=True, pl=True),
     _Column("Sold", lambda r: r.sold_status, lambda r: r.sold_status),
 ]
 
