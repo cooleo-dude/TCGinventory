@@ -65,7 +65,7 @@ _COLUMNS: list[_Column] = [
         numeric=True,
     ),
     _Column(
-        "Market",
+        "Market at ToP",
         lambda r: money(r.market_value_cents),
         lambda r: r.market_value_cents,
         numeric=True,
