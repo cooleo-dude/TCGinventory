@@ -92,6 +92,39 @@ def test_network_error_is_captured_not_raised(conn):
     assert summary.errors and "offline" in summary.errors[0]
 
 
+def test_group_resolves_despite_setcode_prefix(conn):
+    """tcgcsv names sets like 'SV09: Journey Together'; a plain set_name with
+    no set_code must still resolve to the group (regression)."""
+
+    def fetch(url: str):
+        if url.endswith("/groups"):
+            return {
+                "results": [
+                    {
+                        "groupId": 24073,
+                        "name": "SV09: Journey Together",
+                        "abbreviation": "JTG",
+                    }
+                ]
+            }
+        if url.endswith("/24073/prices"):
+            return {"results": [{"productId": 623590, "marketPrice": 6.10}]}
+        raise AssertionError(f"unexpected url: {url}")
+
+    item = ItemRepository(conn).add(
+        Item(
+            name="Kilowattrel",
+            category=Category.SINGLE,
+            set_name="Journey Together",  # no set_code
+            card_number="163/159",
+            tcgplayer_url="https://www.tcgplayer.com/product/623590/x",
+        )
+    )
+    quotes = TcgcsvProvider(fetch_json=fetch).quotes_for([item])
+    assert len(quotes) == 1
+    assert quotes[0].price_cents == 610
+
+
 def test_latest_prices_and_history_since(conn):
     item = ItemRepository(conn).add(_pikachu())
     snaps = PriceSnapshotRepository(conn)

@@ -110,7 +110,14 @@ class TcgcsvProvider:
                 gid = grp.get("groupId")
                 if gid is None:
                     continue
-                for key in (grp.get("abbreviation"), grp.get("name")):
+                name = grp.get("name")
+                keys = [grp.get("abbreviation"), name]
+                # tcgcsv prefixes set names with the code, e.g.
+                # "SV09: Journey Together" — also index the bare name so a
+                # plain "Journey Together" (no set_code) still resolves.
+                if name and ":" in name:
+                    keys.append(name.split(":", 1)[1])
+                for key in keys:
                     norm = _norm(key)
                     if norm:
                         index.setdefault(norm, gid)
