@@ -71,6 +71,14 @@ def test_inventory_rows_sold_status_and_intent(svc, inv):
     assert rows["Keeper"].intent == "personal"
 
 
+def test_inventory_rows_market_at_purchase(svc, inv):
+    # Paid $80 for a card whose entered market was $100 (an 80%-of-market buy).
+    buy(svc, "Deal", 8000, 10000, "2026-01-01")
+    (row,) = inv.inventory_rows()
+    assert row.cost_basis_cents == 8000  # what you paid
+    assert row.market_at_purchase_cents == 10000  # market when entered
+
+
 def test_inventory_rows_partial_sale(svc, inv):
     p = buy(svc, "Box", 3000, 1000, "2026-01-01", quantity=3)
     sell(svc, p.lots[0].item_id, 1, 1500, "2026-02-01")

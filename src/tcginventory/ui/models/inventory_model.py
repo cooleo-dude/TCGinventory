@@ -53,29 +53,23 @@ _COLUMNS: list[_Column] = [
     _Column("Intent", lambda r: r.intent, lambda r: r.intent),
     _Column("Qty", lambda r: str(r.on_hand), lambda r: r.on_hand, numeric=True),
     _Column(
-        "Avg Cost",
-        lambda r: money(r.avg_cost_cents),
-        lambda r: r.avg_cost_cents,
-        numeric=True,
-    ),
-    _Column(
         "Cost Basis",
         lambda r: money(r.cost_basis_cents),
         lambda r: r.cost_basis_cents,
         numeric=True,
     ),
     _Column(
-        "Market",
-        lambda r: money(r.market_value_cents),
-        lambda r: r.market_value_cents,
+        "Market Price at ToP",
+        lambda r: money(r.market_at_purchase_cents),
+        lambda r: r.market_at_purchase_cents,
         numeric=True,
     ),
+    # Deferred until a live price-polling system exists (see roadmap).
     _Column(
-        "Unrealized P/L",
-        lambda r: money(r.unrealized_pl_cents),
-        lambda r: r.unrealized_pl_cents,
+        "Market Price Current",
+        lambda r: "—",
+        lambda r: 0,
         numeric=True,
-        pl=True,
     ),
     _Column("Sold", lambda r: r.sold_status, lambda r: r.sold_status),
 ]

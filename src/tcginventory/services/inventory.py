@@ -37,8 +37,9 @@ class InventoryRow:
     item: Item
     on_hand: int
     acquired_qty: int
-    cost_basis_cents: int
-    market_value_cents: int
+    cost_basis_cents: int  # what you paid for the on-hand units
+    market_at_purchase_cents: int  # entered market value at acquisition (per lot)
+    market_value_cents: int  # current market (deferred: last-entered, not live)
     unrealized_pl_cents: int
     avg_cost_cents: int
     sold_status: str  # "unsold" | "partial" | "sold"
@@ -125,6 +126,9 @@ class InventoryService:
             on_hand = sum(lot.remaining_qty for lot in lots)
             current_mv = item.market_value_cents or 0
             cost = sum(lot.remaining_qty * lot.unit_cost_cents for lot in lots)
+            market_at_purchase = sum(
+                lot.remaining_qty * lot.acquired_market_value_cents for lot in lots
+            )
             market = sum(
                 0 if lot.intent is Intent.RIPPING else lot.remaining_qty * current_mv
                 for lot in lots
@@ -148,6 +152,7 @@ class InventoryService:
                     on_hand=on_hand,
                     acquired_qty=acquired,
                     cost_basis_cents=cost,
+                    market_at_purchase_cents=market_at_purchase,
                     market_value_cents=market,
                     unrealized_pl_cents=market - cost,
                     avg_cost_cents=avg_cost,
