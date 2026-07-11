@@ -50,7 +50,6 @@ class ItemEditorDialog(QDialog):
         if self._item and self._item.market_value_cents is not None:
             self._market.setValue(self._item.market_value_cents / 100)
 
-        self._location = QLineEdit(self._item.location or "" if self._item else "")
         self._tcgplayer = QLineEdit(
             self._item.tcgplayer_url or "" if self._item else ""
         )
@@ -62,7 +61,6 @@ class ItemEditorDialog(QDialog):
         form.addRow("Set:", self._set_name)
         form.addRow("Card #:", self._card_number)
         form.addRow("Market value:", self._market)
-        form.addRow("Location:", self._location)
         form.addRow("TCGplayer URL:", self._tcgplayer)
         form.addRow("eBay URL:", self._ebay)
         form.addRow("Notes:", self._notes)
@@ -84,7 +82,6 @@ class ItemEditorDialog(QDialog):
         self._item.card_number = self._card_number.text().strip() or None
         self._item.market_value_cents = round(self._market.value() * 100)
         self._item.market_value_asof = now_iso()[:10]
-        self._item.location = self._location.text().strip() or None
         self._item.tcgplayer_url = self._tcgplayer.text().strip() or None
         self._item.ebay_url = self._ebay.text().strip() or None
         self._item.notes = self._notes.text().strip() or None

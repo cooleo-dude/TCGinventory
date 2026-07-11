@@ -65,7 +65,7 @@ _COLUMNS: list[_Column] = [
         numeric=True,
     ),
     _Column(
-        "Market at ToP",
+        "Market",
         lambda r: money(r.market_value_cents),
         lambda r: r.market_value_cents,
         numeric=True,
@@ -78,11 +78,6 @@ _COLUMNS: list[_Column] = [
         pl=True,
     ),
     _Column("Sold", lambda r: r.sold_status, lambda r: r.sold_status),
-    _Column(
-        "Location",
-        lambda r: r.item.location or "",
-        lambda r: (r.item.location or "").lower(),
-    ),
 ]
 
 
