@@ -28,6 +28,7 @@ from tcginventory.domain.enums import (
 )
 from tcginventory.domain.models import (
     AuditLogEntry,
+    CardShow,
     Item,
     Lot,
     LotConsumption,
@@ -690,3 +691,82 @@ class PriceSnapshotRepository:
         for r in rows:  # ascending order → last write per item wins
             latest[r["item_id"]] = r["price_cents"]
         return latest
+
+
+class CardShowRepository:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    @staticmethod
+    def _to_model(row: sqlite3.Row) -> CardShow:
+        return CardShow(
+            id=row["id"],
+            source_id=row["source_id"],
+            name=row["name"],
+            venue=row["venue"],
+            city=row["city"],
+            state=row["state"],
+            starts_on=row["starts_on"],
+            start_time=row["start_time"],
+            end_time=row["end_time"],
+            detail_url=row["detail_url"],
+            fetched_at=row["fetched_at"],
+        )
+
+    def upsert(self, show: CardShow) -> None:
+        """Insert or update a show by its tcdb ``source_id``."""
+        self.conn.execute(
+            """
+            INSERT INTO card_show (
+                source_id, name, venue, city, state, starts_on,
+                start_time, end_time, detail_url, fetched_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(source_id) DO UPDATE SET
+                name = excluded.name, venue = excluded.venue,
+                city = excluded.city, state = excluded.state,
+                starts_on = excluded.starts_on, start_time = excluded.start_time,
+                end_time = excluded.end_time, detail_url = excluded.detail_url,
+                fetched_at = excluded.fetched_at
+            """,
+            (
+                show.source_id,
+                show.name,
+                show.venue,
+                show.city,
+                show.state,
+                show.starts_on,
+                show.start_time,
+                show.end_time,
+                show.detail_url,
+                show.fetched_at,
+            ),
+        )
+
+    def list_between(self, start_date: str, end_date: str) -> list[CardShow]:
+        """Shows with ``starts_on`` in [start_date, end_date] (inclusive)."""
+        rows = self.conn.execute(
+            "SELECT * FROM card_show WHERE starts_on >= ? AND starts_on <= ? "
+            "ORDER BY starts_on, start_time, name",
+            (start_date, end_date),
+        ).fetchall()
+        return [self._to_model(r) for r in rows]
+
+    def list_for_states(self, states: list[str]) -> list[CardShow]:
+        if not states:
+            return []
+        placeholders = ",".join("?" for _ in states)
+        rows = self.conn.execute(
+            f"SELECT * FROM card_show WHERE state IN ({placeholders}) "
+            "ORDER BY starts_on, start_time, name",
+            tuple(states),
+        ).fetchall()
+        return [self._to_model(r) for r in rows]
+
+    def delete_before(self, date: str) -> int:
+        """Drop shows that start before ``date`` (past-show pruning). Returns count."""
+        cur = self.conn.execute("DELETE FROM card_show WHERE starts_on < ?", (date,))
+        return cur.rowcount
+
+    def delete_for_state(self, state: str) -> None:
+        """Remove all shows for a state (e.g. when it's toggled off / re-fetched)."""
+        self.conn.execute("DELETE FROM card_show WHERE state = ?", (state,))

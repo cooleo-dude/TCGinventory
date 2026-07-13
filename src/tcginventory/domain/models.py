@@ -125,6 +125,27 @@ class PriceSnapshot:
 
 
 @dataclass
+class CardShow:
+    """An upcoming card/TCG show scraped from tcdb.com (Dashboard calendar).
+
+    ``source_id`` is tcdb's own show ID (the upsert key). ``starts_on`` is an ISO
+    date; times/venue are free text as tcdb presents them.
+    """
+
+    source_id: int
+    name: str
+    state: str  # 2-letter code
+    starts_on: str  # ISO date YYYY-MM-DD
+    venue: str | None = None
+    city: str | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    detail_url: str | None = None
+    fetched_at: str | None = None
+    id: int | None = None
+
+
+@dataclass
 class AuditLogEntry:
     """An append-only record of a create / edit / void on some entity."""
 

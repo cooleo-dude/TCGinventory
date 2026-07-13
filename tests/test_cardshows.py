@@ -1,0 +1,85 @@
+"""Card-show scraping: parser + refresh service (offline, injected fetcher)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from tcginventory.data.repositories import CardShowRepository
+from tcginventory.services.cardshows import (
+    CardShowService,
+    is_tcg,
+    list_url,
+    parse_shows,
+)
+
+_FIXTURE = Path(__file__).parent / "fixtures" / "tcdb_nj.html"
+
+
+def _nj_html() -> str:
+    return _FIXTURE.read_text(encoding="utf-8")
+
+
+def test_list_url_encodes_state_and_display():
+    url = list_url("NJ")
+    assert "State=NJ" in url
+    assert "Display=New+Jersey" in url
+    assert "MODE=Location" in url
+
+
+def test_parse_shows_extracts_all_fields():
+    shows = {s.source_id: s for s in parse_shows(_nj_html(), "NJ", fetched_at="t")}
+    assert len(shows) == 4  # 1 past + 3 future
+
+    g = shows[28222]
+    assert g.name == "Garden State Trading Card Show"
+    assert g.venue == "Baymont by Wyndham"
+    assert g.city == "Pompton Plains"
+    assert g.state == "NJ"
+    assert g.starts_on == "2026-07-14"
+    assert (g.start_time, g.end_time) == ("3:00 PM", "9:00 PM")
+    assert g.detail_url == "https://www.tcdb.com/CardShows.cfm?MODE=VIEW&ID=28222"
+
+    # A show with no time line still parses (times None), entities unescaped.
+    t = shows[28205]
+    assert t.venue == "La Quinta Inn & Suites"
+    assert t.city == "Secaucus"
+    assert t.start_time is None and t.end_time is None
+
+
+def test_is_tcg_keyword_heuristic():
+    shows = {s.source_id: s for s in parse_shows(_nj_html(), "NJ")}
+    assert is_tcg(shows[20227]) is True  # "…Pokemon, and TCG…"
+    assert is_tcg(shows[28222]) is False  # "…Trading Card Show" (no keyword)
+
+
+def test_refresh_stores_future_prunes_past_and_is_idempotent(conn):
+    svc = CardShowService(conn, fetch_html=lambda url: _nj_html())
+    summary = svc.refresh(["NJ"], today="2026-06-01", fetched_at="2026-06-01T00:00:00Z")
+
+    assert summary.fetched == 3  # the 2025 past show is excluded
+    assert summary.errors == []
+    stored = CardShowRepository(conn).list_for_states(["NJ"])
+    assert len(stored) == 3
+    assert 1001 not in {s.source_id for s in stored}  # past pruned
+
+    # Re-running replaces the state's set — no duplicates.
+    svc.refresh(["NJ"], today="2026-06-01")
+    assert len(CardShowRepository(conn).list_for_states(["NJ"])) == 3
+
+
+def test_refresh_captures_fetch_errors_without_raising(conn):
+    def boom(url):
+        raise RuntimeError("403 Forbidden")
+
+    summary = CardShowService(conn, fetch_html=boom).refresh(["NJ"])
+    assert summary.fetched == 0
+    assert summary.errors and "NJ" in summary.errors[0]
+
+
+def test_repo_list_between(conn):
+    CardShowService(conn, fetch_html=lambda url: _nj_html()).refresh(
+        ["NJ"], today="2026-01-01"
+    )
+    repo = CardShowRepository(conn)
+    only_14th = repo.list_between("2026-07-14", "2026-07-14")
+    assert {s.source_id for s in only_14th} == {28222, 20227}

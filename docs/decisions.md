@@ -4,6 +4,28 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-13 — Card-shows calendar: data layer (scrape tcdb via curl)
+
+- **Decision:** Add a shows data layer for the planned Dashboard calendar:
+  migration `0006_card_show`, a `CardShow` model + `CardShowRepository`
+  (upsert-by-tcdb-id, date-range/state queries, past pruning), and
+  `services/cardshows.py` — a Qt-free parser + `CardShowService.refresh(states)`
+  that replaces each state's stored shows with a fresh scrape.
+- **Source:** tcdb `CardShows.cfm?MODE=Location&State=<code>&Display=<name>`.
+  The list page alone yields date, name, venue, city, time range, and a detail
+  link per show — no per-show fetch needed.
+- **Fetch via `curl`, not httpx:** tcdb is behind Cloudflare, which 403s Python
+  HTTP clients on TLS fingerprint (even with browser headers) but lets the
+  system curl through. `_fetch_html` shells out to curl; the injected-fetcher
+  design keeps parsing/refresh unit-testable offline and makes swapping to
+  `curl_cffi` a one-function change if curl is later blocked.
+- **Scope:** background refresh covers **only the user-toggled states**. UI
+  (month calendar + per-cell show names, state multi-select, "TCG only" toggle)
+  and the daily-task integration come next; this increment is source-only
+  (the packaged exe isn't rebuilt until the UI lands).
+
+---
+
 ### 2026-07-13 — Continuous background price updates (headless + Task Scheduler)
 
 - **Decision:** Prices now refresh in the background even when the GUI is
