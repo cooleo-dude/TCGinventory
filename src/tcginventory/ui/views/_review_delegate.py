@@ -10,13 +10,15 @@ elsewhere or the page changes.
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QRect, Qt
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QDoubleSpinBox, QStyle, QStyledItemDelegate
 
-from tcginventory.ui.models.inventory_model import ITEM_ID_ROLE, REVIEW_ROLE
+from tcginventory.ui.models.inventory_model import (
+    ITEM_ID_ROLE,
+    REVIEW_BG,
+    REVIEW_ROLE,
+)
 
 _ICON = 18  # small square icon button (replaces the old wide text button)
-_AMBER = QColor("#fff3cd")
 
 
 def _button_rect(cell: QRect) -> QRect:
@@ -58,7 +60,7 @@ class ReviewPriceDelegate(QStyledItemDelegate):
             painter.setPen(option.palette.highlightedText().color())
         else:
             if not armed:  # armed = preview-unmarked → no highlight
-                painter.fillRect(option.rect, _AMBER)
+                painter.fillRect(option.rect, REVIEW_BG)
             painter.setPen(option.palette.text().color())
 
         text = index.data(Qt.DisplayRole) or ""

@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QTableView,
-    QTextBrowser,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -26,21 +27,38 @@ from PySide6.QtWidgets import (
 from tcginventory.data.repositories import (
     ItemRepository,
     LotConsumptionRepository,
+    LotRepository,
     TransactionLineRepository,
     TransactionRepository,
 )
 from tcginventory.domain.enums import Direction, TransactionStatus
+from tcginventory.domain.models import Item
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.reporting import ReportingService
 from tcginventory.services.transactions import TransactionService
 from tcginventory.ui.formatting import money, percent
-from tcginventory.ui.models.history_model import (
-    ITEMS_COL,
-    HistoryRow,
-    HistoryTableModel,
-)
+from tcginventory.ui.models.history_model import HistoryRow, HistoryTableModel
 
 _TYPES = ["All", "purchase", "sale", "trade", "adjustment"]
+
+# Bottom-pane columns describing each card in the selected transaction.
+_DETAIL_HEADERS = [
+    "SKU",
+    "Name",
+    "Set",
+    "#",
+    "Purchase Price",
+    "Notes",
+    "Cond/Grade",
+    "Language",
+]
+
+
+def _cond_grade(item: Item) -> str:
+    if item.is_graded:
+        company = item.grading_company.value if item.grading_company else "?"
+        return f"{company} {item.grade or ''}".strip()
+    return item.condition.value if item.condition else ""
 
 
 class _HistoryFilterProxy(QSortFilterProxyModel):
@@ -77,6 +95,7 @@ class HistoryView(QWidget):
         self._txns = TransactionRepository(conn)
         self._lines = TransactionLineRepository(conn)
         self._consumptions = LotConsumptionRepository(conn)
+        self._lots = LotRepository(conn)
         self._items = ItemRepository(conn)
         self._reporting = ReportingService(conn)
         self._service = TransactionService(conn)
@@ -116,14 +135,27 @@ class HistoryView(QWidget):
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.selectionModel().selectionChanged.connect(self._show_detail)
-        self._table.clicked.connect(self._on_cell_clicked)
 
-        self._detail = QTextBrowser()
-        self._detail.setPlaceholderText("Select a transaction to see its detail.")
+        # Bottom pane: transaction summary + a table of its cards.
+        self._detail_header = QLabel("Select a transaction to see its items.")
+        self._detail_header.setStyleSheet("padding: 4px;")
+        self._detail_table = QTableWidget(0, len(_DETAIL_HEADERS))
+        self._detail_table.setHorizontalHeaderLabels(_DETAIL_HEADERS)
+        self._detail_table.verticalHeader().setVisible(False)
+        self._detail_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._detail_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._detail_table.setAlternatingRowColors(True)
+        self._detail_table.horizontalHeader().setStretchLastSection(True)
+
+        detail_box = QWidget()
+        detail_layout = QVBoxLayout(detail_box)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.addWidget(self._detail_header)
+        detail_layout.addWidget(self._detail_table)
 
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(self._table)
-        splitter.addWidget(self._detail)
+        splitter.addWidget(detail_box)
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 1)
 
@@ -145,7 +177,7 @@ class HistoryView(QWidget):
         ]
         self._model.set_rows(rows)
         self._table.resizeColumnsToContents()
-        self._detail.clear()
+        self._clear_detail()
 
     def _item_labels(self, transaction_id: int) -> list[str]:
         """['Articuno 161/159', 'Charizard 004/102', …] for a transaction."""
@@ -156,21 +188,6 @@ class HistoryView(QWidget):
             number = (item.card_number if item else None) or ""
             labels.append(f"{name} {number}".strip())
         return labels
-
-    def _on_cell_clicked(self, proxy_index: QModelIndex) -> None:
-        # The Items field trails off in the grid; clicking it shows the full list.
-        if proxy_index.column() != ITEMS_COL:
-            return
-        source = self._proxy.mapToSource(proxy_index)
-        row = self._model.row_at(source.row())
-        labels = self._item_labels(row.transaction.id)
-        if not labels:
-            return
-        QMessageBox.information(
-            self,
-            f"Items — {row.transaction.type.value} {row.transaction.occurred_at}",
-            "\n".join(labels),
-        )
 
     def _selected_transaction(self):
         indexes = self._table.selectionModel().selectedRows()
@@ -213,59 +230,72 @@ class HistoryView(QWidget):
         self.refresh()
         self.changed.emit()
 
+    def _clear_detail(self) -> None:
+        self._detail_header.setText("Select a transaction to see its items.")
+        self._detail_table.setRowCount(0)
+
     def _show_detail(self) -> None:
         indexes = self._table.selectionModel().selectedRows()
         if not indexes:
-            self._detail.clear()
+            self._clear_detail()
             return
         source = self._proxy.mapToSource(indexes[0])
         row = self._model.row_at(source.row())
-        self._detail.setHtml(self._detail_html(row))
-
-    def _detail_html(self, row: HistoryRow) -> str:
         txn = row.transaction
-        parts = [
-            f"<h3>{txn.type.value.title()} — {txn.occurred_at}</h3>",
-            f"<p>Status: {txn.status.value}",
-        ]
-        if txn.counterparty:
-            parts.append(f" &nbsp;·&nbsp; Counterparty: {txn.counterparty}")
-        margin_text = money(row.margin_cents) if row.proceeds_cents else "—"
-        parts.append(
-            f"<br>Cash: {money(txn.cash_delta_cents)}"
-            f" &nbsp;·&nbsp; Margin: {margin_text}"
-        )
-        if row.proceeds_cents:
-            pct = self._reporting.gross_margin_pct(txn.id)
-            parts.append(f" ({percent(pct)})")
-        parts.append("</p>")
 
-        parts.append(
-            "<table width='100%' cellpadding='4'><tr>"
-            "<th align='left'>Dir</th><th align='left'>Item</th>"
-            "<th align='right'>Qty</th><th align='right'>Unit Price</th>"
-            "<th align='right'>Realized</th></tr>"
+        summary = (
+            f"{txn.type.value.title()} — {txn.occurred_at}   ·   "
+            f"Status: {txn.status.value}   ·   Cash: {money(txn.cash_delta_cents)}"
         )
-        for line in self._lines.list_for_transaction(txn.id):
+        if txn.counterparty:
+            summary += f"   ·   {txn.counterparty}"
+        if row.proceeds_cents:
+            summary += (
+                f"   ·   Margin: {money(row.margin_cents)} "
+                f"({percent(self._reporting.gross_margin_pct(txn.id))})"
+            )
+        self._detail_header.setText(summary)
+
+        cells = self._detail_rows(txn.id)
+        self._detail_table.setRowCount(len(cells))
+        for r, values in enumerate(cells):
+            for c, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                if c == 4:  # Purchase Price → right-aligned
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self._detail_table.setItem(r, c, item)
+        self._detail_table.resizeColumnsToContents()
+        self._detail_table.horizontalHeader().setStretchLastSection(True)
+
+    def _detail_rows(self, transaction_id: int) -> list[list[str]]:
+        """One row per lot in the transaction, with the requested columns."""
+        rows: list[list[str]] = []
+        for line in self._lines.list_for_transaction(transaction_id):
             item = self._items.get(line.item_id)
-            name = item.name if item else f"item {line.item_id}"
-            realized = (
-                money(line.realized_pl_cents)
-                if line.realized_pl_cents is not None
-                else ""
-            )
-            parts.append(
-                f"<tr><td>{line.direction.value}</td><td>{name}</td>"
-                f"<td align='right'>{line.quantity}</td>"
-                f"<td align='right'>{money(line.unit_price_cents)}</td>"
-                f"<td align='right'>{realized}</td></tr>"
-            )
-            if line.direction is Direction.OUT:
+            if item is None:
+                continue
+            if line.direction is Direction.IN:
+                lots = self._lots.list_for_acquired_line(line.id)
+                pairs = [(lot.sku or "", lot.unit_cost_cents) for lot in lots]
+            else:  # OUT — draw price basis from the lots it consumed
+                pairs = []
                 for cons in self._consumptions.list_for_line(line.id):
-                    parts.append(
-                        f"<tr><td></td><td colspan='4' style='color:#777'>"
-                        f"&nbsp;&nbsp;↳ drew {cons.quantity} from lot {cons.lot_id} "
-                        f"@ {money(cons.unit_cost_cents)}</td></tr>"
-                    )
-        parts.append("</table>")
-        return "".join(parts)
+                    lot = self._lots.get(cons.lot_id)
+                    sku = (lot.sku if lot else "") or ""
+                    pairs.append((sku, cons.unit_cost_cents))
+            if not pairs:  # fallback so the card still shows
+                pairs = [("", line.unit_price_cents)]
+            for sku, price_cents in pairs:
+                rows.append(
+                    [
+                        sku,
+                        item.name,
+                        item.set_name or "",
+                        item.card_number or "",
+                        money(price_cents),
+                        item.notes or "",
+                        _cond_grade(item),
+                        item.language.value,
+                    ]
+                )
+        return rows

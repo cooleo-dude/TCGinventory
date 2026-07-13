@@ -44,10 +44,12 @@ def test_history_view_populates_and_details(app, seeded_conn):
 
     view = HistoryView(seeded_conn)
     assert view._model.rowCount() >= 6
-    # Selecting the first row renders detail HTML without error.
+    # Selecting a row populates the bottom item table (SKU, name, price, …).
     view._table.selectRow(0)
     app.processEvents()
-    assert view._detail.toPlainText() != ""
+    assert view._detail_table.rowCount() > 0
+    assert view._detail_table.columnCount() == 8
+    assert "Select a transaction" not in view._detail_header.text()  # filled in
     view.deleteLater()
 
 

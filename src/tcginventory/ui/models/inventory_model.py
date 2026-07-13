@@ -105,7 +105,9 @@ NOTES_COL = [c.header for c in _COLUMNS].index("Notes")
 ITEM_ID_ROLE = Qt.UserRole + 1
 REVIEW_ROLE = Qt.UserRole + 2
 LOT_ID_ROLE = Qt.UserRole + 3
-_AMBER = QColor("#fff3cd")
+# Review-cell highlight — gruvbox "neutral yellow" (#d79921), muted vs the old
+# near-white amber. Shared with ReviewPriceDelegate so both stay in sync.
+REVIEW_BG = QColor("#d79921")
 
 
 class InventoryTableModel(QAbstractTableModel):
@@ -176,7 +178,7 @@ class InventoryTableModel(QAbstractTableModel):
             and index.column() == MARKET_CURRENT_COL
             and row.review
         ):
-            return QBrush(_AMBER)
+            return QBrush(REVIEW_BG)
         return None
 
     def flags(self, index: QModelIndex):
