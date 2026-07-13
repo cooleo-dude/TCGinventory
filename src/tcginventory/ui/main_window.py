@@ -16,6 +16,7 @@ from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
+    QLabel,
     QListWidget,
     QMainWindow,
     QMessageBox,
@@ -29,6 +30,7 @@ from tcginventory import __version__, config
 from tcginventory.data.backup import backup_database
 from tcginventory.data.db import connect
 from tcginventory.data.migrator import migrate
+from tcginventory.data.repositories import PriceSnapshotRepository
 from tcginventory.services import importexport
 from tcginventory.ui.assets import app_icon
 from tcginventory.ui.views.dashboard import DashboardView
@@ -123,6 +125,14 @@ class MainWindow(QMainWindow):
 
         self._build_menu()
         self.setStatusBar(QStatusBar())
+        # Persistent (right-aligned) indicator of when prices last updated —
+        # stays visible even while a transient "Refreshing…" message shows.
+        self._last_refresh_label = QLabel()
+        self._last_refresh_label.setToolTip(
+            "When market prices were last recorded (GUI, manual, or the daily "
+            "background update)."
+        )
+        self.statusBar().addPermanentWidget(self._last_refresh_label)
         self._update_status()
 
         self._nav.setCurrentRow(0)
@@ -363,3 +373,19 @@ class MainWindow(QMainWindow):
     def _update_status(self) -> None:
         count = self._conn.execute("SELECT COUNT(*) FROM item").fetchone()[0]
         self.statusBar().showMessage(f"DB: {config.db_path()}   ·   {count} items")
+        self._last_refresh_label.setText(
+            f"Prices last updated: {self._last_refresh_text()}"
+        )
+
+    def _last_refresh_text(self) -> str:
+        """Full local date + time of the most recent price snapshot, or 'never'."""
+        as_of = PriceSnapshotRepository(self._conn).latest_as_of()
+        if not as_of:
+            return "never"
+        try:
+            dt = datetime.fromisoformat(as_of)
+        except ValueError:
+            return as_of  # show the raw value rather than nothing
+        if dt.tzinfo is not None:
+            dt = dt.astimezone()  # UTC snapshot → the user's local time
+        return dt.strftime("%Y-%m-%d %H:%M:%S %Z").strip()

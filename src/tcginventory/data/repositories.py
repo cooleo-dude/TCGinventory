@@ -674,6 +674,14 @@ class PriceSnapshotRepository:
             "DELETE FROM price_snapshot WHERE item_id = ?", (item_id,)
         )
 
+    def latest_as_of(self) -> str | None:
+        """The most recent snapshot timestamp across all items, or None if never
+        refreshed — i.e. when prices were last known to update."""
+        row = self.conn.execute(
+            "SELECT MAX(as_of) AS latest FROM price_snapshot"
+        ).fetchone()
+        return row["latest"] if row and row["latest"] else None
+
     def latest_prices(self) -> dict[int, int]:
         """Map item_id → most-recent per-unit price across all polled items."""
         rows = self.conn.execute(

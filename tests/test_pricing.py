@@ -157,6 +157,17 @@ def test_group_resolves_by_closest_match(conn):
     assert quotes[0].price_cents == 610
 
 
+def test_latest_as_of_reports_most_recent_refresh(conn):
+    snaps = PriceSnapshotRepository(conn)
+    assert snaps.latest_as_of() is None  # never refreshed
+    item = ItemRepository(conn).add(_pikachu())
+    svc = PricingService(conn, provider=TcgcsvProvider(fetch_json=_fake_fetch))
+    svc.refresh(as_of="2026-05-01T00:00:00+00:00")
+    svc.refresh(as_of="2026-07-01T12:34:56+00:00")
+    assert snaps.latest_as_of() == "2026-07-01T12:34:56+00:00"
+    assert item.id  # sanity
+
+
 def test_latest_prices_and_history_since(conn):
     item = ItemRepository(conn).add(_pikachu())
     snaps = PriceSnapshotRepository(conn)
