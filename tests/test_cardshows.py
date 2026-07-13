@@ -154,7 +154,7 @@ def test_shows_view_status_button_marks_show(app, conn, tmp_path, monkeypatch):
     view.deleteLater()
 
 
-def test_shows_view_attending_panel(app, conn, tmp_path, monkeypatch):
+def test_shows_view_marked_panel_and_filters(app, conn, tmp_path, monkeypatch):
     monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
     from tcginventory.ui.views.shows import ShowsView
 
@@ -168,17 +168,23 @@ def test_shows_view_attending_panel(app, conn, tmp_path, monkeypatch):
                  detail_url="https://y", fetched_at="t")
     )
     repo.set_status(1, "attending")
+    repo.set_status(2, "denied")
     conn.commit()
 
     view = ShowsView(conn)
-    lst = view._attending_list
-    assert lst.count() == 1
-    assert lst.itemWidget(lst.item(0)) is not None  # a real show row, not a placeholder
+    lst = view._marked_list
+    # All four filters on by default → both marked shows listed.
+    assert lst.count() == 2
+    assert all(lst.itemWidget(lst.item(i)) is not None for i in range(2))
 
-    # Unmarking removes it from the attending panel.
+    # Turn off "Denied" → only the attending show remains.
+    view._filter_buttons["denied"].setChecked(False)
+    assert lst.count() == 1
+
+    # Unmarking the attending show empties the (attending-only) list.
     view._set_status(1, None)
     assert lst.count() == 1
-    assert lst.itemWidget(lst.item(0)) is None  # placeholder "No shows..." text
+    assert lst.itemWidget(lst.item(0)) is None  # placeholder text
     view.deleteLater()
 
 

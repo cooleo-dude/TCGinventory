@@ -53,6 +53,8 @@ STATUS_ORDER = [
     ("pending", "Pending"),
     ("denied", "Denied"),
 ]
+STATUS_TITLES = {value: title for value, title in STATUS_ORDER}
+_ALL_STATUSES = [value for value, _ in STATUS_ORDER]
 
 # Show up to this many event names per day cell; the rest collapse into a
 # "… N more shows not displayed" indicator line.
@@ -229,12 +231,32 @@ class _DayShowRow(QWidget):
     Clicking a colour sets that status; clicking the active colour clears it.
     """
 
-    def __init__(self, show: CardShow, on_status, with_date: bool = False) -> None:
+    def __init__(
+        self,
+        show: CardShow,
+        on_status,
+        with_date: bool = False,
+        show_status_chip: bool = False,
+    ) -> None:
         super().__init__()
         self._show = show
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 3, 4, 3)
         layout.setSpacing(6)
+
+        # Optional status chip on the left: a coloured square + its designation.
+        if show_status_chip and show.status:
+            color = STATUS_COLORS.get(show.status)
+            square = QLabel()
+            square.setFixedSize(14, 14)
+            square.setStyleSheet(
+                f"background: {color.name()}; border: 1px solid #666;"
+                " border-radius: 3px;"
+            )
+            layout.addWidget(square)
+            designation = QLabel(STATUS_TITLES.get(show.status, show.status.title()))
+            designation.setStyleSheet(f"color: {color.name()}; font-weight: 600;")
+            layout.addWidget(designation)
 
         when = show.start_time or ""
         if show.end_time:
@@ -337,20 +359,42 @@ class ShowsView(QWidget):
         day_layout.addWidget(self._day_header)
         day_layout.addWidget(self._day_list, 1)
 
-        self._attending_list = QListWidget()
-        self._attending_list.setSelectionMode(QListWidget.NoSelection)
-        attending_box = QWidget()
-        attending_layout = QVBoxLayout(attending_box)
-        attending_layout.setContentsMargins(0, 0, 0, 0)
-        attending_header = QLabel("Attending")
-        attending_header.setStyleSheet("font-weight: 600; color: #27ae60;")
-        attending_layout.addWidget(attending_header)
-        attending_layout.addWidget(self._attending_list, 1)
+        # Marked-shows panel: four status toggles filter what's listed; each row
+        # is prefixed with a coloured square + its designation.
+        self._status_filter: set[str] = set(
+            config.get_pref("shows_status_filter", list(_ALL_STATUSES))
+        )
+        self._filter_buttons: dict[str, QPushButton] = {}
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(4)
+        for value, title in STATUS_ORDER:
+            btn = QPushButton(title)
+            btn.setCheckable(True)
+            btn.setChecked(value in self._status_filter)
+            btn.setToolTip(f"Show shows marked {title}")
+            self._style_filter_button(btn, value)
+            btn.toggled.connect(
+                lambda on, v=value: self._on_status_filter_toggled(v, on)
+            )
+            self._filter_buttons[value] = btn
+            filter_row.addWidget(btn)
+        filter_row.addStretch(1)
+
+        self._marked_list = QListWidget()
+        self._marked_list.setSelectionMode(QListWidget.NoSelection)
+        marked_box = QWidget()
+        marked_layout = QVBoxLayout(marked_box)
+        marked_layout.setContentsMargins(0, 0, 0, 0)
+        marked_title = QLabel("Marked Shows")
+        marked_title.setStyleSheet("font-weight: 600;")
+        marked_layout.addWidget(marked_title)
+        marked_layout.addLayout(filter_row)
+        marked_layout.addWidget(self._marked_list, 1)
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self._calendar)
         split.addWidget(day_box)
-        split.addWidget(attending_box)
+        split.addWidget(marked_box)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
         split.setStretchFactor(2, 2)
@@ -434,16 +478,40 @@ class ShowsView(QWidget):
                 self._calendar.setSelectedDate(QDate(y, m, dd))
                 self._calendar.setCurrentPage(y, m)
         self._update_day_list()
-        self._update_attending_list()
+        self._update_marked_list()
         self._status.setText(
             f"{len(shows)} show(s) in {', '.join(self._states) or '—'}"
         )
 
     @staticmethod
-    def _fill_list(widget, shows, on_status, with_date: bool, empty_text: str) -> None:
+    def _style_filter_button(btn: QPushButton, value: str) -> None:
+        color = STATUS_COLORS[value].name()
+        btn.setStyleSheet(
+            f"QPushButton {{ border: 1px solid {color}; color: {color};"
+            " background: transparent; padding: 2px 8px; border-radius: 4px; }"
+            f"QPushButton:checked {{ background: {color}; color: white;"
+            f" border: 1px solid {color}; }}"
+        )
+
+    def _on_status_filter_toggled(self, value: str, on: bool) -> None:
+        if on:
+            self._status_filter.add(value)
+        else:
+            self._status_filter.discard(value)
+        config.set_pref("shows_status_filter", list(self._status_filter))
+        self._update_marked_list()
+
+    @staticmethod
+    def _fill_list(
+        widget, shows, on_status, with_date: bool, empty_text: str,
+        show_status_chip: bool = False,
+    ) -> None:
         widget.clear()
         for show in shows:
-            row = _DayShowRow(show, on_status, with_date=with_date)
+            row = _DayShowRow(
+                show, on_status, with_date=with_date,
+                show_status_chip=show_status_chip,
+            )
             item = QListWidgetItem(widget)
             item.setSizeHint(row.sizeHint())
             widget.addItem(item)
@@ -466,20 +534,21 @@ class ShowsView(QWidget):
             "No shows on the selected date.",
         )
 
-    def _update_attending_list(self) -> None:
-        # Every upcoming show marked Attending (independent of the TCG filter),
-        # in date order — same details as the day list, plus the date.
-        attending = sorted(
+    def _update_marked_list(self) -> None:
+        # Every upcoming show whose status is in the enabled filter set
+        # (independent of the TCG filter), in date order — same details as the
+        # day list, plus the date and a status chip.
+        marked = sorted(
             (
                 s
                 for s in self._repo.list_for_states(self._states)
-                if s.status == "attending"
+                if s.status in self._status_filter
             ),
             key=lambda s: (s.starts_on, s.start_time or "", s.name),
         )
         self._fill_list(
-            self._attending_list, attending, self._set_status, True,
-            "No shows marked Attending yet.",
+            self._marked_list, marked, self._set_status, True,
+            "No marked shows.", show_status_chip=True,
         )
 
     def _set_status(self, source_id: int, status: str | None) -> None:
