@@ -7,7 +7,9 @@ Posting/void/edit refresh the read views so everything stays in sync.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 
 from PySide6.QtCore import QThread, QTimer, Signal
@@ -212,12 +214,40 @@ class MainWindow(QMainWindow):
             "Automatic daily price updates"
         )
         self._auto_update_action.setCheckable(True)
-        self._auto_update_action.setChecked(scheduling.is_enabled())
         self._auto_update_action.setToolTip(
             "Refresh prices once a day in the background, even when the app is "
             "closed (uses the Windows Task Scheduler)."
         )
+        # Default ON: the preference is on unless the user has turned it off.
+        enabled = self._auto_update_pref()
+        # Set state before connecting so this doesn't fire the toggle handler.
+        self._auto_update_action.setChecked(enabled)
         self._auto_update_action.toggled.connect(self._toggle_auto_updates)
+        # Only the packaged app registers the OS task (so the task points at the
+        # exe, and running from source / tests has no side effects).
+        if getattr(sys, "frozen", False):
+            self._reconcile_auto_updates(enabled)
+
+    @staticmethod
+    def _settings():
+        from PySide6.QtCore import QSettings
+
+        return QSettings(config.APP_NAME, config.APP_NAME)
+
+    def _auto_update_pref(self) -> bool:
+        return bool(self._settings().value("auto_update/enabled", True, type=bool))
+
+    def _reconcile_auto_updates(self, enabled: bool) -> None:
+        """Make the OS task match the preference (self-heals a missing task)."""
+        from tcginventory import scheduling
+
+        try:
+            if enabled and not scheduling.is_enabled():
+                scheduling.enable()
+            elif not enabled and scheduling.is_enabled():
+                scheduling.disable()
+        except Exception:
+            logging.getLogger(__name__).exception("auto-update reconcile failed")
 
     def _toggle_auto_updates(self, on: bool) -> None:
         from tcginventory import scheduling
@@ -234,6 +264,7 @@ class MainWindow(QMainWindow):
             self._auto_update_action.setChecked(scheduling.is_enabled())
             self._auto_update_action.blockSignals(False)
             return
+        self._settings().setValue("auto_update/enabled", on)
         if on:
             QMessageBox.information(
                 self,

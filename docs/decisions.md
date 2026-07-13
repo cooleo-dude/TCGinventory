@@ -4,6 +4,27 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-13 — Continuous background price updates (headless + Task Scheduler)
+
+- **Decision:** Prices now refresh in the background even when the GUI is
+  closed. A headless `--refresh-prices` entry point (`app.refresh_prices_headless`,
+  no Qt/display) does one poll-and-record pass; a **Windows Scheduled Task**
+  (`scheduling.py`, via `schtasks`) runs it **once daily**. The packaged app
+  **self-registers the task on startup by default** (default ON) and exposes a
+  File-menu toggle ("Automatic daily price updates") to turn it off; the choice
+  persists in `QSettings` so a user who opts out isn't re-enrolled.
+- **Context / why:** Refresh only happened on GUI launch (throttled) or manual
+  click, so price history had gaps whenever the app wasn't opened. The owner
+  wanted continuous history with no manual step.
+- **Why daily:** tcgcsv mirrors TCGplayer roughly once a day, so one snapshot
+  per day captures all real movement; more frequent polls would mostly dupe.
+- **Scoping choices:** startup self-registration is gated to the **frozen** app
+  so running from source / the test suite never shells out to `schtasks`; the
+  task's command points at `sys.executable` (the exe) so it survives rebuilds
+  in place. Windows-only (macOS/Linux would need launchd/cron — deferred).
+
+---
+
 ### 2026-07-11 — Hard-delete a mistaken inventory entry (exception to soft-void)
 
 - **Decision:** Add `TransactionService.delete_inventory_entry(lot_id)` — a
