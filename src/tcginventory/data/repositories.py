@@ -837,6 +837,13 @@ class CardCatalogRepository:
             ],
         )
 
+    def all_names(self) -> list[str]:
+        """Every distinct card name (for a name-autocomplete model)."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT name FROM card_catalog ORDER BY name"
+        ).fetchall()
+        return [r["name"] for r in rows]
+
     def distinct_names(self, prefix: str, limit: int = 20) -> list[str]:
         """Distinct card names starting with ``prefix`` (case-insensitive)."""
         rows = self.conn.execute(

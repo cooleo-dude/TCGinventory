@@ -104,7 +104,7 @@ def test_ui_sale_realizes_margin(app, conn):
     assert InventoryService(conn).on_hand(item_id) == 0
 
 
-def test_ui_oversell_blocks_submit(app, conn):
+def test_ui_give_row_caps_quantity_to_on_hand(app, conn):
     from tcginventory.ui.views.transaction import TransactionView
 
     view = TransactionView(conn)
@@ -114,7 +114,11 @@ def test_ui_oversell_blocks_submit(app, conn):
 
     item_id = _first_item_id(conn, "A")
     view.add_outgoing(OutgoingCard(item_id, 5), "A")  # only 1 on hand
-    assert view._submit.isEnabled() is False  # oversell → blocked
+    # The inline row caps quantity at what's available, so oversell can't be
+    # entered; a valid one-card sale is submittable.
+    assert view._give_rows[0].qty.value() == 1
+    view._cash_in.setValue(5.00)
+    assert view._submit.isEnabled() is True
 
 
 def test_ui_trade_and_rip_lifecycle(app, conn):
@@ -185,10 +189,12 @@ def test_incoming_card_renders_and_posts_via_dialog(app, conn):
     dlg._market.setValue(50.0)
     view.add_incoming(dlg.result_card())
 
-    # Regression: Cond/Grade, Market and Intent were blank (render crashed).
-    assert view._in_table.item(0, 3).text() == "NM"
-    assert view._in_table.item(0, 4).text() == "$50.00"
-    assert view._in_table.item(0, 5).text() == "Resale"
+    # The inline receive row carries the card's fields as editable widgets.
+    row = view._receive_rows[0]
+    assert row.name.text() == "Blastoise"
+    assert row.cond.currentText() == "NM"
+    assert row.market.value() == 50.0
+    assert row.intent.currentText() == "Resale"
 
     view._cash_out.setValue(50.0)
     view.submit()
@@ -214,6 +220,30 @@ def test_ui_give_dialog_sku_lookup(app, conn):
     card, name = dialog.result_card()
     assert name == "Snorlax"
     dialog.deleteLater()
+
+
+def test_receive_row_autofills_set_and_number_from_catalog(app, conn):
+    from tcginventory.data.repositories import CardCatalogRepository
+    from tcginventory.domain.models import CatalogCard
+    from tcginventory.ui.views.transaction import TransactionView
+
+    CardCatalogRepository(conn).replace_all(
+        [
+            CatalogCard(
+                card_id="sv9-163", name="Iono's Kilowattrel", set_id="sv9",
+                set_name="Journey Together", set_code="JTG", number="163",
+            )
+        ],
+        "2026-07-13T00:00:00Z",
+    )
+    conn.commit()
+
+    view = TransactionView(conn)
+    row = view._add_receive_row()
+    row.name.setText("Iono's Kilowattrel")
+    row._autofill()
+    assert row.set.text() == "Journey Together"
+    assert row.number.text() == "163"
 
 
 def test_ui_edit_reposts_and_history_void(app, conn):
