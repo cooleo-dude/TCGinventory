@@ -34,7 +34,11 @@ from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.reporting import ReportingService
 from tcginventory.services.transactions import TransactionService
 from tcginventory.ui.formatting import money, percent
-from tcginventory.ui.models.history_model import HistoryRow, HistoryTableModel
+from tcginventory.ui.models.history_model import (
+    ITEMS_COL,
+    HistoryRow,
+    HistoryTableModel,
+)
 
 _TYPES = ["All", "purchase", "sale", "trade", "adjustment"]
 
@@ -112,6 +116,7 @@ class HistoryView(QWidget):
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.selectionModel().selectionChanged.connect(self._show_detail)
+        self._table.clicked.connect(self._on_cell_clicked)
 
         self._detail = QTextBrowser()
         self._detail.setPlaceholderText("Select a transaction to see its detail.")
@@ -134,12 +139,38 @@ class HistoryView(QWidget):
                 transaction=txn,
                 margin_cents=self._reporting.transaction_margin_cents(txn.id),
                 proceeds_cents=self._reporting.transaction_proceeds_cents(txn.id),
+                items_label=", ".join(self._item_labels(txn.id)),
             )
             for txn in self._txns.list_all()
         ]
         self._model.set_rows(rows)
         self._table.resizeColumnsToContents()
         self._detail.clear()
+
+    def _item_labels(self, transaction_id: int) -> list[str]:
+        """['Articuno 161/159', 'Charizard 004/102', …] for a transaction."""
+        labels = []
+        for line in self._lines.list_for_transaction(transaction_id):
+            item = self._items.get(line.item_id)
+            name = item.name if item else f"item {line.item_id}"
+            number = (item.card_number if item else None) or ""
+            labels.append(f"{name} {number}".strip())
+        return labels
+
+    def _on_cell_clicked(self, proxy_index: QModelIndex) -> None:
+        # The Items field trails off in the grid; clicking it shows the full list.
+        if proxy_index.column() != ITEMS_COL:
+            return
+        source = self._proxy.mapToSource(proxy_index)
+        row = self._model.row_at(source.row())
+        labels = self._item_labels(row.transaction.id)
+        if not labels:
+            return
+        QMessageBox.information(
+            self,
+            f"Items — {row.transaction.type.value} {row.transaction.occurred_at}",
+            "\n".join(labels),
+        )
 
     def _selected_transaction(self):
         indexes = self._table.selectionModel().selectedRows()

@@ -16,7 +16,10 @@ _RED = QColor("#c62828")
 _MUTED = QColor("#9e9e9e")
 _ROOT = QModelIndex()  # module-level singleton for default parent args
 
-_HEADERS = ["Date", "Type", "Counterparty", "Cash", "Margin", "Status"]
+_HEADERS = ["Date", "Type", "Counterparty", "Cash", "Margin", "Status", "Items"]
+
+# Column index of the clickable item-list field (the view opens the full list).
+ITEMS_COL = _HEADERS.index("Items")
 
 
 @dataclass(frozen=True)
@@ -24,6 +27,7 @@ class HistoryRow:
     transaction: Transaction
     margin_cents: int
     proceeds_cents: int  # 0 for pure purchases → no margin shown
+    items_label: str = ""  # "Articuno 161/159, Charizard 004/102" (elided in grid)
 
 
 class HistoryTableModel(QAbstractTableModel):
@@ -64,6 +68,8 @@ class HistoryTableModel(QAbstractTableModel):
             return self._display(row, txn, col)
         if role == Qt.UserRole:
             return self._sort_key(row, txn, col)
+        if role == Qt.ToolTipRole and col == ITEMS_COL and row.items_label:
+            return row.items_label + "\n\n(click to view the full list)"
         if role == Qt.TextAlignmentRole and col in (3, 4):
             return int(Qt.AlignRight | Qt.AlignVCenter)
         if role == Qt.ForegroundRole:
@@ -89,6 +95,8 @@ class HistoryTableModel(QAbstractTableModel):
             return money(row.margin_cents) if row.proceeds_cents else ""
         if col == 5:
             return txn.status.value
+        if col == ITEMS_COL:
+            return row.items_label
         return ""
 
     @staticmethod
@@ -100,4 +108,5 @@ class HistoryTableModel(QAbstractTableModel):
             3: txn.cash_delta_cents,
             4: row.margin_cents,
             5: txn.status.value,
+            ITEMS_COL: row.items_label.lower(),
         }[col]

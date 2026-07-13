@@ -50,6 +50,21 @@ from tcginventory.services.exceptions import (
 )
 from tcginventory.services.sku import generate_sku
 
+# Note auto-attached to an item entered with "Mark for review" so the reason
+# its price is user-maintained is visible in the Notes column.
+REVIEW_NOTE = "Manual price changed detected."
+
+
+def _with_review_note(notes: str | None) -> str:
+    """Ensure ``notes`` carries the review marker (idempotent)."""
+    existing = (notes or "").strip()
+    if not existing:
+        return REVIEW_NOTE
+    if REVIEW_NOTE in existing:
+        return existing
+    return f"{existing} {REVIEW_NOTE}"
+
+
 # ---------------------------------------------------------------------------
 # Request / result DTOs
 # ---------------------------------------------------------------------------
@@ -622,6 +637,8 @@ class TransactionService:
             existing.market_value_cents = inc.market_value_cents
             existing.market_value_asof = occurred_date
             existing.review = inc.review
+            if inc.review:
+                existing.notes = _with_review_note(existing.notes)
             if inc.item.tcgplayer_url:
                 existing.tcgplayer_url = inc.item.tcgplayer_url
             if inc.item.ebay_url:
@@ -635,6 +652,7 @@ class TransactionService:
             market_value_cents=inc.market_value_cents,
             market_value_asof=occurred_date,
             review=inc.review,
+            notes=_with_review_note(inc.item.notes) if inc.review else inc.item.notes,
         )
         return self.items.add(new_item)
 

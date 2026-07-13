@@ -64,6 +64,18 @@ def test_review_flag_set_on_post(conn):
     # (fresh conn per test via the fixture, so no cross-talk)
 
 
+def test_review_item_gets_explanatory_note(conn):
+    from tcginventory.services.transactions import REVIEW_NOTE
+
+    item = _post_pikachu(conn, review=True)
+    assert ItemRepository(conn).get(item.id).notes == REVIEW_NOTE
+
+
+def test_non_review_item_has_no_forced_note(conn):
+    item = _post_pikachu(conn, review=False)
+    assert not ItemRepository(conn).get(item.id).notes
+
+
 def test_poll_protects_reviewed_current_but_saves_history(conn):
     item = _post_pikachu(conn, review=True)
     PricingService(conn, provider=TcgcsvProvider(fetch_json=_fake_fetch)).refresh(

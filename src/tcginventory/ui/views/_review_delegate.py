@@ -1,10 +1,10 @@
 """Delegate for the 'Market Price Current' column.
 
 Review-marked cells get an amber background, an inline price editor (double-click
-to type a value), and a **two-stage** button: the first click "arms" it (previews
-the unmark — highlight off, label becomes Refresh); the second click commits
-(unmark + refresh). It reverts to stage one if the selection moves elsewhere or
-the page changes.
+to type a value), and a **two-stage** icon button: the first click "arms" it
+(previews the unmark — highlight off, icon becomes a refresh ↻); the second click
+commits (unmark + refresh). It reverts to stage one if the selection moves
+elsewhere or the page changes.
 """
 
 from __future__ import annotations
@@ -15,13 +15,17 @@ from PySide6.QtWidgets import QDoubleSpinBox, QStyle, QStyledItemDelegate
 
 from tcginventory.ui.models.inventory_model import ITEM_ID_ROLE, REVIEW_ROLE
 
-_BTN_W = 84
+_ICON = 18  # small square icon button (replaces the old wide text button)
 _AMBER = QColor("#fff3cd")
-_BTN_BG = QColor("#c8912a")
 
 
 def _button_rect(cell: QRect) -> QRect:
-    return QRect(cell.right() - _BTN_W - 3, cell.top() + 3, _BTN_W, cell.height() - 6)
+    return QRect(
+        cell.right() - _ICON - 4,
+        cell.top() + (cell.height() - _ICON) // 2,
+        _ICON,
+        _ICON,
+    )
 
 
 class ReviewPriceDelegate(QStyledItemDelegate):
@@ -58,14 +62,16 @@ class ReviewPriceDelegate(QStyledItemDelegate):
             painter.setPen(option.palette.text().color())
 
         text = index.data(Qt.DisplayRole) or ""
-        text_rect = option.rect.adjusted(4, 0, -_BTN_W - 8, 0)
+        text_rect = option.rect.adjusted(4, 0, -_ICON - 10, 0)
         painter.drawText(text_rect, int(Qt.AlignRight | Qt.AlignVCenter), text)
 
+        # Icon-only button: a clear/✕ to unmark, a reload/↻ once armed.
         btn = _button_rect(option.rect)
-        painter.fillRect(btn, _BTN_BG)
-        painter.setPen(QColor("#ffffff"))
-        label = "Refresh ↻" if armed else "Unmark ✕"
-        painter.drawText(btn, int(Qt.AlignCenter), label)
+        style = self._view.style()
+        pixmap = style.standardIcon(
+            QStyle.SP_BrowserReload if armed else QStyle.SP_LineEditClearButton
+        )
+        pixmap.paint(painter, btn, Qt.AlignCenter)
         painter.restore()
 
     # -- button interaction -------------------------------------------------

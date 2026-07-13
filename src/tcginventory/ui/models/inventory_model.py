@@ -87,6 +87,11 @@ _COLUMNS: list[_Column] = [
     _Column("Current Market", _current_display, _current_sort, numeric=True),
     _Column("Unrealized Gain/Loss", _upl_display, _upl_sort, numeric=True, pl=True),
     _Column("Sold", lambda r: r.sold_status, lambda r: r.sold_status),
+    _Column(
+        "Notes",
+        lambda r: r.item.notes or "",
+        lambda r: (r.item.notes or "").lower(),
+    ),
 ]
 
 
@@ -94,6 +99,8 @@ _COLUMNS: list[_Column] = [
 MARKET_CURRENT_COL = [c.header for c in _COLUMNS].index("Current Market")
 # Column index of "Intent" (edited inline via a combo-box delegate).
 INTENT_COL = [c.header for c in _COLUMNS].index("Intent")
+# Column index of "Notes" (long text → shown in full via a tooltip).
+NOTES_COL = [c.header for c in _COLUMNS].index("Notes")
 # Extra roles the review delegate reads (sort role is UserRole; keep clear of it).
 ITEM_ID_ROLE = Qt.UserRole + 1
 REVIEW_ROLE = Qt.UserRole + 2
@@ -149,6 +156,11 @@ class InventoryTableModel(QAbstractTableModel):
             value = col.sort_key(row)
             if isinstance(value, int) and value != 0:
                 return QBrush(_GREEN if value > 0 else _RED)
+        if role == Qt.ToolTipRole:
+            if index.column() == NOTES_COL and row.item.notes:
+                return row.item.notes
+            if index.column() == MARKET_CURRENT_COL and row.review:
+                return "Reviewed price. Click ✕ to unmark, then ↻ to refresh."
         if role == ITEM_ID_ROLE:
             return row.item.id
         if role == REVIEW_ROLE:
