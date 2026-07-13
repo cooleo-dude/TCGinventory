@@ -38,6 +38,7 @@ from tcginventory.domain.enums import (
     GradingCompany,
     Language,
 )
+from tcginventory.services.review import with_review_note, without_review_note
 
 
 class ItemEditorDialog(QDialog):
@@ -170,6 +171,12 @@ class ItemEditorDialog(QDialog):
         item.ebay_url = self._ebay.text().strip() or None
         item.notes = self._notes.text().strip() or None
         item.review = self._review.isChecked()
+        # Keep the review note in sync so it matches entry / detail-dialog logic.
+        item.notes = (
+            with_review_note(item.notes)
+            if item.review
+            else without_review_note(item.notes)
+        )
         self._items.update(item)
         self._conn.commit()
         self.accept()

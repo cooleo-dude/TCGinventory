@@ -58,9 +58,7 @@ def test_headless_refresh_runs_pricing(monkeypatch, tmp_path):
             calls["refreshed"] = True
             return RefreshSummary(priced=1)
 
-    monkeypatch.setattr(
-        "tcginventory.services.pricing.PricingService", _FakeService
-    )
+    monkeypatch.setattr("tcginventory.services.pricing.PricingService", _FakeService)
     from tcginventory.app import refresh_prices_headless
 
     assert refresh_prices_headless() == 0

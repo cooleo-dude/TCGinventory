@@ -670,9 +670,7 @@ class PriceSnapshotRepository:
 
     def delete_for_item(self, item_id: int) -> None:
         """Remove all price snapshots for an item (used when deleting the item)."""
-        self.conn.execute(
-            "DELETE FROM price_snapshot WHERE item_id = ?", (item_id,)
-        )
+        self.conn.execute("DELETE FROM price_snapshot WHERE item_id = ?", (item_id,))
 
     def latest_as_of(self) -> str | None:
         """The most recent snapshot timestamp across all items, or None if never

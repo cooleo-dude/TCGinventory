@@ -76,6 +76,33 @@ def test_non_review_item_has_no_forced_note(conn):
     assert not ItemRepository(conn).get(item.id).notes
 
 
+def test_set_item_review_marks_existing_item(conn):
+    from tcginventory.services.review import REVIEW_NOTE, set_item_review
+
+    item = _post_pikachu(conn, review=False)
+    updated = set_item_review(conn, item.id, True)
+    assert updated.review is True
+    assert updated.notes == REVIEW_NOTE
+    # Persisted, so polling will protect it just like an entry-marked item.
+    assert ItemRepository(conn).get(item.id).review is True
+
+
+def test_set_item_review_unmark_preserves_user_note(conn):
+    from tcginventory.services.review import REVIEW_NOTE, set_item_review
+
+    item = _post_pikachu(conn, review=False)
+    it = ItemRepository(conn).get(item.id)
+    it.notes = "Signed copy"
+    ItemRepository(conn).update(it)
+    conn.commit()
+
+    marked = set_item_review(conn, item.id, True)
+    assert marked.notes == f"Signed copy {REVIEW_NOTE}"
+    unmarked = set_item_review(conn, item.id, False)
+    assert unmarked.review is False
+    assert unmarked.notes == "Signed copy"  # only the marker is stripped
+
+
 def test_poll_protects_reviewed_current_but_saves_history(conn):
     item = _post_pikachu(conn, review=True)
     PricingService(conn, provider=TcgcsvProvider(fetch_json=_fake_fetch)).refresh(
@@ -135,6 +162,18 @@ def test_view_manual_price_and_unmark(app, conn):
     assert done.review is False
     assert done.market_value_cents == 999
     view.deleteLater()
+
+
+def test_detail_dialog_marks_item_for_review(app, conn):
+    from tcginventory.ui.views.item_detail import ItemDetailDialog
+
+    item = _post_pikachu(conn, review=False)
+    dlg = ItemDetailDialog(conn, item.id)
+    dlg._review.setChecked(True)  # user ticks "Mark for review"
+    marked = ItemRepository(conn).get(item.id)
+    assert marked.review is True
+    assert "Manual price changed detected." in (marked.notes or "")
+    dlg.deleteLater()
 
 
 def test_armed_button_reverts_when_selection_moves(app, conn):

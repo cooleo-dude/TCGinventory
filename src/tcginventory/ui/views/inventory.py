@@ -46,6 +46,7 @@ from tcginventory.domain.enums import Intent
 from tcginventory.domain.models import PriceSnapshot
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inventory import InventoryRow, InventoryService
+from tcginventory.services.review import without_review_note
 from tcginventory.services.transactions import TransactionService
 from tcginventory.ui.models.inventory_model import (
     INTENT_COL,
@@ -308,6 +309,7 @@ class InventoryView(QWidget):
             item.market_value_cents = latest
             item.market_value_asof = now_iso()[:10]
         item.review = False
+        item.notes = without_review_note(item.notes)
         ItemRepository(self._conn).update(item)
         self._conn.commit()
         self.refresh()

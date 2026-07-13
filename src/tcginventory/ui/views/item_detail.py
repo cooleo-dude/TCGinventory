@@ -6,6 +6,7 @@ import sqlite3
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QHBoxLayout,
     QHeaderView,
@@ -55,6 +56,14 @@ class ItemDetailDialog(QDialog):
 
         if item is not None:
             buttons = QHBoxLayout()
+            self._review = QCheckBox("Mark for review (manual, poll-protected price)")
+            self._review.setToolTip(
+                "Freeze this card's shown market price and keep auto-refresh from "
+                "overwriting it — same as entering it with Mark for review."
+            )
+            self._review.setChecked(item.review)
+            self._review.toggled.connect(lambda on: self._set_review(item_id, on))
+            buttons.addWidget(self._review)
             buttons.addStretch(1)
             edit = QPushButton("Edit item…")
             edit.clicked.connect(lambda: self._edit_item(item_id))
@@ -63,6 +72,11 @@ class ItemDetailDialog(QDialog):
             close.clicked.connect(self.reject)
             buttons.addWidget(close)
             layout.addLayout(buttons)
+
+    def _set_review(self, item_id: int, review: bool) -> None:
+        from tcginventory.services.review import set_item_review
+
+        set_item_review(self._conn, item_id, review)
 
     def _edit_item(self, item_id: int) -> None:
         from tcginventory.ui.views.item_editor import ItemEditorDialog
