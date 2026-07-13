@@ -668,6 +668,12 @@ class PriceSnapshotRepository:
             ).fetchall()
         return [self._to_model(r) for r in rows]
 
+    def delete_for_item(self, item_id: int) -> None:
+        """Remove all price snapshots for an item (used when deleting the item)."""
+        self.conn.execute(
+            "DELETE FROM price_snapshot WHERE item_id = ?", (item_id,)
+        )
+
     def latest_prices(self) -> dict[int, int]:
         """Map item_id → most-recent per-unit price across all polled items."""
         rows = self.conn.execute(

@@ -21,6 +21,7 @@ from tcginventory.data.repositories import (
     ItemRepository,
     LotConsumptionRepository,
     LotRepository,
+    PriceSnapshotRepository,
     TransactionLineRepository,
     TransactionRepository,
 )
@@ -134,6 +135,7 @@ class TransactionService:
         self.txns = TransactionRepository(conn)
         self.lines = TransactionLineRepository(conn)
         self.consumptions = LotConsumptionRepository(conn)
+        self.prices = PriceSnapshotRepository(conn)
         self.audit = AuditLogRepository(conn)
 
     # -- public API ---------------------------------------------------------
@@ -236,9 +238,11 @@ class TransactionService:
                             self.txns.delete(txn.id)
 
             # 4. Orphan cleanup: drop the item if nothing references it anymore.
+            #    Its price snapshots must go first — they FK-reference the item.
             if not self.lots.list_for_item(item_id) and not self.lines.list_for_item(
                 item_id
             ):
+                self.prices.delete_for_item(item_id)
                 self.items.delete(item_id)
 
             self.audit.add(

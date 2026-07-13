@@ -7,8 +7,10 @@ from tcginventory.data.repositories import (
     ItemRepository,
     LotConsumptionRepository,
     LotRepository,
+    PriceSnapshotRepository,
     TransactionRepository,
 )
+from tcginventory.domain.models import PriceSnapshot
 from tcginventory.services.inventory import InventoryService
 from tcginventory.services.reporting import ReportingService
 from tcginventory.services.transactions import (
@@ -59,6 +61,25 @@ def test_delete_one_card_from_multicard_purchase_adjusts_cash(conn):
     assert ReportingService(conn).net_cash_cents() == -3200  # was -8000, +4800
     (txn,) = TransactionRepository(conn).list_all()
     assert txn.cash_delta_cents == -3200
+
+
+def test_delete_priced_item_removes_snapshots(conn):
+    # An item with price-history snapshots must still delete: the snapshots
+    # FK-reference the item, so they have to be cleared first (regression —
+    # this previously failed with a FOREIGN KEY constraint error).
+    svc = TransactionService(conn)
+    result = buy(svc, "Priced", 1000, 1000, "2026-01-01")
+    item_id = result.lots[0].item_id
+    snaps = PriceSnapshotRepository(conn)
+    snaps.add(
+        PriceSnapshot(item_id=item_id, price_cents=1200, source="tcgcsv", as_of="")
+    )
+    conn.commit()
+
+    svc.delete_inventory_entry(result.lots[0].id)
+
+    assert ItemRepository(conn).get(item_id) is None
+    assert snaps.history_for_item(item_id) == []
 
 
 def test_delete_sold_lot_succeeds_and_stays_consistent(conn):
