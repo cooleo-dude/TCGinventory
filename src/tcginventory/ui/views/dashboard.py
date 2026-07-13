@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -114,7 +115,12 @@ class DashboardView(QWidget):
         overview_layout.addWidget(self._chart_view, 1)
         overview_layout.addWidget(self._note)
 
+        # Overview stays at its natural height; the calendar section absorbs any
+        # extra vertical space so a full month shows at a glance and grows with
+        # the window — while the page scrolls once total content exceeds it.
+        overview.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self._shows = ShowsView(conn)
+        self._shows.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         page = QWidget()
         page_layout = QVBoxLayout(page)

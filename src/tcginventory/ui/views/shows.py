@@ -203,9 +203,10 @@ class ShowsView(QWidget):
 
         # -- calendar + day list
         self._calendar = ShowCalendar()
-        # Tall enough that a full month's rows fit ~5 events per cell without the
-        # calendar itself scrolling (the Dashboard page scrolls instead).
-        self._calendar.setMinimumHeight(620)
+        # A modest floor keeps a full month readable on small windows; the
+        # calendar otherwise grows with the section (it never scrolls — its rows
+        # stretch to always show the whole month, more events per cell when tall).
+        self._calendar.setMinimumHeight(340)
         self._calendar.selectionChanged.connect(self._update_day_list)
         self._calendar.clicked.connect(self._update_day_list)
 
