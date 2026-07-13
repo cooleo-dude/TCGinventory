@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
 from tcginventory.domain.enums import Intent
 from tcginventory.services.reporting import ReportingService, SeriesPoint
 from tcginventory.ui.formatting import money
+from tcginventory.ui.views.shows import ShowsView
 
 _INTENTS = ["All", "personal", "resale", "ripping"]
 
@@ -101,11 +103,26 @@ class DashboardView(QWidget):
         self._note = QLabel("")
         self._note.setStyleSheet("color: palette(mid);")
 
+        # Existing overview (tiles + chart) goes in the top pane; the shows
+        # calendar sits below in a resizable splitter (F-VW: dashboard calendar).
+        overview = QWidget()
+        overview_layout = QVBoxLayout(overview)
+        overview_layout.setContentsMargins(0, 0, 0, 0)
+        overview_layout.addLayout(top)
+        overview_layout.addLayout(tile_grid)
+        overview_layout.addWidget(self._chart_view, 1)
+        overview_layout.addWidget(self._note)
+
+        self._shows = ShowsView(conn)
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(overview)
+        splitter.addWidget(self._shows)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+
         layout = QVBoxLayout(self)
-        layout.addLayout(top)
-        layout.addLayout(tile_grid)
-        layout.addWidget(self._chart_view, 1)
-        layout.addWidget(self._note)
+        layout.addWidget(splitter)
 
         self.refresh()
 

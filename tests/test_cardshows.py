@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import pytest
+
 from tcginventory.data.repositories import CardShowRepository
+from tcginventory.domain.models import CardShow
 from tcginventory.services.cardshows import (
     CardShowService,
     is_tcg,
@@ -83,3 +87,62 @@ def test_repo_list_between(conn):
     repo = CardShowRepository(conn)
     only_14th = repo.list_between("2026-07-14", "2026-07-14")
     assert {s.source_id for s in only_14th} == {28222, 20227}
+
+
+@pytest.fixture()
+def app():
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
+
+
+def test_shows_view_renders_cells_and_day_list(app, conn, tmp_path, monkeypatch):
+    # Isolate prefs to a temp dir (don't touch the real preferences.json).
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from PySide6.QtCore import QDate
+
+    from tcginventory.ui.views.shows import ShowsView
+
+    repo = CardShowRepository(conn)
+    repo.upsert(
+        CardShow(
+            source_id=1,
+            name="Garden State Show",
+            state="NJ",
+            starts_on="2026-07-14",
+            venue="Baymont",
+            city="Pompton Plains",
+            start_time="3:00 PM",
+            end_time="9:00 PM",
+            detail_url="https://www.tcdb.com/x",
+            fetched_at="t",
+        )
+    )
+    repo.upsert(
+        CardShow(
+            source_id=2,
+            name="Pokemon TCG Show",
+            state="NJ",
+            starts_on="2026-07-14",
+            city="Newark",
+            fetched_at="t",
+        )
+    )
+    conn.commit()
+
+    view = ShowsView(conn)  # :memory: → no auto-refresh / network
+    day = QDate(2026, 7, 14)
+    assert len(view._calendar.shows_on(day)) == 2
+
+    view._calendar.setSelectedDate(day)
+    view._update_day_list()
+    assert view._day_list.count() == 2
+
+    # "TCG only" keeps just the Pokemon show.
+    view._tcg_toggle.setChecked(True)
+    view._calendar.setSelectedDate(day)
+    view._update_day_list()
+    assert view._day_list.count() == 1
+    view.deleteLater()

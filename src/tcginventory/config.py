@@ -10,6 +10,7 @@ and tests):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -17,6 +18,7 @@ from pathlib import Path
 
 APP_NAME = "TCGinventory"
 DB_FILENAME = "inventory.db"
+PREFS_FILENAME = "preferences.json"
 
 _ENV_DATA_DIR = "TCGINVENTORY_DATA_DIR"
 _ENV_DB = "TCGINVENTORY_DB"
@@ -51,6 +53,42 @@ def ensure_data_dir() -> Path:
     d = data_dir()
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def prefs_path() -> Path:
+    """Path to the JSON preferences file (honours the data-dir override)."""
+    override = os.environ.get(_ENV_DB)
+    if override:  # keep prefs beside an overridden DB (tests / custom locations)
+        return Path(override).parent / PREFS_FILENAME
+    return data_dir() / PREFS_FILENAME
+
+
+def read_prefs() -> dict:
+    """Read the JSON preferences (``{}`` if missing/unreadable).
+
+    Plain JSON (not QSettings) so the headless background task can read it
+    without importing Qt.
+    """
+    try:
+        return json.loads(prefs_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, OSError):
+        return {}
+
+
+def write_prefs(prefs: dict) -> None:
+    """Persist the JSON preferences, creating the data dir if needed."""
+    ensure_data_dir()
+    prefs_path().write_text(json.dumps(prefs, indent=2), encoding="utf-8")
+
+
+def get_pref(key: str, default=None):
+    return read_prefs().get(key, default)
+
+
+def set_pref(key: str, value) -> None:
+    prefs = read_prefs()
+    prefs[key] = value
+    write_prefs(prefs)
 
 
 def configure_logging(level: int = logging.INFO) -> None:

@@ -10,17 +10,19 @@ from tcginventory import config
 
 
 def refresh_prices_headless() -> int:
-    """Refresh market prices without launching the GUI, then exit.
+    """Refresh market prices *and* card shows without launching the GUI.
 
     Entry point for scheduled/background updates (``--refresh-prices``): opens
     the database, runs migrations, records a price snapshot per mapped item, and
-    updates current values. Qt is never imported, so this runs fine from a
-    Windows Scheduled Task with no display. Returns a process exit code.
+    re-scrapes card shows for the states the user has toggled on (read from the
+    JSON prefs, so no Qt is needed). Runs fine from a Windows Scheduled Task with
+    no display. Returns a non-zero exit code if anything errored.
     """
     config.configure_logging()
     log = logging.getLogger(__name__)
 
     from tcginventory.data.db import open_database
+    from tcginventory.services.cardshows import CardShowService
     from tcginventory.services.pricing import PricingService
 
     config.ensure_data_dir()
@@ -29,18 +31,39 @@ def refresh_prices_headless() -> int:
         log.warning("No database at %s; nothing to refresh.", db)
         return 0
 
+    had_error = False
     conn = open_database(db)
     try:
-        summary = PricingService(conn).refresh()
+        try:
+            summary = PricingService(conn).refresh()
+            log.info(
+                "headless price refresh: priced=%d unmapped=%d errors=%s",
+                summary.priced,
+                len(summary.unmapped),
+                summary.errors,
+            )
+            had_error = had_error or bool(summary.errors)
+        except Exception:
+            log.exception("headless price refresh failed")
+            had_error = True
+
+        states = list(config.get_pref("show_states", []))
+        if states:
+            try:
+                shows = CardShowService(conn).refresh(states)
+                log.info(
+                    "headless show refresh: fetched=%d states=%s errors=%s",
+                    shows.fetched,
+                    states,
+                    shows.errors,
+                )
+                had_error = had_error or bool(shows.errors)
+            except Exception:
+                log.exception("headless show refresh failed")
+                had_error = True
     finally:
         conn.close()
-    log.info(
-        "headless price refresh: priced=%d unmapped=%d errors=%s",
-        summary.priced,
-        len(summary.unmapped),
-        summary.errors,
-    )
-    return 1 if summary.errors else 0
+    return 1 if had_error else 0
 
 
 def main() -> int:
