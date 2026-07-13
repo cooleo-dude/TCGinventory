@@ -17,7 +17,6 @@ from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QCalendarWidget,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -81,9 +80,10 @@ class _ShowRefreshWorker(QThread):
 class ShowCalendar(QCalendarWidget):
     """Month calendar that paints each day's show name(s) into its cell.
 
-    Cells are forced tall enough to show up to ``_MAX_CELL_SHOWS`` names plus a
-    "… N more shows not displayed" indicator; if the pane is too short for all
-    six weeks, the calendar scrolls rather than shrinking cells.
+    The whole month is always visible (rows fill the pane — never scrolls; use
+    the header arrows to change month). Each cell shows as many event names as
+    fit, up to ``_MAX_CELL_SHOWS``; any remainder collapses into a
+    "… N more shows not displayed" indicator line.
     """
 
     def __init__(self) -> None:
@@ -92,34 +92,11 @@ class ShowCalendar(QCalendarWidget):
         self.setGridVisible(True)
         self._by_date: dict[str, list[CardShow]] = {}
 
-        # Row height that fits the day number + 5 events + the indicator line.
-        line_h = self._cell_line_height()
-        self._row_h = _DAY_NUM_H + (_MAX_CELL_SHOWS + 1) * line_h + 6
-
-        # The internal week rows are made tall enough for 5 events; a short pane
-        # scrolls rather than shrinking cells. QCalendarWidget resets row heights
-        # on relayout, so re-assert them on show/resize/navigation.
-        self._view = self.findChild(QTableView, "qt_calendar_calendarview")
-        if self._view is not None:
-            self._view.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
-            self._view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            self._view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.currentPageChanged.connect(lambda *_: self._apply_row_heights())
-
-    def _apply_row_heights(self) -> None:
-        if self._view is None or self._view.model() is None:
-            return
-        self._view.setRowHeight(0, 26)  # compact weekday-name row
-        for r in range(1, self._view.model().rowCount()):
-            self._view.setRowHeight(r, self._row_h)
-
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        self._apply_row_heights()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._apply_row_heights()
+        # Keep the whole month visible — the grid stretches to fill; no scroll.
+        view = self.findChild(QTableView, "qt_calendar_calendarview")
+        if view is not None:
+            view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
     @staticmethod
     def _cell_font():
@@ -128,11 +105,6 @@ class ShowCalendar(QCalendarWidget):
         f = QFont()
         f.setPointSizeF(_CELL_FONT_PT)
         return f
-
-    def _cell_line_height(self) -> int:
-        from PySide6.QtGui import QFontMetrics
-
-        return QFontMetrics(self._cell_font()).height()
 
     def set_shows(self, shows: list[CardShow]) -> None:
         by_date: dict[str, list[CardShow]] = {}
@@ -170,17 +142,22 @@ class ShowCalendar(QCalendarWidget):
         width = rect.width() - 6
         x = rect.left() + 3
 
-        shown = shows[:_MAX_CELL_SHOWS]
-        for i, show in enumerate(shown):
-            label = fm.elidedText(show.name, Qt.ElideRight, width)
-            painter.drawText(x, top + i * line_h + fm.ascent(), label)
+        # Show as many names as fit (cap 5); keep a line for the overflow note.
+        capacity = max(1, (rect.bottom() - top) // line_h)
+        n = min(len(shows), _MAX_CELL_SHOWS, capacity)
+        overflow = len(shows) - n
+        if overflow > 0 and n == capacity and n > 0:
+            n -= 1  # free a line for the indicator so it's never clipped
+            overflow = len(shows) - n
 
-        extra = len(shows) - len(shown)
-        if extra:
+        for i in range(n):
+            label = fm.elidedText(shows[i].name, Qt.ElideRight, width)
+            painter.drawText(x, top + i * line_h + fm.ascent(), label)
+        if overflow > 0:
             note = fm.elidedText(
-                f"... {extra} more shows not displayed", Qt.ElideRight, width
+                f"... {overflow} more shows not displayed", Qt.ElideRight, width
             )
-            painter.drawText(x, top + len(shown) * line_h + fm.ascent(), note)
+            painter.drawText(x, top + n * line_h + fm.ascent(), note)
         painter.restore()
 
 
@@ -212,7 +189,9 @@ class ShowsView(QWidget):
         self._refresh_btn.clicked.connect(lambda: self._refresh(self._states))
 
         self._status = QLabel("")
-        self._status.setStyleSheet("color: palette(mid);")
+        # palette(windowText) adapts to the theme (dark text on light, light on
+        # dark) — palette(mid) was near-invisible in both.
+        self._status.setStyleSheet("color: palette(windowText);")
 
         controls = QHBoxLayout()
         controls.addWidget(QLabel("<b>Card Shows</b>"))
@@ -224,6 +203,9 @@ class ShowsView(QWidget):
 
         # -- calendar + day list
         self._calendar = ShowCalendar()
+        # Tall enough that a full month's rows fit ~5 events per cell without the
+        # calendar itself scrolling (the Dashboard page scrolls instead).
+        self._calendar.setMinimumHeight(620)
         self._calendar.selectionChanged.connect(self._update_day_list)
         self._calendar.clicked.connect(self._update_day_list)
 

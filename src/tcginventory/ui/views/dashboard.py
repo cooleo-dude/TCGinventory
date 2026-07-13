@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QSplitter,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -101,10 +101,11 @@ class DashboardView(QWidget):
         self._chart_view.setMinimumHeight(300)
 
         self._note = QLabel("")
-        self._note.setStyleSheet("color: palette(mid);")
+        # palette(windowText) adapts to the theme (readable in light and dark).
+        self._note.setStyleSheet("color: palette(windowText);")
 
-        # Existing overview (tiles + chart) goes in the top pane; the shows
-        # calendar sits below in a resizable splitter (F-VW: dashboard calendar).
+        # Overview (tiles + chart) then the shows calendar, stacked in a
+        # scrollable page so more sections can be added below over time.
         overview = QWidget()
         overview_layout = QVBoxLayout(overview)
         overview_layout.setContentsMargins(0, 0, 0, 0)
@@ -115,16 +116,20 @@ class DashboardView(QWidget):
 
         self._shows = ShowsView(conn)
 
-        splitter = QSplitter(Qt.Vertical)
-        splitter.addWidget(overview)
-        splitter.addWidget(self._shows)
-        # Half graph / half calendar.
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([500, 500])
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(overview)
+        page_layout.addWidget(self._shows)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(page)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(splitter)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(scroll)
 
         self.refresh()
 
