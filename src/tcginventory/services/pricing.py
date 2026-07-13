@@ -170,6 +170,136 @@ def _results(data) -> list:
     return data or []
 
 
+# ---------------------------------------------------------------------------
+# Alternate provider (viability experiment): pokemontcg.io
+# ---------------------------------------------------------------------------
+# Same PriceQuote/quotes_for contract as TcgcsvProvider, so it can be injected
+# into PricingService as a drop-in override for testing/comparison — tcgcsv
+# stays the default. pokemontcg.io is Pokémon-native and carries TCGplayer
+# prices per card, matched on set name + collector number. Network I/O is
+# injected so it's testable offline.
+
+_POKETCG_URL = "https://api.pokemontcg.io/v2/cards"
+# Preference order for which TCGplayer printing's price to use.
+_POKETCG_VARIANTS = (
+    "holofoil",
+    "normal",
+    "reverseHolofoil",
+    "1stEditionHolofoil",
+    "unlimitedHolofoil",
+    "1stEditionNormal",
+)
+
+
+def _poketcg_get(url: str):  # pragma: no cover - real network
+    import time
+
+    import httpx
+
+    headers = {"User-Agent": "TCGinventory/1.0", "Accept": "application/json"}
+    last: Exception | None = None
+    for _ in range(4):  # the endpoint (Cloudflare) is flaky: 504s / timeouts
+        try:
+            resp = httpx.get(url, timeout=40.0, headers=headers)
+            if resp.status_code == 200:
+                return resp.json()
+            last = RuntimeError(f"HTTP {resp.status_code}")
+        except Exception as exc:
+            last = exc
+        time.sleep(1.5)
+    raise last or RuntimeError("pokemontcg.io fetch failed")
+
+
+def _poketcg_number(card_number: str | None) -> str:
+    """'074/073' -> '74' (pokemontcg.io stores the bare collector number)."""
+    if not card_number:
+        return ""
+    head = card_number.split("/", 1)[0].strip()
+    return head.lstrip("0") or head
+
+
+class PokemonTcgProvider:
+    """Resolve TCGplayer prices for items via pokemontcg.io (Pokémon-native)."""
+
+    source = "pokemontcg.io"
+
+    def __init__(
+        self,
+        fetch_json: Callable[[str], object] | None = None,
+        api_key: str | None = None,
+    ) -> None:
+        self._fetch = fetch_json or _poketcg_get
+        self._api_key = api_key
+
+    def quotes_for(self, items: list[Item]) -> list[PriceQuote]:
+        quotes: list[PriceQuote] = []
+        for item in items:
+            query = self._query(item)
+            if not query:
+                continue
+            try:
+                data = self._fetch(f"{_POKETCG_URL}?q={query}&pageSize=8")
+            except Exception:
+                continue  # per-item failure never aborts the batch
+            card = self._best_match(_poketcg_cards(data), item)
+            cents = self._price_cents(card) if card else None
+            if cents is not None:
+                quotes.append(
+                    PriceQuote(item_id=item.id, price_cents=cents, source=self.source)
+                )
+        return quotes
+
+    # -- internals ----------------------------------------------------------
+
+    @staticmethod
+    def _query(item: Item) -> str:
+        """Lucene query — set name + collector number is unique within a set;
+        fall back to the name when identity is thin."""
+        from urllib.parse import quote
+
+        parts = []
+        number = _poketcg_number(item.card_number)
+        if number:
+            parts.append(f"number:{number}")
+        if item.set_name:
+            parts.append(f'set.name:"{item.set_name}"')
+        if not parts and item.name:
+            parts.append(f'name:"{item.name}"')
+        return quote(" ".join(parts)) if parts else ""
+
+    @staticmethod
+    def _best_match(cards: list, item: Item):
+        if not cards:
+            return None
+        # Prefer a card whose name contains the item's name (handles owner
+        # prefixes like "Iono's Kilowattrel" vs stored "Kilowattrel").
+        wanted = _norm(item.name)
+        for card in cards:
+            if wanted and wanted in _norm(card.get("name")):
+                return card
+        return cards[0]
+
+    @staticmethod
+    def _price_cents(card) -> int | None:
+        prices = ((card or {}).get("tcgplayer") or {}).get("prices") or {}
+        for variant in _POKETCG_VARIANTS:
+            p = prices.get(variant) or {}
+            if p.get("market") is not None:
+                return round(float(p["market"]) * 100)
+        # Fallback: any variant, any of market/mid/low.
+        for p in prices.values():
+            for key in ("market", "mid", "low"):
+                if p.get(key) is not None:
+                    return round(float(p[key]) * 100)
+        return None
+
+
+def _poketcg_cards(data) -> list:
+    if isinstance(data, dict):
+        return data.get("data") or []
+    return data or []
+
+
 class PricingService:
     def __init__(self, conn: sqlite3.Connection, provider=None) -> None:
         self.conn = conn

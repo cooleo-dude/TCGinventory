@@ -5,7 +5,11 @@ from __future__ import annotations
 from tcginventory.data.repositories import ItemRepository, PriceSnapshotRepository
 from tcginventory.domain.enums import Category
 from tcginventory.domain.models import Item
-from tcginventory.services.pricing import PricingService, TcgcsvProvider
+from tcginventory.services.pricing import (
+    PokemonTcgProvider,
+    PricingService,
+    TcgcsvProvider,
+)
 
 _PIKACHU_URL = (
     "https://www.tcgplayer.com/product/250303/pokemon-celebrations-pikachu"
@@ -123,6 +127,62 @@ def test_group_resolves_despite_setcode_prefix(conn):
     quotes = TcgcsvProvider(fetch_json=fetch).quotes_for([item])
     assert len(quotes) == 1
     assert quotes[0].price_cents == 610
+
+
+def _poketcg_card():
+    return {
+        "name": "Iono's Kilowattrel",
+        "set": {"name": "Journey Together", "id": "sv9"},
+        "number": "163",
+        "tcgplayer": {
+            "prices": {
+                "reverseHolofoil": {"market": 0.40, "low": 0.09},
+                "holofoil": {"market": 5.51, "low": 4.0},
+            }
+        },
+    }
+
+
+def test_pokemontcg_provider_quotes_via_injected_fetch(conn):
+    item = ItemRepository(conn).add(
+        Item(
+            name="Kilowattrel",
+            category=Category.SINGLE,
+            set_name="Journey Together",
+            card_number="163/159",
+        )
+    )
+
+    def fake(url: str):
+        assert "cards?q=" in url and "163" in url  # set-name + number query
+        return {"data": [_poketcg_card()]}
+
+    quotes = PokemonTcgProvider(fetch_json=fake).quotes_for([item])
+    assert len(quotes) == 1
+    # Prefers the holofoil printing (551c) over reverseHolofoil (40c).
+    assert quotes[0].price_cents == 551
+    assert quotes[0].source == "pokemontcg.io"
+
+
+def test_pricing_service_accepts_pokemontcg_override(conn):
+    """The alternate provider drops into PricingService unchanged (tcgcsv stays
+    the default) and records snapshots tagged with its own source."""
+    item = ItemRepository(conn).add(
+        Item(
+            name="Kilowattrel",
+            category=Category.SINGLE,
+            set_name="Journey Together",
+            card_number="163/159",
+        )
+    )
+    provider = PokemonTcgProvider(fetch_json=lambda url: {"data": [_poketcg_card()]})
+    summary = PricingService(conn, provider=provider).refresh(
+        as_of="2026-07-13T00:00:00+00:00"
+    )
+    assert summary.priced == 1
+    snap = PriceSnapshotRepository(conn).history_for_item(item.id)[-1]
+    assert snap.source == "pokemontcg.io"
+    assert snap.price_cents == 551
 
 
 def test_group_resolves_by_closest_match(conn):
