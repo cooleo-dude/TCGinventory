@@ -12,9 +12,11 @@ from __future__ import annotations
 import sqlite3
 from datetime import date
 
-from PySide6.QtCore import QDate, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QDate, QEvent, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
+    QApplication,
     QCalendarWidget,
     QHBoxLayout,
     QLabel,
@@ -93,10 +95,37 @@ class ShowCalendar(QCalendarWidget):
         self._by_date: dict[str, list[CardShow]] = {}
 
         # Keep the whole month visible — the grid stretches to fill; no scroll.
-        view = self.findChild(QTableView, "qt_calendar_calendarview")
-        if view is not None:
-            view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # The internal view otherwise grabs the mouse wheel to change months;
+        # intercept it so the wheel scrolls the Dashboard page instead and the
+        # month only changes via the header arrows.
+        self._view = self.findChild(QTableView, "qt_calendar_calendarview")
+        if self._view is not None:
+            self._view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self._view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self._view.installEventFilter(self)
+            self._view.viewport().installEventFilter(self)
+
+    def _enclosing_scroll_area(self) -> QAbstractScrollArea | None:
+        w = self.parentWidget()
+        while w is not None:
+            if isinstance(w, QAbstractScrollArea):
+                return w
+            w = w.parentWidget()
+        return None
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Wheel and self._view is not None and obj in (
+            self._view,
+            self._view.viewport(),
+        ):
+            area = self._enclosing_scroll_area()
+            if area is not None:  # scroll the page instead of changing month
+                QApplication.sendEvent(area.viewport(), event)
+            return True  # never let the calendar navigate on wheel
+        return super().eventFilter(obj, event)
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()  # let the wheel bubble to the Dashboard scroll area
 
     @staticmethod
     def _cell_font():
