@@ -176,6 +176,30 @@ def test_detail_dialog_marks_item_for_review(app, conn):
     dlg.deleteLater()
 
 
+def test_price_history_hover_handler_reads_point(app, conn):
+    from PySide6.QtCore import QPointF
+
+    from tcginventory.domain.models import PriceSnapshot
+    from tcginventory.ui.views.inventory import InventoryView, _to_msecs
+
+    item = _post_pikachu(conn, review=False)
+    PriceSnapshotRepository(conn).add(
+        PriceSnapshot(
+            item_id=item.id, price_cents=999, source="tcgcsv",
+            as_of="2026-07-10T00:00:00+00:00",
+        )
+    )
+    conn.commit()
+
+    view = InventoryView(conn)
+    view._table.selectRow(0)
+    # Hovering a point (state True) / leaving it (False) must not raise.
+    x = _to_msecs("2026-07-10T00:00:00+00:00")
+    view._on_price_point_hovered(QPointF(x, 9.99), True)
+    view._on_price_point_hovered(QPointF(x, 9.99), False)
+    view.deleteLater()
+
+
 def test_armed_button_reverts_when_selection_moves(app, conn):
     from tcginventory.ui.views.inventory import InventoryView
 
