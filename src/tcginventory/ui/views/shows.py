@@ -10,7 +10,7 @@ refresh runs off the UI thread.
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 
 from PySide6.QtCore import QDate, QEvent, Qt, QThread, Signal
 from PySide6.QtGui import QColor
@@ -229,7 +229,7 @@ class _DayShowRow(QWidget):
     Clicking a colour sets that status; clicking the active colour clears it.
     """
 
-    def __init__(self, show: CardShow, on_status) -> None:
+    def __init__(self, show: CardShow, on_status, with_date: bool = False) -> None:
         super().__init__()
         self._show = show
         layout = QHBoxLayout(self)
@@ -239,11 +239,20 @@ class _DayShowRow(QWidget):
         when = show.start_time or ""
         if show.end_time:
             when += f"–{show.end_time}"
+        date_str = ""
+        if with_date:
+            try:
+                date_str = datetime.strptime(show.starts_on, "%Y-%m-%d").strftime(
+                    "%a, %b %d"
+                )
+            except ValueError:
+                date_str = show.starts_on
         where = ", ".join(x for x in (show.venue, show.city) if x)
         name = f'<a href="{show.detail_url}">{show.name}</a>' if show.detail_url else (
             show.name
         )
-        head = f"{when}&nbsp; {name}" if when else name
+        lead = " · ".join(x for x in (date_str, when) if x)
+        head = f"{lead}&nbsp; {name}" if lead else name
         label = QLabel(f"{head}<br><small>{where}</small>" if where else head)
         label.setTextFormat(Qt.RichText)
         label.setOpenExternalLinks(True)
@@ -318,14 +327,33 @@ class ShowsView(QWidget):
         self._calendar.selectionChanged.connect(self._update_day_list)
         self._calendar.clicked.connect(self._update_day_list)
 
+        self._day_header = QLabel("Selected day")
+        self._day_header.setStyleSheet("font-weight: 600;")
         self._day_list = QListWidget()
         self._day_list.setSelectionMode(QListWidget.NoSelection)
+        day_box = QWidget()
+        day_layout = QVBoxLayout(day_box)
+        day_layout.setContentsMargins(0, 0, 0, 0)
+        day_layout.addWidget(self._day_header)
+        day_layout.addWidget(self._day_list, 1)
+
+        self._attending_list = QListWidget()
+        self._attending_list.setSelectionMode(QListWidget.NoSelection)
+        attending_box = QWidget()
+        attending_layout = QVBoxLayout(attending_box)
+        attending_layout.setContentsMargins(0, 0, 0, 0)
+        attending_header = QLabel("Attending")
+        attending_header.setStyleSheet("font-weight: 600; color: #27ae60;")
+        attending_layout.addWidget(attending_header)
+        attending_layout.addWidget(self._attending_list, 1)
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self._calendar)
-        split.addWidget(self._day_list)
+        split.addWidget(day_box)
+        split.addWidget(attending_box)
         split.setStretchFactor(0, 3)
         split.setStretchFactor(1, 2)
+        split.setStretchFactor(2, 2)
 
         layout = QVBoxLayout(self)
         layout.addLayout(controls)
@@ -406,29 +434,53 @@ class ShowsView(QWidget):
                 self._calendar.setSelectedDate(QDate(y, m, dd))
                 self._calendar.setCurrentPage(y, m)
         self._update_day_list()
+        self._update_attending_list()
         self._status.setText(
             f"{len(shows)} show(s) in {', '.join(self._states) or '—'}"
         )
 
+    @staticmethod
+    def _fill_list(widget, shows, on_status, with_date: bool, empty_text: str) -> None:
+        widget.clear()
+        for show in shows:
+            row = _DayShowRow(show, on_status, with_date=with_date)
+            item = QListWidgetItem(widget)
+            item.setSizeHint(row.sizeHint())
+            widget.addItem(item)
+            widget.setItemWidget(item, row)
+        if not shows:
+            widget.addItem(QListWidgetItem(empty_text))
+
     def _update_day_list(self, *_args) -> None:
-        self._day_list.clear()
+        selected = self._calendar.selectedDate()
+        self._day_header.setText(selected.toString("dddd, MMMM d, yyyy"))
         shows = [
             s
-            for s in self._calendar.shows_on(self._calendar.selectedDate())
+            for s in self._calendar.shows_on(selected)
             if not self._tcg_only or is_tcg(s)
         ]
         # Statused shows first (match the cell ordering), then by time.
         shows.sort(key=lambda s: (s.status is None, s.start_time or "", s.name))
-        for show in shows:
-            row = _DayShowRow(show, self._set_status)
-            item = QListWidgetItem(self._day_list)
-            item.setSizeHint(row.sizeHint())
-            self._day_list.addItem(item)
-            self._day_list.setItemWidget(item, row)
-        if not shows:
-            self._day_list.addItem(
-                QListWidgetItem("No shows on the selected date.")
-            )
+        self._fill_list(
+            self._day_list, shows, self._set_status, False,
+            "No shows on the selected date.",
+        )
+
+    def _update_attending_list(self) -> None:
+        # Every upcoming show marked Attending (independent of the TCG filter),
+        # in date order — same details as the day list, plus the date.
+        attending = sorted(
+            (
+                s
+                for s in self._repo.list_for_states(self._states)
+                if s.status == "attending"
+            ),
+            key=lambda s: (s.starts_on, s.start_time or "", s.name),
+        )
+        self._fill_list(
+            self._attending_list, attending, self._set_status, True,
+            "No shows marked Attending yet.",
+        )
 
     def _set_status(self, source_id: int, status: str | None) -> None:
         self._repo.set_status(source_id, status)

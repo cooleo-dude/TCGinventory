@@ -154,6 +154,34 @@ def test_shows_view_status_button_marks_show(app, conn, tmp_path, monkeypatch):
     view.deleteLater()
 
 
+def test_shows_view_attending_panel(app, conn, tmp_path, monkeypatch):
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from tcginventory.ui.views.shows import ShowsView
+
+    repo = CardShowRepository(conn)
+    repo.upsert(
+        CardShow(source_id=1, name="Going", state="NJ", starts_on="2026-07-14",
+                 detail_url="https://x", fetched_at="t")
+    )
+    repo.upsert(
+        CardShow(source_id=2, name="Maybe", state="NJ", starts_on="2026-07-15",
+                 detail_url="https://y", fetched_at="t")
+    )
+    repo.set_status(1, "attending")
+    conn.commit()
+
+    view = ShowsView(conn)
+    lst = view._attending_list
+    assert lst.count() == 1
+    assert lst.itemWidget(lst.item(0)) is not None  # a real show row, not a placeholder
+
+    # Unmarking removes it from the attending panel.
+    view._set_status(1, None)
+    assert lst.count() == 1
+    assert lst.itemWidget(lst.item(0)) is None  # placeholder "No shows..." text
+    view.deleteLater()
+
+
 def test_shows_view_renders_cells_and_day_list(app, conn, tmp_path, monkeypatch):
     # Isolate prefs to a temp dir (don't touch the real preferences.json).
     monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
