@@ -4,6 +4,29 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-13 — Transaction value derived from the deal (drop "agreed value")
+
+- **Decision:** Remove the per-outgoing-card manual "agreed value". A card's
+  value is now derived from the whole transaction:
+  - **Cards received** get cost basis from `cash_out + Σ(given cards' current
+    market value) − cash_in` (allocated by market weight, unchanged mechanism).
+  - **Cards given** realize P&L against `cash_in + Σ(received cards' market
+    value) − cash_out`, split across them by market weight;
+    `OUT line.unit_price_cents` = per-unit proceeds (what reporting reads).
+- **Why:** the owner wanted the give side to carry no manual value — "the price
+  is determined by all the cards involved." Given cards are valued at their
+  current market value; received cards at their entered market value.
+- **Behaviour:** pure sale → proceeds = the cash in (unchanged P&L); pure
+  purchase → unchanged; **trades change** — a received card's basis now uses
+  the given card's *market* value (not an arbitrary agreed number), e.g. give a
+  $20-market card + get $10 back → received card basis $10 (was whatever agreed
+  value implied). Helpers: `_deal_values`, `_allocate_amount` (money math,
+  tested). `OutgoingCard.agreed_value_cents` removed.
+- **UI:** give-side "Agreed Value" column gone; add/remove are now a `＋` and a
+  per-row `✕`. (Full inline receive-entry with catalog autocomplete is next.)
+
+---
+
 ### 2026-07-13 — Card-show attendance status (denied/pending/attending/walking)
 
 - **Decision:** Each show can be marked with an attendance status —

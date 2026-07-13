@@ -65,14 +65,11 @@ class OutgoingCardDialog(QDialog):
         self._qty = QSpinBox()
         self._qty.setMinimum(1)
 
-        self._agreed = _money_spin()
-
         form = QFormLayout(self)
         form.addRow("SKU lookup:", self._sku)
         form.addRow("", self._sku_status)
         form.addRow("Card:", self._item)
         form.addRow("Quantity:", self._qty)
-        form.addRow("Agreed value (per unit):", self._agreed)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -103,11 +100,7 @@ class OutgoingCardDialog(QDialog):
 
     def result_card(self) -> tuple[OutgoingCard, str]:
         item_id = self._item.currentData()
-        card = OutgoingCard(
-            item_id=item_id,
-            quantity=self._qty.value(),
-            agreed_value_cents=round(self._agreed.value() * 100),
-        )
+        card = OutgoingCard(item_id=item_id, quantity=self._qty.value())
         return card, self._item.currentText().split(" — ")[0]
 
 

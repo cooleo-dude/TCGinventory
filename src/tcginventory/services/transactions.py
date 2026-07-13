@@ -61,11 +61,11 @@ from tcginventory.services.sku import generate_sku
 
 @dataclass
 class OutgoingCard:
-    """A card you give up. ``agreed_value_cents`` is its per-unit proceeds."""
+    """A card you give up. Its value is derived from the deal (no manual entry):
+    the cards received + cash form the proceeds; see ``_deal_values``."""
 
     item_id: int
     quantity: int
-    agreed_value_cents: int
     notes: str | None = None
 
 
@@ -129,6 +129,37 @@ class TransactionPreview:
 def _as_date(iso: str) -> str:
     """Reduce an ISO date/datetime to its date part (drives FIFO order / as-of)."""
     return iso[:10] if len(iso) >= 10 else iso
+
+
+def _allocate_amount(total: int, weights: list[int]) -> list[int]:
+    """Split ``total`` (which may be negative) across lines by ``weights``.
+
+    Largest-remainder so the shares sum to ``total`` exactly; falls back to an
+    even split when all weights are zero. Used to spread a transaction's proceeds
+    across the cards given up.
+    """
+    n = len(weights)
+    if n == 0:
+        return []
+    if sum(weights) <= 0:
+        weights = [1] * n
+    weight_sum = sum(weights)
+    shares = [total * w // weight_sum for w in weights]  # floor (handles negatives)
+    residual = total - sum(shares)  # always >= 0 since floor underestimates
+    order = sorted(range(n), key=lambda i: (weights[i], -i), reverse=True)
+    for k in range(residual):
+        shares[order[k % n]] += 1
+    return shares
+
+
+@dataclass
+class DealValues:
+    """Values derived from a whole transaction (no per-card agreed value)."""
+
+    given_value: int  # market value of the cards given up
+    value_received: int  # market value of the cards received
+    net_consideration_in: int  # → incoming cost basis
+    net_consideration_out: int  # → proceeds on the cards given up
 
 
 class TransactionService:
@@ -288,6 +319,33 @@ class TransactionService:
             self.conn.rollback()
             raise
 
+    def _outgoing_market(self, request: TransactionRequest) -> int:
+        """Total current market value of the cards being given up."""
+        total = 0
+        for out in request.outgoing:
+            item = self.items.get(out.item_id)
+            total += ((item.market_value_cents or 0) if item else 0) * out.quantity
+        return total
+
+    def _deal_values(self, request: TransactionRequest) -> DealValues:
+        """Derive the transaction's values from the cards + cash involved.
+
+        Cards given are valued at their current market value; cards received at
+        their entered market value. Incoming cost basis comes from
+        ``cash_out + given − cash_in``; proceeds on the cards given come from
+        ``cash_in + received − cash_out`` (so a pure sale's proceeds = the cash).
+        """
+        given = self._outgoing_market(request)
+        received = sum(i.market_value_cents * i.quantity for i in request.incoming)
+        return DealValues(
+            given_value=given,
+            value_received=received,
+            net_consideration_in=request.cash_out_cents + given - request.cash_in_cents,
+            net_consideration_out=request.cash_in_cents
+            + received
+            - request.cash_out_cents,
+        )
+
     def preview(self, request: TransactionRequest) -> TransactionPreview:
         """Compute the live summary for a request without writing anything."""
         has_out, has_in = bool(request.outgoing), bool(request.incoming)
@@ -300,12 +358,8 @@ class TransactionService:
         else:
             inferred = None
 
-        proceeds = sum(o.agreed_value_cents * o.quantity for o in request.outgoing)
-        consideration_given = request.cash_out_cents + proceeds
-        net_consideration_in = consideration_given - request.cash_in_cents
-        value_received = sum(
-            i.market_value_cents * i.quantity for i in request.incoming
-        )
+        deal = self._deal_values(request)
+        consideration_given = request.cash_out_cents + deal.given_value
         net_cash = request.cash_in_cents - request.cash_out_cents
 
         # Simulate FIFO draw-down against a local copy of open non-ripping lots.
@@ -320,9 +374,10 @@ class TransactionService:
                 ]
             return queues[item_id]
 
-        realized = 0
         feasible = True
         shortfalls: dict[int, int] = {}
+        costs: list[int] = []
+        weights: list[int] = []
         for out in request.outgoing:
             remaining = out.quantity
             drawn = 0
@@ -338,14 +393,23 @@ class TransactionService:
             if remaining > 0:
                 feasible = False
                 shortfalls[out.item_id] = shortfalls.get(out.item_id, 0) + remaining
-            realized += out.agreed_value_cents * drawn - cost
+            item = self.items.get(out.item_id)
+            mv = (item.market_value_cents or 0) if item else 0
+            costs.append(cost)
+            weights.append(mv * drawn)
+
+        # Proceeds on the cards given are the deal's net_consideration_out,
+        # split across them by market weight; realized P/L = proceeds − cost.
+        shares = _allocate_amount(deal.net_consideration_out, weights)
+        realized = sum(s - c for s, c in zip(shares, costs, strict=True))
+        proceeds = deal.net_consideration_out if request.outgoing else 0
 
         return TransactionPreview(
             inferred_type=inferred,
             proceeds_cents=proceeds,
             consideration_given_cents=consideration_given,
-            net_consideration_in_cents=net_consideration_in,
-            value_received_cents=value_received,
+            net_consideration_in_cents=deal.net_consideration_in,
+            value_received_cents=deal.value_received,
             net_cash_cents=net_cash,
             realized_pl_cents=realized,
             feasible=feasible,
@@ -458,8 +522,6 @@ class TransactionService:
         for out in request.outgoing:
             if out.quantity < 1:
                 raise InvalidTransactionError("outgoing quantity must be >= 1")
-            if out.agreed_value_cents < 0:
-                raise InvalidTransactionError("agreed value cannot be negative")
         for inc in request.incoming:
             if inc.quantity < 1:
                 raise InvalidTransactionError("incoming quantity must be >= 1")
@@ -494,8 +556,12 @@ class TransactionService:
 
         lines: list[TransactionLine] = []
         total_realized = 0
+        deal = self._deal_values(request)
 
-        # Outgoing side: FIFO draw-down, realize P/L.
+        # Outgoing side: FIFO draw-down; proceeds come from the deal (cash you
+        # received + market value of cards you got − cash you paid), split across
+        # the cards given by their market weight. unit_price = per-unit proceeds.
+        out_infos: list[tuple[TransactionLine, int, int, int]] = []
         for out in request.outgoing:
             line = self.lines.add(
                 TransactionLine(
@@ -503,25 +569,26 @@ class TransactionService:
                     item_id=out.item_id,
                     direction=Direction.OUT,
                     quantity=out.quantity,
-                    unit_price_cents=out.agreed_value_cents,
+                    unit_price_cents=0,
                     notes=out.notes,
                 )
             )
             consumed_cost = self._consume_fifo(out.item_id, out.quantity, line.id)
-            line.realized_pl_cents = (
-                out.agreed_value_cents * out.quantity - consumed_cost
-            )
-            self.lines.update(line)
-            total_realized += line.realized_pl_cents
+            item = self.items.get(out.item_id)
+            mv = (item.market_value_cents or 0) if item else 0
+            out_infos.append((line, out.quantity, consumed_cost, mv * out.quantity))
             lines.append(line)
 
-        # Net consideration paid for incoming cards.
-        cards_out_value = sum(
-            out.agreed_value_cents * out.quantity for out in request.outgoing
+        shares = _allocate_amount(
+            deal.net_consideration_out, [w for *_, w in out_infos]
         )
-        net_consideration_in = (
-            request.cash_out_cents + cards_out_value - request.cash_in_cents
-        )
+        for (line, qty, cost, _), share in zip(out_infos, shares, strict=True):
+            line.unit_price_cents = share // qty if qty else 0
+            line.realized_pl_cents = line.unit_price_cents * qty - cost
+            self.lines.update(line)
+            total_realized += line.realized_pl_cents
+
+        net_consideration_in = deal.net_consideration_in
 
         # Incoming side: match-or-create items, allocate cost, create lots.
         created_lots: list[Lot] = []

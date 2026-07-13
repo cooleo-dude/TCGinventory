@@ -108,9 +108,7 @@ def test_delete_from_trade_succeeds(conn):
     svc.post(
         TransactionRequest(
             occurred_at="2026-02-01",
-            outgoing=[
-                OutgoingCard(item_id=give_id, quantity=1, agreed_value_cents=1500)
-            ],
+            outgoing=[OutgoingCard(item_id=give_id, quantity=1)],
             incoming=[incoming("Get", 1200)],
             cash_in_cents=300,  # cash received → cash_delta > 0
         )

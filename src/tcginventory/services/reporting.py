@@ -120,7 +120,7 @@ class ReportingService:
         return row["v"]
 
     def transaction_proceeds_cents(self, transaction_id: int) -> int:
-        """Total agreed value of the cards given up (the margin's denominator)."""
+        """Total proceeds on the cards given up (the margin's denominator)."""
         row = self.conn.execute(
             "SELECT COALESCE(SUM(tl.unit_price_cents * tl.quantity), 0) AS v "
             "FROM transaction_line tl "

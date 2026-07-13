@@ -149,9 +149,7 @@ def seed_demo(conn: sqlite3.Connection) -> None:
     svc.post(
         TransactionRequest(
             occurred_at="2026-03-01",
-            outgoing=[
-                OutgoingCard(item_id=charizard_id, quantity=1, agreed_value_cents=9000)
-            ],
+            outgoing=[OutgoingCard(item_id=charizard_id, quantity=1)],
             cash_in_cents=9000,
             counterparty="eBay buyer",
         )
@@ -167,11 +165,7 @@ def seed_demo(conn: sqlite3.Connection) -> None:
         svc.post(
             TransactionRequest(
                 occurred_at="2026-03-15",
-                outgoing=[
-                    OutgoingCard(
-                        item_id=snorlax_id, quantity=1, agreed_value_cents=1500
-                    )
-                ],
+                outgoing=[OutgoingCard(item_id=snorlax_id, quantity=1)],
                 incoming=[
                     IncomingCard(
                         _single(

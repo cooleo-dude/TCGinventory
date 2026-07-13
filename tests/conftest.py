@@ -82,16 +82,14 @@ def sell(
     proceeds_cents: int,
     occurred_at: str,
 ):
-    """Post a single-card sale (cash in); returns the PostResult."""
+    """Post a single-card sale (cash in); returns the PostResult.
+
+    Proceeds are the cash received (the value rule derives per-card proceeds
+    from the deal — for a pure sale that's the cash).
+    """
     req = TransactionRequest(
         occurred_at=occurred_at,
-        outgoing=[
-            OutgoingCard(
-                item_id=item_id,
-                quantity=quantity,
-                agreed_value_cents=proceeds_cents // quantity,
-            )
-        ],
+        outgoing=[OutgoingCard(item_id=item_id, quantity=quantity)],
         cash_in_cents=proceeds_cents,
     )
     return svc.post(req)

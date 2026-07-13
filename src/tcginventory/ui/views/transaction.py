@@ -135,16 +135,15 @@ class TransactionView(QWidget):
 
     def _build_give_side(self) -> QGroupBox:
         box = QGroupBox("You give (out)")
+        # No agreed value — a given card's value is derived from the deal.
         self._out_table = QTableWidget(0, 3)
-        self._out_table.setHorizontalHeaderLabels(["Item", "Qty", "Agreed Value"])
-        _tidy(self._out_table)
+        self._out_table.setHorizontalHeaderLabels(["Item", "Qty", ""])
+        _tidy(self._out_table, stretch_col=0)
 
-        add = QPushButton("Add card to give…")
+        add = QPushButton("＋")
+        add.setToolTip("Add a card you're giving")
+        add.setFixedWidth(32)
         add.clicked.connect(self._add_outgoing)
-        remove = QPushButton("Remove selected")
-        remove.clicked.connect(
-            lambda: self._remove(self._out_table, self._outgoing, self._out_names)
-        )
 
         self._cash_out = money_spin()
         self._cash_out.valueChanged.connect(self._update_summary)
@@ -153,29 +152,28 @@ class TransactionView(QWidget):
         cash_row.addWidget(self._cash_out)
         cash_row.addStretch(1)
 
-        buttons = QHBoxLayout()
-        buttons.addWidget(add)
-        buttons.addWidget(remove)
-        buttons.addStretch(1)
+        header = QHBoxLayout()
+        header.addWidget(add)
+        header.addStretch(1)
 
         layout = QVBoxLayout(box)
+        layout.addLayout(header)
         layout.addWidget(self._out_table)
-        layout.addLayout(buttons)
         layout.addLayout(cash_row)
         return box
 
     def _build_receive_side(self) -> QGroupBox:
         box = QGroupBox("You receive (in)")
-        self._in_table = QTableWidget(0, 6)
+        self._in_table = QTableWidget(0, 7)
         self._in_table.setHorizontalHeaderLabels(
-            ["Name", "Set", "#", "Cond/Grade", "Market", "Intent"]
+            ["Name", "Set", "#", "Cond/Grade", "Market", "Intent", ""]
         )
-        _tidy(self._in_table)
+        _tidy(self._in_table, stretch_col=0)
 
-        add = QPushButton("Add card to receive…")
+        add = QPushButton("＋")
+        add.setToolTip("Add a card you're receiving")
+        add.setFixedWidth(32)
         add.clicked.connect(self._add_incoming)
-        remove = QPushButton("Remove selected")
-        remove.clicked.connect(lambda: self._remove(self._in_table, self._incoming))
 
         self._cash_in = money_spin()
         self._cash_in.valueChanged.connect(self._update_summary)
@@ -184,14 +182,13 @@ class TransactionView(QWidget):
         cash_row.addWidget(self._cash_in)
         cash_row.addStretch(1)
 
-        buttons = QHBoxLayout()
-        buttons.addWidget(add)
-        buttons.addWidget(remove)
-        buttons.addStretch(1)
+        header = QHBoxLayout()
+        header.addWidget(add)
+        header.addStretch(1)
 
         layout = QVBoxLayout(box)
+        layout.addLayout(header)
         layout.addWidget(self._in_table)
-        layout.addLayout(buttons)
         layout.addLayout(cash_row)
         return box
 
@@ -223,13 +220,20 @@ class TransactionView(QWidget):
         self._incoming.append(card)
         self._rebuild_tables()
 
-    def _remove(self, table, cards, names=None) -> None:
-        row = table.currentRow()
-        if 0 <= row < len(cards):
-            del cards[row]
-            if names is not None:
-                del names[row]
-            self._rebuild_tables()
+    def _remove_at(self, kind: str, index: int) -> None:
+        if kind == "out" and 0 <= index < len(self._outgoing):
+            del self._outgoing[index]
+            del self._out_names[index]
+        elif kind == "in" and 0 <= index < len(self._incoming):
+            del self._incoming[index]
+        self._rebuild_tables()
+
+    def _delete_button(self, kind: str, index: int) -> QPushButton:
+        btn = QPushButton("✕")
+        btn.setFixedWidth(28)
+        btn.setToolTip("Remove this card")
+        btn.clicked.connect(lambda _=False, k=kind, i=index: self._remove_at(k, i))
+        return btn
 
     # -- rendering ----------------------------------------------------------
 
@@ -240,9 +244,7 @@ class TransactionView(QWidget):
         ):
             self._out_table.setItem(r, 0, _cell(name))
             self._out_table.setItem(r, 1, _cell(str(card.quantity), numeric=True))
-            self._out_table.setItem(
-                r, 2, _cell(money(card.agreed_value_cents), numeric=True)
-            )
+            self._out_table.setCellWidget(r, 2, self._delete_button("out", r))
 
         self._in_table.setRowCount(len(self._incoming))
         for r, card in enumerate(self._incoming):
@@ -255,6 +257,7 @@ class TransactionView(QWidget):
                 r, 4, _cell(money(card.market_value_cents), numeric=True)
             )
             self._in_table.setItem(r, 5, _cell(card.intent.value.capitalize()))
+            self._in_table.setCellWidget(r, 6, self._delete_button("in", r))
         self._update_summary()
 
     def build_request(self) -> TransactionRequest:
@@ -389,11 +392,7 @@ class TransactionView(QWidget):
             if line.direction is Direction.OUT:
                 name = item.name if item else f"item {line.item_id}"
                 self._outgoing.append(
-                    OutgoingCard(
-                        item_id=line.item_id,
-                        quantity=line.quantity,
-                        agreed_value_cents=line.unit_price_cents,
-                    )
+                    OutgoingCard(item_id=line.item_id, quantity=line.quantity)
                 )
                 self._out_names.append(name)
             else:
@@ -427,9 +426,14 @@ def _cell(text: str, numeric: bool = False) -> QTableWidgetItem:
     return cell
 
 
-def _tidy(table: QTableWidget) -> None:
+def _tidy(table: QTableWidget, stretch_col: int = 0) -> None:
+    from PySide6.QtWidgets import QHeaderView
+
     table.verticalHeader().setVisible(False)
     table.setSelectionBehavior(QAbstractItemView.SelectRows)
     table.setSelectionMode(QAbstractItemView.SingleSelection)
     table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-    table.horizontalHeader().setStretchLastSection(True)
+    header = table.horizontalHeader()
+    header.setStretchLastSection(False)
+    header.setSectionResizeMode(QHeaderView.ResizeToContents)
+    header.setSectionResizeMode(stretch_col, QHeaderView.Stretch)

@@ -103,19 +103,21 @@ def test_scenario_4_trade_with_cash_back(svc, conn):
 
     req = TransactionRequest(
         occurred_at="2026-03-01",
-        outgoing=[OutgoingCard(item_id=item_a, quantity=1, agreed_value_cents=5000)],
+        outgoing=[OutgoingCard(item_id=item_a, quantity=1)],  # value from the deal
         incoming=[incoming("Card B", 4000, intent=Intent.RESALE)],
         cash_in_cents=1000,  # cash back
     )
     result = svc.post(req)
 
     assert result.transaction.type is TransactionType.TRADE
-    assert result.net_consideration_in_cents == 4000  # 5000 − 1000
-    assert result.realized_pl_cents == 3000  # 5000 − 2000 basis on A
+    # Value rule: A given at its $20 market. B's basis = cash_out + given − cash_in
+    # = 0 + 2000 − 1000 = 1000.
+    assert result.net_consideration_in_cents == 1000
+    # A's proceeds = cash_in + B market − cash_out = 1000 + 4000 = 5000; − 2000 cost.
+    assert result.realized_pl_cents == 3000
     assert result.transaction.cash_delta_cents == 1000
-    # Card B's basis = net consideration = $40.
     (b_lot,) = result.lots
-    assert b_lot.unit_cost_cents == 4000
+    assert b_lot.unit_cost_cents == 1000
 
 
 def test_scenario_5_oversell_guard_is_atomic(svc, conn):
@@ -271,12 +273,12 @@ def test_preview_infers_type_and_realized(svc, conn):
 
     req = TransactionRequest(
         occurred_at="2026-02-01",
-        outgoing=[OutgoingCard(item_id=item_id, quantity=1, agreed_value_cents=12000)],
+        outgoing=[OutgoingCard(item_id=item_id, quantity=1)],
         cash_in_cents=12000,
     )
     preview = svc.preview(req)
     assert preview.inferred_type is TransactionType.SALE
-    assert preview.proceeds_cents == 12000
+    assert preview.proceeds_cents == 12000  # a sale's proceeds = the cash in
     assert preview.realized_pl_cents == 3000  # 12000 − 9000 FIFO cost
     assert preview.feasible is True
 
@@ -286,7 +288,7 @@ def test_preview_flags_oversell(svc, conn):
     item_id = p.lots[0].item_id
     req = TransactionRequest(
         occurred_at="2026-02-01",
-        outgoing=[OutgoingCard(item_id=item_id, quantity=5, agreed_value_cents=500)],
+        outgoing=[OutgoingCard(item_id=item_id, quantity=5)],
         cash_in_cents=2500,
     )
     preview = svc.preview(req)

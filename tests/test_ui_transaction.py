@@ -95,7 +95,7 @@ def test_ui_sale_realizes_margin(app, conn):
     view.submit()
 
     item_id = _first_item_id(conn, "A")
-    view.add_outgoing(OutgoingCard(item_id, 1, 12000), "A")
+    view.add_outgoing(OutgoingCard(item_id, 1), "A")
     view._cash_in.setValue(120.00)
     assert view._badge.text() == "SALE"
     view.submit()
@@ -113,7 +113,7 @@ def test_ui_oversell_blocks_submit(app, conn):
     view.submit()
 
     item_id = _first_item_id(conn, "A")
-    view.add_outgoing(OutgoingCard(item_id, 5, 500), "A")  # only 1 on hand
+    view.add_outgoing(OutgoingCard(item_id, 5), "A")  # only 1 on hand
     assert view._submit.isEnabled() is False  # oversell → blocked
 
 
@@ -128,18 +128,19 @@ def test_ui_trade_and_rip_lifecycle(app, conn):
     view.submit()
     snorlax = _first_item_id(conn, "Snorlax")
 
-    # Trade Snorlax (agreed $15) for Gengar (market $12) + $3 cash back.
-    view.add_outgoing(OutgoingCard(snorlax, 1, 1500), "Snorlax")
+    # Trade Snorlax (market $10) for Gengar (market $12) + $3 cash back.
+    view.add_outgoing(OutgoingCard(snorlax, 1), "Snorlax")
     view.add_incoming(_inc("Gengar", 1200))
     view._cash_in.setValue(3.00)
     assert view._badge.text() == "TRADE"
     view.submit()
 
-    assert ReportingService(conn).realized_pl_cents() == 500  # 1500 − 1000
-    # net consideration for Gengar = 1500 − 300 = 1200.
+    # Snorlax proceeds = cash_in 300 + Gengar market 1200 = 1500; − 1000 cost.
+    assert ReportingService(conn).realized_pl_cents() == 500
+    # Gengar basis = Snorlax market 1000 − cash back 300 = 700.
     gengar = _first_item_id(conn, "Gengar")
     (gengar_lot,) = LotRepository(conn).list_for_item(gengar)
-    assert gengar_lot.unit_cost_cents == 1200
+    assert gengar_lot.unit_cost_cents == 700
 
     # Rip: buy a sealed box tagged ripping → valued at $0 (a loss).
     view.add_incoming(_inc("Booster Box", 12000, Intent.RIPPING))
