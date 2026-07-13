@@ -160,6 +160,12 @@ class ShowCalendar(QCalendarWidget):
         return self._by_date.get(d.toString("yyyy-MM-dd"), [])
 
     def paintCell(self, painter, rect, d: QDate) -> None:
+        # Only show the shown month's own days — blank out leading/trailing days
+        # from the previous/next month.
+        if d.month() != self.monthShown() or d.year() != self.yearShown():
+            painter.fillRect(rect, self.palette().base())
+            return
+
         shows = self.shows_on(d)
         if not shows:
             super().paintCell(painter, rect, d)
