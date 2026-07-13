@@ -88,7 +88,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(f"TCGinventory {__version__}")
         self.setWindowIcon(app_icon())
-        self.resize(1200, 800)
+        self.resize(1280, 960)  # taller so the half-height calendar fits tall cells
 
         self._dashboard = DashboardView(conn)
         self._transaction = TransactionView(conn)

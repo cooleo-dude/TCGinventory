@@ -118,8 +118,10 @@ class DashboardView(QWidget):
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(overview)
         splitter.addWidget(self._shows)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        # Half graph / half calendar.
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([500, 500])
 
         layout = QVBoxLayout(self)
         layout.addWidget(splitter)

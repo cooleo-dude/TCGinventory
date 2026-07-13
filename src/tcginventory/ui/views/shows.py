@@ -17,12 +17,14 @@ from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QCalendarWidget,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMenu,
     QPushButton,
     QSplitter,
+    QTableView,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -36,6 +38,12 @@ from tcginventory.services.cardshows import US_STATES, CardShowService, is_tcg
 _SHOW_DAY_BG = QColor("#ebdbb2")  # gruvbox light — subtle "has shows" tint
 _DEFAULT_STATES = ["NJ"]
 _URL_ROLE = Qt.UserRole + 1
+
+# Show up to this many event names per day cell; the rest collapse into a
+# "… N more shows not displayed" indicator line.
+_MAX_CELL_SHOWS = 5
+_CELL_FONT_PT = 7.5
+_DAY_NUM_H = 15  # px reserved for the day-number line at the top of a cell
 
 
 def _db_file(conn: sqlite3.Connection) -> str | None:
@@ -71,13 +79,60 @@ class _ShowRefreshWorker(QThread):
 
 
 class ShowCalendar(QCalendarWidget):
-    """Month calendar that paints each day's show name(s) into its cell."""
+    """Month calendar that paints each day's show name(s) into its cell.
+
+    Cells are forced tall enough to show up to ``_MAX_CELL_SHOWS`` names plus a
+    "… N more shows not displayed" indicator; if the pane is too short for all
+    six weeks, the calendar scrolls rather than shrinking cells.
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
         self.setGridVisible(True)
         self._by_date: dict[str, list[CardShow]] = {}
+
+        # Row height that fits the day number + 5 events + the indicator line.
+        line_h = self._cell_line_height()
+        self._row_h = _DAY_NUM_H + (_MAX_CELL_SHOWS + 1) * line_h + 6
+
+        # The internal week rows are made tall enough for 5 events; a short pane
+        # scrolls rather than shrinking cells. QCalendarWidget resets row heights
+        # on relayout, so re-assert them on show/resize/navigation.
+        self._view = self.findChild(QTableView, "qt_calendar_calendarview")
+        if self._view is not None:
+            self._view.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+            self._view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self._view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.currentPageChanged.connect(lambda *_: self._apply_row_heights())
+
+    def _apply_row_heights(self) -> None:
+        if self._view is None or self._view.model() is None:
+            return
+        self._view.setRowHeight(0, 26)  # compact weekday-name row
+        for r in range(1, self._view.model().rowCount()):
+            self._view.setRowHeight(r, self._row_h)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._apply_row_heights()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_row_heights()
+
+    @staticmethod
+    def _cell_font():
+        from PySide6.QtGui import QFont
+
+        f = QFont()
+        f.setPointSizeF(_CELL_FONT_PT)
+        return f
+
+    def _cell_line_height(self) -> int:
+        from PySide6.QtGui import QFontMetrics
+
+        return QFontMetrics(self._cell_font()).height()
 
     def set_shows(self, shows: list[CardShow]) -> None:
         by_date: dict[str, list[CardShow]] = {}
@@ -108,27 +163,24 @@ class ShowCalendar(QCalendarWidget):
             rect.adjusted(3, 1, -3, 0), Qt.AlignTop | Qt.AlignLeft, str(d.day())
         )
 
-        font = painter.font()
-        font.setPointSizeF(max(6.5, font.pointSizeF() - 2.0))
-        painter.setFont(font)
+        painter.setFont(self._cell_font())
         fm = painter.fontMetrics()
         line_h = fm.height()
-        top = rect.top() + line_h + 2
-        avail = rect.height() - (line_h + 3)
-        max_lines = max(1, avail // line_h)
+        top = rect.top() + _DAY_NUM_H
         width = rect.width() - 6
+        x = rect.left() + 3
 
-        for i, show in enumerate(shows):
-            if i >= max_lines:
-                more = len(shows) - i
-                painter.drawText(
-                    rect.left() + 3,
-                    top + i * line_h + fm.ascent(),
-                    f"+{more} more",
-                )
-                break
+        shown = shows[:_MAX_CELL_SHOWS]
+        for i, show in enumerate(shown):
             label = fm.elidedText(show.name, Qt.ElideRight, width)
-            painter.drawText(rect.left() + 3, top + i * line_h + fm.ascent(), label)
+            painter.drawText(x, top + i * line_h + fm.ascent(), label)
+
+        extra = len(shows) - len(shown)
+        if extra:
+            note = fm.elidedText(
+                f"... {extra} more shows not displayed", Qt.ElideRight, width
+            )
+            painter.drawText(x, top + len(shown) * line_h + fm.ascent(), note)
         painter.restore()
 
 
