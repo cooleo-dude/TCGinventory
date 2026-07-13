@@ -201,6 +201,46 @@ class MainWindow(QMainWindow):
         self._refresh_action = self._file_menu.addAction(
             "Refresh prices…", lambda: self._refresh_prices(silent=False)
         )
+        self._build_auto_update_action()
+
+    def _build_auto_update_action(self) -> None:
+        from tcginventory import scheduling
+
+        if not scheduling.is_supported():
+            return
+        self._auto_update_action = self._file_menu.addAction(
+            "Automatic daily price updates"
+        )
+        self._auto_update_action.setCheckable(True)
+        self._auto_update_action.setChecked(scheduling.is_enabled())
+        self._auto_update_action.setToolTip(
+            "Refresh prices once a day in the background, even when the app is "
+            "closed (uses the Windows Task Scheduler)."
+        )
+        self._auto_update_action.toggled.connect(self._toggle_auto_updates)
+
+    def _toggle_auto_updates(self, on: bool) -> None:
+        from tcginventory import scheduling
+
+        try:
+            if on:
+                scheduling.enable()
+            else:
+                scheduling.disable()
+        except Exception as exc:
+            QMessageBox.warning(self, "Automatic updates", str(exc))
+            # Reflect the real state after a failure.
+            self._auto_update_action.blockSignals(True)
+            self._auto_update_action.setChecked(scheduling.is_enabled())
+            self._auto_update_action.blockSignals(False)
+            return
+        if on:
+            QMessageBox.information(
+                self,
+                "Automatic updates on",
+                "Prices will refresh once a day in the background (around "
+                f"{scheduling.DEFAULT_TIME}), even when the app is closed.",
+            )
 
     def _backup_database(self) -> None:
         default = str(config.data_dir() / "inventory-backup.db")

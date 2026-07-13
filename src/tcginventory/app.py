@@ -9,8 +9,47 @@ import sys
 from tcginventory import config
 
 
+def refresh_prices_headless() -> int:
+    """Refresh market prices without launching the GUI, then exit.
+
+    Entry point for scheduled/background updates (``--refresh-prices``): opens
+    the database, runs migrations, records a price snapshot per mapped item, and
+    updates current values. Qt is never imported, so this runs fine from a
+    Windows Scheduled Task with no display. Returns a process exit code.
+    """
+    config.configure_logging()
+    log = logging.getLogger(__name__)
+
+    from tcginventory.data.db import open_database
+    from tcginventory.services.pricing import PricingService
+
+    config.ensure_data_dir()
+    db = config.db_path()
+    if not db.exists():
+        log.warning("No database at %s; nothing to refresh.", db)
+        return 0
+
+    conn = open_database(db)
+    try:
+        summary = PricingService(conn).refresh()
+    finally:
+        conn.close()
+    log.info(
+        "headless price refresh: priced=%d unmapped=%d errors=%s",
+        summary.priced,
+        len(summary.unmapped),
+        summary.errors,
+    )
+    return 1 if summary.errors else 0
+
+
 def main() -> int:
     """Launch the TCGinventory desktop app. Returns the Qt exit code."""
+    # Headless subcommand for scheduled background updates — handled before Qt
+    # is imported so it needs no display.
+    if "--refresh-prices" in sys.argv[1:]:
+        return refresh_prices_headless()
+
     config.configure_logging()
     log = logging.getLogger(__name__)
 
