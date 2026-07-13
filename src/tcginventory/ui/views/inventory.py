@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 
 from PySide6.QtCharts import (
     QChart,
-    QChartView,
     QDateTimeAxis,
     QLineSeries,
     QValueAxis,
@@ -19,7 +18,6 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QCursor, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -32,7 +30,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QTableView,
-    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -49,6 +46,7 @@ from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inventory import InventoryRow, InventoryService
 from tcginventory.services.review import without_review_note
 from tcginventory.services.transactions import TransactionService
+from tcginventory.ui.charts import HoverChartView
 from tcginventory.ui.models.inventory_model import (
     INTENT_COL,
     MARKET_CURRENT_COL,
@@ -183,10 +181,8 @@ class InventoryView(QWidget):
         self._empty.setVisible(False)
 
         # -- price-history chart (last ~3 months) for the selected card
-        self._chart_view = QChartView()
-        self._chart_view.setRenderHint(QPainter.Antialiasing)
+        self._chart_view = HoverChartView()
         self._chart_view.setMinimumHeight(220)
-        self._chart_view.setMouseTracking(True)  # so point hover fires on move
         self._show_chart_message("Select a card to see its price history.")
 
         splitter = QSplitter(Qt.Vertical)
@@ -230,26 +226,7 @@ class InventoryView(QWidget):
             return
         since = (datetime.now(timezone.utc) - timedelta(days=_HISTORY_DAYS)).isoformat()
         history = self._service.prices.history_for_item(row.item.id, since=since)
-        self._chart_view.setChart(
-            _history_chart(row, history, on_hover=self._on_price_point_hovered)
-        )
-
-    def _on_price_point_hovered(self, point, state: bool) -> None:
-        """Show a tooltip with the date + value when a price point is hovered."""
-        if not state:
-            QToolTip.hideText()
-            return
-        try:
-            when = datetime.fromtimestamp(
-                point.x() / 1000.0, tz=timezone.utc
-            ).astimezone()
-            date_str = when.strftime("%b %d, %Y")
-        except (ValueError, OSError, OverflowError):
-            date_str = ""
-        text = f"${point.y():,.2f}"
-        if date_str:
-            text = f"{date_str}: {text}"
-        QToolTip.showText(QCursor.pos(), text)
+        self._chart_view.setChart(_history_chart(row, history))
 
     def _show_chart_message(self, text: str) -> None:
         chart = QChart()
@@ -344,9 +321,7 @@ def _to_msecs(iso: str) -> float:
     return dt.timestamp() * 1000.0
 
 
-def _history_chart(
-    row: InventoryRow, snapshots: list[PriceSnapshot], on_hover=None
-) -> QChart:
+def _history_chart(row: InventoryRow, snapshots: list[PriceSnapshot]) -> QChart:
     chart = QChart()
     name = row.item.name
     if not snapshots:
@@ -356,10 +331,6 @@ def _history_chart(
 
     price = QLineSeries()
     price.setName("Market price")
-    price.setPointsVisible(True)
-    price.setMarkerSize(11.0)  # bigger points → easier to hover for a value
-    if on_hover is not None:
-        price.hovered.connect(on_hover)
     xs = []
     for snap in snapshots:
         x = _to_msecs(snap.as_of)

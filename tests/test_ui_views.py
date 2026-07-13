@@ -59,7 +59,10 @@ def test_dashboard_builds_charts(app, seeded_conn):
     view = DashboardView(seeded_conn)
     chart = view._chart_view.chart()
     assert chart is not None
-    assert len(chart.series()) == 2  # money-movement + realized-profit
+    from PySide6.QtCharts import QLineSeries
+
+    lines = [s for s in chart.series() if isinstance(s, QLineSeries)]
+    assert len(lines) == 2  # money-movement + realized-profit
     view.deleteLater()
 
 

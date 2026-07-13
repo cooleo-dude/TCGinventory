@@ -13,13 +13,11 @@ from datetime import datetime
 
 from PySide6.QtCharts import (
     QChart,
-    QChartView,
     QDateTimeAxis,
     QLineSeries,
     QValueAxis,
 )
 from PySide6.QtCore import QDateTime, Qt
-from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -34,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from tcginventory.domain.enums import Intent
 from tcginventory.services.reporting import ReportingService, SeriesPoint
+from tcginventory.ui.charts import HoverChartView
 from tcginventory.ui.formatting import money
 from tcginventory.ui.views.shows import ShowsView
 
@@ -97,8 +96,7 @@ class DashboardView(QWidget):
         for col, tile in enumerate(self._tiles.values()):
             tile_grid.addWidget(tile, 0, col)
 
-        self._chart_view = QChartView()
-        self._chart_view.setRenderHint(QPainter.Antialiasing)
+        self._chart_view = HoverChartView()
         self._chart_view.setMinimumHeight(300)
 
         self._note = QLabel("")
@@ -217,7 +215,6 @@ class DashboardView(QWidget):
 def _line_series(name: str, points: list[SeriesPoint]) -> QLineSeries:
     series = QLineSeries()
     series.setName(name)
-    series.setPointsVisible(True)
     for pt in points:
         series.append(_to_msecs(pt.at), pt.value_cents / 100.0)
     return series
