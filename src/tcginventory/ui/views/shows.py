@@ -12,8 +12,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import date
 
-from PySide6.QtCore import QDate, QEvent, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtCore import QDate, QEvent, Qt, QThread, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
@@ -38,7 +38,21 @@ from tcginventory.services.cardshows import US_STATES, CardShowService, is_tcg
 
 _SHOW_DAY_BG = QColor("#ebdbb2")  # gruvbox light — subtle "has shows" tint
 _DEFAULT_STATES = ["NJ"]
-_URL_ROLE = Qt.UserRole + 1
+
+# Attendance-status colours (denied/pending/attending/walking) and the order
+# their buttons appear in the day list.
+STATUS_COLORS = {
+    "denied": QColor("#c0392b"),  # red
+    "pending": QColor("#e67e22"),  # orange
+    "attending": QColor("#27ae60"),  # green
+    "walking": QColor("#2980b9"),  # blue
+}
+STATUS_ORDER = [
+    ("attending", "Attending"),
+    ("walking", "Walking"),
+    ("pending", "Pending"),
+    ("denied", "Denied"),
+]
 
 # Show up to this many event names per day cell; the rest collapse into a
 # "… N more shows not displayed" indicator line.
@@ -171,23 +185,82 @@ class ShowCalendar(QCalendarWidget):
         width = rect.width() - 6
         x = rect.left() + 3
 
+        # Statused (highlighted) shows float to the top; time order within groups.
+        ordered = sorted(shows, key=lambda s: s.status is None)
+
         # Show as many names as fit (cap 5); keep a line for the overflow note.
         capacity = max(1, (rect.bottom() - top) // line_h)
-        n = min(len(shows), _MAX_CELL_SHOWS, capacity)
-        overflow = len(shows) - n
+        n = min(len(ordered), _MAX_CELL_SHOWS, capacity)
+        overflow = len(ordered) - n
         if overflow > 0 and n == capacity and n > 0:
             n -= 1  # free a line for the indicator so it's never clipped
-            overflow = len(shows) - n
+            overflow = len(ordered) - n
 
+        base_pen = painter.pen()
         for i in range(n):
-            label = fm.elidedText(shows[i].name, Qt.ElideRight, width)
-            painter.drawText(x, top + i * line_h + fm.ascent(), label)
+            show = ordered[i]
+            line_top = top + i * line_h
+            color = STATUS_COLORS.get(show.status or "")
+            if color is not None:  # highlight bar in the status colour
+                painter.fillRect(x - 2, line_top, width, line_h, color)
+                painter.setPen(QColor("#ffffff"))
+            else:
+                painter.setPen(base_pen)
+            label = fm.elidedText(show.name, Qt.ElideRight, width - 2)
+            painter.drawText(x, line_top + fm.ascent(), label)
+        painter.setPen(base_pen)
         if overflow > 0:
             note = fm.elidedText(
                 f"... {overflow} more shows not displayed", Qt.ElideRight, width
             )
             painter.drawText(x, top + n * line_h + fm.ascent(), note)
         painter.restore()
+
+
+class _DayShowRow(QWidget):
+    """One day-list entry: the show (name links to tcdb) + four status buttons.
+
+    Clicking a colour sets that status; clicking the active colour clears it.
+    """
+
+    def __init__(self, show: CardShow, on_status) -> None:
+        super().__init__()
+        self._show = show
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 3, 4, 3)
+        layout.setSpacing(6)
+
+        when = show.start_time or ""
+        if show.end_time:
+            when += f"–{show.end_time}"
+        where = ", ".join(x for x in (show.venue, show.city) if x)
+        name = f'<a href="{show.detail_url}">{show.name}</a>' if show.detail_url else (
+            show.name
+        )
+        head = f"{when}&nbsp; {name}" if when else name
+        label = QLabel(f"{head}<br><small>{where}</small>" if where else head)
+        label.setTextFormat(Qt.RichText)
+        label.setOpenExternalLinks(True)
+        label.setWordWrap(True)
+        layout.addWidget(label, 1)
+
+        for status_val, title in STATUS_ORDER:
+            active = show.status == status_val
+            btn = QToolButton()
+            btn.setToolTip(title)
+            btn.setFixedSize(22, 22)
+            color = STATUS_COLORS[status_val].name()
+            border = "2px solid palette(windowText)" if active else "1px solid #888"
+            btn.setStyleSheet(
+                f"QToolButton {{ background: {color}; border: {border};"
+                " border-radius: 4px; }"
+            )
+            btn.clicked.connect(
+                lambda _=False, s=status_val, was=active: on_status(
+                    self._show.source_id, None if was else s
+                )
+            )
+            layout.addWidget(btn)
 
 
 class ShowsView(QWidget):
@@ -240,8 +313,7 @@ class ShowsView(QWidget):
         self._calendar.clicked.connect(self._update_day_list)
 
         self._day_list = QListWidget()
-        self._day_list.itemActivated.connect(self._open_show)
-        self._day_list.itemClicked.connect(self._open_show)
+        self._day_list.setSelectionMode(QListWidget.NoSelection)
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self._calendar)
@@ -303,22 +375,10 @@ class ShowsView(QWidget):
         return shows
 
     def reload(self) -> None:
-        shows = self._current_shows()
-        self._calendar.set_shows(shows)
-        # Jump to the first upcoming show's month for immediate context.
-        upcoming = [s for s in shows if s.starts_on >= date.today().isoformat()]
-        if upcoming:
-            first = min(s.starts_on for s in upcoming)
-            y, m, dd = (int(x) for x in first.split("-"))
-            self._calendar.setSelectedDate(QDate(y, m, dd))
-            self._calendar.setCurrentPage(y, m)
-        self._update_day_list()
-        self._status.setText(
-            f"{len(shows)} show(s) in {', '.join(self._states) or '—'}"
-        )
+        self._reload_data(jump=True)
         # First open with no data for the selected states → populate once.
         if (
-            not shows
+            not self._calendar._by_date
             and self._states
             and not self._auto_refreshed
             and _db_file(self._conn) is not None
@@ -326,29 +386,48 @@ class ShowsView(QWidget):
             self._auto_refreshed = True
             self._refresh(self._states)
 
+    def _reload_data(self, jump: bool) -> None:
+        """Re-read shows into the calendar/day list. ``jump`` moves the calendar
+        to the first upcoming show (init/refresh); a status change keeps the
+        current month/day in view instead."""
+        shows = self._current_shows()
+        self._calendar.set_shows(shows)
+        if jump:
+            upcoming = [s for s in shows if s.starts_on >= date.today().isoformat()]
+            if upcoming:
+                first = min(s.starts_on for s in upcoming)
+                y, m, dd = (int(x) for x in first.split("-"))
+                self._calendar.setSelectedDate(QDate(y, m, dd))
+                self._calendar.setCurrentPage(y, m)
+        self._update_day_list()
+        self._status.setText(
+            f"{len(shows)} show(s) in {', '.join(self._states) or '—'}"
+        )
+
     def _update_day_list(self, *_args) -> None:
         self._day_list.clear()
-        for show in self._calendar.shows_on(self._calendar.selectedDate()):
-            if self._tcg_only and not is_tcg(show):
-                continue
-            when = show.start_time or ""
-            if show.end_time:
-                when += f"–{show.end_time}"
-            where = ", ".join(x for x in (show.venue, show.city) if x)
-            text = f"{when}  {show.name}"
-            if where:
-                text += f"\n    {where}"
-            item = QListWidgetItem(text.strip())
-            item.setData(_URL_ROLE, show.detail_url)
-            item.setToolTip("Click to open on tcdb.com")
+        shows = [
+            s
+            for s in self._calendar.shows_on(self._calendar.selectedDate())
+            if not self._tcg_only or is_tcg(s)
+        ]
+        # Statused shows first (match the cell ordering), then by time.
+        shows.sort(key=lambda s: (s.status is None, s.start_time or "", s.name))
+        for show in shows:
+            row = _DayShowRow(show, self._set_status)
+            item = QListWidgetItem(self._day_list)
+            item.setSizeHint(row.sizeHint())
             self._day_list.addItem(item)
-        if self._day_list.count() == 0:
-            self._day_list.addItem(QListWidgetItem("No shows on the selected date."))
+            self._day_list.setItemWidget(item, row)
+        if not shows:
+            self._day_list.addItem(
+                QListWidgetItem("No shows on the selected date.")
+            )
 
-    def _open_show(self, item: QListWidgetItem) -> None:
-        url = item.data(_URL_ROLE)
-        if url:
-            QDesktopServices.openUrl(QUrl(url))
+    def _set_status(self, source_id: int, status: str | None) -> None:
+        self._repo.set_status(source_id, status)
+        self._conn.commit()
+        self._reload_data(jump=False)  # keep the current day in view
 
     # -- refresh ------------------------------------------------------------
 

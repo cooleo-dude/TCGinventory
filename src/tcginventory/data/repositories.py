@@ -742,25 +742,50 @@ class CardShowRepository:
             ),
         )
 
+    def _to_model_with_status(self, row: sqlite3.Row) -> CardShow:
+        show = self._to_model(row)
+        show.status = row["status"]
+        return show
+
     def list_between(self, start_date: str, end_date: str) -> list[CardShow]:
         """Shows with ``starts_on`` in [start_date, end_date] (inclusive)."""
         rows = self.conn.execute(
-            "SELECT * FROM card_show WHERE starts_on >= ? AND starts_on <= ? "
-            "ORDER BY starts_on, start_time, name",
+            "SELECT c.*, s.status AS status FROM card_show c "
+            "LEFT JOIN card_show_status s ON s.source_id = c.source_id "
+            "WHERE c.starts_on >= ? AND c.starts_on <= ? "
+            "ORDER BY c.starts_on, c.start_time, c.name",
             (start_date, end_date),
         ).fetchall()
-        return [self._to_model(r) for r in rows]
+        return [self._to_model_with_status(r) for r in rows]
 
     def list_for_states(self, states: list[str]) -> list[CardShow]:
         if not states:
             return []
         placeholders = ",".join("?" for _ in states)
         rows = self.conn.execute(
-            f"SELECT * FROM card_show WHERE state IN ({placeholders}) "
-            "ORDER BY starts_on, start_time, name",
+            f"SELECT c.*, s.status AS status FROM card_show c "
+            f"LEFT JOIN card_show_status s ON s.source_id = c.source_id "
+            f"WHERE c.state IN ({placeholders}) "
+            "ORDER BY c.starts_on, c.start_time, c.name",
             tuple(states),
         ).fetchall()
-        return [self._to_model(r) for r in rows]
+        return [self._to_model_with_status(r) for r in rows]
+
+    def set_status(self, source_id: int, status: str | None) -> None:
+        """Set (or clear, when ``status`` is None) a show's attendance status.
+
+        Keyed by tcdb ``source_id`` so it persists across show refreshes.
+        """
+        if status is None:
+            self.conn.execute(
+                "DELETE FROM card_show_status WHERE source_id = ?", (source_id,)
+            )
+        else:
+            self.conn.execute(
+                "INSERT INTO card_show_status (source_id, status) VALUES (?, ?) "
+                "ON CONFLICT(source_id) DO UPDATE SET status = excluded.status",
+                (source_id, status),
+            )
 
     def delete_before(self, date: str) -> int:
         """Drop shows that start before ``date`` (past-show pruning). Returns count."""

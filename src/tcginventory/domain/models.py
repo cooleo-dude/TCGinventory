@@ -142,6 +142,8 @@ class CardShow:
     end_time: str | None = None
     detail_url: str | None = None
     fetched_at: str | None = None
+    # user attendance status: denied | pending | attending | walking
+    status: str | None = None
     id: int | None = None
 
 

@@ -4,6 +4,20 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-13 — Card-show attendance status (denied/pending/attending/walking)
+
+- **Decision:** Each show can be marked with an attendance status —
+  denied (red), pending (orange), attending (green), walking (blue) — via four
+  colour buttons per show in the day list. Statused shows sort to the top of a
+  day's cell and render with a coloured highlight bar; the day list mirrors the
+  ordering.
+- **Storage:** a separate `card_show_status(source_id, status)` table (migration
+  0007) keyed by tcdb's show id, **not** a `card_show` FK — so it survives the
+  wholesale delete+reinsert a state refresh does. Joined onto `CardShow.status`
+  on read; absence = no status.
+
+---
+
 ### 2026-07-13 — Card-shows calendar: data layer (scrape tcdb via curl)
 
 - **Decision:** Add a shows data layer for the planned Dashboard calendar:
