@@ -148,6 +148,23 @@ class CardShow:
 
 
 @dataclass
+class CatalogCard:
+    """A reference card from the local catalog (pokemontcg.io dataset).
+
+    Read-only identity data used for autocomplete / set-number auto-fill.
+    """
+
+    card_id: str
+    name: str
+    set_id: str
+    set_name: str | None = None
+    set_code: str | None = None
+    number: str | None = None
+    rarity: str | None = None
+    supertype: str | None = None
+
+
+@dataclass
 class AuditLogEntry:
     """An append-only record of a create / edit / void on some entity."""
 

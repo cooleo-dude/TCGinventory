@@ -29,6 +29,7 @@ from tcginventory.domain.enums import (
 from tcginventory.domain.models import (
     AuditLogEntry,
     CardShow,
+    CatalogCard,
     Item,
     Lot,
     LotConsumption,
@@ -795,3 +796,60 @@ class CardShowRepository:
     def delete_for_state(self, state: str) -> None:
         """Remove all shows for a state (e.g. when it's toggled off / re-fetched)."""
         self.conn.execute("DELETE FROM card_show WHERE state = ?", (state,))
+
+
+class CardCatalogRepository:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    @staticmethod
+    def _to_model(row: sqlite3.Row) -> CatalogCard:
+        return CatalogCard(
+            card_id=row["card_id"],
+            name=row["name"],
+            set_id=row["set_id"],
+            set_name=row["set_name"],
+            set_code=row["set_code"],
+            number=row["number"],
+            rarity=row["rarity"],
+            supertype=row["supertype"],
+        )
+
+    def count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM card_catalog").fetchone()[0]
+
+    def replace_all(self, cards: list[CatalogCard], updated_at: str) -> None:
+        """Swap the whole catalog for a freshly-pulled set (single transaction)."""
+        self.conn.execute("DELETE FROM card_catalog")
+        self.conn.executemany(
+            """
+            INSERT OR REPLACE INTO card_catalog (
+                card_id, name, set_id, set_name, set_code, number, rarity,
+                supertype, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?)
+            """,
+            [
+                (
+                    c.card_id, c.name, c.set_id, c.set_name, c.set_code,
+                    c.number, c.rarity, c.supertype, updated_at,
+                )
+                for c in cards
+            ],
+        )
+
+    def distinct_names(self, prefix: str, limit: int = 20) -> list[str]:
+        """Distinct card names starting with ``prefix`` (case-insensitive)."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT name FROM card_catalog WHERE name LIKE ? "
+            "ORDER BY name LIMIT ?",
+            (prefix.replace("%", "") + "%", limit),
+        ).fetchall()
+        return [r["name"] for r in rows]
+
+    def find_by_name(self, name: str) -> list[CatalogCard]:
+        """All printings of an exact card name, newest-set first-ish."""
+        rows = self.conn.execute(
+            "SELECT * FROM card_catalog WHERE name = ? ORDER BY set_name, number",
+            (name,),
+        ).fetchall()
+        return [self._to_model(r) for r in rows]

@@ -75,6 +75,38 @@ class _PriceRefreshWorker(QThread):
         self.done.emit(summary)
 
 
+class _CatalogUpdateWorker(QThread):
+    """Pulls the reference card catalog off the UI thread (its own connection)."""
+
+    done = Signal(object)  # CatalogUpdateSummary
+
+    def __init__(self, db_path) -> None:
+        super().__init__()
+        self._db_path = db_path
+
+    def run(self) -> None:
+        import logging
+
+        from tcginventory.data.db import open_database
+        from tcginventory.services.catalog import CatalogUpdateSummary, update_catalog
+
+        try:
+            conn = open_database(self._db_path)
+            try:
+                summary = update_catalog(conn)
+            finally:
+                conn.close()
+        except Exception as exc:  # never crash the thread
+            summary = CatalogUpdateSummary(errors=[str(exc)])
+        logging.getLogger(__name__).info(
+            "catalog update: sets=%d cards=%d errors=%d",
+            summary.sets,
+            summary.cards,
+            len(summary.errors),
+        )
+        self.done.emit(summary)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, conn: sqlite3.Connection | None = None) -> None:
         super().__init__()
@@ -85,6 +117,7 @@ class MainWindow(QMainWindow):
         self._conn = conn
         self._db_file = self._resolve_db_file()  # None for in-memory (tests)
         self._price_worker: _PriceRefreshWorker | None = None
+        self._catalog_worker: _CatalogUpdateWorker | None = None
 
         self.setWindowTitle(f"TCGinventory {__version__}")
         self.setWindowIcon(app_icon())
@@ -213,7 +246,38 @@ class MainWindow(QMainWindow):
         self._refresh_action = self._file_menu.addAction(
             "Refresh prices…", lambda: self._refresh_prices(silent=False)
         )
+        self._catalog_action = self._file_menu.addAction(
+            "Update card database…", self._update_catalog
+        )
         self._build_auto_update_action()
+
+    def _update_catalog(self) -> None:
+        if not self._db_file:
+            QMessageBox.information(
+                self, "Card database", "Not available for an in-memory database."
+            )
+            return
+        if self._catalog_worker is not None and self._catalog_worker.isRunning():
+            return
+        self._catalog_action.setEnabled(False)
+        self.statusBar().showMessage("Updating card database… (one-time bulk pull)")
+        self._catalog_worker = _CatalogUpdateWorker(self._db_file)
+        self._catalog_worker.done.connect(self._on_catalog_updated)
+        self._catalog_worker.start()
+
+    def _on_catalog_updated(self, summary) -> None:
+        self._catalog_action.setEnabled(True)
+        self._catalog_worker = None
+        self._update_status()
+        if summary.errors and not summary.cards:
+            QMessageBox.warning(
+                self, "Card database", "Update failed:\n" + "\n".join(summary.errors)
+            )
+        else:
+            msg = f"Loaded {summary.cards:,} cards from {summary.sets} sets."
+            if summary.errors:
+                msg += f"\n({len(summary.errors)} set(s) skipped)"
+            QMessageBox.information(self, "Card database updated", msg)
 
     def _build_auto_update_action(self) -> None:
         from tcginventory import scheduling
