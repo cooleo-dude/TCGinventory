@@ -124,8 +124,8 @@ class CardImagePane(QLabel):
     """
 
     _PLACEHOLDER = "Hover a card\nto preview"
-    _MIN_W = 170  # px — smallest card width
-    _MAX_W = 265  # px — ~native small-image width; avoids blurry upscaling
+    _MIN_W = 190  # px — smallest card width
+    _MAX_W = 460  # px — cap so the card tracks its column (≈ the give panel)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)

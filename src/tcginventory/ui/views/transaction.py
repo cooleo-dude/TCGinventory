@@ -468,8 +468,10 @@ class TransactionView(QWidget):
         preview_box.addWidget(QLabel("Card preview"))
         preview_box.addWidget(self._preview_pane)
         preview_box.addStretch(1)
-        lower.addLayout(preview_box)
-        lower.addStretch(1)
+        # Preview column mirrors the give:receive 1:3 split, so the card image
+        # is as wide as the "You give" panel.
+        lower.addLayout(preview_box, 1)
+        lower.addStretch(3)
 
         # Drag the divider to grow the give/receive tables vertically (or the
         # preview area).

@@ -54,6 +54,22 @@ def _norm_number(number: str | None) -> str:
     return head.lstrip("0") or head
 
 
+# pokemontcg.io names promo sets systematically differently than tcgcsv
+# ("<era> Black Star Promos" vs tcgcsv's era-specific promo group), and the
+# strings are too far apart to fuzzy-match. Bridge them by normalized set name.
+_PROMO_SET_ALIASES = {
+    "swshblackstarpromos": "Sword & Shield Promo Cards",
+    "smblackstarpromos": "SM Promos",
+    "xyblackstarpromos": "XY Promos",
+    "scarletvioletblackstarpromos": "Scarlet & Violet Promo Cards",
+    "nintendoblackstarpromos": "Nintendo Promos",
+    "wizardsblackstarpromos": "WoTC Promo",
+    "hgssblackstarpromos": "HGSS Promos",
+    "dpblackstarpromos": "Diamond and Pearl Promos",
+    "bwblackstarpromos": "Black and White Promos",
+}
+
+
 @dataclass
 class PriceQuote:
     item_id: int
@@ -160,6 +176,12 @@ class TcgcsvProvider:
                 group_id = index.get(_norm(key))
                 if group_id is not None:
                     return group_id
+        # 1b. Known promo-set aliases (pokemontcg.io vs tcgcsv naming).
+        alias = _PROMO_SET_ALIASES.get(_norm(item.set_name))
+        if alias:
+            group_id = index.get(_norm(alias))
+            if group_id is not None:
+                return group_id
         # 2. Closest-match fallback. Set names are recorded inconsistently
         #    ("Journey Together" vs tcgcsv's "SV09: Journey Together"), so pick
         #    the best fuzzy match. A substring hit is treated as a strong match.

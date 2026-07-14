@@ -242,6 +242,39 @@ def test_price_for_card_resolves_by_set_and_number():
     assert provider.price_for_card("Journey Together", "999") is None
 
 
+def test_price_for_card_bridges_promo_set_naming():
+    """pokemontcg.io's "SWSH Black Star Promos" must resolve to tcgcsv's
+    "SWSH: Sword & Shield Promo Cards" group (systematic promo aliasing)."""
+
+    def fetch(url: str):
+        if url.endswith("/groups"):
+            return {
+                "results": [
+                    {"groupId": 2545, "name": "SWSH: Sword & Shield Promo Cards",
+                     "abbreviation": "SWSD"},
+                ]
+            }
+        if url.endswith("/2545/products"):
+            return {
+                "results": [
+                    {
+                        "productId": 285396,
+                        "url": "https://www.tcgplayer.com/product/285396/x",
+                        "extendedData": [{"name": "Number", "value": "SWSH262"}],
+                    }
+                ]
+            }
+        if url.endswith("/2545/prices"):
+            return {"results": [{"productId": 285396, "marketPrice": 81.65}]}
+        raise AssertionError(f"unexpected url: {url}")
+
+    provider = TcgcsvProvider(fetch_json=fetch)
+    result = provider.price_for_card(
+        "SWSH Black Star Promos", "SWSH262", "Charizard VSTAR"
+    )
+    assert result == (8165, "https://www.tcgplayer.com/product/285396/x")
+
+
 def test_latest_as_of_reports_most_recent_refresh(conn):
     snaps = PriceSnapshotRepository(conn)
     assert snaps.latest_as_of() is None  # never refreshed
