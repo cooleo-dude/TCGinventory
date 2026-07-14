@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import sqlite3
 
-from PySide6.QtCore import QDate, QStringListModel, Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QDate, QModelIndex, Qt, Signal
+from PySide6.QtGui import QKeySequence, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QCompleter,
@@ -38,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from tcginventory import config
 from tcginventory.data.repositories import (
     CardCatalogRepository,
     ItemRepository,
@@ -118,6 +120,7 @@ class _GiveRow:
             self.combo.addItem(label, item.id)
         self.qty = QSpinBox()
         self.qty.setMinimum(1)
+        self.qty.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.combo.currentIndexChanged.connect(self._sync_max)
         self.combo.currentIndexChanged.connect(lambda *_: on_change())
         self.qty.valueChanged.connect(lambda *_: on_change())
@@ -149,19 +152,22 @@ class _ReceiveRow:
     """Inline row for a card you receive: the full card field set, entered
     directly. Name autocompletes from the catalog and fills set/number."""
 
-    def __init__(self, conn, completer_model, on_change) -> None:
+    def __init__(self, conn, is_auto, on_change) -> None:
         self._conn = conn
+        self._is_auto = is_auto  # () -> bool : is "Auto Detect Card" on?
         self._on_change = on_change
+        self._matches: dict[str, object] = {}
 
         self.name = QLineEdit()
-        self.name.setPlaceholderText("Card name")
-        if completer_model is not None:
-            comp = QCompleter(completer_model, self.name)
-            comp.setCaseSensitivity(Qt.CaseInsensitive)
-            comp.setFilterMode(Qt.MatchContains)
-            self.name.setCompleter(comp)
-            comp.activated.connect(lambda *_: self._autofill())
-        self.name.editingFinished.connect(self._autofill)
+        self.name.setPlaceholderText("e.g. Pikachu Celebrations 005/025")
+        # Whole-string catalog search: type name (+set +number), pick a match.
+        self._search_model = QStandardItemModel(self.name)
+        self._completer = QCompleter(self._search_model, self.name)
+        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
+        self.name.setCompleter(self._completer)
+        self.name.textEdited.connect(self._on_name_edited)
+        self._completer.activated[QModelIndex].connect(self._pick_match)
         self.name.textChanged.connect(lambda *_: on_change())
 
         self.category = _combo(Category, capitalize=True)
@@ -176,9 +182,11 @@ class _ReceiveRow:
         self.grade = QLineEdit()
         self.cert = QLineEdit()
         self.market = money_spin()
+        self.market.setButtonSymbols(QAbstractSpinBox.NoButtons)  # no up/down arrows
         self.market.valueChanged.connect(lambda *_: on_change())
         self.qty = QSpinBox()
         self.qty.setMinimum(1)
+        self.qty.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.qty.valueChanged.connect(lambda *_: on_change())
         self.intent = _combo(Intent, capitalize=True)
         _select(self.intent, Intent.RESALE.value)
@@ -203,17 +211,37 @@ class _ReceiveRow:
         self.grade.setEnabled(graded)
         self.cert.setEnabled(graded)
 
-    def _autofill(self, *_) -> None:
-        name = self.name.text().strip()
-        if not name:
+    _CARD_ID_ROLE = Qt.UserRole + 1
+
+    def _on_name_edited(self, text: str) -> None:
+        """Query the catalog as the user types (when Auto Detect is on) and show
+        the matches in the popup."""
+        if not self._is_auto() or len(text.strip()) < 2:
             return
-        printings = CardCatalogRepository(self._conn).find_by_name(name)
-        if printings:
-            p = printings[0]  # best-effort; multi-printing picker is a follow-up
-            if not self.set.text().strip():
-                self.set.setText(p.set_name or "")
-            if not self.number.text().strip():
-                self.number.setText(p.number or "")
+        matches = CardCatalogRepository(self._conn).search(text, limit=25)
+        self._matches = {c.card_id: c for c in matches}
+        self._search_model.clear()
+        for card in matches:
+            label = f"{card.name} — {card.set_name or '?'} #{card.number or '?'}"
+            item = QStandardItem(label)
+            item.setData(card.name, Qt.EditRole)  # inserted into the field on pick
+            item.setData(card.card_id, self._CARD_ID_ROLE)
+            self._search_model.appendRow(item)
+        if matches:
+            self._completer.complete()
+
+    def _pick_match(self, index: QModelIndex) -> None:
+        card = self._matches.get(index.data(self._CARD_ID_ROLE))
+        if card is not None:
+            self.apply_catalog_card(card)
+
+    def apply_catalog_card(self, card) -> None:
+        """Populate as many fields as possible from a chosen catalog card."""
+        self.name.setText(card.name)
+        self.set.setText(card.set_name or "")
+        self.number.setText(card.number or "")
+        _select(self.category, Category.SINGLE.value)  # catalog cards are singles
+        _select(self.language, Language.EN.value)  # dataset is English
         self._on_change()
 
     def set_card(self, card: IncomingCard) -> None:
@@ -282,7 +310,6 @@ class TransactionView(QWidget):
         self._give_rows: list[_GiveRow] = []
         self._receive_rows: list[_ReceiveRow] = []
         self._edit_id: int | None = None
-        self._catalog_model = self._build_catalog_model()
 
         self._badge = QLabel("—")
         self._badge.setStyleSheet("font-size: 16px; font-weight: 700;")
@@ -335,10 +362,6 @@ class TransactionView(QWidget):
 
         self._update_summary()
 
-    def _build_catalog_model(self) -> QStringListModel | None:
-        names = CardCatalogRepository(self._conn).all_names()
-        return QStringListModel(names) if names else None
-
     # -- side builders ------------------------------------------------------
 
     def _build_give_side(self) -> QGroupBox:
@@ -380,6 +403,18 @@ class TransactionView(QWidget):
         add.setFixedWidth(32)
         add.clicked.connect(self._add_receive_row)
 
+        self._auto_detect_cb = QCheckBox("Auto Detect Card")
+        self._auto_detect_cb.setToolTip(
+            "As you type a card (name, set, and/or number), search the local "
+            "card database and pick a match to auto-fill its fields."
+        )
+        self._auto_detect_cb.setChecked(
+            bool(config.get_pref("receive_auto_detect", True))
+        )
+        self._auto_detect_cb.toggled.connect(
+            lambda on: config.set_pref("receive_auto_detect", on)
+        )
+
         self._cash_in = money_spin()
         self._cash_in.valueChanged.connect(self._update_summary)
         cash_row = QHBoxLayout()
@@ -390,6 +425,7 @@ class TransactionView(QWidget):
         head = QHBoxLayout()
         head.addWidget(add)
         head.addStretch(1)
+        head.addWidget(self._auto_detect_cb)  # top-right of the receive panel
 
         layout = QVBoxLayout(box)
         layout.addLayout(head)
@@ -439,7 +475,11 @@ class TransactionView(QWidget):
         return row
 
     def _add_receive_row(self) -> _ReceiveRow:
-        row = _ReceiveRow(self._conn, self._catalog_model, self._update_summary)
+        row = _ReceiveRow(
+            self._conn,
+            lambda: self._auto_detect_cb.isChecked(),
+            self._update_summary,
+        )
         self._receive_rows.append(row)
         index = self._in_table.rowCount()
         self._in_table.insertRow(index)

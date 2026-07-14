@@ -57,6 +57,24 @@ def test_catalog_autocomplete_queries(conn):
     )
 
 
+def test_search_enriches_with_set_and_number(conn):
+    update_catalog(conn, fetch_json=_fake_fetch)
+    repo = CardCatalogRepository(conn)
+
+    # name + set narrows to the Celebrations Pikachu (#5), not the sv9 one (#1).
+    (hit,) = repo.search("Pikachu Celebrations")
+    assert (hit.set_name, hit.number) == ("Celebrations", "5")
+
+    # name + number (XX/YY form) narrows by collector number.
+    (hit,) = repo.search("Pikachu 1/99")
+    assert (hit.set_name, hit.number) == ("Journey Together", "1")
+
+    # name only returns every printing.
+    assert len(repo.search("Pikachu")) == 2
+    # partial name still matches (owner prefix).
+    assert repo.search("Kilowattrel")[0].name == "Iono's Kilowattrel"
+
+
 def test_update_catalog_replaces_and_skips_bad_set(conn):
     update_catalog(conn, fetch_json=_fake_fetch)
 

@@ -860,3 +860,40 @@ class CardCatalogRepository:
             (name,),
         ).fetchall()
         return [self._to_model(r) for r in rows]
+
+    def search(self, query: str, limit: int = 25) -> list[CatalogCard]:
+        """Free-text card search that enriches with set + collector number.
+
+        A token containing a ``/`` and a digit (e.g. ``072/159``, ``TG10/TG30``)
+        is treated as the collector number; the rest are matched against name OR
+        set name (all must appear). So ``Pikachu Celebrations 005/025``,
+        ``Pikachu Celebrations`` and ``Pikachu 005/025`` all narrow the match.
+        """
+        query = query.strip()
+        if not query:
+            return []
+        number = None
+        text_tokens = []
+        for tok in query.split():
+            if "/" in tok and any(ch.isdigit() for ch in tok):
+                number = tok
+            else:
+                text_tokens.append(tok)
+
+        clauses, params = [], []
+        for tok in text_tokens:
+            clauses.append("(name LIKE ? OR set_name LIKE ?)")
+            params += [f"%{tok}%", f"%{tok}%"]
+        if number:
+            clauses.append("(number = ? OR number = ?)")
+            params += [number, number.split("/", 1)[0]]
+        if not clauses:
+            return []
+
+        rows = self.conn.execute(
+            "SELECT * FROM card_catalog WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY name, set_name, number LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [self._to_model(r) for r in rows]

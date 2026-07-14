@@ -261,11 +261,16 @@ def test_receive_row_autofills_set_and_number_from_catalog(app, conn):
     conn.commit()
 
     view = TransactionView(conn)
+    view._auto_detect_cb.setChecked(True)
     row = view._add_receive_row()
-    row.name.setText("Iono's Kilowattrel")
-    row._autofill()
+    # Typing a name (+set) searches the catalog; picking a match fills fields.
+    row._on_name_edited("Kilowattrel Journey Together")
+    (card,) = row._matches.values()
+    row.apply_catalog_card(card)
+    assert row.name.text() == "Iono's Kilowattrel"
     assert row.set.text() == "Journey Together"
     assert row.number.text() == "163"
+    assert row.category.currentData() == "single"
 
 
 def test_ui_edit_reposts_and_history_void(app, conn):
