@@ -76,12 +76,20 @@ def test_image_for_keys_on_set_and_number_not_exact_name(conn):
                 set_name="Obsidian Flames", number="82",
                 image_small="https://img/sv3-82",
             ),
-            # Mewtwo #14 in a WoTC promo set — a decoy for a card whose real set
-            # ("Trading Card Game Classic") the dataset does not carry.
+            # Mewtwo #14 in a WoTC promo set (set total 117) — a decoy for a
+            # card whose real set ("Trading Card Game Classic", /034) the dataset
+            # does not carry.
             CatalogCard(
                 card_id="basep-14", name="Mewtwo", set_id="basep",
                 set_name="Wizards Black Star Promos", number="14",
-                image_small="https://img/basep-14",
+                printed_total=117, image_small="https://img/basep-14",
+            ),
+            # Alt-art Jirachi-GX filed under its base set (Unified Minds, /236);
+            # hyphen vs space in the name, unique number "79a".
+            CatalogCard(
+                card_id="sm11-79a", name="Jirachi-GX", set_id="sm11",
+                set_name="Unified Minds", number="79a",
+                printed_total=236, image_small="https://img/sm11-79a",
             ),
         ],
         "t",
@@ -98,8 +106,15 @@ def test_image_for_keys_on_set_and_number_not_exact_name(conn):
     # a bare number with an unrelated name is not trusted → no wrong card.
     assert repo.image_for("Totally Unrelated", None, "106") is None
 
-    # The real set is absent from the catalog → show NOTHING, never a
-    # same-number card from a different set (WoTC promo Mewtwo #14).
+    # Alt-art under a non-catalog set name still resolves: the "/236"
+    # denominator matches Unified Minds' total, and name ignores the hyphen.
+    assert repo.image_for("Jirachi GX", "Alternate Art Promos", "79a/236")[0] == (
+        "sm11-79a"
+    )
+    assert repo.image_for("Jirachi-GX", "Unified Minds", "79a")[0] == "sm11-79a"
+
+    # The real set is absent AND the "/034" denominator matches no candidate's
+    # total → show NOTHING, never the WoTC promo Mewtwo #14 (whose set is /117).
     assert repo.image_for("Mewtwo", "Trading Card Game Classic", "014/034") is None
     # …but when the set genuinely is the promo set, it resolves.
     assert repo.image_for("Mewtwo", "Wizards Black Star Promos", "14")[0] == "basep-14"

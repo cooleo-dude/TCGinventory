@@ -931,9 +931,11 @@ class CardCatalogRepository:
 
         want_num = norm_num(number)
         want_set = (set_name or "").strip().lower()
-        want_name = (name or "").strip().lower()
 
-        cols = "SELECT card_id, name, set_name, number, image_small FROM card_catalog"
+        cols = (
+            "SELECT card_id, name, set_name, number, image_small, printed_total "
+            "FROM card_catalog"
+        )
         pool: dict[str, sqlite3.Row] = {}
 
         def gather(where: str, params: tuple) -> None:
@@ -962,6 +964,12 @@ class CardCatalogRepository:
         if not pool:
             return None
 
+        def flat(value: str | None) -> str:
+            # Ignore case, spaces and punctuation so "Jirachi GX" == "Jirachi-GX".
+            return "".join(ch for ch in (value or "").lower() if ch.isalnum())
+
+        flat_name = flat(name)
+
         def set_ok(row: sqlite3.Row) -> bool:
             other = (row["set_name"] or "").strip().lower()
             return bool(want_set) and bool(other) and (
@@ -972,21 +980,37 @@ class CardCatalogRepository:
             return bool(want_num) and norm_num(row["number"]) == want_num
 
         def name_ok(row: sqlite3.Row) -> bool:
-            other = (row["name"] or "").strip().lower()
-            return bool(want_name) and (want_name in other or other in want_name)
+            other = flat(row["name"])
+            return bool(flat_name) and bool(other) and (
+                flat_name in other or other in flat_name
+            )
 
+        # 1) If the named set is actually in the catalog, trust it: pick the
+        #    best card *within* that set (number, then name).
         if want_set:
-            # A set was named → restrict to that set, then require number or
-            # name agreement. An unknown set has no eligible rows → None.
-            eligible = [r for r in pool.values() if set_ok(r)]
-            eligible = [r for r in eligible if num_ok(r) or name_ok(r)]
-            if not eligible:
-                return None
-            best = max(eligible, key=lambda r: (num_ok(r), name_ok(r)))
-        else:
-            # No set → number and name must both agree.
-            eligible = [r for r in pool.values() if num_ok(r) and name_ok(r)]
-            if not eligible:
-                return None
-            best = eligible[0]
-        return best["card_id"], best["image_small"]
+            in_set = [
+                r for r in pool.values() if set_ok(r) and (num_ok(r) or name_ok(r))
+            ]
+            if in_set:
+                best = max(in_set, key=lambda r: (num_ok(r), name_ok(r)))
+                return best["card_id"], best["image_small"]
+            # Set given but unknown to the catalog (alt-art / special naming) →
+            # fall through to a number+name match.
+
+        # 2) Number and name must both agree. This is the alt-art / unknown-set
+        #    path, so lean on the denominator when the number carries one: a
+        #    "79a/236" whose 236 matches the card's set total is confident, while
+        #    a "014/034" that matches no candidate's total stays blank (its
+        #    denominator proves it is *not* the same-numbered card in some other
+        #    set). Without a denominator, require a single unambiguous hit.
+        want_total = None
+        if number and "/" in number:
+            digits = "".join(ch for ch in number.split("/", 1)[1] if ch.isdigit())
+            want_total = int(digits) if digits else None
+
+        strong = [r for r in pool.values() if num_ok(r) and name_ok(r)]
+        if want_total is not None:
+            strong = [r for r in strong if r["printed_total"] == want_total]
+        if len(strong) == 1:
+            return strong[0]["card_id"], strong[0]["image_small"]
+        return None
