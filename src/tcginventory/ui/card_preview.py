@@ -143,8 +143,9 @@ class CardImagePane(QLabel):
         self.setText(self._PLACEHOLDER)
 
     def show_card(self, card_id: str | None, url: str | None) -> None:
+        # No valid card (e.g. hovering a row with no catalog match, or a leave):
+        # keep the most-recently-viewed image rather than blanking the pane.
         if not card_id or not url:
-            self.clear()
             return
         self._current = card_id
         path = cardimages.cache_path(card_id)
@@ -158,12 +159,9 @@ class CardImagePane(QLabel):
         worker.start()
 
     def clear(self) -> None:
-        self._current = None
-        self._pixmap = None
-        try:
-            self.setText(self._PLACEHOLDER)  # replaces any pixmap
-        except RuntimeError:
-            pass  # C++ QLabel already deleted (app teardown)
+        # Leaving a card keeps the last one shown (persistent preview). Nothing
+        # to do — a subsequent show_card replaces it.
+        pass
 
     def _retire(self, worker: _FetchWorker) -> None:
         if worker in self._workers:

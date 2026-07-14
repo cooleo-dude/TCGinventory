@@ -72,6 +72,7 @@ class _InventoryFilterProxy(QSortFilterProxyModel):
         self._intent = "All"
         self._sold = "All"
         self._in_stock_only = False
+        self._review_only = False
 
     def set_text(self, text: str) -> None:
         self._text = text.strip().lower()
@@ -89,8 +90,14 @@ class _InventoryFilterProxy(QSortFilterProxyModel):
         self._in_stock_only = on
         self.invalidateFilter()
 
+    def set_review_only(self, on: bool) -> None:
+        self._review_only = on
+        self.invalidateFilter()
+
     def filterAcceptsRow(self, source_row: int, parent: QModelIndex) -> bool:
         row = self.sourceModel().row_at(source_row)
+        if self._review_only and not row.review:
+            return False
         if self._in_stock_only and not row.in_stock:
             return False
         if self._intent != "All" and row.intent != self._intent:
@@ -139,6 +146,10 @@ class InventoryView(QWidget):
         self._in_stock = QCheckBox("In stock only")
         self._in_stock.toggled.connect(self._proxy.set_in_stock_only)
 
+        self._review_only = QCheckBox("Marked for review")
+        self._review_only.setToolTip("Show only entries flagged for review")
+        self._review_only.toggled.connect(self._proxy.set_review_only)
+
         self._delete_btn = QPushButton("Delete entry…")
         self._delete_btn.setToolTip(
             "Permanently delete the selected entry (for correcting a mistake)"
@@ -152,6 +163,7 @@ class InventoryView(QWidget):
         filter_bar.addWidget(QLabel("Sold:"))
         filter_bar.addWidget(self._sold)
         filter_bar.addWidget(self._in_stock)
+        filter_bar.addWidget(self._review_only)
         filter_bar.addWidget(self._delete_btn)
 
         # -- table
@@ -242,6 +254,9 @@ class InventoryView(QWidget):
     def _on_selection(self, *_args) -> None:
         row = self._selected_row()
         self._review_delegate.note_selected_item(row.item.id if row else None)
+        self._set_history_chart(row)
+
+    def _set_history_chart(self, row: InventoryRow | None) -> None:
         if row is None:
             self._show_chart_message("Select a card to see its price history.")
             return
@@ -251,14 +266,15 @@ class InventoryView(QWidget):
 
     def _on_row_hover(self, proxy_index: QModelIndex) -> None:
         row = self._model.row_at(self._proxy.mapToSource(proxy_index).row())
-        res = (
-            CardCatalogRepository(self._conn).image_for(
-                row.item.name, row.item.set_name, row.item.card_number
-            )
-            if row is not None
-            else None
+        if row is None:
+            return
+        # Card art (kept as the most-recently-viewed once the pointer leaves).
+        res = CardCatalogRepository(self._conn).image_for(
+            row.item.name, row.item.set_name, row.item.card_number
         )
         self._preview_pane.show_card(*(res if res else (None, None)))
+        # Price-history graph for the hovered row (also persists on leave).
+        self._set_history_chart(row)
 
     def _show_chart_message(self, text: str) -> None:
         chart = QChart()

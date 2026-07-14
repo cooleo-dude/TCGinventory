@@ -54,6 +54,26 @@ def test_inventory_intent_edit_updates_lot(app, conn):
     view.deleteLater()
 
 
+def test_inventory_review_filter(app, conn):
+    from tcginventory.ui.views.inventory import InventoryView
+
+    r1 = buy(TransactionService(conn), "Pikachu", 100, 200, "2026-01-01")
+    buy(TransactionService(conn), "Charizard", 100, 200, "2026-01-02")
+    items = ItemRepository(conn)
+    it = items.get(r1.lots[0].item_id)
+    it.review = True
+    items.update(it)
+    conn.commit()
+
+    view = InventoryView(conn)
+    assert view._proxy.rowCount() == 2
+    view._review_only.setChecked(True)  # only entries flagged for review
+    assert view._proxy.rowCount() == 1
+    view._review_only.setChecked(False)
+    assert view._proxy.rowCount() == 2
+    view.deleteLater()
+
+
 def test_item_editor_changes_condition_and_language(app, conn):
     from tcginventory.ui.views.item_editor import ItemEditorDialog
 
