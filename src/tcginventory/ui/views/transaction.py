@@ -246,9 +246,10 @@ class _ReceiveRow:
         self._matches = {c.card_id: c for c in matches}
         self._search_model.clear()
         for card in matches:
-            label = f"{card.name} — {card.set_name or '?'} #{card.number or '?'}"
+            label = f"{card.name}  ·  {card.set_name or '?'}  #{card.number or '?'}"
+            # The popup shows the completion text (the label with set + number);
+            # picking replaces the field with the clean name via apply_catalog_card.
             item = QStandardItem(label)
-            item.setData(card.name, Qt.EditRole)  # inserted into the field on pick
             item.setData(card.card_id, self._CARD_ID_ROLE)
             self._search_model.appendRow(item)
         if matches:
