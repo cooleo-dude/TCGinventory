@@ -115,17 +115,23 @@ class CardImagePreview(QObject):
 
 
 class CardImagePane(QLabel):
-    """An embeddable fixed preview region (e.g. Transaction lower-left corner).
+    """An embeddable card preview region (e.g. Transaction lower-left corner).
 
-    Same lazy fetch+cache as the popup, but painted into this widget and scaled
-    to fit; shows a placeholder when empty.
+    Same lazy fetch+cache as the popup. Every card is shown at the *same* width
+    (no zoom-to-fill): the display width tracks the pane's width but is clamped
+    to a sensible band, so it grows modestly with the window and never upscales
+    past the source resolution. Shows a placeholder when empty.
     """
 
     _PLACEHOLDER = "Hover a card\nto preview"
+    _MIN_W = 170  # px — smallest card width
+    _MAX_W = 265  # px — ~native small-image width; avoids blurry upscaling
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setAlignment(
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
+        )
         self.setMinimumSize(190, 265)
         self.setStyleSheet(
             "border:1px solid #504945; border-radius:4px; "
@@ -154,7 +160,10 @@ class CardImagePane(QLabel):
     def clear(self) -> None:
         self._current = None
         self._pixmap = None
-        self.setText(self._PLACEHOLDER)  # replaces any pixmap
+        try:
+            self.setText(self._PLACEHOLDER)  # replaces any pixmap
+        except RuntimeError:
+            pass  # C++ QLabel already deleted (app teardown)
 
     def _retire(self, worker: _FetchWorker) -> None:
         if worker in self._workers:
@@ -174,13 +183,17 @@ class CardImagePane(QLabel):
     def _rescale(self) -> None:
         if self._pixmap is None:
             return
-        self.setPixmap(
-            self._pixmap.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+        # Scale by width only (aspect kept), clamped — one consistent card size
+        # that grows with the pane width but never fills/zooms to its height.
+        width = max(self._MIN_W, min(self.width() - 8, self._MAX_W))
+        try:
+            self.setPixmap(
+                self._pixmap.scaledToWidth(
+                    width, Qt.TransformationMode.SmoothTransformation
+                )
             )
-        )
+        except RuntimeError:
+            pass  # C++ QLabel already deleted (app teardown)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
@@ -222,11 +235,14 @@ class _HoverFilter(QObject):
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         etype = event.type()
-        if etype == QEvent.Type.Enter:
-            res = self._resolve()
-            self._target().show_card(*(res if res else (None, None)))
-        elif etype in (QEvent.Type.Leave, QEvent.Type.Hide):
-            self._target().clear()
+        try:
+            if etype == QEvent.Type.Enter:
+                res = self._resolve()
+                self._target().show_card(*(res if res else (None, None)))
+            elif etype in (QEvent.Type.Leave, QEvent.Type.Hide):
+                self._target().clear()
+        except RuntimeError:
+            pass  # sink's C++ widget already deleted (app teardown)
         return False
 
 

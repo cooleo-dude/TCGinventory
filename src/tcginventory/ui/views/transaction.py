@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QSplitter,
     QStyledItemDelegate,
     QTableWidget,
     QVBoxLayout,
@@ -438,7 +439,9 @@ class TransactionView(QWidget):
         top.addLayout(badge_box)
 
         # Give is narrow (2 fields) vs the wider receive side.
-        sides = QHBoxLayout()
+        sides_widget = QWidget()
+        sides = QHBoxLayout(sides_widget)
+        sides.setContentsMargins(0, 0, 0, 0)
         sides.addWidget(self._build_give_side(), 1)
         sides.addWidget(self._build_receive_side(), 3)
 
@@ -456,9 +459,11 @@ class TransactionView(QWidget):
         footer.addWidget(clear_btn)
         footer.addWidget(self._submit)
 
-        # Lower half: card-image preview parked in the left corner; the rest is
+        # Lower area: card-image preview parked in the left corner; the rest is
         # reserved for later.
-        lower = QHBoxLayout()
+        lower_widget = QWidget()
+        lower = QHBoxLayout(lower_widget)
+        lower.setContentsMargins(0, 0, 0, 0)
         preview_box = QVBoxLayout()
         preview_box.addWidget(QLabel("Card preview"))
         preview_box.addWidget(self._preview_pane)
@@ -466,10 +471,18 @@ class TransactionView(QWidget):
         lower.addLayout(preview_box)
         lower.addStretch(1)
 
+        # Drag the divider to grow the give/receive tables vertically (or the
+        # preview area).
+        body = QSplitter(Qt.Vertical)
+        body.addWidget(sides_widget)
+        body.addWidget(lower_widget)
+        body.setStretchFactor(0, 3)
+        body.setStretchFactor(1, 1)
+        body.setChildrenCollapsible(False)
+
         layout = QVBoxLayout(self)
         layout.addLayout(top)
-        layout.addLayout(sides)
-        layout.addLayout(lower, 1)
+        layout.addWidget(body, 1)
         layout.addLayout(footer)
 
         self._update_summary()
