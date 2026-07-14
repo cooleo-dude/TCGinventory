@@ -69,6 +69,16 @@ _COLUMNS: list[_Column] = [
     ),
     _Column("Lang", lambda r: r.item.language.value, lambda r: r.item.language.value),
     _Column("Cond/Grade", lambda r: _cond_grade(r.item), lambda r: _cond_grade(r.item)),
+    _Column(
+        "Holo",
+        lambda r: r.item.holo_pattern.value if r.item.holo_pattern else "",
+        lambda r: r.item.holo_pattern.value if r.item.holo_pattern else "",
+    ),
+    _Column(
+        "Edition",
+        lambda r: r.item.edition.value if r.item.edition else "",
+        lambda r: r.item.edition.value if r.item.edition else "",
+    ),
     _Column("Intent", lambda r: r.intent, lambda r: r.intent),
     _Column("Acquired", lambda r: r.acquired_at, lambda r: r.acquired_at),
     _Column(

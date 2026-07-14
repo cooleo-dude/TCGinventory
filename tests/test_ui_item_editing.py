@@ -80,6 +80,24 @@ def test_item_editor_changes_condition_and_language(app, conn):
     dlg.deleteLater()
 
 
+def test_item_editor_non_nm_condition_auto_marks_review(app, conn):
+    from tcginventory.ui.views.item_editor import ItemEditorDialog
+
+    result = buy(
+        TransactionService(conn), "Charizard", 4000, 6000, "2026-01-01",
+        set_code="BS", card_number="004/102", condition=Condition.NM,
+    )
+    item_id = result.lots[0].item_id
+
+    dlg = ItemEditorDialog(conn, item_id)
+    assert not dlg._review.isChecked()
+    dlg._select(dlg._condition, Condition.MP.value)  # worse than NM
+    assert dlg._review.isChecked()  # auto-flagged
+    dlg._save()
+    assert ItemRepository(conn).get(item_id).review is True
+    dlg.deleteLater()
+
+
 def test_item_editor_toggles_grading(app, conn):
     from tcginventory.ui.views.item_editor import ItemEditorDialog
 

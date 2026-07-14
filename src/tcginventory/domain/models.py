@@ -15,7 +15,9 @@ from tcginventory.domain.enums import (
     Category,
     Condition,
     Direction,
+    Edition,
     GradingCompany,
+    HoloPattern,
     Intent,
     Language,
     TransactionStatus,
@@ -35,6 +37,8 @@ class Item:
     card_number: str | None = None  # "60/107", "GG09/GG12"
     language: Language = Language.EN
     condition: Condition | None = None  # NULL when graded
+    holo_pattern: HoloPattern | None = None
+    edition: Edition | None = None
     is_graded: bool = False
     grading_company: GradingCompany | None = None
     grade: str | None = None

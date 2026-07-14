@@ -21,7 +21,9 @@ from tcginventory.domain.enums import (
     Category,
     Condition,
     Direction,
+    Edition,
     GradingCompany,
+    HoloPattern,
     Intent,
     Language,
     TransactionStatus,
@@ -123,6 +125,39 @@ def test_item_find_by_identity_matches_and_distinguishes(conn):
     assert repo.find_by_identity(_raw_item(condition=Condition.LP)) is None
     # Different language → also a distinct item (language is part of identity).
     assert repo.find_by_identity(_raw_item(language=Language.JP)) is None
+
+
+def test_item_round_trips_holo_and_edition(conn):
+    repo = ItemRepository(conn)
+    item = repo.add(
+        _raw_item(holo_pattern=HoloPattern.REVERSE_HOLO, edition=Edition.FIRST)
+    )
+    got = repo.get(item.id)
+    assert got.holo_pattern is HoloPattern.REVERSE_HOLO
+    assert got.edition is Edition.FIRST
+
+
+def test_holo_and_edition_are_part_of_identity(conn):
+    repo = ItemRepository(conn)
+    base = repo.add(
+        _raw_item(holo_pattern=HoloPattern.HOLO, edition=Edition.UNLIMITED)
+    )
+    # Same holo + edition → matches.
+    same = _raw_item(holo_pattern=HoloPattern.HOLO, edition=Edition.UNLIMITED)
+    assert repo.find_by_identity(same).id == base.id
+    # A different foil or edition is a distinct item.
+    assert (
+        repo.find_by_identity(
+            _raw_item(holo_pattern=HoloPattern.REVERSE_HOLO, edition=Edition.UNLIMITED)
+        )
+        is None
+    )
+    assert (
+        repo.find_by_identity(
+            _raw_item(holo_pattern=HoloPattern.HOLO, edition=Edition.FIRST)
+        )
+        is None
+    )
 
 
 def test_lot_add_list_and_open_lots_fifo(conn):

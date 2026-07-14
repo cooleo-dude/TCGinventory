@@ -20,7 +20,9 @@ from tcginventory.domain.enums import (
     Category,
     Condition,
     Direction,
+    Edition,
     GradingCompany,
+    HoloPattern,
     Intent,
     Language,
     TransactionStatus,
@@ -47,6 +49,8 @@ _ITEM_IDENTITY_COLUMNS = (
     "card_number",
     "language",
     "condition",
+    "holo_pattern",
+    "edition",
     "is_graded",
     "grading_company",
     "grade",
@@ -74,6 +78,8 @@ class ItemRepository:
             language=Language(row["language"]),
             category=Category(row["category"]),
             condition=_opt_enum(Condition, row["condition"]),
+            holo_pattern=_opt_enum(HoloPattern, row["holo_pattern"]),
+            edition=_opt_enum(Edition, row["edition"]),
             is_graded=bool(row["is_graded"]),
             grading_company=_opt_enum(GradingCompany, row["grading_company"]),
             grade=row["grade"],
@@ -97,10 +103,11 @@ class ItemRepository:
             """
             INSERT INTO item (
                 name, game, set_name, set_code, card_number, language, category,
-                condition, is_graded, grading_company, grade, cert_number,
-                location, tcgplayer_url, ebay_url, market_value_cents,
-                market_value_asof, review, notes, created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                condition, holo_pattern, edition, is_graded, grading_company,
+                grade, cert_number, location, tcgplayer_url, ebay_url,
+                market_value_cents, market_value_asof, review, notes,
+                created_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 item.name,
@@ -111,6 +118,8 @@ class ItemRepository:
                 item.language.value,
                 item.category.value,
                 item.condition.value if item.condition else None,
+                item.holo_pattern.value if item.holo_pattern else None,
+                item.edition.value if item.edition else None,
                 int(item.is_graded),
                 item.grading_company.value if item.grading_company else None,
                 item.grade,
@@ -152,6 +161,8 @@ class ItemRepository:
             item.card_number,
             item.language.value,
             item.condition.value if item.condition else None,
+            item.holo_pattern.value if item.holo_pattern else None,
+            item.edition.value if item.edition else None,
             int(item.is_graded),
             item.grading_company.value if item.grading_company else None,
             item.grade,
@@ -169,7 +180,8 @@ class ItemRepository:
             """
             UPDATE item SET
                 name = ?, game = ?, set_name = ?, set_code = ?, card_number = ?,
-                language = ?, category = ?, condition = ?, is_graded = ?,
+                language = ?, category = ?, condition = ?, holo_pattern = ?,
+                edition = ?, is_graded = ?,
                 grading_company = ?, grade = ?, cert_number = ?,
                 location = ?, tcgplayer_url = ?, ebay_url = ?,
                 market_value_cents = ?, market_value_asof = ?, review = ?,
@@ -185,6 +197,8 @@ class ItemRepository:
                 item.language.value,
                 item.category.value,
                 item.condition.value if item.condition else None,
+                item.holo_pattern.value if item.holo_pattern else None,
+                item.edition.value if item.edition else None,
                 int(item.is_graded),
                 item.grading_company.value if item.grading_company else None,
                 item.grade,

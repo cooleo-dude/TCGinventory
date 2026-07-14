@@ -35,7 +35,9 @@ from tcginventory.data.repositories import (
 from tcginventory.domain.enums import (
     Category,
     Condition,
+    Edition,
     GradingCompany,
+    HoloPattern,
     Language,
 )
 from tcginventory.services.review import with_review_note, without_review_note
@@ -76,6 +78,20 @@ class ItemEditorDialog(QDialog):
             self._condition.addItem(cond.value, cond.value)
         if item and item.condition:
             self._select(self._condition, item.condition.value)
+        # Editing to a non-NM condition auto-marks the item for review.
+        self._condition.currentIndexChanged.connect(self._maybe_flag_review)
+
+        self._holo = QComboBox()
+        for pattern in HoloPattern:
+            self._holo.addItem(pattern.value, pattern.value)
+        if item and item.holo_pattern:
+            self._select(self._holo, item.holo_pattern.value)
+
+        self._edition = QComboBox()
+        for ed in Edition:
+            self._edition.addItem(ed.value, ed.value)
+        if item and item.edition:
+            self._select(self._edition, item.edition.value)
 
         self._company = QComboBox()
         for company in GradingCompany:
@@ -110,6 +126,8 @@ class ItemEditorDialog(QDialog):
         form.addRow("Language:", self._language)
         form.addRow("", self._graded)
         form.addRow("Condition:", self._condition)
+        form.addRow("Holo pattern:", self._holo)
+        form.addRow("Edition:", self._edition)
         form.addRow("Grading company:", self._company)
         form.addRow("Grade:", self._grade)
         form.addRow("Cert #:", self._cert)
@@ -138,6 +156,13 @@ class ItemEditorDialog(QDialog):
         if pos >= 0:
             combo.setCurrentIndex(pos)
 
+    def _maybe_flag_review(self) -> None:
+        if (
+            not self._graded.isChecked()
+            and self._condition.currentData() != Condition.NM.value
+        ):
+            self._review.setChecked(True)
+
     def _toggle_graded(self, graded: bool) -> None:
         # Condition greys out when graded; grade fields enable (Spec 02).
         self._condition.setEnabled(not graded)
@@ -159,6 +184,8 @@ class ItemEditorDialog(QDialog):
         item.language = Language(self._language.currentData())
         item.is_graded = graded
         item.condition = None if graded else Condition(self._condition.currentData())
+        item.holo_pattern = HoloPattern(self._holo.currentData())
+        item.edition = Edition(self._edition.currentData())
         item.grading_company = (
             GradingCompany(self._company.currentData()) if graded else None
         )

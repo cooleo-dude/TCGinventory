@@ -110,17 +110,18 @@ class InventoryService:
         return positions
 
     def sellable_items(self) -> list[tuple[Item, int]]:
-        """Items with sellable (non-ripping, on-hand) units, for the give picker.
+        """Items with sellable on-hand units, for the give picker.
 
-        Returns ``(item, available_qty)`` pairs — ripping lots are excluded since
-        they are never sold (invariant 8).
+        Returns ``(item, available_qty)`` pairs. Only **resale** lots count:
+        ripping lots are never sold (invariant 8), and personal lots are held for
+        the owner's collection, not for giving away in a deal.
         """
         out: list[tuple[Item, int]] = []
         for item in self.items.list_all():
             available = sum(
                 lot.remaining_qty
                 for lot in self.lots.list_for_item(item.id)
-                if lot.remaining_qty > 0 and lot.intent is not Intent.RIPPING
+                if lot.remaining_qty > 0 and lot.intent is Intent.RESALE
             )
             if available > 0:
                 out.append((item, available))

@@ -53,7 +53,9 @@ from tcginventory.domain.enums import (
     Category,
     Condition,
     Direction,
+    Edition,
     GradingCompany,
+    HoloPattern,
     Intent,
     Language,
     TransactionStatus,
@@ -75,11 +77,12 @@ _GIVE_HEADERS = ["Item", "Qty", ""]
 _GIVE_WIDTHS = [280, 55, 30]
 _RECV_HEADERS = [
     "Name", "Category", "Set", "#", "Language", "Graded", "Condition",
-    "Grading Co.", "Grade", "Cert #", "Market", "Qty", "Intent", "Review",
-    "TCGplayer", "eBay", "Notes", "",
+    "Holo", "Edition", "Grading Co.", "Grade", "Cert #", "Market", "Qty",
+    "Intent", "Review", "TCGplayer", "eBay", "Notes", "",
 ]
 _RECV_WIDTHS = [
-    150, 85, 100, 55, 65, 55, 80, 90, 55, 85, 85, 45, 85, 55, 120, 100, 130, 30
+    150, 85, 100, 55, 65, 55, 80, 55, 90, 90, 55, 85, 85, 45, 85, 55, 120,
+    100, 130, 30,
 ]
 
 
@@ -140,6 +143,7 @@ class _GiveRow:
     ) -> None:
         self._conn = conn
         self._sellable = sellable
+        self._sink = sink
         self.combo = QComboBox()
         for item, available in sellable:
             label = item.name
@@ -148,6 +152,9 @@ class _GiveRow:
             label += f" — {available} on hand"
             self.combo.addItem(label, item.id)
         install_hover_preview(self.combo, self._hover_card, sink)
+        # Hovering an item in the open dropdown previews it in the pane too.
+        self.combo.view().setMouseTracking(True)
+        self.combo.view().entered.connect(self._on_dropdown_hover)
         self.qty = QSpinBox()
         self.qty.setMinimum(1)
         self.qty.setButtonSymbols(QAbstractSpinBox.NoButtons)
@@ -160,13 +167,20 @@ class _GiveRow:
         return [self.combo, self.qty]
 
     def _hover_card(self) -> tuple[str, str] | None:
-        i = self.combo.currentIndex()
+        return self._image_for_index(self.combo.currentIndex())
+
+    def _image_for_index(self, i: int) -> tuple[str, str] | None:
         if not (0 <= i < len(self._sellable)):
             return None
         item = self._sellable[i][0]
         return CardCatalogRepository(self._conn).image_for(
             item.name, item.set_name, item.card_number
         )
+
+    def _on_dropdown_hover(self, index: QModelIndex) -> None:
+        if self._sink is not None:
+            res = self._image_for_index(index.row())
+            self._sink.show_card(*(res if res else (None, None)))
 
     def _sync_max(self, *_) -> None:
         i = self.combo.currentIndex()
@@ -250,6 +264,10 @@ class _ReceiveRow:
         self.graded.toggled.connect(self._toggle_graded)
         self.graded.toggled.connect(lambda *_: on_change())
         self.condition = _combo(Condition)
+        # Auto-mark for review when a non-NM condition is chosen.
+        self.condition.currentIndexChanged.connect(self._maybe_flag_review)
+        self.holo = _combo(HoloPattern)  # default NH
+        self.edition = _combo(Edition)  # default N/A
         self.company = _combo(GradingCompany)
         self.grade = QLineEdit()
         self.cert = QLineEdit()
@@ -271,10 +289,19 @@ class _ReceiveRow:
     def widgets(self) -> list[QWidget]:
         return [
             self.name, self.category, self.set, self.number, self.language,
-            self.graded, self.condition, self.company, self.grade, self.cert,
-            self.market, self.qty, self.intent, self.review, self.tcgplayer,
-            self.ebay, self.notes,
+            self.graded, self.condition, self.holo, self.edition, self.company,
+            self.grade, self.cert, self.market, self.qty, self.intent,
+            self.review, self.tcgplayer, self.ebay, self.notes,
         ]
+
+    def _maybe_flag_review(self) -> None:
+        """A condition worse than NM (and ungraded) auto-marks the card for
+        review — its value warrants a manual look."""
+        if (
+            not self.graded.isChecked()
+            and self.condition.currentData() != Condition.NM.value
+        ):
+            self.review.setChecked(True)
 
     def _toggle_graded(self, graded: bool) -> None:
         # Condition greys out when graded; grade fields enable (Spec 02).
@@ -354,6 +381,10 @@ class _ReceiveRow:
         self.graded.setChecked(item.is_graded)
         if item.condition is not None:
             _select(self.condition, item.condition.value)
+        if item.holo_pattern is not None:
+            _select(self.holo, item.holo_pattern.value)
+        if item.edition is not None:
+            _select(self.edition, item.edition.value)
         if item.grading_company is not None:
             _select(self.company, item.grading_company.value)
         self.grade.setText(item.grade or "")
@@ -378,6 +409,8 @@ class _ReceiveRow:
             card_number=self.number.text().strip() or None,
             language=Language(self.language.currentData()),
             condition=None if graded else Condition(self.condition.currentData()),
+            holo_pattern=HoloPattern(self.holo.currentData()),
+            edition=Edition(self.edition.currentData()),
             is_graded=graded,
             grading_company=(
                 GradingCompany(self.company.currentData()) if graded else None

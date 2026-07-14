@@ -54,6 +54,22 @@ class Condition(str, Enum):
     SEALED = "sealed"
 
 
+class HoloPattern(str, Enum):
+    """Foiling of a card face; part of item identity (affects value)."""
+
+    NON_HOLO = "NH"
+    HOLO = "H"
+    REVERSE_HOLO = "RH"
+
+
+class Edition(str, Enum):
+    """Print edition; part of item identity (1st edition commands a premium)."""
+
+    NA = "N/A"
+    FIRST = "1st Edition"
+    UNLIMITED = "Unlimited"
+
+
 class GradingCompany(str, Enum):
     PSA = "PSA"
     BGS = "BGS"
