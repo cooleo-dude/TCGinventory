@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from tcginventory.data.repositories import ItemRepository, PriceSnapshotRepository
-from tcginventory.domain.enums import Category
+from tcginventory.domain.enums import Category, Language
 from tcginventory.domain.models import Item
 from tcginventory.services.pricing import (
     PokemonTcgProvider,
@@ -273,6 +273,46 @@ def test_price_for_card_bridges_promo_set_naming():
         "SWSH Black Star Promos", "SWSH262", "Charizard VSTAR"
     )
     assert result == (8165, "https://www.tcgplayer.com/product/285396/x")
+
+
+def _fake_jp_fetch(url: str):
+    """tcgcsv category 85 ("Pokemon Japan") — a group with one card."""
+    if url.endswith("/85/groups"):
+        return {"results": [{"groupId": 24711, "name": "M5: Abyss Eye",
+                             "abbreviation": "M5"}]}
+    if url.endswith("/85/24711/products"):
+        return {"results": [{
+            "productId": 694993,
+            "url": "https://www.tcgplayer.com/product/694993/x",
+            "extendedData": [{"name": "Number", "value": "103/081"}],
+        }]}
+    if url.endswith("/85/24711/prices"):
+        return {"results": [{"productId": 694993, "marketPrice": 0.91}]}
+    raise AssertionError(f"unexpected url: {url}")
+
+
+def test_price_for_card_uses_japanese_category():
+    provider = TcgcsvProvider(fetch_json=_fake_jp_fetch)
+    # category=85 routes to the Japanese groups/products/prices files.
+    result = provider.price_for_card("M5: Abyss Eye", "103/081", category=85)
+    assert result == (91, "https://www.tcgplayer.com/product/694993/x")
+
+
+def test_quotes_for_routes_japanese_item_to_category_85(conn):
+    item = ItemRepository(conn).add(
+        Item(
+            name="Energy Switch",
+            category=Category.SINGLE,
+            set_name="M5: Abyss Eye",
+            card_number="103/081",
+            language=Language.JP,
+            tcgplayer_url="https://www.tcgplayer.com/product/694993/x",
+        )
+    )
+    # A JP-language item is priced against category 85 (fetch asserts the URL).
+    quotes = TcgcsvProvider(fetch_json=_fake_jp_fetch).quotes_for([item])
+    assert len(quotes) == 1
+    assert quotes[0].item_id == item.id and quotes[0].price_cents == 91
 
 
 def test_latest_as_of_reports_most_recent_refresh(conn):

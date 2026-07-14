@@ -2,13 +2,14 @@
 
 tcgcsv mirrors TCGplayer's own pricing API as free JSON, keyed by TCGplayer
 **product ID** — which we parse from the item's saved ``tcgplayer_url``. Prices
-are product-level market prices (≈ Near Mint, English); condition/JP fidelity is
-out of scope for this source.
+are product-level market prices (≈ Near Mint); condition fidelity is out of scope
+for this source. English and Japanese cards are both supported, resolved against
+tcgcsv category 3 ("Pokemon") or 85 ("Pokemon Japan") by the item's language.
 
-A refresh resolves each item's set → tcgcsv group, downloads that group's price
-file once, joins by product ID, then writes a ``price_snapshot`` per item and
-updates the item's current market value. Network I/O is injected (``fetch_json``)
-so the service is testable offline.
+A refresh resolves each item's (category, set) → tcgcsv group, downloads that
+group's price file once, joins by product ID, then writes a ``price_snapshot``
+per item and updates the item's current market value. Network I/O is injected
+(``fetch_json``) so the service is testable offline.
 """
 
 from __future__ import annotations
@@ -21,9 +22,11 @@ from dataclasses import dataclass, field
 
 from tcginventory.data.db import now_iso
 from tcginventory.data.repositories import ItemRepository, PriceSnapshotRepository
+from tcginventory.domain.enums import Language
 from tcginventory.domain.models import Item, PriceSnapshot
 
-_CATEGORY_POKEMON = 3
+_CATEGORY_POKEMON = 3  # tcgcsv English "Pokemon"
+_CATEGORY_POKEMON_JP = 85  # tcgcsv "Pokemon Japan"
 _BASE_URL = "https://tcgcsv.com/tcgplayer"
 _PRODUCT_RE = re.compile(r"/product/(\d+)")
 # Minimum similarity for the closest-match set fallback. Kept modest because
@@ -92,40 +95,54 @@ class TcgcsvProvider:
 
     def __init__(self, fetch_json: Callable[[str], object] | None = None) -> None:
         self._fetch = fetch_json or _httpx_get_json
-        self._group_index: dict[str, int] | None = None
-        self._group_candidates: list[tuple[str, int]] = []
-        self._price_cache: dict[int, dict[int, int]] = {}
-        self._product_cache: dict[int, list[tuple[int, str, str]]] = {}
+        # Caches are keyed by tcgcsv category (3 = English, 85 = Japanese) so a
+        # single provider serves both. group_ids are globally unique, but the
+        # per-category price/product files live at different URLs.
+        self._group_cache: dict[int, tuple[dict[str, int], list[tuple[str, int]]]] = {}
+        self._price_cache: dict[tuple[int, int], dict[int, int]] = {}
+        self._product_cache: dict[tuple[int, int], list[tuple[int, str, str]]] = {}
+
+    @staticmethod
+    def _category_for(item: Item) -> int:
+        if item.language is Language.JP:
+            return _CATEGORY_POKEMON_JP
+        return _CATEGORY_POKEMON
 
     def price_for_card(
-        self, set_name: str, number: str, name: str | None = None
+        self,
+        set_name: str,
+        number: str,
+        name: str | None = None,
+        category: int = _CATEGORY_POKEMON,
     ) -> tuple[int, str] | None:
         """Current market price for a card identified by set + collector number.
 
-        Resolves the set's tcgcsv group, finds the product whose number matches,
-        and returns ``(price_cents, tcgplayer_url)`` — the same source the
-        inventory uses. Returns None if the set/product/price can't be resolved.
-        The URL lets the caller store it so future refreshes join by product id.
+        Resolves the set's tcgcsv group (in the given category — 3 English, 85
+        Japanese), finds the product whose number matches, and returns
+        ``(price_cents, tcgplayer_url)``. Returns None if the set/product/price
+        can't be resolved. The URL lets the caller store it so future refreshes
+        join by product id.
         """
-        from types import SimpleNamespace
-
-        group_id = self._group_id(SimpleNamespace(set_code=None, set_name=set_name))
+        group_id = self._resolve_group(set_name, None, category)
         if group_id is None:
             return None
         want = _norm_number(number)
-        prices = self._prices_for_group(group_id)
-        for product_id, prod_number, url in self._products_for_group(group_id):
+        prices = self._prices_for_group(category, group_id)
+        for product_id, prod_number, url in self._products_for_group(
+            category, group_id
+        ):
             if _norm_number(prod_number) == want:
                 cents = prices.get(product_id)
                 if cents is not None:
                     return cents, url
         return None
 
-    def _products_for_group(self, group_id: int) -> list[tuple[int, str, str]]:
-        if group_id not in self._product_cache:
-            data = self._fetch(
-                f"{_BASE_URL}/{_CATEGORY_POKEMON}/{group_id}/products"
-            )
+    def _products_for_group(
+        self, category: int, group_id: int
+    ) -> list[tuple[int, str, str]]:
+        key = (category, group_id)
+        if key not in self._product_cache:
+            data = self._fetch(f"{_BASE_URL}/{category}/{group_id}/products")
             products: list[tuple[int, str, str]] = []
             for row in _results(data):
                 pid = row.get("productId")
@@ -136,23 +153,24 @@ class TcgcsvProvider:
                     if ext.get("name") == "Number":
                         number = ext.get("value") or ""
                 products.append((pid, number, row.get("url") or ""))
-            self._product_cache[group_id] = products
-        return self._product_cache[group_id]
+            self._product_cache[key] = products
+        return self._product_cache[key]
 
     def quotes_for(self, items: list[Item]) -> list[PriceQuote]:
-        # Group items by their resolved tcgcsv group so each price file is
+        # Group items by their (category, resolved group) so each price file is
         # downloaded at most once.
-        by_group: dict[int, list[tuple[Item, int]]] = {}
+        by_group: dict[tuple[int, int], list[tuple[Item, int]]] = {}
         for item in items:
             product_id = self._product_id(item)
+            category = self._category_for(item)
             group_id = self._group_id(item)
             if product_id is None or group_id is None:
                 continue
-            by_group.setdefault(group_id, []).append((item, product_id))
+            by_group.setdefault((category, group_id), []).append((item, product_id))
 
         quotes: list[PriceQuote] = []
-        for group_id, entries in by_group.items():
-            prices = self._prices_for_group(group_id)
+        for (category, group_id), entries in by_group.items():
+            prices = self._prices_for_group(category, group_id)
             for item, product_id in entries:
                 cents = prices.get(product_id)
                 if cents is not None:
@@ -169,15 +187,22 @@ class TcgcsvProvider:
         return int(match.group(1)) if match else None
 
     def _group_id(self, item: Item) -> int | None:
-        index = self._groups()
+        return self._resolve_group(
+            item.set_name, item.set_code, self._category_for(item)
+        )
+
+    def _resolve_group(
+        self, set_name: str | None, set_code: str | None, category: int
+    ) -> int | None:
+        index, candidates = self._groups(category)
         # 1. Exact (normalized) match on set_code then set_name.
-        for key in (item.set_code, item.set_name):
+        for key in (set_code, set_name):
             if key:
                 group_id = index.get(_norm(key))
                 if group_id is not None:
                     return group_id
         # 1b. Known promo-set aliases (pokemontcg.io vs tcgcsv naming).
-        alias = _PROMO_SET_ALIASES.get(_norm(item.set_name))
+        alias = _PROMO_SET_ALIASES.get(_norm(set_name))
         if alias:
             group_id = index.get(_norm(alias))
             if group_id is not None:
@@ -186,11 +211,11 @@ class TcgcsvProvider:
         #    ("Journey Together" vs tcgcsv's "SV09: Journey Together"), so pick
         #    the best fuzzy match. A substring hit is treated as a strong match.
         best_gid, best_score = None, 0.0
-        for key in (item.set_name, item.set_code):
+        for key in (set_name, set_code):
             nkey = _norm(key)
             if len(nkey) < 3:
                 continue
-            for cand_norm, gid in self._group_candidates:
+            for cand_norm, gid in candidates:
                 score = difflib.SequenceMatcher(None, nkey, cand_norm).ratio()
                 if len(nkey) >= 4 and (nkey in cand_norm or cand_norm in nkey):
                     score = max(score, 0.9)
@@ -198,9 +223,11 @@ class TcgcsvProvider:
                     best_gid, best_score = gid, score
         return best_gid if best_score >= _FUZZY_THRESHOLD else None
 
-    def _groups(self) -> dict[str, int]:
-        if self._group_index is None:
-            data = self._fetch(f"{_BASE_URL}/{_CATEGORY_POKEMON}/groups")
+    def _groups(
+        self, category: int
+    ) -> tuple[dict[str, int], list[tuple[str, int]]]:
+        if category not in self._group_cache:
+            data = self._fetch(f"{_BASE_URL}/{category}/groups")
             index: dict[str, int] = {}
             candidates: list[tuple[str, int]] = []
             for grp in _results(data):
@@ -219,13 +246,13 @@ class TcgcsvProvider:
                     if norm:
                         index.setdefault(norm, gid)
                         candidates.append((norm, gid))
-            self._group_index = index
-            self._group_candidates = candidates
-        return self._group_index
+            self._group_cache[category] = (index, candidates)
+        return self._group_cache[category]
 
-    def _prices_for_group(self, group_id: int) -> dict[int, int]:
-        if group_id not in self._price_cache:
-            data = self._fetch(f"{_BASE_URL}/{_CATEGORY_POKEMON}/{group_id}/prices")
+    def _prices_for_group(self, category: int, group_id: int) -> dict[int, int]:
+        key = (category, group_id)
+        if key not in self._price_cache:
+            data = self._fetch(f"{_BASE_URL}/{category}/{group_id}/prices")
             prices: dict[int, int] = {}
             for row in _results(data):
                 pid = row.get("productId")
@@ -235,8 +262,8 @@ class TcgcsvProvider:
                 cents = round(float(market) * 100)
                 # A product may list several sub-types; keep the highest market.
                 prices[pid] = max(prices.get(pid, 0), cents)
-            self._price_cache[group_id] = prices
-        return self._price_cache[group_id]
+            self._price_cache[key] = prices
+        return self._price_cache[key]
 
 
 def _results(data) -> list:

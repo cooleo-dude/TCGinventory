@@ -473,3 +473,16 @@ _Template for new entries:_
 - **Consequences:** Names are English/romaji, not Japanese script (fine for a
   US inventory app; Japanese names could be layered in from TCGdex later).
   Phase 2 (JP pricing) now just parameterizes TcgcsvProvider to category 85.
+
+### 2026-07-14 — Japanese cards Phase 2: JP pricing via tcgcsv category 85
+- **Decision:** Make `TcgcsvProvider` category-aware so it prices both English
+  (category 3) and Japanese (category 85) cards. Caches are keyed by category;
+  `_category_for(item)` selects by `item.language`; `_resolve_group` and
+  `price_for_card(..., category=)` take the category. The transaction
+  price-on-pick passes 85 for Japanese picks.
+- **Context / why:** The JP catalog was pulled from tcgcsv cat 85, so a card's
+  stored set name matches the tcgcsv group name exactly — group resolution is
+  trivial, no set-code bridge needed. One provider, one code path, both markets.
+- **Consequences:** JP items priced-on-pick get a TCGplayer JP product URL, so
+  the daily refresh joins them by product id like English. Prices are USD market
+  (≈ NM). Verified live.
