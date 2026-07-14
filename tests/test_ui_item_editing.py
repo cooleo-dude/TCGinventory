@@ -74,6 +74,32 @@ def test_inventory_review_filter(app, conn):
     view.deleteLater()
 
 
+def test_inventory_graded_filter(app, conn):
+    from tcginventory.domain.enums import GradingCompany
+    from tcginventory.ui.views.inventory import InventoryView
+
+    r1 = buy(TransactionService(conn), "Pikachu", 100, 200, "2026-01-01")
+    buy(TransactionService(conn), "Charizard", 100, 200, "2026-01-02")
+    items = ItemRepository(conn)
+    it = items.get(r1.lots[0].item_id)
+    it.is_graded = True
+    it.condition = None
+    it.grading_company = GradingCompany.PSA
+    it.grade = "10"
+    items.update(it)
+    conn.commit()
+
+    view = InventoryView(conn)
+    assert view._proxy.rowCount() == 2  # All
+    view._graded.setCurrentText("Graded")
+    assert view._proxy.rowCount() == 1
+    view._graded.setCurrentText("Singles")
+    assert view._proxy.rowCount() == 1
+    view._graded.setCurrentText("All")
+    assert view._proxy.rowCount() == 2
+    view.deleteLater()
+
+
 def test_item_editor_changes_condition_and_language(app, conn):
     from tcginventory.ui.views.item_editor import ItemEditorDialog
 

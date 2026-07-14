@@ -16,6 +16,7 @@ from PySide6.QtCore import (
     QModelIndex,
     QSortFilterProxyModel,
     Qt,
+    QThread,
     Signal,
 )
 from PySide6.QtWidgets import (
@@ -43,6 +44,7 @@ from tcginventory.data.repositories import (
 )
 from tcginventory.domain.enums import Intent
 from tcginventory.domain.models import PriceSnapshot
+from tcginventory.services import cardimages
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inventory import InventoryRow, InventoryService
 from tcginventory.services.review import without_review_note
@@ -62,6 +64,43 @@ _HISTORY_DAYS = 90
 
 _INTENTS = ["All", "personal", "resale", "ripping", "mixed"]
 _SOLD = ["All", "unsold", "partial", "sold"]
+_GRADED = ["All", "Singles", "Graded"]
+
+
+class _PreviewPrefetchWorker(QThread):
+    """Resolve + warm the on-disk image cache for the grid's rows, off the UI
+    thread, so hovering is instant. Uses its own DB connection (sqlite handles
+    aren't shareable across threads) and emits a ``{lot_id: (card_id, url)}`` map
+    the view then serves hovers from.
+    """
+
+    resolved = Signal(dict)
+
+    def __init__(self, db_file: str, rows: list[tuple[int, str, str, str]]) -> None:
+        super().__init__()
+        self._db_file = db_file
+        self._rows = rows
+
+    def run(self) -> None:  # pragma: no cover - exercised via the UI
+        from tcginventory.data.db import connect
+
+        result: dict[int, tuple[str, str]] = {}
+        try:
+            conn = connect(self._db_file)
+            try:
+                repo = CardCatalogRepository(conn)
+                for lot_id, name, set_name, number in self._rows:
+                    if self.isInterruptionRequested():
+                        break
+                    hit = repo.image_for(name, set_name, number)
+                    if hit:
+                        result[lot_id] = hit
+                        cardimages.ensure_cached(hit[0], hit[1])  # warm disk
+            finally:
+                conn.close()
+        except Exception:
+            pass  # best-effort cache warming; never break the UI
+        self.resolved.emit(result)
 
 
 class _InventoryFilterProxy(QSortFilterProxyModel):
@@ -73,6 +112,7 @@ class _InventoryFilterProxy(QSortFilterProxyModel):
         self._sold = "All"
         self._in_stock_only = False
         self._review_only = False
+        self._graded = "All"  # All | Singles | Graded
 
     def set_text(self, text: str) -> None:
         self._text = text.strip().lower()
@@ -94,8 +134,16 @@ class _InventoryFilterProxy(QSortFilterProxyModel):
         self._review_only = on
         self.invalidateFilter()
 
+    def set_graded(self, mode: str) -> None:
+        self._graded = mode
+        self.invalidateFilter()
+
     def filterAcceptsRow(self, source_row: int, parent: QModelIndex) -> bool:
         row = self.sourceModel().row_at(source_row)
+        if self._graded == "Graded" and not row.item.is_graded:
+            return False
+        if self._graded == "Singles" and row.item.is_graded:
+            return False
         if self._review_only and not row.review:
             return False
         if self._in_stock_only and not row.in_stock:
@@ -123,6 +171,10 @@ class InventoryView(QWidget):
         super().__init__()
         self._conn = conn
         self._service = InventoryService(conn)
+        # lot_id -> (card_id, image_url), populated in the background so hovers
+        # don't re-query the catalog or wait on the network.
+        self._row_image: dict[int, tuple[str, str]] = {}
+        self._prefetch_worker: _PreviewPrefetchWorker | None = None
         self._model = InventoryTableModel(
             on_edit_price=self._set_manual_price,
             on_edit_intent=self._set_lot_intent,
@@ -143,6 +195,10 @@ class InventoryView(QWidget):
         self._sold.addItems(_SOLD)
         self._sold.currentTextChanged.connect(self._proxy.set_sold)
 
+        self._graded = QComboBox()
+        self._graded.addItems(_GRADED)
+        self._graded.currentTextChanged.connect(self._proxy.set_graded)
+
         self._in_stock = QCheckBox("In stock only")
         self._in_stock.toggled.connect(self._proxy.set_in_stock_only)
 
@@ -162,6 +218,8 @@ class InventoryView(QWidget):
         filter_bar.addWidget(self._intent)
         filter_bar.addWidget(QLabel("Sold:"))
         filter_bar.addWidget(self._sold)
+        filter_bar.addWidget(QLabel("Type:"))
+        filter_bar.addWidget(self._graded)
         filter_bar.addWidget(self._in_stock)
         filter_bar.addWidget(self._review_only)
         filter_bar.addWidget(self._delete_btn)
@@ -242,7 +300,36 @@ class InventoryView(QWidget):
         self._table.resizeColumnsToContents()
         self._empty.setVisible(not rows)
         self._table.setVisible(bool(rows))
+        self._prefetch_previews(rows)
         self._on_selection()
+
+    def _db_file(self) -> str | None:
+        """The backing SQLite file, or None for an in-memory DB (tests)."""
+        for _seq, name, file in self._conn.execute("PRAGMA database_list"):
+            if name == "main":
+                return file or None
+        return None
+
+    def _prefetch_previews(self, rows: list[InventoryRow]) -> None:
+        """Warm the card-image cache + resolve each row's image in the
+        background so hovering the grid is instant (no per-hover catalog scan or
+        network fetch)."""
+        db_file = self._db_file()
+        if not db_file or not rows:
+            return
+        if self._prefetch_worker is not None and self._prefetch_worker.isRunning():
+            self._prefetch_worker.requestInterruption()
+        payload = [
+            (r.lot_id, r.item.name, r.item.set_name, r.item.card_number)
+            for r in rows
+        ]
+        worker = _PreviewPrefetchWorker(db_file, payload)
+        worker.resolved.connect(self._on_previews_resolved)
+        self._prefetch_worker = worker
+        worker.start()
+
+    def _on_previews_resolved(self, mapping: dict) -> None:
+        self._row_image = mapping
 
     def _selected_row(self) -> InventoryRow | None:
         indexes = self._table.selectionModel().selectedRows()
@@ -269,9 +356,13 @@ class InventoryView(QWidget):
         if row is None:
             return
         # Card art (kept as the most-recently-viewed once the pointer leaves).
-        res = CardCatalogRepository(self._conn).image_for(
-            row.item.name, row.item.set_name, row.item.card_number
-        )
+        # Prefer the pre-resolved map; fall back to a live lookup only if the
+        # background prefetch hasn't reached this row yet.
+        res = self._row_image.get(row.lot_id)
+        if res is None:
+            res = CardCatalogRepository(self._conn).image_for(
+                row.item.name, row.item.set_name, row.item.card_number
+            )
         self._preview_pane.show_card(*(res if res else (None, None)))
         # Price-history graph for the hovered row (also persists on leave).
         self._set_history_chart(row)

@@ -412,8 +412,14 @@ class PricingService:
     def refresh(
         self, items: list[Item] | None = None, as_of: str | None = None
     ) -> RefreshSummary:
-        """Fetch prices and persist snapshots + current values. Atomic write."""
+        """Fetch prices and persist snapshots + current values. Atomic write.
+
+        Graded cards are skipped: tcgcsv prices the *raw* single, which is the
+        wrong figure for a slab, so we don't record it (their value stays
+        user-maintained, like a reviewed card's).
+        """
         items = items if items is not None else self.items.list_all()
+        items = [i for i in items if not i.is_graded]
         as_of = as_of or now_iso()
         summary = RefreshSummary(as_of=as_of)
 

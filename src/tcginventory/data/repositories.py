@@ -982,10 +982,13 @@ class CardCatalogRepository:
                 pool.setdefault(row["card_id"], row)
 
         # Candidate pool: cards in the same set, same name, and/or same number.
+        # Exact set match (index-backed); containment / fuzzy-named sets still
+        # land in the pool via the name/number gathers below and are handled in
+        # scoring, so this stays correct while avoiding a full-table LIKE scan.
         if want_set:
             gather(
-                "set_name LIKE ? COLLATE NOCASE AND image_small IS NOT NULL",
-                (f"%{set_name.strip()}%",),
+                "set_name = ? COLLATE NOCASE AND image_small IS NOT NULL",
+                (set_name.strip(),),
             )
         if name:
             gather("name = ? COLLATE NOCASE AND image_small IS NOT NULL", (name,))

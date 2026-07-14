@@ -315,6 +315,23 @@ def test_quotes_for_routes_japanese_item_to_category_85(conn):
     assert quotes[0].item_id == item.id and quotes[0].price_cents == 91
 
 
+def test_refresh_skips_graded_cards(conn):
+    """Graded slabs must not be priced from tcgcsv (that's the raw single's
+    price) — no snapshot, no value change."""
+    from tcginventory.domain.enums import GradingCompany
+
+    items = ItemRepository(conn)
+    graded = items.add(
+        _pikachu(is_graded=True, condition=None, grading_company=GradingCompany.PSA,
+                 grade="10")
+    )
+    svc = PricingService(conn, provider=TcgcsvProvider(fetch_json=_fake_fetch))
+    summary = svc.refresh()
+    assert summary.priced == 0
+    assert graded.name not in summary.unmapped  # skipped, not "unmapped"
+    assert PriceSnapshotRepository(conn).history_for_item(graded.id) == []
+
+
 def test_latest_as_of_reports_most_recent_refresh(conn):
     snaps = PriceSnapshotRepository(conn)
     assert snaps.latest_as_of() is None  # never refreshed
