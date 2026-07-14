@@ -883,12 +883,22 @@ class CardCatalogRepository:
             like = f"%{tok}%"
             parts = ["name LIKE ?", "set_name LIKE ?"]
             tok_params = [like, like]
-            if any(ch.isdigit() for ch in tok):
-                # A digit-bearing token might be the collector number, in any of
-                # its forms: full ("SV103/SV122"), head ("SV103"), or
-                # leading-zeros stripped ("5" for "005").
+            if "/" in tok and any(ch.isdigit() for ch in tok):
+                # A full collector number, in any of its forms: full
+                # ("SV103/SV122"), head ("SV103"), or leading-zeros stripped.
                 head = tok.split("/", 1)[0].strip()
                 for form in dict.fromkeys([tok, head, head.lstrip("0") or head]):
+                    parts.append("number = ? COLLATE NOCASE")
+                    tok_params.append(form)
+            elif any(ch.isalpha() for ch in tok):
+                # A lettered token may be a collector-number *prefix* — "SV" and
+                # "SV074" both match "SV074" — so the number can be typed
+                # partially. (A pure word like "Vault" simply matches nothing.)
+                parts.append("number LIKE ? COLLATE NOCASE")
+                tok_params.append(f"{tok}%")
+            elif tok.isdigit():
+                # A bare number matches exactly (not a prefix, so "1" ≠ "10").
+                for form in dict.fromkeys([tok, tok.lstrip("0") or tok]):
                     parts.append("number = ? COLLATE NOCASE")
                     tok_params.append(form)
             clauses.append("(" + " OR ".join(parts) + ")")

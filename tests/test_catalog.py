@@ -83,6 +83,28 @@ def test_search_enriches_with_set_and_number(conn):
         assert (hit.set_name, hit.number) == ("Celebrations", "5"), q
 
 
+def test_search_matches_lettered_number_prefix(conn):
+    from tcginventory.domain.models import CatalogCard
+
+    CardCatalogRepository(conn).replace_all(
+        [
+            CatalogCard(card_id="a", name="Falinks", set_id="s1",
+                        set_name="Shining Fates Shiny Vault", number="SV074"),
+            CatalogCard(card_id="b", name="Falinks", set_id="s2",
+                        set_name="Rebel Clash", number="109"),
+        ],
+        "t",
+    )
+    repo = CardCatalogRepository(conn)
+
+    # A lettered number can be typed partially — "SV", "SV0", "SV074" all narrow.
+    for q in ("Falinks SV", "Falinks SV0", "Falinks SV074"):
+        assert [c.number for c in repo.search(q)] == ["SV074"], q
+    # A bare digit stays exact, so "10" does NOT surface "109".
+    assert repo.search("Falinks 10") == []
+    assert repo.search("Falinks 109")[0].number == "109"
+
+
 def test_full_number_combines_number_with_set_total():
     from tcginventory.domain.models import CatalogCard
 
