@@ -53,6 +53,43 @@ def test_image_for_matches_by_identity(conn):
     assert repo.image_for("Nonexistent Card") is None
 
 
+def test_image_for_keys_on_set_and_number_not_exact_name(conn):
+    """Regression: a human-typed name ("Clefable EX") must resolve to the right
+    printing by set + collector number, never fall through to a wrong-set card
+    that happens to match the name literally."""
+    from tcginventory.domain.models import CatalogCard
+
+    CardCatalogRepository(conn).replace_all(
+        [
+            CatalogCard(
+                card_id="me3-119", name="Mega Clefable ex", set_id="me3",
+                set_name="Perfect Order", number="119",
+                image_small="https://img/me3-119",
+            ),
+            CatalogCard(
+                card_id="ex6-106", name="Clefable ex", set_id="ex6",
+                set_name="FireRed & LeafGreen", number="106",
+                image_small="https://img/ex6-106",
+            ),
+            CatalogCard(
+                card_id="sv3-82", name="Clefable ex", set_id="sv3",
+                set_name="Obsidian Flames", number="82",
+                image_small="https://img/sv3-82",
+            ),
+        ],
+        "t",
+    )
+    repo = CardCatalogRepository(conn)
+
+    # set + number pins the exact printing regardless of the typed name form.
+    for nm in ("Mega Clefable ex", "Clefable EX", "Clefable ex"):
+        assert repo.image_for(nm, "Perfect Order", "119/088")[0] == "me3-119"
+    # number + fuzzy name works even with no set given.
+    assert repo.image_for("Clefable ex", None, "119")[0] == "me3-119"
+    # a bare number with an unrelated name is not trusted → no wrong card.
+    assert repo.image_for("Totally Unrelated", None, "106") is None
+
+
 def test_ensure_cached_fetches_once_then_serves_from_disk(tmp_path, monkeypatch):
     monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
     calls = {"n": 0}

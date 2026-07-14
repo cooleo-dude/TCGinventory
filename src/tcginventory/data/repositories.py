@@ -905,37 +905,72 @@ class CardCatalogRepository:
         set_name: str | None = None,
         number: str | None = None,
     ) -> tuple[str, str] | None:
-        """Best-effort ``(card_id, image_small)`` for a card by identity.
+        """Best-effort ``(card_id, image_small)`` for a card by printed identity.
 
         Used where we hold only the printed identity (inventory rows, given
-        cards) rather than a catalog id. Scores exact-name rows by set-name and
-        collector-number agreement and returns the best row that has an image.
+        cards) rather than a catalog id. A card is uniquely identified by its
+        **set + collector number**, so those dominate; the name is only a fuzzy
+        tiebreaker (catalog names like "Mega Clefable ex" rarely equal what a
+        person types, e.g. "Clefable EX"). A weak match (set-only or name-only)
+        returns ``None`` — better to show no image than the wrong card.
         """
-        if not name:
-            return None
-        rows = self.conn.execute(
-            "SELECT card_id, set_name, number, image_small "
-            "FROM card_catalog WHERE name = ?",
-            (name,),
-        ).fetchall()
 
         def norm_num(value: str | None) -> str:
             head = (value or "").split("/", 1)[0].strip().lower()
             return head.lstrip("0") or head
 
-        want_set = (set_name or "").strip().lower()
         want_num = norm_num(number)
-        best_row, best_score = None, -1
-        for row in rows:
-            if not row["image_small"]:
-                continue
-            score = 0
-            if want_set and (row["set_name"] or "").strip().lower() == want_set:
-                score += 2
-            if want_num and norm_num(row["number"]) == want_num:
-                score += 2
-            if score > best_score:
-                best_row, best_score = row, score
-        if best_row is None:
+        want_set = (set_name or "").strip().lower()
+        want_name = (name or "").strip().lower()
+
+        cols = "SELECT card_id, name, set_name, number, image_small FROM card_catalog"
+        pool: dict[str, sqlite3.Row] = {}
+
+        def gather(where: str, params: tuple) -> None:
+            for row in self.conn.execute(f"{cols} WHERE {where}", params).fetchall():
+                pool.setdefault(row["card_id"], row)
+
+        # Candidate pool: cards in the same set, same name, and/or same
+        # collector number. Each on its own is weak; the scoring below combines
+        # them and the gate demands agreement across two axes.
+        if want_set:
+            gather(
+                "set_name = ? COLLATE NOCASE AND image_small IS NOT NULL",
+                (set_name,),
+            )
+        if name:
+            gather("name = ? COLLATE NOCASE AND image_small IS NOT NULL", (name,))
+        if want_num:
+            gather(
+                "(number = ? OR number = ? OR number = ?) "
+                "AND image_small IS NOT NULL LIMIT 400",
+                ((number or "").strip(), norm_num(number), want_num),
+            )
+        if not pool and name:  # loose fallback when nothing else hit
+            gather(
+                "name LIKE ? AND image_small IS NOT NULL LIMIT 50",
+                (f"%{name.strip()}%",),
+            )
+        if not pool:
             return None
-        return best_row["card_id"], best_row["image_small"]
+
+        best, best_flags, best_score = None, (False, False, False), 0
+        for row in pool.values():
+            num_ok = bool(want_num) and norm_num(row["number"]) == want_num
+            set_ok = bool(want_set) and (
+                row["set_name"] or ""
+            ).strip().lower() == want_set
+            other = (row["name"] or "").strip().lower()
+            name_ok = bool(want_name) and (want_name in other or other in want_name)
+            score = 4 * num_ok + 2 * set_ok + 1 * name_ok
+            if score > best_score:
+                best, best_flags, best_score = row, (num_ok, set_ok, name_ok), score
+
+        # Trust only agreement across two axes: number+set, number+name, or
+        # set+name. A lone number/set/name match is ambiguous → show nothing
+        # rather than risk the wrong card.
+        num_ok, set_ok, name_ok = best_flags
+        strong = (num_ok and (set_ok or name_ok)) or (set_ok and name_ok)
+        if best is not None and strong:
+            return best["card_id"], best["image_small"]
+        return None
