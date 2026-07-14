@@ -867,31 +867,32 @@ class CardCatalogRepository:
     def search(self, query: str, limit: int = 25) -> list[CatalogCard]:
         """Free-text card search that enriches with set + collector number.
 
-        A token containing a ``/`` and a digit (e.g. ``072/159``, ``TG10/TG30``)
-        is treated as the collector number; the rest are matched against name OR
-        set name (all must appear). So ``Pikachu Celebrations 005/025``,
-        ``Pikachu Celebrations`` and ``Pikachu 005/025`` all narrow the match.
+        Every whitespace-separated token must match *somewhere* — the name, the
+        set name, or (if it contains a digit) the collector number. So the
+        tokens can be given in any order and the number may be bare or full:
+        ``Pikachu Celebrations 5``, ``Pikachu 5 Celebrations``,
+        ``Wooloo SV103 Shiny Vault`` and ``Wooloo Shiny Vault SV103/SV122`` all
+        narrow to the right printing.
         """
         query = query.strip()
         if not query:
             return []
-        number = None
-        text_tokens = []
-        for tok in query.split():
-            if "/" in tok and any(ch.isdigit() for ch in tok):
-                number = tok
-            else:
-                text_tokens.append(tok)
 
         clauses, params = [], []
-        for tok in text_tokens:
-            clauses.append("(name LIKE ? OR set_name LIKE ?)")
-            params += [f"%{tok}%", f"%{tok}%"]
-        if number:
-            clauses.append("(number = ? OR number = ?)")
-            params += [number, number.split("/", 1)[0]]
-        if not clauses:
-            return []
+        for tok in query.split():
+            like = f"%{tok}%"
+            parts = ["name LIKE ?", "set_name LIKE ?"]
+            tok_params = [like, like]
+            if any(ch.isdigit() for ch in tok):
+                # A digit-bearing token might be the collector number, in any of
+                # its forms: full ("SV103/SV122"), head ("SV103"), or
+                # leading-zeros stripped ("5" for "005").
+                head = tok.split("/", 1)[0].strip()
+                for form in dict.fromkeys([tok, head, head.lstrip("0") or head]):
+                    parts.append("number = ? COLLATE NOCASE")
+                    tok_params.append(form)
+            clauses.append("(" + " OR ".join(parts) + ")")
+            params += tok_params
 
         rows = self.conn.execute(
             "SELECT * FROM card_catalog WHERE "

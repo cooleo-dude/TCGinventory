@@ -76,6 +76,12 @@ def test_search_enriches_with_set_and_number(conn):
     # partial name still matches (owner prefix).
     assert repo.search("Kilowattrel")[0].name == "Iono's Kilowattrel"
 
+    # Tokens work in ANY order, and the number may be bare (no denominator).
+    for q in ("Pikachu Celebrations 5", "Pikachu 5 Celebrations",
+              "5 Celebrations Pikachu"):
+        (hit,) = repo.search(q)
+        assert (hit.set_name, hit.number) == ("Celebrations", "5"), q
+
 
 def test_full_number_combines_number_with_set_total():
     from tcginventory.domain.models import CatalogCard
