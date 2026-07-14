@@ -192,7 +192,7 @@ def test_incoming_card_renders_and_posts_via_dialog(app, conn):
     # The inline receive row carries the card's fields as editable widgets.
     row = view._receive_rows[0]
     assert row.name.text() == "Blastoise"
-    assert row.cond.currentText() == "NM"
+    assert row.condition.currentText() == "NM"
     assert row.market.value() == 50.0
     assert row.intent.currentText() == "Resale"
 
@@ -220,6 +220,28 @@ def test_ui_give_dialog_sku_lookup(app, conn):
     card, name = dialog.result_card()
     assert name == "Snorlax"
     dialog.deleteLater()
+
+
+def test_removing_a_middle_receive_row_does_not_crash(app, conn):
+    from tcginventory.ui.views.transaction import TransactionView
+
+    view = TransactionView(conn)
+    r0 = view._add_receive_row()
+    view._add_receive_row()
+    r2 = view._add_receive_row()
+    r0.name.setText("first")
+    r2.name.setText("third")
+
+    # Remove the first (not the last) row — used to delete surviving widgets.
+    view._remove_row("in", r0)
+    assert len(view._receive_rows) == 2
+    assert view._in_table.rowCount() == 2
+    # Surviving rows' widgets are still live and correct.
+    assert view._receive_rows[-1].name.text() == "third"
+    # Deleting again still works.
+    view._remove_row("in", r2)
+    assert len(view._receive_rows) == 1
+    view.deleteLater()
 
 
 def test_receive_row_autofills_set_and_number_from_catalog(app, conn):

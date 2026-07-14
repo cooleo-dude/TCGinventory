@@ -4,8 +4,9 @@ One bidirectional screen records every purchase, sale, and trade: cards/cash you
 give on the left, cards/cash you receive on the right. Cards are entered
 **inline** — a ＋ adds an editable row, a per-row ✕ removes it; the receive
 side's Name field autocompletes from the local card catalog and auto-fills
-set/number. Type is inferred live; a card's *value* is derived from the whole
-deal (no per-card agreed value). Submit is blocked until valid.
+set/number. Columns are drag-resizable. Type is inferred live; a card's *value*
+is derived from the whole deal (no per-card agreed value). Submit is blocked
+until valid.
 
 Also supports **edit mode**: pre-loaded from an existing transaction, Submit
 performs an atomic void + re-post via :meth:`TransactionService.edit`.
@@ -19,6 +20,7 @@ from PySide6.QtCore import QDate, QStringListModel, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QCompleter,
     QDoubleSpinBox,
@@ -47,7 +49,9 @@ from tcginventory.domain.enums import (
     Category,
     Condition,
     Direction,
+    GradingCompany,
     Intent,
+    Language,
     TransactionStatus,
 )
 from tcginventory.domain.models import Item
@@ -62,6 +66,17 @@ from tcginventory.services.transactions import (
 )
 from tcginventory.ui.formatting import money, percent
 
+_GIVE_HEADERS = ["Item", "Qty", ""]
+_GIVE_WIDTHS = [280, 55, 30]
+_RECV_HEADERS = [
+    "Name", "Category", "Set", "#", "Language", "Graded", "Condition",
+    "Grading Co.", "Grade", "Cert #", "Market", "Qty", "Intent", "Review",
+    "TCGplayer", "eBay", "Notes", "",
+]
+_RECV_WIDTHS = [
+    150, 85, 100, 55, 65, 55, 80, 90, 55, 85, 85, 45, 85, 55, 120, 100, 130, 30
+]
+
 
 def money_spin() -> QDoubleSpinBox:
     spin = QDoubleSpinBox()
@@ -74,6 +89,19 @@ def money_spin() -> QDoubleSpinBox:
 
 def _cents(spin: QDoubleSpinBox) -> int:
     return round(spin.value() * 100)
+
+
+def _combo(values, *, capitalize: bool = False) -> QComboBox:
+    combo = QComboBox()
+    for v in values:
+        combo.addItem(v.value.capitalize() if capitalize else v.value, v.value)
+    return combo
+
+
+def _select(combo: QComboBox, value: str) -> None:
+    pos = combo.findData(value)
+    if pos >= 0:
+        combo.setCurrentIndex(pos)
 
 
 class _GiveRow:
@@ -95,6 +123,9 @@ class _GiveRow:
         self.qty.valueChanged.connect(lambda *_: on_change())
         self._sync_max()
 
+    def widgets(self) -> list[QWidget]:
+        return [self.combo, self.qty]
+
     def _sync_max(self, *_) -> None:
         i = self.combo.currentIndex()
         if 0 <= i < len(self._sellable):
@@ -107,9 +138,6 @@ class _GiveRow:
         self._sync_max()
         self.qty.setValue(quantity)
 
-    def display_name(self) -> str:
-        return self.combo.currentText().split(" — ")[0]
-
     def to_card(self):
         item_id = self.combo.currentData()
         if item_id is None:
@@ -118,7 +146,7 @@ class _GiveRow:
 
 
 class _ReceiveRow:
-    """Inline row for a card you receive: identity + market value, entered
+    """Inline row for a card you receive: the full card field set, entered
     directly. Name autocompletes from the catalog and fills set/number."""
 
     def __init__(self, conn, completer_model, on_change) -> None:
@@ -136,20 +164,44 @@ class _ReceiveRow:
         self.name.editingFinished.connect(self._autofill)
         self.name.textChanged.connect(lambda *_: on_change())
 
+        self.category = _combo(Category, capitalize=True)
         self.set = QLineEdit()
         self.number = QLineEdit()
-        self.cond = QComboBox()
-        for c in Condition:
-            self.cond.addItem(c.value, c.value)
+        self.language = _combo(Language)
+        self.graded = QCheckBox()
+        self.graded.toggled.connect(self._toggle_graded)
+        self.graded.toggled.connect(lambda *_: on_change())
+        self.condition = _combo(Condition)
+        self.company = _combo(GradingCompany)
+        self.grade = QLineEdit()
+        self.cert = QLineEdit()
         self.market = money_spin()
         self.market.valueChanged.connect(lambda *_: on_change())
         self.qty = QSpinBox()
         self.qty.setMinimum(1)
         self.qty.valueChanged.connect(lambda *_: on_change())
-        self.intent = QComboBox()
-        for intent in Intent:
-            self.intent.addItem(intent.value.capitalize(), intent.value)
-        self.intent.setCurrentIndex(self.intent.findData(Intent.RESALE.value))
+        self.intent = _combo(Intent, capitalize=True)
+        _select(self.intent, Intent.RESALE.value)
+        self.review = QCheckBox()
+        self.tcgplayer = QLineEdit()
+        self.ebay = QLineEdit()
+        self.notes = QLineEdit()
+        self._toggle_graded(False)
+
+    def widgets(self) -> list[QWidget]:
+        return [
+            self.name, self.category, self.set, self.number, self.language,
+            self.graded, self.condition, self.company, self.grade, self.cert,
+            self.market, self.qty, self.intent, self.review, self.tcgplayer,
+            self.ebay, self.notes,
+        ]
+
+    def _toggle_graded(self, graded: bool) -> None:
+        # Condition greys out when graded; grade fields enable (Spec 02).
+        self.condition.setEnabled(not graded)
+        self.company.setEnabled(graded)
+        self.grade.setEnabled(graded)
+        self.cert.setEnabled(graded)
 
     def _autofill(self, *_) -> None:
         name = self.name.text().strip()
@@ -167,34 +219,53 @@ class _ReceiveRow:
     def set_card(self, card: IncomingCard) -> None:
         item = card.item
         self.name.setText(item.name)
+        _select(self.category, item.category.value)
         self.set.setText(item.set_name or "")
         self.number.setText(item.card_number or "")
+        _select(self.language, item.language.value)
+        self.graded.setChecked(item.is_graded)
         if item.condition is not None:
-            idx = self.cond.findData(item.condition.value)
-            if idx >= 0:
-                self.cond.setCurrentIndex(idx)
+            _select(self.condition, item.condition.value)
+        if item.grading_company is not None:
+            _select(self.company, item.grading_company.value)
+        self.grade.setText(item.grade or "")
+        self.cert.setText(item.cert_number or "")
         self.market.setValue(card.market_value_cents / 100)
         self.qty.setValue(card.quantity)
-        idx = self.intent.findData(card.intent.value)
-        if idx >= 0:
-            self.intent.setCurrentIndex(idx)
+        _select(self.intent, card.intent.value)
+        self.review.setChecked(getattr(card, "review", False))
+        self.tcgplayer.setText(item.tcgplayer_url or "")
+        self.ebay.setText(item.ebay_url or "")
+        self.notes.setText(item.notes or "")
 
     def to_card(self):
         name = self.name.text().strip()
         if not name:
             return None
+        graded = self.graded.isChecked()
         item = Item(
             name=name,
-            category=Category.SINGLE,
+            category=Category(self.category.currentData()),
             set_name=self.set.text().strip() or None,
             card_number=self.number.text().strip() or None,
-            condition=Condition(self.cond.currentData()),
+            language=Language(self.language.currentData()),
+            condition=None if graded else Condition(self.condition.currentData()),
+            is_graded=graded,
+            grading_company=(
+                GradingCompany(self.company.currentData()) if graded else None
+            ),
+            grade=(self.grade.text().strip() or None) if graded else None,
+            cert_number=(self.cert.text().strip() or None) if graded else None,
+            tcgplayer_url=self.tcgplayer.text().strip() or None,
+            ebay_url=self.ebay.text().strip() or None,
+            notes=self.notes.text().strip() or None,
         )
         return IncomingCard(
             item=item,
             quantity=self.qty.value(),
             market_value_cents=round(self.market.value() * 100),
             intent=Intent(self.intent.currentData()),
+            review=self.review.isChecked(),
         )
 
 
@@ -258,8 +329,7 @@ class TransactionView(QWidget):
         layout = QVBoxLayout(self)
         layout.addLayout(top)
         layout.addLayout(sides)
-        # The give/receive area occupies the upper half; the lower half is
-        # reserved for a future panel.
+        # Give/receive occupy the upper half; the lower half is reserved.
         layout.addStretch(1)
         layout.addLayout(footer)
 
@@ -273,9 +343,9 @@ class TransactionView(QWidget):
 
     def _build_give_side(self) -> QGroupBox:
         box = QGroupBox("You give (out)")
-        self._out_table = QTableWidget(0, 3)
-        self._out_table.setHorizontalHeaderLabels(["Item", "Qty", ""])
-        _tidy(self._out_table, stretch_col=0)
+        self._out_table = QTableWidget(0, len(_GIVE_HEADERS))
+        self._out_table.setHorizontalHeaderLabels(_GIVE_HEADERS)
+        _tidy(self._out_table, _GIVE_WIDTHS)
 
         add = QPushButton("＋")
         add.setToolTip("Add a card you're giving")
@@ -289,23 +359,21 @@ class TransactionView(QWidget):
         cash_row.addWidget(self._cash_out)
         cash_row.addStretch(1)
 
-        header = QHBoxLayout()
-        header.addWidget(add)
-        header.addStretch(1)
+        head = QHBoxLayout()
+        head.addWidget(add)
+        head.addStretch(1)
 
         layout = QVBoxLayout(box)
-        layout.addLayout(header)
+        layout.addLayout(head)
         layout.addWidget(self._out_table)
         layout.addLayout(cash_row)
         return box
 
     def _build_receive_side(self) -> QGroupBox:
         box = QGroupBox("You receive (in)")
-        self._in_table = QTableWidget(0, 8)
-        self._in_table.setHorizontalHeaderLabels(
-            ["Name", "Set", "#", "Cond/Grade", "Market", "Qty", "Intent", ""]
-        )
-        _tidy(self._in_table, stretch_col=0)
+        self._in_table = QTableWidget(0, len(_RECV_HEADERS))
+        self._in_table.setHorizontalHeaderLabels(_RECV_HEADERS)
+        _tidy(self._in_table, _RECV_WIDTHS)
 
         add = QPushButton("＋")
         add.setToolTip("Add a card you're receiving")
@@ -319,17 +387,41 @@ class TransactionView(QWidget):
         cash_row.addWidget(self._cash_in)
         cash_row.addStretch(1)
 
-        header = QHBoxLayout()
-        header.addWidget(add)
-        header.addStretch(1)
+        head = QHBoxLayout()
+        head.addWidget(add)
+        head.addStretch(1)
 
         layout = QVBoxLayout(box)
-        layout.addLayout(header)
+        layout.addLayout(head)
         layout.addWidget(self._in_table)
         layout.addLayout(cash_row)
         return box
 
-    # -- add / remove -------------------------------------------------------
+    # -- add / remove (insert/remove rows — never a full-table rebuild, which
+    #    would destroy surviving rows' cell widgets on shrink) --------------
+
+    def _place_row(self, table, index, row, kind) -> None:
+        for col, widget in enumerate(row.widgets()):
+            table.setCellWidget(index, col, widget)
+        table.setCellWidget(
+            index, table.columnCount() - 1, self._delete_button(kind, row)
+        )
+
+    def _delete_button(self, kind: str, row) -> QPushButton:
+        btn = QPushButton("✕")
+        btn.setFixedWidth(28)
+        btn.setToolTip("Remove this card")
+        btn.clicked.connect(lambda _=False, r=row, k=kind: self._remove_row(k, r))
+        return btn
+
+    def _remove_row(self, kind: str, row) -> None:
+        rows = self._give_rows if kind == "out" else self._receive_rows
+        table = self._out_table if kind == "out" else self._in_table
+        if row in rows:
+            index = rows.index(row)
+            rows.remove(row)
+            table.removeRow(index)  # keeps other rows' widgets intact
+        self._update_summary()
 
     def _add_give_row(self) -> _GiveRow | None:
         sellable = self._inventory.sellable_items()
@@ -340,14 +432,20 @@ class TransactionView(QWidget):
             return None
         row = _GiveRow(sellable, self._update_summary)
         self._give_rows.append(row)
-        self._rebuild_tables()
+        index = self._out_table.rowCount()
+        self._out_table.insertRow(index)
+        self._place_row(self._out_table, index, row, "out")
+        self._update_summary()
         return row
 
     def _add_receive_row(self) -> _ReceiveRow:
         row = _ReceiveRow(self._conn, self._catalog_model, self._update_summary)
         self._receive_rows.append(row)
-        self._rebuild_tables()
+        index = self._in_table.rowCount()
+        self._in_table.insertRow(index)
+        self._place_row(self._in_table, index, row, "in")
         row.name.setFocus()
+        self._update_summary()
         return row
 
     # Test/programmatic API (used by the lifecycle tests).
@@ -362,39 +460,7 @@ class TransactionView(QWidget):
         row.set_card(card)
         self._update_summary()
 
-    def _remove_at(self, kind: str, index: int) -> None:
-        rows = self._give_rows if kind == "out" else self._receive_rows
-        if 0 <= index < len(rows):
-            del rows[index]
-        self._rebuild_tables()
-
-    def _delete_button(self, kind: str, index: int) -> QPushButton:
-        btn = QPushButton("✕")
-        btn.setFixedWidth(28)
-        btn.setToolTip("Remove this card")
-        btn.clicked.connect(lambda _=False, k=kind, i=index: self._remove_at(k, i))
-        return btn
-
-    # -- rendering ----------------------------------------------------------
-
-    def _rebuild_tables(self) -> None:
-        self._out_table.setRowCount(len(self._give_rows))
-        for r, row in enumerate(self._give_rows):
-            self._out_table.setCellWidget(r, 0, row.combo)
-            self._out_table.setCellWidget(r, 1, row.qty)
-            self._out_table.setCellWidget(r, 2, self._delete_button("out", r))
-
-        self._in_table.setRowCount(len(self._receive_rows))
-        for r, row in enumerate(self._receive_rows):
-            self._in_table.setCellWidget(r, 0, row.name)
-            self._in_table.setCellWidget(r, 1, row.set)
-            self._in_table.setCellWidget(r, 2, row.number)
-            self._in_table.setCellWidget(r, 3, row.cond)
-            self._in_table.setCellWidget(r, 4, row.market)
-            self._in_table.setCellWidget(r, 5, row.qty)
-            self._in_table.setCellWidget(r, 6, row.intent)
-            self._in_table.setCellWidget(r, 7, self._delete_button("in", r))
-        self._update_summary()
+    # -- request / summary --------------------------------------------------
 
     def build_request(self) -> TransactionRequest:
         outgoing = [c for c in (r.to_card() for r in self._give_rows) if c]
@@ -487,13 +553,15 @@ class TransactionView(QWidget):
     def clear(self) -> None:
         self._give_rows.clear()
         self._receive_rows.clear()
+        self._out_table.setRowCount(0)
+        self._in_table.setRowCount(0)
         self._cash_in.setValue(0.0)
         self._cash_out.setValue(0.0)
         self._counterparty.clear()
         self._reference.clear()
         self._edit_id = None
         self._edit_banner.setText("")
-        self._rebuild_tables()
+        self._update_summary()
 
     def refresh(self) -> None:
         self._update_summary()
@@ -541,16 +609,17 @@ class TransactionView(QWidget):
                         intent=intent,
                     )
                 )
-        self._rebuild_tables()
         return True
 
 
-def _tidy(table: QTableWidget, stretch_col: int = 0) -> None:
+def _tidy(table: QTableWidget, widths: list[int]) -> None:
     table.verticalHeader().setVisible(False)
     table.setSelectionBehavior(QAbstractItemView.SelectRows)
     table.setSelectionMode(QAbstractItemView.SingleSelection)
     table.setEditTriggers(QAbstractItemView.NoEditTriggers)
     header = table.horizontalHeader()
     header.setStretchLastSection(False)
-    header.setSectionResizeMode(QHeaderView.ResizeToContents)
-    header.setSectionResizeMode(stretch_col, QHeaderView.Stretch)
+    header.setSectionResizeMode(QHeaderView.Interactive)  # drag to resize
+    header.setMinimumSectionSize(22)
+    for col, width in enumerate(widths):
+        table.setColumnWidth(col, width)
