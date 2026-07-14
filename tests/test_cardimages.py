@@ -91,6 +91,13 @@ def test_image_for_keys_on_set_and_number_not_exact_name(conn):
                 set_name="Unified Minds", number="79a",
                 printed_total=236, image_small="https://img/sm11-79a",
             ),
+            # Frosmoth #43 in the base set "Mega Evolution" — a decoy for a
+            # "Mega Evolution Promo" query (the base set name is a substring).
+            CatalogCard(
+                card_id="me1-43", name="Frosmoth", set_id="me1",
+                set_name="Mega Evolution", number="43",
+                printed_total=132, image_small="https://img/me1-43",
+            ),
         ],
         "t",
     )
@@ -118,6 +125,12 @@ def test_image_for_keys_on_set_and_number_not_exact_name(conn):
     assert repo.image_for("Mewtwo", "Trading Card Game Classic", "014/034") is None
     # …but when the set genuinely is the promo set, it resolves.
     assert repo.image_for("Mewtwo", "Wizards Black Star Promos", "14")[0] == "basep-14"
+
+    # A containment set match ("Mega Evolution" ⊂ "Mega Evolution Promo") must
+    # NOT borrow a different card by number alone — Rowlet is not Frosmoth.
+    assert repo.image_for("Rowlet", "Mega Evolution Promo", "043") is None
+    # The exact base set still resolves its own card.
+    assert repo.image_for("Frosmoth", "Mega Evolution", "43")[0] == "me1-43"
 
 
 def test_ensure_cached_fetches_once_then_serves_from_disk(tmp_path, monkeypatch):

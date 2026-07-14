@@ -151,6 +151,15 @@ class _GiveRow:
                 label += f" ({item.set_name})"
             label += f" — {available} on hand"
             self.combo.addItem(label, item.id)
+        # Type-to-search over our resale cards (the picker only lists resale
+        # lots); the arrow still opens the full dropdown.
+        self.combo.setEditable(True)
+        self.combo.setInsertPolicy(QComboBox.NoInsert)
+        self.combo.lineEdit().setPlaceholderText("Type to search your resale cards…")
+        completer = self.combo.completer()
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
         install_hover_preview(self.combo, self._hover_card, sink)
         # Hovering an item in the open dropdown previews it in the pane too.
         self.combo.view().setMouseTracking(True)
@@ -295,13 +304,12 @@ class _ReceiveRow:
         ]
 
     def _maybe_flag_review(self) -> None:
-        """A condition worse than NM (and ungraded) auto-marks the card for
-        review — its value warrants a manual look."""
-        if (
-            not self.graded.isChecked()
-            and self.condition.currentData() != Condition.NM.value
-        ):
-            self.review.setChecked(True)
+        """Sync review to condition (ungraded): a worse-than-NM condition marks
+        the card for review; switching back to NM clears it."""
+        if not self.graded.isChecked():
+            self.review.setChecked(
+                self.condition.currentData() != Condition.NM.value
+            )
 
     def _toggle_graded(self, graded: bool) -> None:
         # Condition greys out when graded; grade fields enable (Spec 02).
@@ -476,7 +484,7 @@ class TransactionView(QWidget):
         sides = QHBoxLayout(sides_widget)
         sides.setContentsMargins(0, 0, 0, 0)
         sides.addWidget(self._build_give_side(), 1)
-        sides.addWidget(self._build_receive_side(), 3)
+        sides.addWidget(self._build_receive_side(), 4)
 
         self._summary = QLabel("")
         self._summary.setTextFormat(Qt.RichText)
@@ -501,10 +509,10 @@ class TransactionView(QWidget):
         preview_box.addWidget(QLabel("Card preview"))
         preview_box.addWidget(self._preview_pane)
         preview_box.addStretch(1)
-        # Preview column mirrors the give:receive 1:3 split, so the card image
-        # is as wide as the "You give" panel.
+        # Preview column mirrors the give:receive 1:4 split, so the card image
+        # is as wide as the "You give" panel (and shrinks with it).
         lower.addLayout(preview_box, 1)
-        lower.addStretch(3)
+        lower.addStretch(4)
 
         # Drag the divider to grow the give/receive tables vertically (or the
         # preview area).

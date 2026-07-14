@@ -157,11 +157,12 @@ class ItemEditorDialog(QDialog):
             combo.setCurrentIndex(pos)
 
     def _maybe_flag_review(self) -> None:
-        if (
-            not self._graded.isChecked()
-            and self._condition.currentData() != Condition.NM.value
-        ):
-            self._review.setChecked(True)
+        # Sync review to condition (ungraded): worse-than-NM marks for review,
+        # switching back to NM clears it.
+        if not self._graded.isChecked():
+            self._review.setChecked(
+                self._condition.currentData() != Condition.NM.value
+            )
 
     def _toggle_graded(self, graded: bool) -> None:
         # Condition greys out when graded; grade fields enable (Spec 02).

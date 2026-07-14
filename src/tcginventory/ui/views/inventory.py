@@ -212,7 +212,7 @@ class InventoryView(QWidget):
         preview_box.addWidget(self._preview_pane)
         preview_box.addStretch(1)
         bottom_layout.addLayout(preview_box, 1)
-        bottom_layout.addWidget(self._chart_view, 3)
+        bottom_layout.addWidget(self._chart_view, 4)
         splitter.addWidget(bottom)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)

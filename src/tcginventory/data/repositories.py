@@ -994,6 +994,10 @@ class CardCatalogRepository:
 
         flat_name = flat(name)
 
+        def set_exact(row: sqlite3.Row) -> bool:
+            other = (row["set_name"] or "").strip().lower()
+            return bool(want_set) and other == want_set
+
         def set_ok(row: sqlite3.Row) -> bool:
             other = (row["set_name"] or "").strip().lower()
             return bool(want_set) and bool(other) and (
@@ -1009,15 +1013,24 @@ class CardCatalogRepository:
                 flat_name in other or other in flat_name
             )
 
-        # 1) If the named set is actually in the catalog, trust it: pick the
-        #    best card *within* that set (number, then name).
+        # 1) A set was named. An *exact* set match is trustworthy on its own, so
+        #    the best card in that set (by number, then name) wins. A looser
+        #    containment match ("Mega Evolution" ⊂ "Mega Evolution Promo") is
+        #    NOT trustworthy alone — it must also agree on name AND number, or
+        #    we'd borrow a different set's same-numbered card.
         if want_set:
-            in_set = [
-                r for r in pool.values() if set_ok(r) and (num_ok(r) or name_ok(r))
+            exact = [
+                r for r in pool.values() if set_exact(r) and (num_ok(r) or name_ok(r))
             ]
-            if in_set:
-                best = max(in_set, key=lambda r: (num_ok(r), name_ok(r)))
+            if exact:
+                best = max(exact, key=lambda r: (num_ok(r), name_ok(r)))
                 return best["card_id"], best["image_small"]
+            fuzzy = [
+                r for r in pool.values()
+                if set_ok(r) and name_ok(r) and num_ok(r)
+            ]
+            if fuzzy:
+                return fuzzy[0]["card_id"], fuzzy[0]["image_small"]
             # Set given but unknown to the catalog (alt-art / special naming) →
             # fall through to a number+name match.
 

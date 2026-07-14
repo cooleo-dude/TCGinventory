@@ -93,6 +93,9 @@ def test_item_editor_non_nm_condition_auto_marks_review(app, conn):
     assert not dlg._review.isChecked()
     dlg._select(dlg._condition, Condition.MP.value)  # worse than NM
     assert dlg._review.isChecked()  # auto-flagged
+    dlg._select(dlg._condition, Condition.NM.value)  # back to NM
+    assert not dlg._review.isChecked()  # auto-cleared
+    dlg._select(dlg._condition, Condition.HP.value)
     dlg._save()
     assert ItemRepository(conn).get(item_id).review is True
     dlg.deleteLater()

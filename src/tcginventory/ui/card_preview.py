@@ -124,7 +124,7 @@ class CardImagePane(QLabel):
     """
 
     _PLACEHOLDER = "Hover a card\nto preview"
-    _MIN_W = 190  # px — smallest card width
+    _MIN_W = 110  # px — smallest card width (lets a narrow column shrink it)
     _MAX_W = 460  # px — cap so the card tracks its column (≈ the give panel)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -132,7 +132,7 @@ class CardImagePane(QLabel):
         self.setAlignment(
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
         )
-        self.setMinimumSize(190, 265)
+        self.setMinimumSize(110, 155)
         self.setStyleSheet(
             "border:1px solid #504945; border-radius:4px; "
             "background:#1d2021; color:#a89984;"
