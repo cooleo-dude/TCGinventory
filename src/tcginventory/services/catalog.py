@@ -50,14 +50,16 @@ def update_catalog(
 
     sets = _as_list(fetch(f"{_RAW}/sets/en.json"))
     set_meta = {
-        s["id"]: (s.get("name"), s.get("ptcgoCode"))
+        s["id"]: (s.get("name"), s.get("ptcgoCode"), s.get("printedTotal"))
         for s in sets
         if isinstance(s, dict) and s.get("id")
     }
     total = len(set_meta)
 
     cards: list[CatalogCard] = []
-    for i, (set_id, (set_name, set_code)) in enumerate(set_meta.items()):
+    for i, (set_id, (set_name, set_code, printed_total)) in enumerate(
+        set_meta.items()
+    ):
         try:
             entries = _as_list(fetch(f"{_RAW}/cards/en/{set_id}.json"))
         except Exception as exc:
@@ -78,6 +80,7 @@ def update_catalog(
                     rarity=c.get("rarity"),
                     supertype=c.get("supertype"),
                     image_small=(c.get("images") or {}).get("small"),
+                    printed_total=printed_total,
                 )
             )
         if on_progress is not None:

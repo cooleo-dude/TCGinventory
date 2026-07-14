@@ -6,8 +6,10 @@ from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.services.catalog import update_catalog
 
 _SETS = [
-    {"id": "sv9", "name": "Journey Together", "ptcgoCode": "JTG"},
-    {"id": "cel25", "name": "Celebrations", "ptcgoCode": "CEL"},
+    {"id": "sv9", "name": "Journey Together", "ptcgoCode": "JTG",
+     "printedTotal": 159},
+    {"id": "cel25", "name": "Celebrations", "ptcgoCode": "CEL",
+     "printedTotal": 25},
 ]
 _CARDS = {
     "sv9": [
@@ -73,6 +75,29 @@ def test_search_enriches_with_set_and_number(conn):
     assert len(repo.search("Pikachu")) == 2
     # partial name still matches (owner prefix).
     assert repo.search("Kilowattrel")[0].name == "Iono's Kilowattrel"
+
+
+def test_full_number_combines_number_with_set_total():
+    from tcginventory.domain.models import CatalogCard
+
+    def card(number, total):
+        return CatalogCard(card_id="x", name="n", set_id="s", number=number,
+                           printed_total=total)
+
+    # plain numerator → numeric denominator; lettered numerator keeps its prefix.
+    assert card("124", 142).full_number == "124/142"
+    assert card("SV103", 122).full_number == "SV103/SV122"
+    assert card("TG10", 30).full_number == "TG10/TG30"
+    # unknown total or missing number degrade gracefully.
+    assert card("124", None).full_number == "124"
+    assert card(None, 142).full_number is None
+
+
+def test_update_catalog_stores_printed_total(conn):
+    update_catalog(conn, fetch_json=_fake_fetch)
+    (kilo,) = CardCatalogRepository(conn).find_by_name("Iono's Kilowattrel")
+    assert kilo.printed_total == 159
+    assert kilo.full_number == "163/159"
 
 
 def test_update_catalog_replaces_and_skips_bad_set(conn):

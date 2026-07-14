@@ -163,6 +163,23 @@ class CatalogCard:
     rarity: str | None = None
     supertype: str | None = None
     image_small: str | None = None
+    printed_total: int | None = None
+
+    @property
+    def full_number(self) -> str | None:
+        """Collector number with the set's denominator, matching the numerator's
+        prefix — e.g. "SV103" + total 122 → "SV103/SV122"; "124" + 142 →
+        "124/142". Falls back to the bare number when the total is unknown."""
+        if not self.number:
+            return None
+        if not self.printed_total:
+            return self.number
+        prefix = ""
+        for ch in self.number:
+            if ch.isdigit():
+                break
+            prefix += ch
+        return f"{self.number}/{prefix}{self.printed_total}"
 
 
 @dataclass

@@ -814,6 +814,7 @@ class CardCatalogRepository:
             rarity=row["rarity"],
             supertype=row["supertype"],
             image_small=row["image_small"],
+            printed_total=row["printed_total"],
         )
 
     def count(self) -> int:
@@ -826,13 +827,14 @@ class CardCatalogRepository:
             """
             INSERT OR REPLACE INTO card_catalog (
                 card_id, name, set_id, set_name, set_code, number, rarity,
-                supertype, image_small, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                supertype, image_small, printed_total, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """,
             [
                 (
                     c.card_id, c.name, c.set_id, c.set_name, c.set_code,
-                    c.number, c.rarity, c.supertype, c.image_small, updated_at,
+                    c.number, c.rarity, c.supertype, c.image_small,
+                    c.printed_total, updated_at,
                 )
                 for c in cards
             ],

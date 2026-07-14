@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QStyledItemDelegate,
     QTableWidget,
     QVBoxLayout,
     QWidget,
@@ -185,6 +186,25 @@ class _GiveRow:
         return OutgoingCard(item_id=item_id, quantity=self.qty.value())
 
 
+class _MatchDelegate(QStyledItemDelegate):
+    """Render autofill popup rows with the full "name · set #number" label.
+
+    QCompleter shows *and* inserts its completion role, so the completion text
+    is kept as the clean card name (what lands in the Name field) while this
+    delegate paints the richer label from a separate role in the popup only.
+    """
+
+    def __init__(self, label_role: int, parent=None) -> None:
+        super().__init__(parent)
+        self._label_role = label_role
+
+    def initStyleOption(self, option, index) -> None:
+        super().initStyleOption(option, index)
+        label = index.data(self._label_role)
+        if label:
+            option.text = label
+
+
 class _ReceiveRow:
     """Inline row for a card you receive: the full card field set, entered
     directly. Name autocompletes from the catalog and fills set/number."""
@@ -217,6 +237,8 @@ class _ReceiveRow:
         popup = self._completer.popup()
         popup.setMouseTracking(True)
         popup.entered.connect(self._on_match_hover)
+        self._match_delegate = _MatchDelegate(self._LABEL_ROLE, popup)
+        popup.setItemDelegate(self._match_delegate)
         install_hover_preview(popup, lambda: None, self._sink)  # clear on leave
 
         self.category = _combo(Category, capitalize=True)
@@ -261,6 +283,7 @@ class _ReceiveRow:
         self.cert.setEnabled(graded)
 
     _CARD_ID_ROLE = Qt.UserRole + 1
+    _LABEL_ROLE = Qt.UserRole + 2
 
     def _on_name_edited(self, text: str) -> None:
         """Query the catalog as the user types (when Auto Detect is on) and show
@@ -271,11 +294,14 @@ class _ReceiveRow:
         self._matches = {c.card_id: c for c in matches}
         self._search_model.clear()
         for card in matches:
-            label = f"{card.name}  ·  {card.set_name or '?'}  #{card.number or '?'}"
-            # The popup shows the completion text (the label with set + number);
-            # picking replaces the field with the clean name via apply_catalog_card.
-            item = QStandardItem(label)
+            # Completion text is the clean name (what QCompleter inserts into the
+            # Name field); the popup shows the fuller label via _MatchDelegate.
+            item = QStandardItem(card.name)
+            label = (
+                f"{card.name}  ·  {card.set_name or '?'}  #{card.full_number or '?'}"
+            )
             item.setData(card.card_id, self._CARD_ID_ROLE)
+            item.setData(label, self._LABEL_ROLE)
             self._search_model.appendRow(item)
         if matches:
             self._completer.complete()
@@ -309,7 +335,7 @@ class _ReceiveRow:
         self._image_url = getattr(card, "image_small", None)
         self.name.setText(card.name)
         self.set.setText(card.set_name or "")
-        self.number.setText(card.number or "")
+        self.number.setText(card.full_number or card.number or "")
         _select(self.category, Category.SINGLE.value)  # catalog cards are singles
         _select(self.language, Language.EN.value)  # dataset is English
         # Keep the chosen card showing in the pane after the popup closes.
