@@ -457,3 +457,19 @@ _Template for new entries:_
   and/or set-code+number (search now also matches `set_code`). Phase 2 = JP
   pricing via tcgcsv category 85 (link by set code → number). Phase 3 = romaji /
   cross-language search.
+
+### 2026-07-14 — Japanese catalog source: tcgcsv cat 85, not TCGdex
+- **Decision:** Source the Japanese catalog + images from **tcgcsv "Pokemon
+  Japan" (category 85)** instead of TCGdex. Products with a collector Number
+  become catalog cards (sealed boxes/packs skipped); `image_small` = the
+  TCGplayer-CDN `imageUrl`; set_code = group abbreviation; card_id = `jp-<pid>`.
+- **Context / why:** TCGdex JP was thin (~6.2k cards, ~53% with images) and used
+  Japanese-script names. tcgcsv cat 85 has 448 sets → **~27k cards (more than
+  English), 100% with images**, **English/romaji names** (searchable without a
+  Japanese IME), full collector numbers, and it's the *same* source we'll use for
+  JP pricing — so catalog + images + prices come from one bulk free feed.
+  (Evaluated artofpkm.com per request: it's a Rails art gallery — no API, signed
+  ephemeral ActiveStorage images, ~70 sets — not usable as a data source.)
+- **Consequences:** Names are English/romaji, not Japanese script (fine for a
+  US inventory app; Japanese names could be layered in from TCGdex later).
+  Phase 2 (JP pricing) now just parameterizes TcgcsvProvider to category 85.

@@ -1,10 +1,15 @@
-"""Local reference card catalog, pulled from the open pokemontcg.io dataset.
+"""Local reference card catalog.
 
-The dataset (github.com/PokemonTCG/pokemon-tcg-data) publishes an index of sets
-plus one JSON file of cards per set — bulk, versioned, no API key or rate
-limits. We pull it into the ``card_catalog`` table so name autocomplete and
-set/number auto-fill work offline; "update" just re-pulls. Qt-free; network I/O
-is injected so it's testable offline.
+* **English** comes from the open pokemontcg.io dataset
+  (github.com/PokemonTCG/pokemon-tcg-data) — an index of sets plus one JSON file
+  of cards per set.
+* **Japanese** comes from tcgcsv.com's "Pokemon Japan" category (85): groups
+  (sets) and one products file per group, with English/romaji names, collector
+  numbers, TCGplayer-CDN images, and — later — the same source for pricing.
+
+Both are bulk, no API key, cached into the ``card_catalog`` table (tagged by
+language) so autocomplete / set-number / image lookup work offline; "update"
+re-pulls. Qt-free; network I/O is injected so it's testable offline.
 """
 
 from __future__ import annotations
@@ -18,7 +23,8 @@ from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.domain.models import CatalogCard
 
 _RAW = "https://raw.githubusercontent.com/PokemonTCG/pokemon-tcg-data/master"
-_TCGDEX_JA = "https://api.tcgdex.net/v2/ja"
+_TCGCSV = "https://tcgcsv.com/tcgplayer"
+_CATEGORY_JP = 85  # tcgcsv "Pokemon Japan"
 
 
 def _fetch_json(url: str):  # pragma: no cover - real network
@@ -27,6 +33,21 @@ def _fetch_json(url: str):  # pragma: no cover - real network
     resp = httpx.get(url, timeout=30.0, headers={"User-Agent": "TCGinventory/1.0"})
     resp.raise_for_status()
     return resp.json()
+
+
+def _fetch_tcgcsv(url: str):  # pragma: no cover - real network
+    import httpx
+
+    # tcgcsv sits behind Cloudflare; use a browser-like UA.
+    resp = httpx.get(url, timeout=30.0, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _results(data) -> list:
+    if isinstance(data, dict):
+        return data.get("results") or []
+    return data or []
 
 
 @dataclass
@@ -104,45 +125,53 @@ def update_catalog_ja(
     fetch_json: Callable[[str], object] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> CatalogUpdateSummary:
-    """Pull the Japanese card catalog from TCGdex into ``card_catalog``.
+    """Pull the Japanese card catalog from tcgcsv (category 85) into the catalog.
 
-    Mirrors :func:`update_catalog` but for Japanese: the set index then each
-    set's card list (id / localId / name / image). Only the JP rows are
-    replaced. A set that fails to fetch is recorded and skipped.
+    Fetches the group (set) index, then one products file per group. Products
+    without a collector Number (sealed boxes/packs) are skipped so this stays a
+    card catalog. Only JP rows are replaced; a group that fails is recorded and
+    skipped.
     """
-    fetch = fetch_json or _fetch_json
+    fetch = fetch_json or _fetch_tcgcsv
     summary = CatalogUpdateSummary()
 
-    sets = _as_list(fetch(f"{_TCGDEX_JA}/sets"))
-    set_ids = [s["id"] for s in sets if isinstance(s, dict) and s.get("id")]
-    total = len(set_ids)
+    groups = [
+        g
+        for g in _results(fetch(f"{_TCGCSV}/{_CATEGORY_JP}/groups"))
+        if isinstance(g, dict) and g.get("groupId") is not None
+    ]
+    total = len(groups)
 
     cards: list[CatalogCard] = []
-    for i, set_id in enumerate(set_ids):
+    for i, grp in enumerate(groups):
+        gid = grp["groupId"]
         try:
-            detail = fetch(f"{_TCGDEX_JA}/sets/{set_id}")
+            products = _results(fetch(f"{_TCGCSV}/{_CATEGORY_JP}/{gid}/products"))
         except Exception as exc:
-            summary.errors.append(f"{set_id}: {exc}")
+            summary.errors.append(f"{gid}: {exc}")
             continue
-        set_name = detail.get("name") if isinstance(detail, dict) else None
-        printed_total = None
-        if isinstance(detail, dict) and isinstance(detail.get("cardCount"), dict):
-            printed_total = detail["cardCount"].get("official")
-        for c in detail.get("cards") or []:
-            card_id = c.get("id")
-            if not card_id:
+        set_name = grp.get("name")
+        set_code = grp.get("abbreviation") or None
+        for p in products:
+            pid = p.get("productId")
+            if pid is None:
                 continue
-            image = c.get("image")
+            ext = {
+                e.get("name"): e.get("value") for e in (p.get("extendedData") or [])
+            }
+            number = ext.get("Number")
+            if not number:
+                continue  # sealed product / no collector number → not a card
             cards.append(
                 CatalogCard(
-                    card_id=card_id,
-                    name=c.get("name") or "",
-                    set_id=set_id,
+                    card_id=f"jp-{pid}",  # namespaced so it can't clash with EN ids
+                    name=p.get("name") or "",
+                    set_id=str(gid),
                     set_name=set_name,
-                    set_code=set_id,  # TCGdex set id doubles as the set code
-                    number=c.get("localId"),
-                    image_small=f"{image}/low.png" if image else None,
-                    printed_total=printed_total,
+                    set_code=set_code,
+                    number=number,
+                    rarity=ext.get("Rarity"),
+                    image_small=p.get("imageUrl") or None,
                     language="JP",
                 )
             )

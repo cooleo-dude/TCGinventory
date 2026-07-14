@@ -5,25 +5,27 @@ from __future__ import annotations
 from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.services.catalog import update_catalog, update_catalog_ja
 
-_JA_SETS = [{"id": "SV1a", "name": "トリプレットビート"}]
-_JA_DETAIL = {
-    "SV1a": {
-        "name": "トリプレットビート",
-        "cardCount": {"official": 73, "total": 103},
-        "cards": [
-            {"id": "SV1a-001", "localId": "001", "name": "トロピウス",
-             "image": "https://assets.tcgdex.net/ja/SV/SV1a/001"},
-            {"id": "SV1a-002", "localId": "002", "name": "ノコッチ", "image": None},
-        ],
-    }
+# tcgcsv category 85 ("Pokemon Japan") shape.
+_JA_GROUPS = {"results": [{"groupId": 24711, "name": "M5: Abyss Eye",
+                           "abbreviation": "M5"}]}
+_JA_PRODUCTS = {
+    "results": [
+        {"productId": 694993, "name": "Energy Switch",
+         "imageUrl": "https://tcgplayer-cdn.tcgplayer.com/product/694993_200w.jpg",
+         "extendedData": [{"name": "Number", "value": "103/081"},
+                          {"name": "Rarity", "value": "Super Rare"}]},
+        # A sealed product (no collector Number) must be skipped.
+        {"productId": 999, "name": "Abyss Eye Booster Box",
+         "imageUrl": "https://x/999.jpg", "extendedData": []},
+    ]
 }
 
 
 def _fake_ja_fetch(url: str):
-    if url.endswith("/sets"):
-        return _JA_SETS
-    if url.endswith("/sets/SV1a"):
-        return _JA_DETAIL["SV1a"]
+    if url.endswith("/85/groups"):
+        return _JA_GROUPS
+    if url.endswith("/85/24711/products"):
+        return _JA_PRODUCTS
     raise AssertionError(f"unexpected url: {url}")
 
 _SETS = [
@@ -151,27 +153,30 @@ def test_update_catalog_stores_printed_total(conn):
 
 def test_update_catalog_ja_pulls_japanese(conn):
     summary = update_catalog_ja(conn, fetch_json=_fake_ja_fetch)
-    assert summary.sets == 1 and summary.cards == 2 and summary.errors == []
+    # Two products, but the sealed booster box (no Number) is skipped.
+    assert summary.sets == 1 and summary.cards == 1 and summary.errors == []
     repo = CardCatalogRepository(conn)
-    (tropius,) = repo.find_by_name("トロピウス")
-    assert tropius.language == "JP"
-    assert tropius.number == "001"
-    assert tropius.set_code == "SV1a"  # TCGdex set id doubles as the code
-    assert tropius.printed_total == 73
-    assert tropius.image_small == "https://assets.tcgdex.net/ja/SV/SV1a/001/low.png"
+    (card,) = repo.find_by_name("Energy Switch")
+    assert card.language == "JP"
+    assert card.number == "103/081"
+    assert card.set_code == "M5"
+    assert card.rarity == "Super Rare"
+    assert card.image_small.endswith("/product/694993_200w.jpg")
 
 
 def test_en_and_ja_catalogs_coexist(conn):
     update_catalog(conn, fetch_json=_fake_fetch)  # 3 EN cards
-    update_catalog_ja(conn, fetch_json=_fake_ja_fetch)  # 2 JP cards
+    update_catalog_ja(conn, fetch_json=_fake_ja_fetch)  # 1 JP card (box skipped)
     repo = CardCatalogRepository(conn)
-    assert repo.count() == 5
+    assert repo.count() == 4
     # A JP re-pull must not wipe the English rows (replace_for_language).
     update_catalog_ja(conn, fetch_json=_fake_ja_fetch)
-    assert repo.count() == 5
-    # Japanese cards are reachable by their set code + number.
-    (hit,) = repo.search("SV1a 001")
-    assert hit.name == "トロピウス"
+    assert repo.count() == 4
+    # The Japanese card is reachable and tagged JP.
+    (hit,) = repo.search("Energy Switch")
+    assert hit.language == "JP"
+    # …and by set code + full number.
+    assert repo.search("M5 103/081")[0].name == "Energy Switch"
 
 
 def test_update_catalog_replaces_and_skips_bad_set(conn):
