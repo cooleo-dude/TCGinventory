@@ -66,7 +66,7 @@ from tcginventory.services.transactions import (
     TransactionRequest,
     TransactionService,
 )
-from tcginventory.ui.card_preview import card_preview, install_hover_preview
+from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
 from tcginventory.ui.formatting import money, percent
 
 _GIVE_HEADERS = ["Item", "Qty", ""]
@@ -133,7 +133,9 @@ class _PriceLookupWorker(QThread):
 class _GiveRow:
     """Inline row for a card you give: pick an on-hand card + quantity."""
 
-    def __init__(self, conn, sellable: list[tuple[Item, int]], on_change) -> None:
+    def __init__(
+        self, conn, sellable: list[tuple[Item, int]], on_change, sink=None
+    ) -> None:
         self._conn = conn
         self._sellable = sellable
         self.combo = QComboBox()
@@ -143,7 +145,7 @@ class _GiveRow:
                 label += f" ({item.set_name})"
             label += f" — {available} on hand"
             self.combo.addItem(label, item.id)
-        install_hover_preview(self.combo, self._hover_card)
+        install_hover_preview(self.combo, self._hover_card, sink)
         self.qty = QSpinBox()
         self.qty.setMinimum(1)
         self.qty.setButtonSymbols(QAbstractSpinBox.NoButtons)
@@ -187,11 +189,12 @@ class _ReceiveRow:
     """Inline row for a card you receive: the full card field set, entered
     directly. Name autocompletes from the catalog and fills set/number."""
 
-    def __init__(self, conn, is_auto, on_change, on_pick=None) -> None:
+    def __init__(self, conn, is_auto, on_change, on_pick=None, sink=None) -> None:
         self._conn = conn
         self._is_auto = is_auto  # () -> bool : is "Auto Detect Card" on?
         self._on_change = on_change
         self._on_pick = on_pick  # (row, CatalogCard) -> None : after a pick
+        self._sink = sink  # preview target (Transaction's lower-left pane)
         self._matches: dict[str, object] = {}
         self._card_id: str | None = None  # set when a catalog card is applied
         self._image_url: str | None = None
@@ -208,12 +211,13 @@ class _ReceiveRow:
         self._completer.activated[QModelIndex].connect(self._pick_match)
         self.name.textChanged.connect(lambda *_: on_change())
         # Hover the Name field to preview the card image; hover a match in the
-        # autofill popup to preview it before picking.
-        install_hover_preview(self.name, self._hover_card)
+        # autofill popup to preview it before picking. Previews land in the
+        # Transaction window's lower-left pane (the sink).
+        install_hover_preview(self.name, self._hover_card, self._sink)
         popup = self._completer.popup()
         popup.setMouseTracking(True)
         popup.entered.connect(self._on_match_hover)
-        install_hover_preview(popup, lambda: None)  # clear preview on popup leave
+        install_hover_preview(popup, lambda: None, self._sink)  # clear on leave
 
         self.category = _combo(Category, capitalize=True)
         self.set = QLineEdit()
@@ -279,8 +283,8 @@ class _ReceiveRow:
     def _on_match_hover(self, index: QModelIndex) -> None:
         """Preview a card image as the pointer moves over autofill matches."""
         card = self._matches.get(index.data(self._CARD_ID_ROLE))
-        if card is not None and getattr(card, "image_small", None):
-            card_preview().request(card.card_id, card.image_small)
+        if card is not None and self._sink is not None:
+            self._sink.show_card(card.card_id, getattr(card, "image_small", None))
 
     def _hover_card(self) -> tuple[str, str] | None:
         if self._card_id and self._image_url:
@@ -293,7 +297,6 @@ class _ReceiveRow:
         )
 
     def _pick_match(self, index: QModelIndex) -> None:
-        card_preview().clear()
         card = self._matches.get(index.data(self._CARD_ID_ROLE))
         if card is not None:
             self.apply_catalog_card(card)
@@ -309,6 +312,9 @@ class _ReceiveRow:
         self.number.setText(card.number or "")
         _select(self.category, Category.SINGLE.value)  # catalog cards are singles
         _select(self.language, Language.EN.value)  # dataset is English
+        # Keep the chosen card showing in the pane after the popup closes.
+        if self._sink is not None and self._image_url:
+            self._sink.show_card(self._card_id, self._image_url)
         self._on_change()
 
     def set_card(self, card: IncomingCard) -> None:
@@ -378,6 +384,9 @@ class TransactionView(QWidget):
         self._receive_rows: list[_ReceiveRow] = []
         self._price_workers: list[_PriceLookupWorker] = []
         self._edit_id: int | None = None
+        # Hovering any card in this window shows its image here, not at the
+        # cursor (parked in the reserved lower-left region).
+        self._preview_pane = CardImagePane()
 
         self._badge = QLabel("—")
         self._badge.setStyleSheet("font-size: 16px; font-weight: 700;")
@@ -421,11 +430,20 @@ class TransactionView(QWidget):
         footer.addWidget(clear_btn)
         footer.addWidget(self._submit)
 
+        # Lower half: card-image preview parked in the left corner; the rest is
+        # reserved for later.
+        lower = QHBoxLayout()
+        preview_box = QVBoxLayout()
+        preview_box.addWidget(QLabel("Card preview"))
+        preview_box.addWidget(self._preview_pane)
+        preview_box.addStretch(1)
+        lower.addLayout(preview_box)
+        lower.addStretch(1)
+
         layout = QVBoxLayout(self)
         layout.addLayout(top)
         layout.addLayout(sides)
-        # Give/receive occupy the upper half; the lower half is reserved.
-        layout.addStretch(1)
+        layout.addLayout(lower, 1)
         layout.addLayout(footer)
 
         self._update_summary()
@@ -550,7 +568,9 @@ class TransactionView(QWidget):
                 self, "Nothing to give", "No sellable cards on hand."
             )
             return None
-        row = _GiveRow(self._conn, sellable, self._update_summary)
+        row = _GiveRow(
+            self._conn, sellable, self._update_summary, sink=self._preview_pane
+        )
         self._give_rows.append(row)
         index = self._out_table.rowCount()
         self._out_table.insertRow(index)
@@ -564,6 +584,7 @@ class TransactionView(QWidget):
             lambda: self._auto_detect_cb.isChecked(),
             self._update_summary,
             on_pick=self._request_price,
+            sink=self._preview_pane,
         )
         self._receive_rows.append(row)
         index = self._in_table.rowCount()

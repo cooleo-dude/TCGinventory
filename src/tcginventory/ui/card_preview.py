@@ -1,9 +1,14 @@
-"""A single floating card-image preview shown while hovering a card anywhere.
+"""Card-image previews shown while hovering a card.
 
-One shared frameless popup is reused across the app (autofill matches, the
-inventory grid, transaction rows). Callers hand it a catalog ``card_id`` + image
-URL and a screen position; the image is fetched+cached lazily on first use
-(:mod:`tcginventory.services.cardimages`) and served from disk after. A fetch
+Two sinks share the same lazy fetch+cache (:mod:`tcginventory.services.cardimages`):
+
+* :class:`CardImagePreview` — a shared frameless popup that follows the cursor
+  (used by the inventory grid).
+* :class:`CardImagePane` — an embeddable fixed region (the Transaction window
+  parks one in its lower-left corner).
+
+Both expose ``show_card(card_id, url)`` / ``clear()``; :func:`install_hover_preview`
+wires a widget's hover to whichever sink you pass (default: the popup). A fetch
 that finishes after the pointer has moved on is discarded (guarded by the
 currently-requested id).
 """
@@ -13,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QThread, Signal
-from PySide6.QtGui import QCursor, QPixmap
+from PySide6.QtGui import QCursor, QPixmap, QResizeEvent
 from PySide6.QtWidgets import QLabel, QWidget
 
 from tcginventory.services import cardimages
@@ -49,6 +54,10 @@ class CardImagePreview(QObject):
         self._current: str | None = None
         self._pos = QPoint()
         self._workers: list[_FetchWorker] = []
+
+    def show_card(self, card_id: str | None, url: str | None) -> None:
+        """Sink interface: show at the current cursor position."""
+        self.request(card_id, url)
 
     def request(
         self, card_id: str | None, url: str | None, pos: QPoint | None = None
@@ -105,11 +114,84 @@ class CardImagePreview(QObject):
             pass  # C++ QLabel already deleted (app teardown)
 
 
+class CardImagePane(QLabel):
+    """An embeddable fixed preview region (e.g. Transaction lower-left corner).
+
+    Same lazy fetch+cache as the popup, but painted into this widget and scaled
+    to fit; shows a placeholder when empty.
+    """
+
+    _PLACEHOLDER = "Hover a card\nto preview"
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumSize(190, 265)
+        self.setStyleSheet(
+            "border:1px solid #504945; border-radius:4px; "
+            "background:#1d2021; color:#a89984;"
+        )
+        self._current: str | None = None
+        self._pixmap: QPixmap | None = None
+        self._workers: list[_FetchWorker] = []
+        self.setText(self._PLACEHOLDER)
+
+    def show_card(self, card_id: str | None, url: str | None) -> None:
+        if not card_id or not url:
+            self.clear()
+            return
+        self._current = card_id
+        path = cardimages.cache_path(card_id)
+        if path.exists():
+            self._set_image(card_id, str(path))
+            return
+        worker = _FetchWorker(card_id, url)
+        worker.done.connect(self._on_fetched)
+        worker.finished.connect(lambda w=worker: self._retire(w))
+        self._workers.append(worker)
+        worker.start()
+
+    def clear(self) -> None:
+        self._current = None
+        self._pixmap = None
+        self.setText(self._PLACEHOLDER)  # replaces any pixmap
+
+    def _retire(self, worker: _FetchWorker) -> None:
+        if worker in self._workers:
+            self._workers.remove(worker)
+
+    def _on_fetched(self, card_id: str, path: str) -> None:
+        if path and card_id == self._current:
+            self._set_image(card_id, path)
+
+    def _set_image(self, card_id: str, path: str) -> None:
+        pix = QPixmap(path)
+        if pix.isNull() or card_id != self._current:
+            return
+        self._pixmap = pix
+        self._rescale()
+
+    def _rescale(self) -> None:
+        if self._pixmap is None:
+            return
+        self.setPixmap(
+            self._pixmap.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._rescale()
+
+
 _instance: CardImagePreview | None = None
 
 
 def card_preview() -> CardImagePreview:
-    """The shared preview singleton (created on first use)."""
+    """The shared floating-popup singleton (created on first use)."""
     global _instance
     if _instance is None:
         _instance = CardImagePreview()
@@ -121,30 +203,38 @@ class _HoverFilter(QObject):
 
     ``resolve()`` returns the ``(card_id, image_url)`` to preview, or ``None``
     for no image (the pointer entering a container with no single card).
+    ``sink`` is the preview target; defaults to the shared floating popup.
     """
 
     def __init__(
-        self, widget: QWidget, resolve: Callable[[], tuple[str, str] | None]
+        self,
+        widget: QWidget,
+        resolve: Callable[[], tuple[str, str] | None],
+        sink: object | None = None,
     ) -> None:
         super().__init__(widget)
         self._resolve = resolve
+        self._sink = sink
         widget.installEventFilter(self)
+
+    def _target(self):
+        return self._sink or card_preview()
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         etype = event.type()
         if etype == QEvent.Type.Enter:
             res = self._resolve()
-            if res:
-                card_preview().request(res[0], res[1], QCursor.pos())
-            else:
-                card_preview().clear()
+            self._target().show_card(*(res if res else (None, None)))
         elif etype in (QEvent.Type.Leave, QEvent.Type.Hide):
-            card_preview().clear()
+            self._target().clear()
         return False
 
 
 def install_hover_preview(
-    widget: QWidget, resolve: Callable[[], tuple[str, str] | None]
+    widget: QWidget,
+    resolve: Callable[[], tuple[str, str] | None],
+    sink: object | None = None,
 ) -> _HoverFilter:
-    """Wire ``widget`` so hovering it shows the card image from ``resolve()``."""
-    return _HoverFilter(widget, resolve)
+    """Wire ``widget`` so hovering shows the card from ``resolve()`` in ``sink``
+    (default: the shared floating popup)."""
+    return _HoverFilter(widget, resolve, sink)
