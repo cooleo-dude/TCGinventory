@@ -419,3 +419,22 @@ _Template for new entries:_
 - **Alternatives considered:** …
 - **Consequences:** …
 ```
+
+### 2026-07-14 — Card images: lazy on-disk cache, not a bulk pre-download
+- **Decision:** Store each catalog card's `images.small` URL (from the
+  pokemontcg.io dataset, migration 0009 + `card_catalog.image_small`) and fetch
+  the PNG on demand the first time a card is hovered, caching it under
+  `<data_dir>/card_images/<card_id>.png`. A single shared frameless preview
+  popup (`ui/card_preview.py`) shows it while hovering autofill matches, the
+  inventory grid, and transaction rows.
+- **Context / why:** Measured `images.small` at ~165–170 KB each; caching all
+  ~20k cards would be ~3.3 GB on disk + a 20k-request download. You only ever
+  touch a small subset, so lazy caching gives the same "hover shows a local
+  image" result for tens of MB.
+- **Alternatives considered:** Bulk pre-download (rejected: 3.3 GB, hammers the
+  free CDN); storing image bytes as SQLite BLOBs (rejected: bloats the DB and
+  slows every query — files on disk keyed by card_id instead).
+- **Consequences:** First hover of a new card needs network (fetched off the UI
+  thread; silently skipped when offline); afterwards it's instant from disk.
+  Inventory/given cards resolve their image by identity via
+  `CardCatalogRepository.image_for`.

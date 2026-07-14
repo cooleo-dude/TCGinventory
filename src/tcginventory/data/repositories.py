@@ -813,6 +813,7 @@ class CardCatalogRepository:
             number=row["number"],
             rarity=row["rarity"],
             supertype=row["supertype"],
+            image_small=row["image_small"],
         )
 
     def count(self) -> int:
@@ -825,13 +826,13 @@ class CardCatalogRepository:
             """
             INSERT OR REPLACE INTO card_catalog (
                 card_id, name, set_id, set_name, set_code, number, rarity,
-                supertype, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?)
+                supertype, image_small, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)
             """,
             [
                 (
                     c.card_id, c.name, c.set_id, c.set_name, c.set_code,
-                    c.number, c.rarity, c.supertype, updated_at,
+                    c.number, c.rarity, c.supertype, c.image_small, updated_at,
                 )
                 for c in cards
             ],
@@ -897,3 +898,44 @@ class CardCatalogRepository:
             (*params, limit),
         ).fetchall()
         return [self._to_model(r) for r in rows]
+
+    def image_for(
+        self,
+        name: str | None,
+        set_name: str | None = None,
+        number: str | None = None,
+    ) -> tuple[str, str] | None:
+        """Best-effort ``(card_id, image_small)`` for a card by identity.
+
+        Used where we hold only the printed identity (inventory rows, given
+        cards) rather than a catalog id. Scores exact-name rows by set-name and
+        collector-number agreement and returns the best row that has an image.
+        """
+        if not name:
+            return None
+        rows = self.conn.execute(
+            "SELECT card_id, set_name, number, image_small "
+            "FROM card_catalog WHERE name = ?",
+            (name,),
+        ).fetchall()
+
+        def norm_num(value: str | None) -> str:
+            head = (value or "").split("/", 1)[0].strip().lower()
+            return head.lstrip("0") or head
+
+        want_set = (set_name or "").strip().lower()
+        want_num = norm_num(number)
+        best_row, best_score = None, -1
+        for row in rows:
+            if not row["image_small"]:
+                continue
+            score = 0
+            if want_set and (row["set_name"] or "").strip().lower() == want_set:
+                score += 2
+            if want_num and norm_num(row["number"]) == want_num:
+                score += 2
+            if score > best_score:
+                best_row, best_score = row, score
+        if best_row is None:
+            return None
+        return best_row["card_id"], best_row["image_small"]

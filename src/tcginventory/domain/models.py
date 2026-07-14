@@ -162,6 +162,7 @@ class CatalogCard:
     number: str | None = None
     rarity: str | None = None
     supertype: str | None = None
+    image_small: str | None = None
 
 
 @dataclass

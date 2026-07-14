@@ -66,6 +66,7 @@ from tcginventory.services.transactions import (
     TransactionRequest,
     TransactionService,
 )
+from tcginventory.ui.card_preview import card_preview, install_hover_preview
 from tcginventory.ui.formatting import money, percent
 
 _GIVE_HEADERS = ["Item", "Qty", ""]
@@ -132,7 +133,8 @@ class _PriceLookupWorker(QThread):
 class _GiveRow:
     """Inline row for a card you give: pick an on-hand card + quantity."""
 
-    def __init__(self, sellable: list[tuple[Item, int]], on_change) -> None:
+    def __init__(self, conn, sellable: list[tuple[Item, int]], on_change) -> None:
+        self._conn = conn
         self._sellable = sellable
         self.combo = QComboBox()
         for item, available in sellable:
@@ -141,6 +143,7 @@ class _GiveRow:
                 label += f" ({item.set_name})"
             label += f" — {available} on hand"
             self.combo.addItem(label, item.id)
+        install_hover_preview(self.combo, self._hover_card)
         self.qty = QSpinBox()
         self.qty.setMinimum(1)
         self.qty.setButtonSymbols(QAbstractSpinBox.NoButtons)
@@ -151,6 +154,15 @@ class _GiveRow:
 
     def widgets(self) -> list[QWidget]:
         return [self.combo, self.qty]
+
+    def _hover_card(self) -> tuple[str, str] | None:
+        i = self.combo.currentIndex()
+        if not (0 <= i < len(self._sellable)):
+            return None
+        item = self._sellable[i][0]
+        return CardCatalogRepository(self._conn).image_for(
+            item.name, item.set_name, item.card_number
+        )
 
     def _sync_max(self, *_) -> None:
         i = self.combo.currentIndex()
@@ -181,6 +193,8 @@ class _ReceiveRow:
         self._on_change = on_change
         self._on_pick = on_pick  # (row, CatalogCard) -> None : after a pick
         self._matches: dict[str, object] = {}
+        self._card_id: str | None = None  # set when a catalog card is applied
+        self._image_url: str | None = None
 
         self.name = QLineEdit()
         self.name.setPlaceholderText("e.g. Pikachu Celebrations 005/025")
@@ -193,6 +207,13 @@ class _ReceiveRow:
         self.name.textEdited.connect(self._on_name_edited)
         self._completer.activated[QModelIndex].connect(self._pick_match)
         self.name.textChanged.connect(lambda *_: on_change())
+        # Hover the Name field to preview the card image; hover a match in the
+        # autofill popup to preview it before picking.
+        install_hover_preview(self.name, self._hover_card)
+        popup = self._completer.popup()
+        popup.setMouseTracking(True)
+        popup.entered.connect(self._on_match_hover)
+        install_hover_preview(popup, lambda: None)  # clear preview on popup leave
 
         self.category = _combo(Category, capitalize=True)
         self.set = QLineEdit()
@@ -255,7 +276,24 @@ class _ReceiveRow:
         if matches:
             self._completer.complete()
 
+    def _on_match_hover(self, index: QModelIndex) -> None:
+        """Preview a card image as the pointer moves over autofill matches."""
+        card = self._matches.get(index.data(self._CARD_ID_ROLE))
+        if card is not None and getattr(card, "image_small", None):
+            card_preview().request(card.card_id, card.image_small)
+
+    def _hover_card(self) -> tuple[str, str] | None:
+        if self._card_id and self._image_url:
+            return self._card_id, self._image_url
+        name = self.name.text().strip()
+        if not name:
+            return None
+        return CardCatalogRepository(self._conn).image_for(
+            name, self.set.text().strip(), self.number.text().strip()
+        )
+
     def _pick_match(self, index: QModelIndex) -> None:
+        card_preview().clear()
         card = self._matches.get(index.data(self._CARD_ID_ROLE))
         if card is not None:
             self.apply_catalog_card(card)
@@ -264,6 +302,8 @@ class _ReceiveRow:
 
     def apply_catalog_card(self, card) -> None:
         """Populate as many fields as possible from a chosen catalog card."""
+        self._card_id = card.card_id
+        self._image_url = getattr(card, "image_small", None)
         self.name.setText(card.name)
         self.set.setText(card.set_name or "")
         self.number.setText(card.number or "")
@@ -510,7 +550,7 @@ class TransactionView(QWidget):
                 self, "Nothing to give", "No sellable cards on hand."
             )
             return None
-        row = _GiveRow(sellable, self._update_summary)
+        row = _GiveRow(self._conn, sellable, self._update_summary)
         self._give_rows.append(row)
         index = self._out_table.rowCount()
         self._out_table.insertRow(index)

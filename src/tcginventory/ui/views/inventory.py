@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from tcginventory.data.db import now_iso
 from tcginventory.data.repositories import (
+    CardCatalogRepository,
     ItemRepository,
     LotRepository,
     PriceSnapshotRepository,
@@ -46,6 +47,7 @@ from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inventory import InventoryRow, InventoryService
 from tcginventory.services.review import without_review_note
 from tcginventory.services.transactions import TransactionService
+from tcginventory.ui.card_preview import card_preview, install_hover_preview
 from tcginventory.ui.charts import HoverChartView
 from tcginventory.ui.models.inventory_model import (
     INTENT_COL,
@@ -165,6 +167,10 @@ class InventoryView(QWidget):
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.doubleClicked.connect(self._open_detail)
         self._table.selectionModel().selectionChanged.connect(self._on_selection)
+        # Hover a row to preview the card image (lazily fetched + cached).
+        self._table.setMouseTracking(True)
+        self._table.entered.connect(self._on_row_hover)
+        install_hover_preview(self._table.viewport(), lambda: None)  # clear on leave
 
         # Review column: amber highlight + inline editor + two-stage button.
         self._review_delegate = ReviewPriceDelegate(
@@ -227,6 +233,20 @@ class InventoryView(QWidget):
         since = (datetime.now(timezone.utc) - timedelta(days=_HISTORY_DAYS)).isoformat()
         history = self._service.prices.history_for_item(row.item.id, since=since)
         self._chart_view.setChart(_history_chart(row, history))
+
+    def _on_row_hover(self, proxy_index: QModelIndex) -> None:
+        row = self._model.row_at(self._proxy.mapToSource(proxy_index).row())
+        res = (
+            CardCatalogRepository(self._conn).image_for(
+                row.item.name, row.item.set_name, row.item.card_number
+            )
+            if row is not None
+            else None
+        )
+        if res:
+            card_preview().request(res[0], res[1])
+        else:
+            card_preview().clear()
 
     def _show_chart_message(self, text: str) -> None:
         chart = QChart()

@@ -77,6 +77,7 @@ def update_catalog(
                     number=c.get("number"),
                     rarity=c.get("rarity"),
                     supertype=c.get("supertype"),
+                    image_small=(c.get("images") or {}).get("small"),
                 )
             )
         if on_progress is not None:
