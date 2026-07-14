@@ -44,6 +44,16 @@ def _norm(text: str | None) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
+def _norm_number(number: str | None) -> str:
+    """Collector number for matching: head before '/', leading zeros stripped.
+
+    e.g. '163/159' -> '163', '074/073' -> '74', '5' -> '5'. tcgcsv products
+    store 'NNN/TTT'; the catalog stores the bare head.
+    """
+    head = (number or "").split("/", 1)[0].strip().lower()
+    return head.lstrip("0") or head
+
+
 @dataclass
 class PriceQuote:
     item_id: int
@@ -69,6 +79,49 @@ class TcgcsvProvider:
         self._group_index: dict[str, int] | None = None
         self._group_candidates: list[tuple[str, int]] = []
         self._price_cache: dict[int, dict[int, int]] = {}
+        self._product_cache: dict[int, list[tuple[int, str, str]]] = {}
+
+    def price_for_card(
+        self, set_name: str, number: str, name: str | None = None
+    ) -> tuple[int, str] | None:
+        """Current market price for a card identified by set + collector number.
+
+        Resolves the set's tcgcsv group, finds the product whose number matches,
+        and returns ``(price_cents, tcgplayer_url)`` — the same source the
+        inventory uses. Returns None if the set/product/price can't be resolved.
+        The URL lets the caller store it so future refreshes join by product id.
+        """
+        from types import SimpleNamespace
+
+        group_id = self._group_id(SimpleNamespace(set_code=None, set_name=set_name))
+        if group_id is None:
+            return None
+        want = _norm_number(number)
+        prices = self._prices_for_group(group_id)
+        for product_id, prod_number, url in self._products_for_group(group_id):
+            if _norm_number(prod_number) == want:
+                cents = prices.get(product_id)
+                if cents is not None:
+                    return cents, url
+        return None
+
+    def _products_for_group(self, group_id: int) -> list[tuple[int, str, str]]:
+        if group_id not in self._product_cache:
+            data = self._fetch(
+                f"{_BASE_URL}/{_CATEGORY_POKEMON}/{group_id}/products"
+            )
+            products: list[tuple[int, str, str]] = []
+            for row in _results(data):
+                pid = row.get("productId")
+                if pid is None:
+                    continue
+                number = ""
+                for ext in row.get("extendedData") or []:
+                    if ext.get("name") == "Number":
+                        number = ext.get("value") or ""
+                products.append((pid, number, row.get("url") or ""))
+            self._product_cache[group_id] = products
+        return self._product_cache[group_id]
 
     def quotes_for(self, items: list[Item]) -> list[PriceQuote]:
         # Group items by their resolved tcgcsv group so each price file is

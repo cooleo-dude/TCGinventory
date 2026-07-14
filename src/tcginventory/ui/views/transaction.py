@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from PySide6.QtCore import QDate, QModelIndex, Qt, Signal
+from PySide6.QtCore import QDate, QModelIndex, Qt, QThread, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -106,6 +106,29 @@ def _select(combo: QComboBox, value: str) -> None:
         combo.setCurrentIndex(pos)
 
 
+class _PriceLookupWorker(QThread):
+    """Fetch a picked card's current tcgcsv market price off the UI thread."""
+
+    done = Signal(object)  # (price_cents, tcgplayer_url) or None
+
+    def __init__(self, set_name: str, number: str, name: str) -> None:
+        super().__init__()
+        self._set = set_name
+        self._number = number
+        self._name = name
+
+    def run(self) -> None:
+        from tcginventory.services.pricing import TcgcsvProvider
+
+        try:
+            result = TcgcsvProvider().price_for_card(
+                self._set, self._number, self._name
+            )
+        except Exception:  # network/parse failure → just skip the auto-price
+            result = None
+        self.done.emit(result)
+
+
 class _GiveRow:
     """Inline row for a card you give: pick an on-hand card + quantity."""
 
@@ -152,10 +175,11 @@ class _ReceiveRow:
     """Inline row for a card you receive: the full card field set, entered
     directly. Name autocompletes from the catalog and fills set/number."""
 
-    def __init__(self, conn, is_auto, on_change) -> None:
+    def __init__(self, conn, is_auto, on_change, on_pick=None) -> None:
         self._conn = conn
         self._is_auto = is_auto  # () -> bool : is "Auto Detect Card" on?
         self._on_change = on_change
+        self._on_pick = on_pick  # (row, CatalogCard) -> None : after a pick
         self._matches: dict[str, object] = {}
 
         self.name = QLineEdit()
@@ -234,6 +258,8 @@ class _ReceiveRow:
         card = self._matches.get(index.data(self._CARD_ID_ROLE))
         if card is not None:
             self.apply_catalog_card(card)
+            if self._on_pick is not None:
+                self._on_pick(self, card)
 
     def apply_catalog_card(self, card) -> None:
         """Populate as many fields as possible from a chosen catalog card."""
@@ -309,6 +335,7 @@ class TransactionView(QWidget):
 
         self._give_rows: list[_GiveRow] = []
         self._receive_rows: list[_ReceiveRow] = []
+        self._price_workers: list[_PriceLookupWorker] = []
         self._edit_id: int | None = None
 
         self._badge = QLabel("—")
@@ -411,9 +438,10 @@ class TransactionView(QWidget):
         self._auto_detect_cb.setChecked(
             bool(config.get_pref("receive_auto_detect", True))
         )
-        self._auto_detect_cb.toggled.connect(
-            lambda on: config.set_pref("receive_auto_detect", on)
-        )
+        self._auto_detect_cb.toggled.connect(self._on_auto_detect_toggled)
+        # Hint when Auto Detect is on but the catalog hasn't been pulled yet.
+        self._catalog_hint = QLabel("")
+        self._catalog_hint.setStyleSheet("color: #b26a00;")
 
         self._cash_in = money_spin()
         self._cash_in.valueChanged.connect(self._update_summary)
@@ -424,6 +452,7 @@ class TransactionView(QWidget):
 
         head = QHBoxLayout()
         head.addWidget(add)
+        head.addWidget(self._catalog_hint)
         head.addStretch(1)
         head.addWidget(self._auto_detect_cb)  # top-right of the receive panel
 
@@ -431,7 +460,21 @@ class TransactionView(QWidget):
         layout.addLayout(head)
         layout.addWidget(self._in_table)
         layout.addLayout(cash_row)
+        self._update_catalog_hint()
         return box
+
+    def _on_auto_detect_toggled(self, on: bool) -> None:
+        config.set_pref("receive_auto_detect", on)
+        self._update_catalog_hint()
+
+    def _update_catalog_hint(self) -> None:
+        empty = CardCatalogRepository(self._conn).count() == 0
+        if self._auto_detect_cb.isChecked() and empty:
+            self._catalog_hint.setText(
+                "Card database is empty — run File ▸ Update card database"
+            )
+        else:
+            self._catalog_hint.setText("")
 
     # -- add / remove (insert/remove rows — never a full-table rebuild, which
     #    would destroy surviving rows' cell widgets on shrink) --------------
@@ -479,6 +522,7 @@ class TransactionView(QWidget):
             self._conn,
             lambda: self._auto_detect_cb.isChecked(),
             self._update_summary,
+            on_pick=self._request_price,
         )
         self._receive_rows.append(row)
         index = self._in_table.rowCount()
@@ -487,6 +531,29 @@ class TransactionView(QWidget):
         row.name.setFocus()
         self._update_summary()
         return row
+
+    def _request_price(self, row, card) -> None:
+        """After a catalog pick, fetch the card's current tcgcsv market price
+        (off-thread) and fill Market — the same source the inventory uses."""
+        if not card.set_name or not card.number:
+            return
+        worker = _PriceLookupWorker(card.set_name, card.number, card.name)
+        worker.done.connect(
+            lambda result, r=row, w=worker: self._on_price_ready(r, w, result)
+        )
+        self._price_workers.append(worker)
+        worker.start()
+
+    def _on_price_ready(self, row, worker, result) -> None:
+        if worker in self._price_workers:
+            self._price_workers.remove(worker)
+        if result is None or row not in self._receive_rows:
+            return
+        cents, url = result
+        row.market.setValue(cents / 100)
+        if url and not row.tcgplayer.text().strip():
+            row.tcgplayer.setText(url)
+        self._update_summary()
 
     # Test/programmatic API (used by the lifecycle tests).
     def add_outgoing(self, card: OutgoingCard, display_name: str = "") -> None:

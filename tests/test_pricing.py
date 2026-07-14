@@ -217,6 +217,31 @@ def test_group_resolves_by_closest_match(conn):
     assert quotes[0].price_cents == 610
 
 
+def test_price_for_card_resolves_by_set_and_number():
+    def fetch(url: str):
+        if url.endswith("/groups"):
+            return {"results": [{"groupId": 24073, "name": "SV09: Journey Together"}]}
+        if url.endswith("/24073/products"):
+            return {
+                "results": [
+                    {
+                        "productId": 623590,
+                        "url": "https://www.tcgplayer.com/product/623590/x",
+                        "extendedData": [{"name": "Number", "value": "163/159"}],
+                    }
+                ]
+            }
+        if url.endswith("/24073/prices"):
+            return {"results": [{"productId": 623590, "marketPrice": 6.10}]}
+        raise AssertionError(f"unexpected url: {url}")
+
+    provider = TcgcsvProvider(fetch_json=fetch)
+    # Catalog stores the bare number '163'; tcgcsv products use '163/159'.
+    result = provider.price_for_card("Journey Together", "163", "Iono's Kilowattrel")
+    assert result == (610, "https://www.tcgplayer.com/product/623590/x")
+    assert provider.price_for_card("Journey Together", "999") is None
+
+
 def test_latest_as_of_reports_most_recent_refresh(conn):
     snaps = PriceSnapshotRepository(conn)
     assert snaps.latest_as_of() is None  # never refreshed
