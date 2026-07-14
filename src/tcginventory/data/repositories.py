@@ -908,11 +908,18 @@ class CardCatalogRepository:
         """Best-effort ``(card_id, image_small)`` for a card by printed identity.
 
         Used where we hold only the printed identity (inventory rows, given
-        cards) rather than a catalog id. A card is uniquely identified by its
-        **set + collector number**, so those dominate; the name is only a fuzzy
-        tiebreaker (catalog names like "Mega Clefable ex" rarely equal what a
-        person types, e.g. "Clefable EX"). A weak match (set-only or name-only)
-        returns ``None`` — better to show no image than the wrong card.
+        cards) rather than a catalog id. Matching rules:
+
+        * If a **set** is given, only cards *in that set* are eligible (set names
+          are compared with containment so "Trading Card Game Classic" matches a
+          catalog "Pokémon Trading Card Game Classic"), and the match must also
+          agree on the collector number or the name. If the set isn't in the
+          catalog at all — e.g. a special product the pokemontcg.io dataset
+          lacks — this returns ``None`` rather than a same-number card from some
+          *other* set.
+        * If no set is given, the collector **number and name** must both agree.
+
+        A weaker match returns ``None``: better no image than the wrong card.
         """
 
         def norm_num(value: str | None) -> str:
@@ -930,13 +937,11 @@ class CardCatalogRepository:
             for row in self.conn.execute(f"{cols} WHERE {where}", params).fetchall():
                 pool.setdefault(row["card_id"], row)
 
-        # Candidate pool: cards in the same set, same name, and/or same
-        # collector number. Each on its own is weak; the scoring below combines
-        # them and the gate demands agreement across two axes.
+        # Candidate pool: cards in the same set, same name, and/or same number.
         if want_set:
             gather(
-                "set_name = ? COLLATE NOCASE AND image_small IS NOT NULL",
-                (set_name,),
+                "set_name LIKE ? COLLATE NOCASE AND image_small IS NOT NULL",
+                (f"%{set_name.strip()}%",),
             )
         if name:
             gather("name = ? COLLATE NOCASE AND image_small IS NOT NULL", (name,))
@@ -954,23 +959,31 @@ class CardCatalogRepository:
         if not pool:
             return None
 
-        best, best_flags, best_score = None, (False, False, False), 0
-        for row in pool.values():
-            num_ok = bool(want_num) and norm_num(row["number"]) == want_num
-            set_ok = bool(want_set) and (
-                row["set_name"] or ""
-            ).strip().lower() == want_set
-            other = (row["name"] or "").strip().lower()
-            name_ok = bool(want_name) and (want_name in other or other in want_name)
-            score = 4 * num_ok + 2 * set_ok + 1 * name_ok
-            if score > best_score:
-                best, best_flags, best_score = row, (num_ok, set_ok, name_ok), score
+        def set_ok(row: sqlite3.Row) -> bool:
+            other = (row["set_name"] or "").strip().lower()
+            return bool(want_set) and bool(other) and (
+                want_set in other or other in want_set
+            )
 
-        # Trust only agreement across two axes: number+set, number+name, or
-        # set+name. A lone number/set/name match is ambiguous → show nothing
-        # rather than risk the wrong card.
-        num_ok, set_ok, name_ok = best_flags
-        strong = (num_ok and (set_ok or name_ok)) or (set_ok and name_ok)
-        if best is not None and strong:
-            return best["card_id"], best["image_small"]
-        return None
+        def num_ok(row: sqlite3.Row) -> bool:
+            return bool(want_num) and norm_num(row["number"]) == want_num
+
+        def name_ok(row: sqlite3.Row) -> bool:
+            other = (row["name"] or "").strip().lower()
+            return bool(want_name) and (want_name in other or other in want_name)
+
+        if want_set:
+            # A set was named → restrict to that set, then require number or
+            # name agreement. An unknown set has no eligible rows → None.
+            eligible = [r for r in pool.values() if set_ok(r)]
+            eligible = [r for r in eligible if num_ok(r) or name_ok(r)]
+            if not eligible:
+                return None
+            best = max(eligible, key=lambda r: (num_ok(r), name_ok(r)))
+        else:
+            # No set → number and name must both agree.
+            eligible = [r for r in pool.values() if num_ok(r) and name_ok(r)]
+            if not eligible:
+                return None
+            best = eligible[0]
+        return best["card_id"], best["image_small"]

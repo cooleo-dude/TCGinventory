@@ -76,6 +76,13 @@ def test_image_for_keys_on_set_and_number_not_exact_name(conn):
                 set_name="Obsidian Flames", number="82",
                 image_small="https://img/sv3-82",
             ),
+            # Mewtwo #14 in a WoTC promo set — a decoy for a card whose real set
+            # ("Trading Card Game Classic") the dataset does not carry.
+            CatalogCard(
+                card_id="basep-14", name="Mewtwo", set_id="basep",
+                set_name="Wizards Black Star Promos", number="14",
+                image_small="https://img/basep-14",
+            ),
         ],
         "t",
     )
@@ -84,10 +91,18 @@ def test_image_for_keys_on_set_and_number_not_exact_name(conn):
     # set + number pins the exact printing regardless of the typed name form.
     for nm in ("Mega Clefable ex", "Clefable EX", "Clefable ex"):
         assert repo.image_for(nm, "Perfect Order", "119/088")[0] == "me3-119"
+    # a slightly different set spelling still matches (containment).
+    assert repo.image_for("Clefable ex", "Order", "119")[0] == "me3-119"
     # number + fuzzy name works even with no set given.
     assert repo.image_for("Clefable ex", None, "119")[0] == "me3-119"
     # a bare number with an unrelated name is not trusted → no wrong card.
     assert repo.image_for("Totally Unrelated", None, "106") is None
+
+    # The real set is absent from the catalog → show NOTHING, never a
+    # same-number card from a different set (WoTC promo Mewtwo #14).
+    assert repo.image_for("Mewtwo", "Trading Card Game Classic", "014/034") is None
+    # …but when the set genuinely is the promo set, it resolves.
+    assert repo.image_for("Mewtwo", "Wizards Black Star Promos", "14")[0] == "basep-14"
 
 
 def test_ensure_cached_fetches_once_then_serves_from_disk(tmp_path, monkeypatch):
