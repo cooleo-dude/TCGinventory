@@ -47,7 +47,7 @@ from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inventory import InventoryRow, InventoryService
 from tcginventory.services.review import without_review_note
 from tcginventory.services.transactions import TransactionService
-from tcginventory.ui.card_preview import card_preview, install_hover_preview
+from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
 from tcginventory.ui.charts import HoverChartView
 from tcginventory.ui.models.inventory_model import (
     INTENT_COL,
@@ -167,10 +167,14 @@ class InventoryView(QWidget):
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.doubleClicked.connect(self._open_detail)
         self._table.selectionModel().selectionChanged.connect(self._on_selection)
-        # Hover a row to preview the card image (lazily fetched + cached).
+        # Hover a row to preview the card image in the pane by the chart
+        # (lazily fetched + cached).
+        self._preview_pane = CardImagePane()
         self._table.setMouseTracking(True)
         self._table.entered.connect(self._on_row_hover)
-        install_hover_preview(self._table.viewport(), lambda: None)  # clear on leave
+        install_hover_preview(
+            self._table.viewport(), lambda: None, self._preview_pane
+        )  # clear on leave
 
         # Review column: amber highlight + inline editor + two-stage button.
         self._review_delegate = ReviewPriceDelegate(
@@ -198,7 +202,17 @@ class InventoryView(QWidget):
         table_layout.addWidget(self._table)
         table_layout.addWidget(self._empty)
         splitter.addWidget(table_box)
-        splitter.addWidget(self._chart_view)
+
+        # Bottom pane: card preview (left) beside the price-history chart.
+        bottom = QWidget()
+        bottom_layout = QHBoxLayout(bottom)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        preview_box = QVBoxLayout()
+        preview_box.addWidget(QLabel("Card preview"))
+        preview_box.addWidget(self._preview_pane)
+        bottom_layout.addLayout(preview_box)
+        bottom_layout.addWidget(self._chart_view, 1)
+        splitter.addWidget(bottom)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
 
@@ -243,10 +257,7 @@ class InventoryView(QWidget):
             if row is not None
             else None
         )
-        if res:
-            card_preview().request(res[0], res[1])
-        else:
-            card_preview().clear()
+        self._preview_pane.show_card(*(res if res else (None, None)))
 
     def _show_chart_message(self, text: str) -> None:
         chart = QChart()
