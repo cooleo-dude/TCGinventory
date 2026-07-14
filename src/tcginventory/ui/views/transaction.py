@@ -373,7 +373,7 @@ class _ReceiveRow:
         self.set.setText(card.set_name or "")
         self.number.setText(card.full_number or card.number or "")
         _select(self.category, Category.SINGLE.value)  # catalog cards are singles
-        _select(self.language, Language.EN.value)  # dataset is English
+        _select(self.language, getattr(card, "language", None) or Language.EN.value)
         # Keep the chosen card showing in the pane after the popup closes.
         if self._sink is not None and self._image_url:
             self._sink.show_card(self._card_id, self._image_url)

@@ -80,20 +80,26 @@ class _CatalogUpdateWorker(QThread):
 
     done = Signal(object)  # CatalogUpdateSummary
 
-    def __init__(self, db_path) -> None:
+    def __init__(self, db_path, language: str = "EN") -> None:
         super().__init__()
         self._db_path = db_path
+        self._language = language
 
     def run(self) -> None:
         import logging
 
         from tcginventory.data.db import open_database
-        from tcginventory.services.catalog import CatalogUpdateSummary, update_catalog
+        from tcginventory.services.catalog import (
+            CatalogUpdateSummary,
+            update_catalog,
+            update_catalog_ja,
+        )
 
+        pull = update_catalog_ja if self._language == "JP" else update_catalog
         try:
             conn = open_database(self._db_path)
             try:
-                summary = update_catalog(conn)
+                summary = pull(conn)
             finally:
                 conn.close()
         except Exception as exc:  # never crash the thread
@@ -247,11 +253,14 @@ class MainWindow(QMainWindow):
             "Refresh prices…", lambda: self._refresh_prices(silent=False)
         )
         self._catalog_action = self._file_menu.addAction(
-            "Update card database…", self._update_catalog
+            "Update card database (English)…", lambda: self._update_catalog("EN")
+        )
+        self._catalog_action_ja = self._file_menu.addAction(
+            "Update card database (Japanese)…", lambda: self._update_catalog("JP")
         )
         self._build_auto_update_action()
 
-    def _update_catalog(self) -> None:
+    def _update_catalog(self, language: str = "EN") -> None:
         if not self._db_file:
             QMessageBox.information(
                 self, "Card database", "Not available for an in-memory database."
@@ -259,14 +268,19 @@ class MainWindow(QMainWindow):
             return
         if self._catalog_worker is not None and self._catalog_worker.isRunning():
             return
+        label = "Japanese" if language == "JP" else "English"
         self._catalog_action.setEnabled(False)
-        self.statusBar().showMessage("Updating card database… (one-time bulk pull)")
-        self._catalog_worker = _CatalogUpdateWorker(self._db_file)
+        self._catalog_action_ja.setEnabled(False)
+        self.statusBar().showMessage(
+            f"Updating {label} card database… (one-time bulk pull)"
+        )
+        self._catalog_worker = _CatalogUpdateWorker(self._db_file, language)
         self._catalog_worker.done.connect(self._on_catalog_updated)
         self._catalog_worker.start()
 
     def _on_catalog_updated(self, summary) -> None:
         self._catalog_action.setEnabled(True)
+        self._catalog_action_ja.setEnabled(True)
         self._catalog_worker = None
         self._update_status()
         if summary.errors and not summary.cards:

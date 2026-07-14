@@ -18,6 +18,7 @@ from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.domain.models import CatalogCard
 
 _RAW = "https://raw.githubusercontent.com/PokemonTCG/pokemon-tcg-data/master"
+_TCGDEX_JA = "https://api.tcgdex.net/v2/ja"
 
 
 def _fetch_json(url: str):  # pragma: no cover - real network
@@ -87,7 +88,69 @@ def update_catalog(
             on_progress(i + 1, total)
 
     try:
-        CardCatalogRepository(conn).replace_all(cards, now_iso())
+        CardCatalogRepository(conn).replace_for_language(cards, "EN", now_iso())
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    summary.sets = total
+    summary.cards = len(cards)
+    return summary
+
+
+def update_catalog_ja(
+    conn: sqlite3.Connection,
+    fetch_json: Callable[[str], object] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> CatalogUpdateSummary:
+    """Pull the Japanese card catalog from TCGdex into ``card_catalog``.
+
+    Mirrors :func:`update_catalog` but for Japanese: the set index then each
+    set's card list (id / localId / name / image). Only the JP rows are
+    replaced. A set that fails to fetch is recorded and skipped.
+    """
+    fetch = fetch_json or _fetch_json
+    summary = CatalogUpdateSummary()
+
+    sets = _as_list(fetch(f"{_TCGDEX_JA}/sets"))
+    set_ids = [s["id"] for s in sets if isinstance(s, dict) and s.get("id")]
+    total = len(set_ids)
+
+    cards: list[CatalogCard] = []
+    for i, set_id in enumerate(set_ids):
+        try:
+            detail = fetch(f"{_TCGDEX_JA}/sets/{set_id}")
+        except Exception as exc:
+            summary.errors.append(f"{set_id}: {exc}")
+            continue
+        set_name = detail.get("name") if isinstance(detail, dict) else None
+        printed_total = None
+        if isinstance(detail, dict) and isinstance(detail.get("cardCount"), dict):
+            printed_total = detail["cardCount"].get("official")
+        for c in detail.get("cards") or []:
+            card_id = c.get("id")
+            if not card_id:
+                continue
+            image = c.get("image")
+            cards.append(
+                CatalogCard(
+                    card_id=card_id,
+                    name=c.get("name") or "",
+                    set_id=set_id,
+                    set_name=set_name,
+                    set_code=set_id,  # TCGdex set id doubles as the set code
+                    number=c.get("localId"),
+                    image_small=f"{image}/low.png" if image else None,
+                    printed_total=printed_total,
+                    language="JP",
+                )
+            )
+        if on_progress is not None:
+            on_progress(i + 1, total)
+
+    try:
+        CardCatalogRepository(conn).replace_for_language(cards, "JP", now_iso())
         conn.commit()
     except Exception:
         conn.rollback()

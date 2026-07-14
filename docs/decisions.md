@@ -438,3 +438,22 @@ _Template for new entries:_
   thread; silently skipped when offline); afterwards it's instant from disk.
   Inventory/given cards resolve their image by identity via
   `CardCatalogRepository.image_for`.
+
+### 2026-07-14 — Japanese cards, Phase 1: catalog + images via TCGdex
+- **Decision:** Add Japanese-card support in phases. Phase 1 pulls a Japanese
+  catalog from **TCGdex** (`api.tcgdex.net/v2/ja`) into `card_catalog` alongside
+  the English (pokemontcg.io) rows, tagged by a new `language` column (migration
+  0012). Images use TCGdex's asset CDN (`{card.image}/low.png`); collector number
+  = `localId`; printed total = `cardCount.official`; set code = TCGdex set id.
+- **Context / why:** pokemontcg.io is English-only. TCGdex is the multilingual
+  equivalent — free, no key, per-set JSON — so it mirrors our English pull.
+  Catalogs coexist via `replace_for_language`, so re-pulling one language doesn't
+  wipe the other. File menu now has separate English/Japanese update actions.
+- **Alternatives considered:** JustTCG/paid APIs (rejected: not the catalog need,
+  and condition pricing was a separate, rate-limited dead end); TCGdex's built-in
+  `pricing` field (Cardmarket EUR, per-card — deferred to tcgcsv cat 85 in USD).
+- **Consequences:** ~6.2k JP cards load today; ~53% have TCGdex images (older JP
+  sets lack assets). Japanese names are Japanese script, so entry is by JP name
+  and/or set-code+number (search now also matches `set_code`). Phase 2 = JP
+  pricing via tcgcsv category 85 (link by set code → number). Phase 3 = romaji /
+  cross-language search.

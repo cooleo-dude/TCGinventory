@@ -168,6 +168,7 @@ class CatalogCard:
     supertype: str | None = None
     image_small: str | None = None
     printed_total: int | None = None
+    language: str = "EN"  # "EN" (pokemontcg.io) or "JP" (TCGdex)
 
     @property
     def full_number(self) -> str | None:

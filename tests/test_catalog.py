@@ -3,7 +3,28 @@
 from __future__ import annotations
 
 from tcginventory.data.repositories import CardCatalogRepository
-from tcginventory.services.catalog import update_catalog
+from tcginventory.services.catalog import update_catalog, update_catalog_ja
+
+_JA_SETS = [{"id": "SV1a", "name": "トリプレットビート"}]
+_JA_DETAIL = {
+    "SV1a": {
+        "name": "トリプレットビート",
+        "cardCount": {"official": 73, "total": 103},
+        "cards": [
+            {"id": "SV1a-001", "localId": "001", "name": "トロピウス",
+             "image": "https://assets.tcgdex.net/ja/SV/SV1a/001"},
+            {"id": "SV1a-002", "localId": "002", "name": "ノコッチ", "image": None},
+        ],
+    }
+}
+
+
+def _fake_ja_fetch(url: str):
+    if url.endswith("/sets"):
+        return _JA_SETS
+    if url.endswith("/sets/SV1a"):
+        return _JA_DETAIL["SV1a"]
+    raise AssertionError(f"unexpected url: {url}")
 
 _SETS = [
     {"id": "sv9", "name": "Journey Together", "ptcgoCode": "JTG",
@@ -126,6 +147,31 @@ def test_update_catalog_stores_printed_total(conn):
     (kilo,) = CardCatalogRepository(conn).find_by_name("Iono's Kilowattrel")
     assert kilo.printed_total == 159
     assert kilo.full_number == "163/159"
+
+
+def test_update_catalog_ja_pulls_japanese(conn):
+    summary = update_catalog_ja(conn, fetch_json=_fake_ja_fetch)
+    assert summary.sets == 1 and summary.cards == 2 and summary.errors == []
+    repo = CardCatalogRepository(conn)
+    (tropius,) = repo.find_by_name("トロピウス")
+    assert tropius.language == "JP"
+    assert tropius.number == "001"
+    assert tropius.set_code == "SV1a"  # TCGdex set id doubles as the code
+    assert tropius.printed_total == 73
+    assert tropius.image_small == "https://assets.tcgdex.net/ja/SV/SV1a/001/low.png"
+
+
+def test_en_and_ja_catalogs_coexist(conn):
+    update_catalog(conn, fetch_json=_fake_fetch)  # 3 EN cards
+    update_catalog_ja(conn, fetch_json=_fake_ja_fetch)  # 2 JP cards
+    repo = CardCatalogRepository(conn)
+    assert repo.count() == 5
+    # A JP re-pull must not wipe the English rows (replace_for_language).
+    update_catalog_ja(conn, fetch_json=_fake_ja_fetch)
+    assert repo.count() == 5
+    # Japanese cards are reachable by their set code + number.
+    (hit,) = repo.search("SV1a 001")
+    assert hit.name == "トロピウス"
 
 
 def test_update_catalog_replaces_and_skips_bad_set(conn):

@@ -829,30 +829,45 @@ class CardCatalogRepository:
             supertype=row["supertype"],
             image_small=row["image_small"],
             printed_total=row["printed_total"],
+            language=row["language"],
         )
 
     def count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM card_catalog").fetchone()[0]
 
-    def replace_all(self, cards: list[CatalogCard], updated_at: str) -> None:
-        """Swap the whole catalog for a freshly-pulled set (single transaction)."""
-        self.conn.execute("DELETE FROM card_catalog")
+    def _insert_many(self, cards: list[CatalogCard], updated_at: str) -> None:
         self.conn.executemany(
             """
             INSERT OR REPLACE INTO card_catalog (
                 card_id, name, set_id, set_name, set_code, number, rarity,
-                supertype, image_small, printed_total, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                supertype, image_small, printed_total, language, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             [
                 (
                     c.card_id, c.name, c.set_id, c.set_name, c.set_code,
                     c.number, c.rarity, c.supertype, c.image_small,
-                    c.printed_total, updated_at,
+                    c.printed_total, c.language, updated_at,
                 )
                 for c in cards
             ],
         )
+
+    def replace_all(self, cards: list[CatalogCard], updated_at: str) -> None:
+        """Swap the whole catalog for a freshly-pulled set (single transaction)."""
+        self.conn.execute("DELETE FROM card_catalog")
+        self._insert_many(cards, updated_at)
+
+    def replace_for_language(
+        self, cards: list[CatalogCard], language: str, updated_at: str
+    ) -> None:
+        """Replace only one language's rows, leaving the other language intact
+        (so an English re-pull doesn't wipe the Japanese catalog, or vice versa).
+        """
+        self.conn.execute(
+            "DELETE FROM card_catalog WHERE language = ?", (language,)
+        )
+        self._insert_many(cards, updated_at)
 
     def all_names(self) -> list[str]:
         """Every distinct card name (for a name-autocomplete model)."""
@@ -895,8 +910,8 @@ class CardCatalogRepository:
         clauses, params = [], []
         for tok in query.split():
             like = f"%{tok}%"
-            parts = ["name LIKE ?", "set_name LIKE ?"]
-            tok_params = [like, like]
+            parts = ["name LIKE ?", "set_name LIKE ?", "set_code LIKE ?"]
+            tok_params = [like, like, like]
             if "/" in tok and any(ch.isdigit() for ch in tok):
                 # A full collector number, in any of its forms: full
                 # ("SV103/SV122"), head ("SV103"), or leading-zeros stripped.
