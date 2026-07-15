@@ -15,6 +15,9 @@ class ComboDelegate(QStyledItemDelegate):
 
     def createEditor(self, parent, option, index):
         combo = QComboBox(parent)
+        # Drop the option list *below* the cell instead of the native popup that
+        # overlays the current value.
+        combo.setStyleSheet("QComboBox { combobox-popup: 0; }")
         combo.addItems(self._options)
         return combo
 

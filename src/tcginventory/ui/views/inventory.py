@@ -17,6 +17,7 @@ from PySide6.QtCore import (
     QSortFilterProxyModel,
     Qt,
     QThread,
+    QTimer,
     Signal,
 )
 from PySide6.QtWidgets import (
@@ -246,7 +247,8 @@ class InventoryView(QWidget):
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self._table.horizontalHeader().setStretchLastSection(False)
+        # Notes is the last column → it stretches to absorb any leftover width.
+        self._table.horizontalHeader().setStretchLastSection(True)
         self._table.doubleClicked.connect(self._open_detail)
         self._table.clicked.connect(self._edit_on_click)
         self._table.selectionModel().selectionChanged.connect(self._on_selection)
@@ -281,9 +283,19 @@ class InventoryView(QWidget):
         self._empty.setAlignment(Qt.AlignCenter)
         self._empty.setVisible(False)
 
-        # -- price-history chart (last ~3 months) for the selected card
+        # -- price-history chart (last ~3 months) for the selected card.
+        # Rebuilding a QChart is heavy, so coalesce rapid hover/selection changes
+        # and build it just after the pointer settles — this also keeps single-
+        # click cell editing snappy (the click isn't blocked by a chart rebuild).
         self._chart_view = HoverChartView()
         self._chart_view.setMinimumHeight(220)
+        self._pending_chart_row: InventoryRow | None = None
+        self._chart_timer = QTimer(self)
+        self._chart_timer.setSingleShot(True)
+        self._chart_timer.setInterval(120)
+        self._chart_timer.timeout.connect(
+            lambda: self._set_history_chart(self._pending_chart_row)
+        )
         self._show_chart_message("Select a card to see its price history.")
 
         splitter = QSplitter(Qt.Vertical)
@@ -332,10 +344,8 @@ class InventoryView(QWidget):
         )
 
     def _apply_column_widths(self) -> None:
-        """Trim the auto-sized Notes column and give the freed space to the
-        Holo / Edition / Intent drop-down columns so their editors have room."""
-        notes = self._col("Notes")
-        self._table.setColumnWidth(notes, max(90, self._table.columnWidth(notes) // 2))
+        """Widen the Holo / Edition / Intent drop-down columns so their editors
+        have room; Notes (last column) stretches to absorb the leftover width."""
         for header, width in (("Holo", 70), ("Edition", 110), ("Intent", 110)):
             self._table.setColumnWidth(self._col(header), width)
 
@@ -377,7 +387,12 @@ class InventoryView(QWidget):
     def _on_selection(self, *_args) -> None:
         row = self._selected_row()
         self._review_delegate.note_selected_item(row.item.id if row else None)
-        self._set_history_chart(row)
+        self._request_chart(row)
+
+    def _request_chart(self, row: InventoryRow | None) -> None:
+        """Debounce chart rebuilds (coalesces rapid hover/selection changes)."""
+        self._pending_chart_row = row
+        self._chart_timer.start()
 
     def _set_history_chart(self, row: InventoryRow | None) -> None:
         if row is None:
@@ -401,7 +416,7 @@ class InventoryView(QWidget):
             )
         self._preview_pane.show_card(*(res if res else (None, None)))
         # Price-history graph for the hovered row (also persists on leave).
-        self._set_history_chart(row)
+        self._request_chart(row)
 
     def _show_chart_message(self, text: str) -> None:
         chart = QChart()

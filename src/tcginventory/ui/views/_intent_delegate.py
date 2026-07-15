@@ -13,6 +13,8 @@ class IntentDelegate(QStyledItemDelegate):
 
     def createEditor(self, parent, option, index):
         combo = QComboBox(parent)
+        # Drop the list below the cell instead of overlaying the current value.
+        combo.setStyleSheet("QComboBox { combobox-popup: 0; }")
         combo.addItems(_INTENTS)
         return combo
 
