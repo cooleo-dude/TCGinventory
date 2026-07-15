@@ -48,11 +48,13 @@ def conn():
 
 @pytest.fixture(autouse=True)
 def _silence_dialogs(monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtWidgets import QDialog, QMessageBox
 
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: QMessageBox.Ok)
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: QMessageBox.Ok)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    # The success confirmation is a custom QDialog — don't block on exec().
+    monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.Accepted)
 
 
 def _inc(name, mv, intent=Intent.RESALE, qty=1) -> IncomingCard:

@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QCompleter,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -33,6 +35,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QStyledItemDelegate,
@@ -784,28 +787,67 @@ class TransactionView(QWidget):
         self.clear()
         self.posted.emit()
 
+    _ITEMS_PER_COLUMN = 25
+
     def _show_success(self, result, edited_from=None, old_margin=None) -> None:
-        lines = [f"Recorded {result.transaction.type.value.upper()}."]
+        header = [f"Recorded {result.transaction.type.value.upper()}."]
         if edited_from is not None:
-            lines.append(f"(edit of transaction {edited_from} — original voided)")
-        if result.lots:
-            lines.append("\nInferred cost of each card received:")
-            for lot in result.lots:
-                item = self._service.items.get(lot.item_id)
-                name = item.name if item else f"item {lot.item_id}"
-                lines.append(
-                    f"  • {name}: {money(lot.unit_cost_cents)} × {lot.quantity}"
-                )
+            header.append(f"(edit of transaction {edited_from} — original voided)")
+
+        items = []
+        for lot in result.lots:
+            item = self._service.items.get(lot.item_id)
+            name = item.name if item else f"item {lot.item_id}"
+            items.append(f"•  {name}: {money(lot.unit_cost_cents)} × {lot.quantity}")
+
+        footer = []
         if result.realized_pl_cents:
-            lines.append(
-                f"\nMargin on cards given up: {money(result.realized_pl_cents)}"
+            footer.append(
+                f"Margin on cards given up: {money(result.realized_pl_cents)}"
             )
         if old_margin is not None and old_margin != result.realized_pl_cents:
-            lines.append(
-                f"\n⚠ Realized P/L changed: {money(old_margin)} → "
+            footer.append(
+                f"⚠ Realized P/L changed: {money(old_margin)} → "
                 f"{money(result.realized_pl_cents)}"
             )
-        QMessageBox.information(self, "Success", "\n".join(lines))
+        self._success_dialog(header, items, footer)
+
+    def _success_dialog(self, header, items, footer) -> None:
+        """Confirmation dialog. The received-card list is laid out in columns of
+        25, wrapping to a new column so a big transaction never runs off-screen."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Success")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("\n".join(header)))
+
+        if items:
+            layout.addWidget(QLabel("Inferred cost of each card received:"))
+            columns = QWidget()
+            cols_layout = QHBoxLayout(columns)
+            cols_layout.setContentsMargins(0, 0, 0, 0)
+            for start in range(0, len(items), self._ITEMS_PER_COLUMN):
+                chunk = items[start : start + self._ITEMS_PER_COLUMN]
+                col = QLabel("\n".join(chunk))
+                col.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                cols_layout.addWidget(col, 0, Qt.AlignTop)
+            cols_layout.addStretch(1)
+            # Scroll if there are so many columns they'd exceed the screen width.
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(columns)
+            layout.addWidget(scroll, 1)
+
+        if footer:
+            layout.addWidget(QLabel("\n".join(footer)))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        # Never exceed the visible screen; the scroll area handles overflow.
+        avail = self.screen().availableGeometry()
+        dialog.setMaximumSize(int(avail.width() * 0.9), int(avail.height() * 0.9))
+        dialog.exec()
 
     def clear(self) -> None:
         self._give_rows.clear()
