@@ -184,6 +184,7 @@ class InventoryView(QWidget):
         # don't re-query the catalog or wait on the network.
         self._row_image: dict[int, tuple[str, str]] = {}
         self._prefetch_worker: _PreviewPrefetchWorker | None = None
+        self._columns_sized = False  # auto-size grid columns once, on first load
         self._model = InventoryTableModel(
             on_edit_price=self._set_manual_price,
             on_edit_intent=self._set_lot_intent,
@@ -329,8 +330,12 @@ class InventoryView(QWidget):
         self._review_delegate.disarm()
         rows = self._service.inventory_rows()
         self._model.set_rows(rows)
-        self._table.resizeColumnsToContents()
-        self._apply_column_widths()
+        # Size columns only on first load — re-sizing on every edit is slow and
+        # would also discard the user's column drags.
+        if not self._columns_sized and rows:
+            self._table.resizeColumnsToContents()
+            self._apply_column_widths()
+            self._columns_sized = True
         self._empty.setVisible(not rows)
         self._table.setVisible(bool(rows))
         self._prefetch_previews(rows)

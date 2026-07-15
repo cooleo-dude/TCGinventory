@@ -5,6 +5,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QStyledItemDelegate
 
+from tcginventory.ui.views._combo_delegate import DropDownComboBox
+
 _INTENTS = ["personal", "resale", "ripping"]
 
 
@@ -12,9 +14,7 @@ class IntentDelegate(QStyledItemDelegate):
     """Edit a lot's intent with a drop-down (personal / resale / ripping)."""
 
     def createEditor(self, parent, option, index):
-        combo = QComboBox(parent)
-        # Drop the list below the cell instead of overlaying the current value.
-        combo.setStyleSheet("QComboBox { combobox-popup: 0; }")
+        combo = DropDownComboBox(parent)  # list drops below the cell
         combo.addItems(_INTENTS)
         return combo
 

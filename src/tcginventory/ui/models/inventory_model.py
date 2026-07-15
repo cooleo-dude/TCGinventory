@@ -251,6 +251,8 @@ class InventoryTableModel(QAbstractTableModel):
             return False
         row = self._rows[index.row()]
         if index.column() == INTENT_COL:
+            if str(value) == row.intent:
+                return True  # no-op: don't trigger a refresh
             if self._on_edit_intent is not None:
                 self._on_edit_intent(row.lot_id, str(value))
             return True
@@ -264,6 +266,9 @@ class InventoryTableModel(QAbstractTableModel):
             return True
         coldef = _COLUMNS[index.column()]
         if coldef.field is not None:
+            current = self.data(index, Qt.EditRole)
+            if str(value).strip() == str(current).strip():
+                return True  # no-op: closing an editor unchanged shouldn't refresh
             if self._on_edit_item is not None:
                 self._on_edit_item(row.item.id, coldef.field, value)
             return True

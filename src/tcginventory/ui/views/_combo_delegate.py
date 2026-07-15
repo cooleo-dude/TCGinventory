@@ -6,6 +6,23 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QStyledItemDelegate
 
 
+class DropDownComboBox(QComboBox):
+    """A combo whose option list always drops **below** the cell instead of the
+    native popup that overlays the current value (which reads as doubled text).
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setStyleSheet("QComboBox { combobox-popup: 0; }")
+        self.setAutoFillBackground(True)  # opaque over the cell being edited
+
+    def showPopup(self) -> None:
+        super().showPopup()
+        popup = self.view().window()
+        below = self.mapToGlobal(self.rect().bottomLeft())
+        popup.move(below.x(), below.y())
+
+
 class ComboDelegate(QStyledItemDelegate):
     """Edit a cell with a fixed set of options; commits the chosen value string."""
 
@@ -14,10 +31,7 @@ class ComboDelegate(QStyledItemDelegate):
         self._options = options
 
     def createEditor(self, parent, option, index):
-        combo = QComboBox(parent)
-        # Drop the option list *below* the cell instead of the native popup that
-        # overlays the current value.
-        combo.setStyleSheet("QComboBox { combobox-popup: 0; }")
+        combo = DropDownComboBox(parent)
         combo.addItems(self._options)
         return combo
 
