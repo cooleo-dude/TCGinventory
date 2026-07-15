@@ -74,6 +74,51 @@ def test_inventory_review_filter(app, conn):
     view.deleteLater()
 
 
+def test_inventory_inline_item_edits(app, conn):
+    from PySide6.QtCore import Qt
+
+    from tcginventory.domain.enums import Condition, HoloPattern
+    from tcginventory.ui.views.inventory import InventoryView
+
+    r = buy(
+        TransactionService(conn), "Pikachu", 100, 200, "2026-01-01",
+        condition=Condition.NM,
+    )
+    item_id = r.lots[0].item_id
+    view = InventoryView(conn)
+    model = view._model
+    items = ItemRepository(conn)
+
+    def col(header: str) -> int:
+        return next(
+            i for i in range(model.columnCount())
+            if model.headerData(i, Qt.Horizontal) == header
+        )
+
+    # Text field.
+    assert model.setData(model.index(0, col("Name")), "Pikachu V", Qt.EditRole)
+    assert items.get(item_id).name == "Pikachu V"
+
+    # Enum field.
+    assert model.setData(
+        model.index(0, col("Holo")), HoloPattern.REVERSE_HOLO.value, Qt.EditRole
+    )
+    assert items.get(item_id).holo_pattern is HoloPattern.REVERSE_HOLO
+
+    # Condition → non-NM auto-marks review; back to NM clears it.
+    model.setData(model.index(0, col("Cond/Grade")), Condition.LP.value, Qt.EditRole)
+    got = items.get(item_id)
+    assert got.condition is Condition.LP and got.review is True
+    model.setData(model.index(0, col("Cond/Grade")), Condition.NM.value, Qt.EditRole)
+    assert items.get(item_id).review is False
+
+    # Editing the current market price marks the item for review.
+    model.setData(model.index(0, col("Current Market")), 12.50, Qt.EditRole)
+    got = items.get(item_id)
+    assert got.market_value_cents == 1250 and got.review is True
+    view.deleteLater()
+
+
 def test_inventory_graded_filter(app, conn):
     from tcginventory.domain.enums import GradingCompany
     from tcginventory.ui.views.inventory import InventoryView

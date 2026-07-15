@@ -42,12 +42,18 @@ from tcginventory.data.repositories import (
     LotRepository,
     PriceSnapshotRepository,
 )
-from tcginventory.domain.enums import Intent
+from tcginventory.domain.enums import (
+    Condition,
+    Edition,
+    HoloPattern,
+    Intent,
+    Language,
+)
 from tcginventory.domain.models import PriceSnapshot
 from tcginventory.services import cardimages
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inventory import InventoryRow, InventoryService
-from tcginventory.services.review import without_review_note
+from tcginventory.services.review import with_review_note, without_review_note
 from tcginventory.services.transactions import TransactionService
 from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
 from tcginventory.ui.charts import HoverChartView
@@ -55,7 +61,9 @@ from tcginventory.ui.models.inventory_model import (
     INTENT_COL,
     MARKET_CURRENT_COL,
     InventoryTableModel,
+    combo_columns,
 )
+from tcginventory.ui.views._combo_delegate import ComboDelegate
 from tcginventory.ui.views._intent_delegate import IntentDelegate
 from tcginventory.ui.views._review_delegate import ReviewPriceDelegate
 from tcginventory.ui.views.item_detail import ItemDetailDialog
@@ -178,6 +186,7 @@ class InventoryView(QWidget):
         self._model = InventoryTableModel(
             on_edit_price=self._set_manual_price,
             on_edit_intent=self._set_lot_intent,
+            on_edit_item=self._set_item_field,
         )
         self._proxy = _InventoryFilterProxy()
         self._proxy.setSourceModel(self._model)
@@ -255,6 +264,14 @@ class InventoryView(QWidget):
         # Intent column: edit inline with a drop-down (personal/resale/ripping).
         self._intent_delegate = IntentDelegate(self._table)
         self._table.setItemDelegateForColumn(INTENT_COL, self._intent_delegate)
+
+        # Lang / Cond / Holo / Edition: inline drop-downs of their enum values.
+        # (Name / Set / # / Notes use the default text editor.)
+        self._combo_delegates = []
+        for col, options in combo_columns():
+            delegate = ComboDelegate(options, self._table)
+            self._combo_delegates.append(delegate)
+            self._table.setItemDelegateForColumn(col, delegate)
 
         self._empty = QLabel("Nothing here yet — record your first purchase.")
         self._empty.setAlignment(Qt.AlignCenter)
@@ -375,22 +392,61 @@ class InventoryView(QWidget):
     def _open_detail(self, proxy_index: QModelIndex) -> None:
         source_index = self._proxy.mapToSource(proxy_index)
         row = self._model.row_at(source_index.row())
-        # Double-clicking an inline-editable cell edits it instead of opening
-        # the detail dialog (marked price cell, or the Intent drop-down).
-        if proxy_index.column() == MARKET_CURRENT_COL and row.review:
-            return
-        if proxy_index.column() == INTENT_COL:
+        # Inline-editable cells edit in place on double-click; only the
+        # read-only columns open the full item editor dialog.
+        if self._model.flags(source_index) & Qt.ItemIsEditable:
             return
         ItemDetailDialog(self._conn, row.item.id, parent=self).exec()
         self.refresh()  # reflect any edits made in the detail/editor
 
     def _set_manual_price(self, item_id: int, per_unit_cents: int) -> None:
-        """Inline-edit handler: store the manual per-unit price (stays marked)."""
+        """Inline-edit handler: store the manual per-unit price. Editing the
+        price marks the item for review so the daily poll won't overwrite it."""
         item = ItemRepository(self._conn).get(item_id)
         if item is None:
             return
         item.market_value_cents = per_unit_cents
         item.market_value_asof = now_iso()[:10]
+        item.review = True
+        item.notes = with_review_note(item.notes)
+        ItemRepository(self._conn).update(item)
+        self._conn.commit()
+        self.refresh()
+
+    def _set_item_field(self, item_id: int, field: str, value) -> None:
+        """Inline-edit handler for a card's descriptive/identity fields."""
+        item = ItemRepository(self._conn).get(item_id)
+        if item is None:
+            return
+        text = value.strip() if isinstance(value, str) else value
+        if field == "name":
+            item.name = text or item.name  # never blank the name
+        elif field == "set_name":
+            item.set_name = text or None
+        elif field == "card_number":
+            item.card_number = text or None
+        elif field == "language":
+            item.language = Language(text)
+        elif field == "holo_pattern":
+            item.holo_pattern = HoloPattern(text)
+        elif field == "edition":
+            item.edition = Edition(text)
+        elif field == "notes":
+            base = without_review_note(text)  # don't duplicate the marker
+            item.notes = with_review_note(base) if item.review else base
+        elif field == "condition":
+            if item.is_graded:
+                return  # graded cards have no condition to set
+            item.condition = Condition(text)
+            # Non-NM auto-marks for review; NM clears it (matches entry/editor).
+            item.review = text != Condition.NM.value
+            item.notes = (
+                with_review_note(item.notes)
+                if item.review
+                else without_review_note(item.notes)
+            )
+        else:
+            return
         ItemRepository(self._conn).update(item)
         self._conn.commit()
         self.refresh()

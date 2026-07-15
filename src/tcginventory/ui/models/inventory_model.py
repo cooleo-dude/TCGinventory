@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QBrush, QColor
 
+from tcginventory.domain.enums import Condition, Edition, HoloPattern, Language
 from tcginventory.domain.models import Item
 from tcginventory.services.inventory import InventoryRow
 from tcginventory.ui.formatting import money
@@ -54,30 +55,48 @@ class _Column:
     sort_key: Callable[[InventoryRow], object]
     numeric: bool = False
     pl: bool = False  # colour by sign
+    # Inline editing: `field` is the Item attribute to edit; `editor` is the kind
+    # ("text" or "combo"); `enum` is the enum class for combo columns.
+    field: str | None = None
+    editor: str | None = None
+    enum: object = None
 
 
 _COLUMNS: list[_Column] = [
     _Column("SKU", lambda r: r.sku, lambda r: r.sku),
-    _Column("Name", lambda r: r.item.name, lambda r: r.item.name.lower()),
+    _Column(
+        "Name", lambda r: r.item.name, lambda r: r.item.name.lower(),
+        field="name", editor="text",
+    ),
     _Column(
         "Set",
         lambda r: r.item.set_name or "",
         lambda r: (r.item.set_name or "").lower(),
+        field="set_name", editor="text",
     ),
     _Column(
-        "#", lambda r: r.item.card_number or "", lambda r: r.item.card_number or ""
+        "#", lambda r: r.item.card_number or "", lambda r: r.item.card_number or "",
+        field="card_number", editor="text",
     ),
-    _Column("Lang", lambda r: r.item.language.value, lambda r: r.item.language.value),
-    _Column("Cond/Grade", lambda r: _cond_grade(r.item), lambda r: _cond_grade(r.item)),
+    _Column(
+        "Lang", lambda r: r.item.language.value, lambda r: r.item.language.value,
+        field="language", editor="combo", enum=Language,
+    ),
+    _Column(
+        "Cond/Grade", lambda r: _cond_grade(r.item), lambda r: _cond_grade(r.item),
+        field="condition", editor="combo", enum=Condition,
+    ),
     _Column(
         "Holo",
         lambda r: r.item.holo_pattern.value if r.item.holo_pattern else "",
         lambda r: r.item.holo_pattern.value if r.item.holo_pattern else "",
+        field="holo_pattern", editor="combo", enum=HoloPattern,
     ),
     _Column(
         "Edition",
         lambda r: r.item.edition.value if r.item.edition else "",
         lambda r: r.item.edition.value if r.item.edition else "",
+        field="edition", editor="combo", enum=Edition,
     ),
     _Column("Intent", lambda r: r.intent, lambda r: r.intent),
     _Column("Acquired", lambda r: r.acquired_at, lambda r: r.acquired_at),
@@ -101,8 +120,19 @@ _COLUMNS: list[_Column] = [
         "Notes",
         lambda r: r.item.notes or "",
         lambda r: (r.item.notes or "").lower(),
+        field="notes", editor="text",
     ),
 ]
+
+
+def combo_columns() -> list[tuple[int, list[str]]]:
+    """(column index, option-value list) for each combo-editable column, so the
+    view can attach a drop-down delegate."""
+    out: list[tuple[int, list[str]]] = []
+    for i, col in enumerate(_COLUMNS):
+        if col.editor == "combo" and col.enum is not None:
+            out.append((i, [e.value for e in col.enum]))
+    return out
 
 
 # Column index of "Current Market" (the review-editable column).
@@ -126,11 +156,13 @@ class InventoryTableModel(QAbstractTableModel):
         rows: list[InventoryRow] | None = None,
         on_edit_price=None,  # (item_id, per_unit_cents) -> None
         on_edit_intent=None,  # (lot_id, intent_str) -> None
+        on_edit_item=None,  # (item_id, field, value) -> None : inline item edit
     ) -> None:
         super().__init__()
         self._rows: list[InventoryRow] = rows or []
         self._on_edit_price = on_edit_price
         self._on_edit_intent = on_edit_intent
+        self._on_edit_item = on_edit_item
 
     def set_rows(self, rows: list[InventoryRow]) -> None:
         self.beginResetModel()
@@ -183,6 +215,13 @@ class InventoryTableModel(QAbstractTableModel):
             return (row.current_price_cents or 0) / 100.0
         if index.column() == INTENT_COL and role == Qt.EditRole:
             return row.intent
+        if role == Qt.EditRole:
+            col = _COLUMNS[index.column()]
+            if col.field is not None:  # inline-editable item field
+                val = getattr(row.item, col.field)
+                if col.enum is not None:
+                    return val.value if val is not None else ""
+                return val or ""
         if (
             role == Qt.BackgroundRole
             and index.column() == MARKET_CURRENT_COL
@@ -194,10 +233,17 @@ class InventoryTableModel(QAbstractTableModel):
     def flags(self, index: QModelIndex):
         base = super().flags(index)
         col = index.column()
-        if col == MARKET_CURRENT_COL and self._rows[index.row()].review:
+        row = self._rows[index.row()]
+        if col == MARKET_CURRENT_COL:  # always editable → sets a manual price
             base |= Qt.ItemIsEditable
-        if col == INTENT_COL:
+        elif col == INTENT_COL:
             base |= Qt.ItemIsEditable
+        else:
+            coldef = _COLUMNS[col]
+            if coldef.field is not None:
+                # Condition only applies to ungraded cards.
+                if not (coldef.field == "condition" and row.item.is_graded):
+                    base |= Qt.ItemIsEditable
         return base
 
     def setData(self, index: QModelIndex, value, role=Qt.EditRole) -> bool:
@@ -215,5 +261,10 @@ class InventoryTableModel(QAbstractTableModel):
                 return False
             if self._on_edit_price is not None:
                 self._on_edit_price(row.item.id, per_unit_cents)
+            return True
+        coldef = _COLUMNS[index.column()]
+        if coldef.field is not None:
+            if self._on_edit_item is not None:
+                self._on_edit_item(row.item.id, coldef.field, value)
             return True
         return False
