@@ -77,39 +77,50 @@ _GRADED = ["All", "Singles", "Graded"]
 
 
 class _PreviewPrefetchWorker(QThread):
-    """Resolve + warm the on-disk image cache for the grid's rows, off the UI
-    thread, so hovering is instant. Uses its own DB connection (sqlite handles
-    aren't shareable across threads) and emits a ``{lot_id: (card_id, url)}`` map
-    the view then serves hovers from.
+    """Pre-fetch, off the UI thread, everything a hover needs so it's instant:
+    each row's card image (resolved + cached to disk) and each item's price
+    history. Uses its own DB connection (sqlite handles aren't shareable across
+    threads) and emits the image map ``{lot_id: (card_id, url)}`` and the history
+    map ``{item_id: [PriceSnapshot]}``. The chart itself is still built on the UI
+    thread (QtCharts isn't thread-safe), but from this cache — no DB round-trip.
     """
 
-    resolved = Signal(dict)
+    resolved = Signal(dict, dict)
 
-    def __init__(self, db_file: str, rows: list[tuple[int, str, str, str]]) -> None:
+    def __init__(
+        self, db_file: str, rows: list[tuple[int, int, str, str, str]], since: str
+    ) -> None:
         super().__init__()
         self._db_file = db_file
         self._rows = rows
+        self._since = since
 
     def run(self) -> None:  # pragma: no cover - exercised via the UI
         from tcginventory.data.db import connect
 
-        result: dict[int, tuple[str, str]] = {}
+        images: dict[int, tuple[str, str]] = {}
+        history: dict[int, list] = {}
         try:
             conn = connect(self._db_file)
             try:
-                repo = CardCatalogRepository(conn)
-                for lot_id, name, set_name, number in self._rows:
+                catalog = CardCatalogRepository(conn)
+                snaps = PriceSnapshotRepository(conn)
+                for lot_id, item_id, name, set_name, number in self._rows:
                     if self.isInterruptionRequested():
                         break
-                    hit = repo.image_for(name, set_name, number)
+                    hit = catalog.image_for(name, set_name, number)
                     if hit:
-                        result[lot_id] = hit
+                        images[lot_id] = hit
                         cardimages.ensure_cached(hit[0], hit[1])  # warm disk
+                    if item_id not in history:
+                        history[item_id] = snaps.history_for_item(
+                            item_id, since=self._since
+                        )
             finally:
                 conn.close()
         except Exception:
-            pass  # best-effort cache warming; never break the UI
-        self.resolved.emit(result)
+            pass  # best-effort warming; never break the UI
+        self.resolved.emit(images, history)
 
 
 class _InventoryFilterProxy(QSortFilterProxyModel):
@@ -183,6 +194,7 @@ class InventoryView(QWidget):
         # lot_id -> (card_id, image_url), populated in the background so hovers
         # don't re-query the catalog or wait on the network.
         self._row_image: dict[int, tuple[str, str]] = {}
+        self._row_history: dict[int, list] = {}  # item_id -> price snapshots
         self._prefetch_worker: _PreviewPrefetchWorker | None = None
         self._columns_sized = False  # auto-size grid columns once, on first load
         self._model = InventoryTableModel(
@@ -362,25 +374,32 @@ class InventoryView(QWidget):
         return None
 
     def _prefetch_previews(self, rows: list[InventoryRow]) -> None:
-        """Warm the card-image cache + resolve each row's image in the
-        background so hovering the grid is instant (no per-hover catalog scan or
-        network fetch)."""
+        """Warm the card image + price-history caches in the background so
+        hovering the grid is instant (no per-hover catalog scan, network fetch,
+        or history query)."""
         db_file = self._db_file()
         if not db_file or not rows:
             return
         if self._prefetch_worker is not None and self._prefetch_worker.isRunning():
             self._prefetch_worker.requestInterruption()
         payload = [
-            (r.lot_id, r.item.name, r.item.set_name, r.item.card_number)
+            (r.lot_id, r.item.id, r.item.name, r.item.set_name, r.item.card_number)
             for r in rows
         ]
-        worker = _PreviewPrefetchWorker(db_file, payload)
+        worker = _PreviewPrefetchWorker(db_file, payload, self._history_since())
         worker.resolved.connect(self._on_previews_resolved)
         self._prefetch_worker = worker
         worker.start()
 
-    def _on_previews_resolved(self, mapping: dict) -> None:
-        self._row_image = mapping
+    def _on_previews_resolved(self, images: dict, history: dict) -> None:
+        self._row_image = images
+        self._row_history = history
+
+    @staticmethod
+    def _history_since() -> str:
+        return (
+            datetime.now(timezone.utc) - timedelta(days=_HISTORY_DAYS)
+        ).isoformat()
 
     def _selected_row(self) -> InventoryRow | None:
         indexes = self._table.selectionModel().selectedRows()
@@ -403,8 +422,13 @@ class InventoryView(QWidget):
         if row is None:
             self._show_chart_message("Select a card to see its price history.")
             return
-        since = (datetime.now(timezone.utc) - timedelta(days=_HISTORY_DAYS)).isoformat()
-        history = self._service.prices.history_for_item(row.item.id, since=since)
+        # Prefer the pre-fetched history; fall back to a live query only if the
+        # background prefetch hasn't reached this item yet.
+        history = self._row_history.get(row.item.id)
+        if history is None:
+            history = self._service.prices.history_for_item(
+                row.item.id, since=self._history_since()
+            )
         self._chart_view.setChart(_history_chart(row, history))
 
     def _on_row_hover(self, proxy_index: QModelIndex) -> None:
