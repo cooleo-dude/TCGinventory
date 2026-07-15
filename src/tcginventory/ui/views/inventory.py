@@ -239,12 +239,16 @@ class InventoryView(QWidget):
         self._table.setSortingEnabled(True)
         self._table.sortByColumn(0, Qt.AscendingOrder)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        # Single click into a cell opens its editor (see _edit_on_click);
+        # double-click stays as a fallback and opens the dialog on read-only
+        # columns.
         self._table.setEditTriggers(QAbstractItemView.DoubleClicked)
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.horizontalHeader().setStretchLastSection(False)
         self._table.doubleClicked.connect(self._open_detail)
+        self._table.clicked.connect(self._edit_on_click)
         self._table.selectionModel().selectionChanged.connect(self._on_selection)
         # Hover a row to preview the card image in the pane by the chart
         # (lazily fetched + cached).
@@ -296,8 +300,7 @@ class InventoryView(QWidget):
         bottom_layout.setContentsMargins(0, 0, 0, 0)
         preview_box = QVBoxLayout()
         preview_box.addWidget(QLabel("Card preview"))
-        preview_box.addWidget(self._preview_pane)
-        preview_box.addStretch(1)
+        preview_box.addWidget(self._preview_pane, 1)  # fills the column height
         bottom_layout.addLayout(preview_box, 1)
         bottom_layout.addWidget(self._chart_view, 4)
         splitter.addWidget(bottom)
@@ -315,10 +318,26 @@ class InventoryView(QWidget):
         rows = self._service.inventory_rows()
         self._model.set_rows(rows)
         self._table.resizeColumnsToContents()
+        self._apply_column_widths()
         self._empty.setVisible(not rows)
         self._table.setVisible(bool(rows))
         self._prefetch_previews(rows)
         self._on_selection()
+
+    def _col(self, header: str) -> int:
+        return next(
+            i
+            for i in range(self._model.columnCount())
+            if self._model.headerData(i, Qt.Horizontal) == header
+        )
+
+    def _apply_column_widths(self) -> None:
+        """Trim the auto-sized Notes column and give the freed space to the
+        Holo / Edition / Intent drop-down columns so their editors have room."""
+        notes = self._col("Notes")
+        self._table.setColumnWidth(notes, max(90, self._table.columnWidth(notes) // 2))
+        for header, width in (("Holo", 70), ("Edition", 110), ("Intent", 110)):
+            self._table.setColumnWidth(self._col(header), width)
 
     def _db_file(self) -> str | None:
         """The backing SQLite file, or None for an in-memory DB (tests)."""
@@ -392,12 +411,20 @@ class InventoryView(QWidget):
     def _open_detail(self, proxy_index: QModelIndex) -> None:
         source_index = self._proxy.mapToSource(proxy_index)
         row = self._model.row_at(source_index.row())
-        # Inline-editable cells edit in place on double-click; only the
-        # read-only columns open the full item editor dialog.
+        # Inline-editable cells edit in place; only the read-only columns open
+        # the full item editor dialog.
         if self._model.flags(source_index) & Qt.ItemIsEditable:
             return
         ItemDetailDialog(self._conn, row.item.id, parent=self).exec()
         self.refresh()  # reflect any edits made in the detail/editor
+
+    def _edit_on_click(self, proxy_index: QModelIndex) -> None:
+        """Open the cell's editor on a single click (except the Current Market
+        cell, whose single click drives the review ✕/↻ button)."""
+        if proxy_index.column() == MARKET_CURRENT_COL:
+            return
+        if self._model.flags(self._proxy.mapToSource(proxy_index)) & Qt.ItemIsEditable:
+            self._table.edit(proxy_index)
 
     def _set_manual_price(self, item_id: int, per_unit_cents: int) -> None:
         """Inline-edit handler: store the manual per-unit price. Editing the

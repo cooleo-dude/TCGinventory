@@ -510,8 +510,7 @@ class TransactionView(QWidget):
         lower.setContentsMargins(0, 0, 0, 0)
         preview_box = QVBoxLayout()
         preview_box.addWidget(QLabel("Card preview"))
-        preview_box.addWidget(self._preview_pane)
-        preview_box.addStretch(1)
+        preview_box.addWidget(self._preview_pane, 1)  # fills the reserved height
         # Preview column mirrors the give:receive 1:4 split, so the card image
         # is as wide as the "You give" panel (and shrinks with it).
         lower.addLayout(preview_box, 1)

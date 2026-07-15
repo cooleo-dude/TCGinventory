@@ -19,7 +19,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QThread, Signal
 from PySide6.QtGui import QCursor, QPixmap, QResizeEvent
-from PySide6.QtWidgets import QLabel, QWidget
+from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 
 from tcginventory.services import cardimages
 
@@ -124,7 +124,6 @@ class CardImagePane(QLabel):
     """
 
     _PLACEHOLDER = "Hover a card\nto preview"
-    _MIN_W = 110  # px — smallest card width (lets a narrow column shrink it)
     _MAX_W = 460  # px — cap so the card tracks its column (≈ the give panel)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -133,6 +132,9 @@ class CardImagePane(QLabel):
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
         )
         self.setMinimumSize(110, 155)
+        # Take whatever space the layout gives (don't let the pixmap's size hint
+        # drive/inflate the layout) — the image is scaled to fit that space.
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.setStyleSheet(
             "border:1px solid #504945; border-radius:4px; "
             "background:#1d2021; color:#a89984;"
@@ -181,13 +183,20 @@ class CardImagePane(QLabel):
     def _rescale(self) -> None:
         if self._pixmap is None:
             return
-        # Scale by width only (aspect kept), clamped — one consistent card size
-        # that grows with the pane width but never fills/zooms to its height.
-        width = max(self._MIN_W, min(self.width() - 8, self._MAX_W))
+        # Fit within the pane's width AND height (aspect kept), width capped —
+        # so the card never overflows/clips the bottom of a short pane, and
+        # grows with the pane up to the cap.
+        avail_w = min(self.width() - 8, self._MAX_W)
+        avail_h = self.height() - 8
+        if avail_w < 1 or avail_h < 1:
+            return
         try:
             self.setPixmap(
-                self._pixmap.scaledToWidth(
-                    width, Qt.TransformationMode.SmoothTransformation
+                self._pixmap.scaled(
+                    avail_w,
+                    avail_h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
                 )
             )
         except RuntimeError:
