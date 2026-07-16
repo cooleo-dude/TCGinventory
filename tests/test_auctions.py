@@ -144,7 +144,15 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
-def _view(app):
+class _FakeHistory:
+    def __init__(self, prices):
+        self._prices = prices  # card_id -> cents
+
+    def current_price(self, card_id):
+        return self._prices.get(card_id)
+
+
+def _view(app, history=None):
     from tcginventory.data.db import connect
     from tcginventory.data.migrator import migrate
     from tcginventory.ui.views.auctions import AuctionsView
@@ -152,7 +160,7 @@ def _view(app):
     conn = connect(":memory:")
     migrate(conn)
     # history=None -> no pricehistory.db lookup / no filesystem access in tests.
-    return AuctionsView(conn, auctions_conn=open_auctions(":memory:"), history=None)
+    return AuctionsView(conn, auctions_conn=open_auctions(":memory:"), history=history)
 
 
 def test_view_breakdown_updates_live(app):
@@ -206,4 +214,39 @@ def test_view_save_load_and_delete_roundtrip(app):
         QMessageBox.question = orig
     assert view._watch.rowCount() == 0
     assert view._edit_id is None
+    view.deleteLater()
+
+
+def test_refresh_values_from_history(app, monkeypatch):
+    view = _view(app, history=_FakeHistory({"cel-4": 1_500}))
+    a = Auction(
+        title="lot",
+        cards=[
+            AuctionCard(
+                name="Charizard",
+                card_id="cel-4",
+                set_name="Celebrations",
+                number="4",
+                market_value_cents=500,
+            ),
+            AuctionCard(name="Manual entry", market_value_cents=300),  # no card_id
+        ],
+    )
+    view._repo.save(a, now="2026-07-16T00:00:00+00:00")
+    view.refresh()
+
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "information", staticmethod(lambda *a, **k: None)
+    )
+    view._refresh_values(view._repo.get(a.id))
+
+    got = view._repo.get(a.id)
+    vals = {c.name: c.market_value_cents for c in got.cards}
+    assert vals["Charizard"] == 1_500  # repriced from history
+    assert vals["Manual entry"] == 300  # no catalog match -> left unchanged
+    # No live fetch spawned (history had the price) and value cell reflects it.
+    assert view._price_workers == []
+    assert view._watch.item(0, 2).text() == "$18.00"  # 1500 + 300
     view.deleteLater()

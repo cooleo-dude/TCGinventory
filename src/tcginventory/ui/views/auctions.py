@@ -67,9 +67,9 @@ _CARD_WIDTHS = [200, 150, 70, 90, 50, 30]
 
 _WATCH_HEADERS = [
     "Title", "Cards", "Value", "70%", "80%", "90%", "100%", "Ship", "Tax",
-    "Link", "",
+    "", "Link", "",
 ]
-_WATCH_WIDTHS = [220, 50, 90, 90, 90, 90, 90, 80, 60, 60, 30]
+_WATCH_WIDTHS = [220, 50, 90, 90, 90, 90, 90, 80, 60, 34, 60, 30]
 _ID_ROLE = Qt.UserRole + 1
 _UNSET = object()  # sentinel: history not supplied -> open the default DB
 
@@ -349,6 +349,12 @@ class AuctionsView(QWidget):
         for col, cell in enumerate(cells):
             self._watch.setItem(r, col, cell)
 
+        refresh = QPushButton("↻")
+        refresh.setFixedWidth(30)
+        refresh.setToolTip("Refresh card values from current market prices")
+        refresh.clicked.connect(lambda _=False, a=auction: self._refresh_values(a))
+        self._watch.setCellWidget(r, 9, refresh)
+
         link = QPushButton("Open ↗")
         link.setEnabled(bool(auction.url))
         link.setToolTip(auction.url or "No link")
@@ -356,13 +362,13 @@ class AuctionsView(QWidget):
             link.clicked.connect(
                 lambda _=False, u=auction.url: QDesktopServices.openUrl(QUrl(u))
             )
-        self._watch.setCellWidget(r, 9, link)
+        self._watch.setCellWidget(r, 10, link)
 
         remove = QPushButton("✕")
         remove.setFixedWidth(28)
         remove.setToolTip("Delete this auction")
         remove.clicked.connect(lambda _=False, a=auction: self._delete(a))
-        self._watch.setCellWidget(r, 10, remove)
+        self._watch.setCellWidget(r, 11, remove)
 
     def _on_watch_cell_clicked(self, row: int, col: int) -> None:
         # The Link (9) and Delete (10) columns are buttons; other cells load.
@@ -386,6 +392,83 @@ class AuctionsView(QWidget):
         if self._edit_id == auction.id:
             self._new()
         self.refresh()
+
+    # -- refresh values -----------------------------------------------------
+
+    def _history_price(self, card_id: str | None) -> int | None:
+        if not card_id or self._history is None:
+            return None
+        try:
+            return self._history.current_price(card_id)
+        except Exception:
+            return None
+
+    def _refresh_values(self, auction: Auction) -> None:
+        """Re-pull each card's market value for a saved auction and recompute the
+        breakdown. History-first (instant/offline); a live tcgcsv fetch fills any
+        card not yet in ``pricehistory.db``. Cards with no catalog match (no
+        ``card_id``) can't be repriced and are left unchanged."""
+        live: list[AuctionCard] = []
+        refreshed = 0
+        unmatched: list[str] = []
+        for card in auction.cards:
+            if not card.card_id:
+                unmatched.append(card.name)
+                continue
+            price = self._history_price(card.card_id)
+            if price:
+                card.market_value_cents = price
+                refreshed += 1
+            elif card.set_name and card.number:
+                live.append(card)
+            else:
+                unmatched.append(card.name)
+
+        self._repo.save(auction)
+        self._reflect_values_saved(auction, reload_editor=True)
+
+        for card in live:
+            category = 85 if card.language == "JP" else 3
+            worker = _LivePriceWorker(
+                card.set_name, card.number, card.name, category
+            )
+            worker.done.connect(
+                lambda result, a=auction, c=card, w=worker: self._on_refresh_price(
+                    a, c, w, result
+                )
+            )
+            self._price_workers.append(worker)
+            worker.start()
+
+        parts = [f"Refreshed {refreshed} card value(s) from current prices."]
+        if live:
+            parts.append(f"Fetching {len(live)} more live…")
+        if unmatched:
+            shown = ", ".join(unmatched[:5]) + (
+                f" (+{len(unmatched) - 5})" if len(unmatched) > 5 else ""
+            )
+            parts.append(
+                f"{len(unmatched)} card(s) have no catalog match and were left "
+                f"unchanged: {shown}."
+            )
+        QMessageBox.information(self, "Refresh values", "\n".join(parts))
+
+    def _on_refresh_price(self, auction, card, worker, result) -> None:
+        if worker in self._price_workers:
+            self._price_workers.remove(worker)
+        if result is None:
+            return
+        cents, _url = result
+        card.market_value_cents = cents
+        self._repo.save(auction)
+        # Watchlist only (no editor reload) so an async result never clobbers
+        # in-progress edits.
+        self._reflect_values_saved(auction, reload_editor=False)
+
+    def _reflect_values_saved(self, auction: Auction, *, reload_editor: bool) -> None:
+        self.refresh()
+        if reload_editor and self._edit_id == auction.id:
+            self._load_auction(auction.id)
 
     # -- editor -------------------------------------------------------------
 
