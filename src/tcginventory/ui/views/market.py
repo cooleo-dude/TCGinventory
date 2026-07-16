@@ -1,9 +1,9 @@
-"""Market view — look up *any* card and see its price-history graph.
+"""Price Lookup view — chart the price history of any card, and overlay several.
 
-Backed by the catalog-wide ``pricehistory.db`` (built by the daily sweep), so
-it works for every card in the catalog, not just owned ones. Search by name /
-set / number, pick a result, and see the card image, current market price, and
-its recorded price path.
+Search any catalog card, see its image + current market price + price path, and
+**tag** cards so their graphs persist and overlay on one chart for comparison. A
+side panel lists the currently-tagged cards. Backed by the catalog-wide
+``pricehistory.db`` (built by the daily market sweep).
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QPushButton,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -29,6 +30,7 @@ from tcginventory.ui.charts import HoverChartView
 from tcginventory.ui.formatting import money
 
 _CARD_ID_ROLE = Qt.UserRole + 1
+_DAY_MS = 86_400_000
 
 
 def _msecs(day: str) -> float:
@@ -39,7 +41,12 @@ def _msecs(day: str) -> float:
     return dt.timestamp() * 1000.0
 
 
-class MarketView(QWidget):
+def _label(card) -> str:
+    tail = card.set_code or card.set_name or ""
+    return f"{card.name} ({tail})" if tail else card.name
+
+
+class PriceLookupView(QWidget):
     def __init__(self, conn: sqlite3.Connection) -> None:
         super().__init__()
         self._conn = conn
@@ -47,48 +54,70 @@ class MarketView(QWidget):
         self._history_conn: sqlite3.Connection | None = None
         self._history = None  # PriceHistoryRepository, opened lazily
         self._matches: dict[str, object] = {}
+        self._selected = None  # CatalogCard currently previewed
+        self._tagged: dict[str, object] = {}  # card_id -> CatalogCard (persistent)
 
+        # -- left column: search block above the card display, equal sizes -----
         self._search = QLineEdit()
-        self._search.setPlaceholderText("Search any card — name, set, and/or number…")
+        self._search.setPlaceholderText("Search a card — name, set, and/or number…")
         self._search.textChanged.connect(self._on_search)
         self._results = QListWidget()
         self._results.currentItemChanged.connect(self._on_select)
+        search_block = QWidget()
+        sb = QVBoxLayout(search_block)
+        sb.setContentsMargins(0, 0, 0, 0)
+        sb.addWidget(self._search)
+        sb.addWidget(self._results, 1)
+
+        self._preview = CardImagePane()
+        self._tag_btn = QPushButton("Tag card")
+        self._tag_btn.setToolTip("Keep this card's graph on the chart to compare")
+        self._tag_btn.clicked.connect(self._tag_selected)
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(self._search)
-        left_layout.addWidget(self._results, 1)
+        left_layout.addWidget(search_block, 1)  # same size as the card display…
+        left_layout.addWidget(self._preview, 1)  # …below it
+        left_layout.addWidget(self._tag_btn)
 
-        self._title = QLabel("Search for a card to see its price history.")
-        self._title.setStyleSheet("font-size: 15px; font-weight: 600;")
-        self._title.setWordWrap(True)
-        self._current = QLabel("")
+        # -- centre: overlay chart + current price -----------------------------
+        centre = QWidget()
+        centre_layout = QVBoxLayout(centre)
+        centre_layout.setContentsMargins(0, 0, 0, 0)
+        self._current = QLabel("Search for a card to see its price history.")
         self._current.setStyleSheet("color: #689d6a; font-weight: 600;")
-        self._preview = CardImagePane()
         self._chart = HoverChartView()
         self._chart.setMinimumHeight(240)
-        self._show_message("Search for a card to see its price history.")
+        centre_layout.addWidget(self._current)
+        centre_layout.addWidget(self._chart, 1)
 
-        detail = QWidget()
-        detail_layout = QVBoxLayout(detail)
-        detail_layout.addWidget(self._title)
-        detail_layout.addWidget(self._current)
-        body = QSplitter(Qt.Horizontal)
-        body.addWidget(self._preview)
-        body.addWidget(self._chart)
-        body.setStretchFactor(0, 1)
-        body.setStretchFactor(1, 3)
-        detail_layout.addWidget(body, 1)
+        # -- right: tagged-cards panel ----------------------------------------
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(QLabel("Tagged cards"))
+        self._tagged_list = QListWidget()
+        self._tagged_list.itemDoubleClicked.connect(self._untag_item)
+        right_layout.addWidget(self._tagged_list, 1)
+        untag = QPushButton("Untag selected")
+        untag.clicked.connect(self._untag_selected)
+        clear = QPushButton("Clear all")
+        clear.clicked.connect(self._clear_tags)
+        right_layout.addWidget(untag)
+        right_layout.addWidget(clear)
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(left)
-        split.addWidget(detail)
+        split.addWidget(centre)
+        split.addWidget(right)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 3)
+        split.setStretchFactor(2, 1)
 
         layout = QVBoxLayout(self)
         layout.addWidget(split)
+        self._rebuild_chart()
 
     # -- history db (opened on first use) -----------------------------------
 
@@ -128,53 +157,87 @@ class MarketView(QWidget):
         card = self._matches.get(current.data(_CARD_ID_ROLE))
         if card is None:
             return
-        self._title.setText(
-            f"{card.name}  ·  {card.set_name or ''}  "
-            f"#{card.full_number or card.number or ''}  ({card.language})"
-        )
+        self._selected = card
         self._preview.show_card(card.card_id, getattr(card, "image_small", None))
-
         hist = self._hist()
-        points = hist.history_for_card(card.card_id) if hist else []
-        current_cents = hist.current_price(card.card_id) if hist else None
+        cents = hist.current_price(card.card_id) if hist else None
         self._current.setText(
-            f"Current market: {money(current_cents)}"
-            if current_cents is not None
-            else "No market price recorded yet."
+            f"{_label(card)} — current market: {money(cents)}"
+            if cents is not None
+            else f"{_label(card)} — no market price recorded yet."
         )
-        if points:
-            self._chart.setChart(_price_chart(card.name, points))
-        else:
-            self._show_message(
-                f"{card.name} — no price history recorded yet "
-                "(built by the daily market update)."
-            )
+        self._tag_btn.setText(f"Tag {card.name}")
+        self._rebuild_chart()
 
-    def _show_message(self, text: str) -> None:
-        chart = QChart()
-        chart.setTitle(text)
-        self._chart.setChart(chart)
+    # -- tagging ------------------------------------------------------------
+
+    def _tag_selected(self) -> None:
+        if self._selected is None or self._selected.card_id in self._tagged:
+            return
+        card = self._selected
+        self._tagged[card.card_id] = card
+        item = QListWidgetItem(_label(card))
+        item.setData(_CARD_ID_ROLE, card.card_id)
+        self._tagged_list.addItem(item)
+        self._rebuild_chart()
+
+    def _untag_item(self, item: QListWidgetItem) -> None:
+        self._tagged.pop(item.data(_CARD_ID_ROLE), None)
+        self._tagged_list.takeItem(self._tagged_list.row(item))
+        self._rebuild_chart()
+
+    def _untag_selected(self) -> None:
+        item = self._tagged_list.currentItem()
+        if item is not None:
+            self._untag_item(item)
+
+    def _clear_tags(self) -> None:
+        self._tagged.clear()
+        self._tagged_list.clear()
+        self._rebuild_chart()
+
+    # -- chart --------------------------------------------------------------
+
+    def _rebuild_chart(self) -> None:
+        hist = self._hist()
+        entries: list[tuple[str, list[tuple[str, int]]]] = []
+        seen = set()
+        for card in self._tagged.values():
+            pts = hist.history_for_card(card.card_id) if hist else []
+            if pts:
+                entries.append((_label(card), pts))
+            seen.add(card.card_id)
+        # Overlay the currently-selected (untagged) card as a live preview.
+        if self._selected is not None and self._selected.card_id not in seen:
+            pts = hist.history_for_card(self._selected.card_id) if hist else []
+            if pts:
+                entries.append((_label(self._selected), pts))
+        self._chart.setChart(_overlay_chart(entries))
 
 
-def _price_chart(name: str, points: list[tuple[str, int]]) -> QChart:
+def _overlay_chart(entries: list[tuple[str, list[tuple[str, int]]]]) -> QChart:
     chart = QChart()
-    chart.setTitle(f"{name} — market price")
-
-    pts = [(_msecs(as_of), cents / 100.0) for as_of, cents in points]
-    # Carry the last known price forward to today so the line reaches "now".
+    if not entries:
+        chart.setTitle("Search a card, then Tag it to compare price histories.")
+        return chart
+    chart.setTitle("Price history")
     today_x = _msecs(date.today().isoformat())
-    if pts and pts[-1][0] < today_x:
-        pts.append((today_x, pts[-1][1]))
-    # A single change-point needs a second vertex to render as a line.
-    if len(pts) == 1:
-        x, y = pts[0]
-        pts.insert(0, (x - 86_400_000, y))  # one day earlier, same price
-
-    series = QLineSeries()
-    series.setName("Market price")
-    for x, y in pts:
-        series.append(x, y)
-    chart.addSeries(series)
+    all_x: list[float] = []
+    all_y: list[float] = []
+    for label, points in entries:
+        pts = [(_msecs(a), c / 100.0) for a, c in points]
+        if pts and pts[-1][0] < today_x:  # carry last price to today
+            pts.append((today_x, pts[-1][1]))
+        if len(pts) == 1:  # a lone point needs a second vertex to draw a line
+            x, y = pts[0]
+            pts.insert(0, (x - _DAY_MS, y))
+        series = QLineSeries()
+        series.setName(label)
+        for x, y in pts:
+            series.append(x, y)
+            all_x.append(x)
+            all_y.append(y)
+        chart.addSeries(series)
 
     axis_x = QDateTimeAxis()
     axis_x.setFormat("MMM d")
@@ -183,16 +246,15 @@ def _price_chart(name: str, points: list[tuple[str, int]]) -> QChart:
     axis_y = QValueAxis()
     axis_y.setTitleText("USD")
     chart.addAxis(axis_y, Qt.AlignLeft)
-    series.attachAxis(axis_x)
-    series.attachAxis(axis_y)
-
-    xs = [x for x, _ in pts]
+    for series in chart.series():
+        series.attachAxis(axis_x)
+        series.attachAxis(axis_y)
     axis_x.setRange(
-        QDateTime.fromMSecsSinceEpoch(int(min(xs))),
-        QDateTime.fromMSecsSinceEpoch(int(max(xs))),
+        QDateTime.fromMSecsSinceEpoch(int(min(all_x))),
+        QDateTime.fromMSecsSinceEpoch(int(max(all_x))),
     )
-    ys = [y for _, y in pts]
-    low, high = min(ys), max(ys)
+    low, high = min(all_y), max(all_y)
     pad = max(1.0, (high - low) * 0.1)
     axis_y.setRange(low - pad, high + pad)
+    chart.legend().setVisible(True)
     return chart

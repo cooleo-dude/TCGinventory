@@ -1,4 +1,4 @@
-"""Market view: search any card + render its price-history graph (offscreen)."""
+"""Price Lookup view: search, chart, and multi-card overlay (offscreen)."""
 
 from __future__ import annotations
 
@@ -22,15 +22,17 @@ def app():
 
 
 class _FakeHistory:
-    def __init__(self, points, current):
-        self._points = points
-        self._current = current
+    """Returns per-card history/current price from a dict."""
+
+    def __init__(self, by_card):
+        self._by_card = by_card  # card_id -> list[(as_of, cents)]
 
     def history_for_card(self, card_id, since=None):
-        return self._points
+        return self._by_card.get(card_id, [])
 
     def current_price(self, card_id):
-        return self._current
+        pts = self._by_card.get(card_id)
+        return pts[-1][1] if pts else None
 
 
 def _seed(conn):
@@ -38,47 +40,73 @@ def _seed(conn):
         [
             # No image_small → CardImagePane won't spawn a fetch thread in tests.
             CatalogCard(card_id="sv9-1", name="Pikachu", set_id="sv9",
-                        set_name="Journey Together", number="1", language="EN"),
+                        set_name="Journey Together", set_code="JTG", number="1",
+                        language="EN"),
+            CatalogCard(card_id="cel-5", name="Charizard", set_id="cel",
+                        set_name="Celebrations", set_code="CEL", number="4",
+                        language="EN"),
         ],
         "t",
     )
     conn.commit()
 
 
-def test_market_search_selects_and_charts(app, conn):
-    from tcginventory.ui.views.market import MarketView
+def test_select_shows_current_and_charts(app, conn):
+    from tcginventory.ui.views.market import PriceLookupView
 
     _seed(conn)
-    view = MarketView(conn)
-    view._history = _FakeHistory([("2026-06-01", 500), ("2026-07-01", 750)], 750)
-
+    view = PriceLookupView(conn)
+    view._history = _FakeHistory({"sv9-1": [("2026-06-01", 500), ("2026-07-01", 750)]})
     view._search.setText("Pikachu")
     assert view._results.count() == 1
-
-    view._results.setCurrentRow(0)  # fires _on_select
-    assert "Current market" in view._current.text()
-    assert view._chart.chart().series()  # a price line was plotted
+    view._results.setCurrentRow(0)
+    assert "current market" in view._current.text().lower()
+    assert view._chart.chart().series()  # previewed the selected card
     view.deleteLater()
 
 
-def test_market_no_history_shows_message(app, conn):
-    from tcginventory.ui.views.market import MarketView
+def test_tag_persists_and_overlays_multiple(app, conn):
+    from tcginventory.ui.views.market import PriceLookupView
 
     _seed(conn)
-    view = MarketView(conn)
-    view._history = _FakeHistory([], None)  # nothing recorded yet
+    view = PriceLookupView(conn)
+    view._history = _FakeHistory({
+        "sv9-1": [("2026-06-01", 500), ("2026-07-01", 750)],
+        "cel-5": [("2026-06-01", 9000), ("2026-07-01", 12000)],
+    })
+
+    def line_count():
+        from PySide6.QtCharts import QLineSeries
+        return sum(isinstance(s, QLineSeries) for s in view._chart.chart().series())
+
     view._search.setText("Pikachu")
     view._results.setCurrentRow(0)
-    assert "No market price" in view._current.text()
-    assert not view._chart.chart().series()  # message chart, no series
+    view._tag_selected()
+    assert view._tagged_list.count() == 1
+
+    # Select a different card → its preview overlays the tagged one (2 lines).
+    view._search.setText("Charizard")
+    view._results.setCurrentRow(0)
+    assert line_count() == 2
+
+    view._tag_selected()  # now both tagged
+    assert view._tagged_list.count() == 2
+    assert line_count() == 2
+
+    view._clear_tags()
+    assert view._tagged_list.count() == 0
     view.deleteLater()
 
 
-def test_price_chart_forward_fills_and_handles_single_point(app):
-    from tcginventory.ui.views.market import _price_chart
+def test_overlay_chart_forward_fills_and_single_point(app):
+    from tcginventory.ui.views.market import _overlay_chart
 
-    multi = _price_chart("X", [("2026-06-01", 500), ("2026-07-01", 750)])
-    assert multi.series() and multi.series()[0].count() >= 2
+    multi = _overlay_chart([
+        ("A", [("2026-06-01", 500), ("2026-07-01", 750)]),
+        ("B", [("2026-07-01", 900)]),  # single point → synthesised second vertex
+    ])
+    lines = multi.series()
+    assert len(lines) == 2
+    assert all(s.count() >= 2 for s in lines)
 
-    single = _price_chart("Y", [("2026-07-01", 750)])
-    assert single.series()[0].count() >= 2  # a second vertex was synthesised
+    assert not _overlay_chart([]).series()  # empty → message chart, no lines
