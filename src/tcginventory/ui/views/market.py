@@ -14,6 +14,7 @@ from datetime import date, datetime
 
 from PySide6.QtCharts import QChart, QDateTimeAxis, QLineSeries, QValueAxis
 from PySide6.QtCore import QDateTime, QEvent, QRect, Qt
+from PySide6.QtGui import QPainter, QPalette
 from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
@@ -50,7 +51,11 @@ def _label(card) -> str:
 
 
 class _ArrowDelegate(QStyledItemDelegate):
-    """Paint a move arrow on the selected row; clicking it moves that card."""
+    """Paint a move-arrow chip on the hovered row; clicking it moves that card.
+
+    The chip is drawn with the palette's highlight/highlighted-text colours so it
+    stands out in both light and dark themes.
+    """
 
     def __init__(self, glyph: str, view: QListWidget, on_move) -> None:
         super().__init__(view)
@@ -64,20 +69,22 @@ class _ArrowDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index) -> None:
         super().paint(painter, option, index)
-        if option.state & QStyle.State_Selected:
+        if option.state & QStyle.State_MouseOver:
             painter.save()
-            painter.setPen(option.palette.highlightedText().color())
-            painter.drawText(
-                self._arrow_rect(option.rect), Qt.AlignCenter, self._glyph
-            )
+            painter.setRenderHint(QPainter.Antialiasing)
+            box = self._arrow_rect(option.rect).adjusted(1, 3, -2, -3)
+            pal = option.palette
+            painter.setBrush(pal.color(QPalette.Highlight))
+            painter.setPen(pal.color(QPalette.Highlight).darker(130))
+            painter.drawRoundedRect(box, 4, 4)
+            painter.setPen(pal.color(QPalette.HighlightedText))
+            painter.drawText(box, Qt.AlignCenter, self._glyph)
             painter.restore()
 
     def editorEvent(self, event, model, option, index) -> bool:
-        if (
-            event.type() == QEvent.MouseButtonRelease
-            and index == self._view.currentIndex()
-            and self._arrow_rect(option.rect).contains(event.pos())
-        ):
+        if event.type() == QEvent.MouseButtonRelease and self._arrow_rect(
+            option.rect
+        ).contains(event.pos()):
             self._on_move(index.data(_CARD_ID_ROLE))
             return True
         return super().editorEvent(event, model, option, index)
@@ -137,35 +144,32 @@ class PriceLookupView(QWidget):
         tp.addWidget(QLabel("Tagged cards"))
         tp.addWidget(self._tagged_list, 1)
 
-        top = QSplitter(Qt.Horizontal)
-        top.addWidget(results_panel)
-        top.addWidget(tagged_panel)
-        top.setStretchFactor(0, 1)
-        top.setStretchFactor(1, 1)
+        lists = QSplitter(Qt.Horizontal)  # the two columns, side by side
+        lists.addWidget(results_panel)
+        lists.addWidget(tagged_panel)
+        lists.setStretchFactor(0, 1)
+        lists.setStretchFactor(1, 1)
 
-        # -- bottom: (wide) card display beside the overlay chart --------------
+        # -- left side: the two lists above a wide card display ----------------
         self._preview = CardImagePane()
         self._current = QLabel("Hover a card for its image; click for its graph.")
         self._current.setStyleSheet("color: #689d6a; font-weight: 600;")
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(lists, 3)  # columns extend down to the card display
+        left_layout.addWidget(self._current)
+        left_layout.addWidget(self._preview, 2)
+
+        # -- right side: the graph, full height --------------------------------
         self._chart = HoverChartView()
         self._chart.setMinimumHeight(240)
-        chart_panel = QWidget()
-        cp = QVBoxLayout(chart_panel)
-        cp.setContentsMargins(0, 0, 0, 0)
-        cp.addWidget(self._current)
-        cp.addWidget(self._chart, 1)
 
-        bottom = QSplitter(Qt.Horizontal)
-        bottom.addWidget(self._preview)
-        bottom.addWidget(chart_panel)
-        bottom.setStretchFactor(0, 2)  # wide card display
-        bottom.setStretchFactor(1, 3)
-
-        body = QSplitter(Qt.Vertical)
-        body.addWidget(top)
-        body.addWidget(bottom)
-        body.setStretchFactor(0, 1)
-        body.setStretchFactor(1, 2)
+        body = QSplitter(Qt.Horizontal)
+        body.addWidget(left)
+        body.addWidget(self._chart)
+        body.setStretchFactor(0, 2)
+        body.setStretchFactor(1, 3)  # graph takes the whole right side
 
         layout = QVBoxLayout(self)
         layout.addWidget(body)
