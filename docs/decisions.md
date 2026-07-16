@@ -4,6 +4,35 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-16 — eBay auction max-bid planner (new screen, ephemeral store)
+
+- **Decision:** Add an **eBay Auctions** nav screen for planning max bids on
+  auctions you're watching. Two stacked panes: a **watchlist** table (title,
+  link, total card value, and a max-bid breakdown at **70/80/90/100%**, plus
+  shipping/tax and delete) over a **transaction-adjacent editor** (title + URL,
+  catalog-autofilled cards with auto-priced-but-editable market values, flat
+  shipping, and an editable sales-tax rate defaulting to **6%**). Clicking a
+  watchlist row loads it into the editor; Save upserts.
+- **Max-bid math** (`services/auctions.py`, pure/integer-cents, Qt-free): the
+  percentage is an *all-in* ceiling — bid + shipping + tax ≤ `p%` of the cards'
+  value. Tax is charged on **bid + shipping** (standard eBay base), so
+  `max_bid(p) = p·V/(1+rate) − shipping`, clamped ≥ 0. Tax rate stored as
+  integer **basis points** (600 = 6.00%) to preserve the integer-money rule.
+- **Storage:** a **separate, ephemeral `auctions.db`** beside the main DB
+  (`data/auctions.py`, mirroring the `pricehistory.db` precedent). Kept out of
+  the ledger entirely — no audit/soft-void, and never in the ledger's CSV
+  export / `import_all` / keep-10 backup. Persists across sessions; **manual
+  delete only** (nothing prunes it). `auction` + child `auction_card` (cascade).
+- **Reuse:** the Transaction window's inline catalog-autofill row pattern,
+  `CardImagePane` hover preview, `CardCatalogRepository.search`, and
+  price-on-pick — but sourced **history-first** (`pricehistory.current_price`,
+  instant/offline) with a live tcgcsv fetch only as a fallback for un-swept
+  cards. Verified: ruff clean, 13 new tests (math + repo + offscreen view),
+  full suite green, and an end-to-end MainWindow smoke.
+- **Not stored as inventory:** these are scratch bid estimates, *not* lots — no
+  linkage to holdings. Winning an auction is still entered as a normal purchase
+  in the Transaction window.
+
 ### 2026-07-13 — Transaction value derived from the deal (drop "agreed value")
 
 - **Decision:** Remove the per-outgoing-card manual "agreed value". A card's

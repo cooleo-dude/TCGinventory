@@ -27,19 +27,28 @@ from PySide6.QtWidgets import (
 )
 
 from tcginventory import __version__, config
+from tcginventory.data.auctions import open_auctions
 from tcginventory.data.backup import backup_database
 from tcginventory.data.db import connect
 from tcginventory.data.migrator import migrate
 from tcginventory.data.repositories import PriceSnapshotRepository
 from tcginventory.services import importexport
 from tcginventory.ui.assets import app_icon
+from tcginventory.ui.views.auctions import AuctionsView
 from tcginventory.ui.views.dashboard import DashboardView
 from tcginventory.ui.views.history import HistoryView
 from tcginventory.ui.views.inventory import InventoryView
 from tcginventory.ui.views.market import PriceLookupView
 from tcginventory.ui.views.transaction import TransactionView
 
-NAV_ITEMS = ["Dashboard", "Transaction", "Inventory", "History", "Price Lookup"]
+NAV_ITEMS = [
+    "Dashboard",
+    "Transaction",
+    "Inventory",
+    "History",
+    "Price Lookup",
+    "eBay Auctions",
+]
 _TRANSACTION_INDEX = 1
 _REFRESH_STALE_HOURS = 12  # startup auto-refresh only if older than this
 
@@ -180,6 +189,11 @@ class MainWindow(QMainWindow):
         self._inventory = InventoryView(conn)
         self._history = HistoryView(conn)
         self._price_lookup = PriceLookupView(conn)
+        # Watched auctions live in their own file; mirror the main DB's storage
+        # nature so an in-memory app (tests) doesn't touch the real auctions.db.
+        self._auctions = AuctionsView(
+            conn, auctions_conn=open_auctions(None if self._db_file else ":memory:")
+        )
 
         self._stack = QStackedWidget()
         self._stack.addWidget(self._dashboard)  # 0 Dashboard
@@ -187,6 +201,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._inventory)  # 2 Inventory
         self._stack.addWidget(self._history)  # 3 History
         self._stack.addWidget(self._price_lookup)  # 4 Price Lookup
+        self._stack.addWidget(self._auctions)  # 5 eBay Auctions
 
         # Keep read views current as the ledger changes.
         self._transaction.posted.connect(self._on_ledger_changed)
