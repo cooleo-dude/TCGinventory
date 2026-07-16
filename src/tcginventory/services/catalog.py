@@ -14,6 +14,7 @@ re-pulls. Qt-free; network I/O is injected so it's testable offline.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -21,6 +22,12 @@ from dataclasses import dataclass, field
 from tcginventory.data.db import now_iso
 from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.domain.models import CatalogCard
+
+# tcgcsv embeds the collector number in the product name to disambiguate
+# same-named cards ("Mega Darkrai ex - 046/081", "Landorus - 398/742 (Mirror
+# Holo)"). Strip that " - <number>" segment so JP names read like the English
+# catalog; the number already lives in its own field.
+_NUMBER_IN_NAME = re.compile(r"\s*-\s*\d+/[\w-]+")
 
 _RAW = "https://raw.githubusercontent.com/PokemonTCG/pokemon-tcg-data/master"
 _TCGCSV = "https://tcgcsv.com/tcgplayer"
@@ -162,10 +169,14 @@ def update_catalog_ja(
             number = ext.get("Number")
             if not number:
                 continue  # sealed product / no collector number → not a card
+            # Drop the embedded " - <number>" segment (see _NUMBER_IN_NAME) so
+            # the stored name is clean like the English catalog; a trailing
+            # variant label such as "(Mirror Holo)" is kept.
+            name = " ".join(_NUMBER_IN_NAME.sub("", p.get("name") or "").split())
             cards.append(
                 CatalogCard(
                     card_id=f"jp-{pid}",  # namespaced so it can't clash with EN ids
-                    name=p.get("name") or "",
+                    name=name,
                     set_id=str(gid),
                     set_name=set_name,
                     set_code=set_code,

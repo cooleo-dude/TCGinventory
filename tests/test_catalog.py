@@ -14,6 +14,15 @@ _JA_PRODUCTS = {
          "imageUrl": "https://tcgplayer-cdn.tcgplayer.com/product/694993_200w.jpg",
          "extendedData": [{"name": "Number", "value": "103/081"},
                           {"name": "Rarity", "value": "Super Rare"}]},
+        # tcgcsv embeds the number to disambiguate same-named cards; the pull
+        # must strip that "- <number>" segment (suffix form)…
+        {"productId": 694994, "name": "Mega Darkrai ex - 046/081",
+         "imageUrl": "https://x/694994.jpg",
+         "extendedData": [{"name": "Number", "value": "046/081"}]},
+        # …and mid-name form, keeping the trailing variant label.
+        {"productId": 694995, "name": "Landorus - 398/742 (Mirror Holo)",
+         "imageUrl": "https://x/694995.jpg",
+         "extendedData": [{"name": "Number", "value": "398/742"}]},
         # A sealed product (no collector Number) must be skipped.
         {"productId": 999, "name": "Abyss Eye Booster Box",
          "imageUrl": "https://x/999.jpg", "extendedData": []},
@@ -153,8 +162,8 @@ def test_update_catalog_stores_printed_total(conn):
 
 def test_update_catalog_ja_pulls_japanese(conn):
     summary = update_catalog_ja(conn, fetch_json=_fake_ja_fetch)
-    # Two products, but the sealed booster box (no Number) is skipped.
-    assert summary.sets == 1 and summary.cards == 1 and summary.errors == []
+    # Four products, but the sealed booster box (no Number) is skipped.
+    assert summary.sets == 1 and summary.cards == 3 and summary.errors == []
     repo = CardCatalogRepository(conn)
     (card,) = repo.find_by_name("Energy Switch")
     assert card.language == "JP"
@@ -163,15 +172,22 @@ def test_update_catalog_ja_pulls_japanese(conn):
     assert card.rarity == "Super Rare"
     assert card.image_small.endswith("/product/694993_200w.jpg")
 
+    # The "- <number>" segment tcgcsv embeds in the name is stripped, in both
+    # the suffix form and the mid-name form (variant label kept).
+    (darkrai,) = repo.find_by_name("Mega Darkrai ex")
+    assert darkrai.number == "046/081"
+    (landorus,) = repo.find_by_name("Landorus (Mirror Holo)")
+    assert landorus.number == "398/742"
+
 
 def test_en_and_ja_catalogs_coexist(conn):
     update_catalog(conn, fetch_json=_fake_fetch)  # 3 EN cards
-    update_catalog_ja(conn, fetch_json=_fake_ja_fetch)  # 1 JP card (box skipped)
+    update_catalog_ja(conn, fetch_json=_fake_ja_fetch)  # 3 JP cards (box skipped)
     repo = CardCatalogRepository(conn)
-    assert repo.count() == 4
+    assert repo.count() == 6
     # A JP re-pull must not wipe the English rows (replace_for_language).
     update_catalog_ja(conn, fetch_json=_fake_ja_fetch)
-    assert repo.count() == 4
+    assert repo.count() == 6
     # The Japanese card is reachable and tagged JP.
     (hit,) = repo.search("Energy Switch")
     assert hit.language == "JP"
