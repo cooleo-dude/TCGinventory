@@ -250,3 +250,24 @@ def test_refresh_values_from_history(app, monkeypatch):
     assert view._price_workers == []
     assert view._watch.item(0, 2).text() == "$18.00"  # 1500 + 300
     view.deleteLater()
+
+
+def test_gallery_reflects_editor_cards(app, monkeypatch):
+    view = _view(app)
+    # Capture the entries handed to the gallery (avoids building real thumbnails
+    # / spawning image-fetch threads in the test).
+    captured = {}
+    monkeypatch.setattr(
+        view._gallery, "set_cards", lambda entries: captured.__setitem__("e", entries)
+    )
+    monkeypatch.setattr(view._gallery, "show_gallery", lambda: None)
+
+    r1 = view._add_card_row()
+    r1._card_id, r1._image_url = "a", "http://x/a.png"
+    r2 = view._add_card_row()
+    r2._card_id, r2._image_url = "b", "http://x/b.png"
+    view._add_card_row()  # no card_id/image -> excluded from the gallery
+
+    view._refresh_gallery()
+    assert [e[0] for e in captured["e"]] == ["a", "b"]
+    view.deleteLater()

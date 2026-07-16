@@ -59,7 +59,8 @@ from tcginventory.data.auctions import (
 )
 from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.services import auctions as auction_math
-from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
+from tcginventory.ui.card_gallery import CardGallery
+from tcginventory.ui.card_preview import install_hover_preview
 from tcginventory.ui.formatting import money, percent
 
 _CARD_HEADERS = ["Name", "Set", "#", "Market", "Qty", ""]
@@ -72,6 +73,26 @@ _WATCH_HEADERS = [
 _WATCH_WIDTHS = [220, 50, 90, 90, 90, 90, 90, 80, 60, 34, 60, 30]
 _ID_ROLE = Qt.UserRole + 1
 _UNSET = object()  # sentinel: history not supplied -> open the default DB
+_THUMB_BORDER = "#504945"  # neutral thumbnail frame (no chart-line colours here)
+
+
+class _GallerySink:
+    """Hover-preview sink for the auction editor's gallery.
+
+    Hovering a card row (or an autofill match) focuses that single card in the
+    gallery; leaving reverts to the full gallery of the auction's cards — the
+    same show_single/show_gallery toggle the Price Lookup window uses.
+    """
+
+    def __init__(self, gallery: CardGallery) -> None:
+        self._gallery = gallery
+
+    def show_card(self, card_id, url) -> None:
+        if card_id and url:
+            self._gallery.show_single(card_id, url)
+
+    def clear(self) -> None:
+        self._gallery.show_gallery()
 
 
 def _money_spin() -> QDoubleSpinBox:
@@ -246,6 +267,12 @@ class _AuctionCardRow:
         self.market.setValue(card.market_value_cents / 100)
         self.qty.setValue(card.quantity)
 
+    def card_id(self) -> str | None:
+        return self._card_id
+
+    def image_url(self) -> str | None:
+        return self._image_url
+
     def value_cents(self) -> int:
         return round(self.market.value() * 100) * self.qty.value()
 
@@ -286,7 +313,12 @@ class AuctionsView(QWidget):
         self._rows: list[_AuctionCardRow] = []
         self._price_workers: list[_LivePriceWorker] = []
         self._edit_id: int | None = None
-        self._preview_pane = CardImagePane()
+        # Multi-card display (same widget/logic as the Price Lookup window):
+        # shows every card in the auction, or a single focused card on hover.
+        self._gallery = CardGallery(
+            empty_hint="Pick cards from the catalog to see them here"
+        )
+        self._row_sink = _GallerySink(self._gallery)
 
         body = QSplitter(Qt.Vertical)
         body.addWidget(self._build_watchlist())
@@ -300,6 +332,7 @@ class AuctionsView(QWidget):
 
         self.refresh()
         self._update_breakdown()
+        self._refresh_gallery()
 
     # -- watchlist ----------------------------------------------------------
 
@@ -528,13 +561,14 @@ class AuctionsView(QWidget):
         cards_widget.setLayout(cards_col)
 
         preview_col = QVBoxLayout()
-        preview_col.addWidget(QLabel("Card preview"))
-        preview_col.addWidget(self._preview_pane, 1)
+        preview_col.addWidget(QLabel("Cards in this auction"))
+        preview_col.addWidget(self._gallery, 1)
         preview_widget = QWidget()
         preview_widget.setLayout(preview_col)
 
+        # 50/50 split: card entry on the left, the card gallery on the right.
         middle = QHBoxLayout()
-        middle.addWidget(cards_widget, 3)
+        middle.addWidget(cards_widget, 1)
         middle.addWidget(preview_widget, 1)
 
         self._breakdown = QLabel("")
@@ -572,8 +606,8 @@ class AuctionsView(QWidget):
             self._conn,
             lambda: self._auto_detect.isChecked(),
             self._update_breakdown,
-            on_pick=self._request_price,
-            sink=self._preview_pane,
+            on_pick=self._on_card_picked,
+            sink=self._row_sink,
         )
         self._rows.append(row)
         index = self._card_table.rowCount()
@@ -600,6 +634,27 @@ class AuctionsView(QWidget):
             self._rows.remove(row)
             self._card_table.removeRow(index)
         self._update_breakdown()
+        self._refresh_gallery()
+
+    # -- gallery (multi-card display) ---------------------------------------
+
+    def _refresh_gallery(self) -> None:
+        """Rebuild the preview gallery from the cards currently in the editor.
+
+        Only rebuilt when the card set changes (pick / remove / load), so
+        thumbnail images load once and persist — the Price Lookup pattern.
+        """
+        entries = [
+            (r.card_id(), r.image_url(), _THUMB_BORDER)
+            for r in self._rows
+            if r.card_id() and r.image_url()
+        ]
+        self._gallery.set_cards(entries)
+        self._gallery.show_gallery()
+
+    def _on_card_picked(self, row: _AuctionCardRow, card) -> None:
+        self._request_price(row, card)
+        self._refresh_gallery()
 
     # -- price autofill -----------------------------------------------------
 
@@ -687,11 +742,13 @@ class AuctionsView(QWidget):
             row = self._add_card_row()
             row.set_card(card)
         self._update_breakdown()
+        self._refresh_gallery()
 
     def _new(self) -> None:
         self._clear_editor()
         self._banner.setText("New auction")
         self._update_breakdown()
+        self._refresh_gallery()
 
     def _clear_editor(self) -> None:
         self._rows.clear()

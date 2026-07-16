@@ -4,6 +4,23 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-16 — Auction editor: multi-card display reuses Price Lookup's gallery
+
+- **Decision:** The auction editor's preview is a **`CardGallery`** (the reusable
+  widget the Price Lookup window uses), showing **every card in the auction** as
+  a wrapping thumbnail grid; hovering a card row focuses that single card and
+  leaving reverts to the full gallery (the same `show_single` / `show_gallery`
+  toggle). The gallery is rebuilt (`set_cards`) **only when the card set
+  changes** — pick / remove / load — so thumbnails load once and persist, per the
+  Price Lookup pattern. Entry table and gallery are a **50/50** horizontal split.
+- **Why:** the earlier single-`CardImagePane` preview showed one card at a time;
+  an auction is a bundle, so seeing all its cards at once is the point. Reusing
+  `CardGallery` inherits the fix for rapid-rebuild thumbnail pile-up
+  (synchronous `setParent(None)` before `deleteLater`).
+- **Note:** only catalog-matched cards (with a `card_id` + image URL) get a
+  thumbnail; manually-typed cards without a match simply don't appear in the
+  gallery (they still count toward value / max bid).
+
 ### 2026-07-16 — eBay auction max-bid planner (new screen, ephemeral store)
 
 - **Decision:** Add an **eBay Auctions** nav screen for planning max bids on
