@@ -128,6 +128,11 @@ class CardImagePane(QLabel):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        # Set state first so a resize during construction finds it (resizeEvent
+        # -> _rescale reads self._pixmap).
+        self._current: str | None = None
+        self._pixmap: QPixmap | None = None
+        self._workers: list[_FetchWorker] = []
         self.setAlignment(
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
         )
@@ -135,6 +140,8 @@ class CardImagePane(QLabel):
         # Take whatever space the layout gives (don't let the pixmap's size hint
         # drive/inflate the layout) — the image is scaled to fit that space.
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.set_border()
+        self.setText(self._PLACEHOLDER)
 
     def set_border(self, color: str = "#504945", width: int = 1) -> None:
         """Recolour the frame — used to tint a thumbnail to match its graph line."""
@@ -142,14 +149,6 @@ class CardImagePane(QLabel):
             f"border:{width}px solid {color}; border-radius:4px; "
             "background:#1d2021; color:#a89984;"
         )
-        self.setStyleSheet(
-            "border:1px solid #504945; border-radius:4px; "
-            "background:#1d2021; color:#a89984;"
-        )
-        self._current: str | None = None
-        self._pixmap: QPixmap | None = None
-        self._workers: list[_FetchWorker] = []
-        self.setText(self._PLACEHOLDER)
 
     def show_card(self, card_id: str | None, url: str | None) -> None:
         # No valid card (e.g. hovering a row with no catalog match, or a leave):

@@ -63,35 +63,53 @@ def _label(card) -> str:
 
 
 class _ArrowDelegate(QStyledItemDelegate):
-    """Paint a move-arrow chip on the hovered row; clicking it moves that card.
+    """Paint a move-arrow chip and move the card when it's clicked.
 
-    The chip uses the palette's highlight / highlighted-text colours so it stays
-    visible in both light and dark themes.
+    ``align`` puts the chip on the right (search list — pinned to the visible
+    right edge so long names can't push it off-screen) or the left (tagged list —
+    adjacent to the card). ``always`` keeps it visible without hovering. The chip
+    uses palette highlight colours so it reads in light and dark themes.
     """
 
-    def __init__(self, glyph: str, view: QListWidget, on_move) -> None:
+    def __init__(
+        self, glyph: str, view: QListWidget, on_move, *, align="right", always=False
+    ) -> None:
         super().__init__(view)
         self._glyph = glyph
         self._view = view
         self._on_move = on_move  # (card_id) -> None
+        self._align = align
+        self._always = always
 
-    @staticmethod
-    def _arrow_rect(rect: QRect) -> QRect:
-        return QRect(rect.right() - _ARROW_W, rect.top(), _ARROW_W, rect.height())
+    def _arrow_rect(self, rect: QRect) -> QRect:
+        if self._align == "left":
+            return QRect(rect.left() + 2, rect.top(), _ARROW_W, rect.height())
+        # Right: pin to the viewport's visible right edge, not the item rect.
+        right = min(rect.right(), self._view.viewport().width() - 1)
+        return QRect(right - _ARROW_W, rect.top(), _ARROW_W, rect.height())
+
+    def initStyleOption(self, option, index) -> None:
+        super().initStyleOption(option, index)
+        option.textElideMode = Qt.ElideRight
+        if self._align == "left":  # indent text past the left-hand arrow
+            option.rect = option.rect.adjusted(_ARROW_W + 4, 0, 0, 0)
+        else:  # reserve room on the right so text never runs under the arrow
+            option.rect = option.rect.adjusted(0, 0, -_ARROW_W, 0)
 
     def paint(self, painter, option, index) -> None:
         super().paint(painter, option, index)
-        if option.state & QStyle.State_MouseOver:
-            painter.save()
-            painter.setRenderHint(QPainter.Antialiasing)
-            box = self._arrow_rect(option.rect).adjusted(1, 3, -2, -3)
-            pal = option.palette
-            painter.setBrush(pal.color(QPalette.Highlight))
-            painter.setPen(pal.color(QPalette.Highlight).darker(130))
-            painter.drawRoundedRect(box, 4, 4)
-            painter.setPen(pal.color(QPalette.HighlightedText))
-            painter.drawText(box, Qt.AlignCenter, self._glyph)
-            painter.restore()
+        if not (self._always or option.state & QStyle.State_MouseOver):
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        box = self._arrow_rect(option.rect).adjusted(1, 3, -1, -3)
+        pal = option.palette
+        painter.setBrush(pal.color(QPalette.Highlight))
+        painter.setPen(pal.color(QPalette.Highlight).darker(130))
+        painter.drawRoundedRect(box, 4, 4)
+        painter.setPen(pal.color(QPalette.HighlightedText))
+        painter.drawText(box, Qt.AlignCenter, self._glyph)
+        painter.restore()
 
     def editorEvent(self, event, model, option, index) -> bool:
         if event.type() == QEvent.MouseButtonRelease and self._arrow_rect(
@@ -218,6 +236,9 @@ class _CardDisplay(QWidget):
 def _configure_list(lst: QListWidget) -> None:
     lst.setMouseTracking(True)  # so itemEntered fires on hover
     lst.setUniformItemSizes(True)
+    lst.setWordWrap(False)
+    lst.setTextElideMode(Qt.ElideRight)  # long names don't widen the row
+    lst.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
 
 class PriceLookupView(QWidget):
@@ -237,7 +258,9 @@ class PriceLookupView(QWidget):
         self._search.textChanged.connect(self._on_search)
         self._results = QListWidget()
         _configure_list(self._results)
-        self._results.setItemDelegate(_ArrowDelegate("→", self._results, self._tag))
+        self._results.setItemDelegate(
+            _ArrowDelegate("→", self._results, self._tag, align="right")
+        )
         self._results.itemEntered.connect(self._on_hover)
         self._results.itemClicked.connect(self._on_click)
         self._results.itemDoubleClicked.connect(
@@ -246,7 +269,9 @@ class PriceLookupView(QWidget):
         self._tagged_list = QListWidget()
         _configure_list(self._tagged_list)
         self._tagged_list.setItemDelegate(
-            _ArrowDelegate("←", self._tagged_list, self._untag)
+            _ArrowDelegate(
+                "←", self._tagged_list, self._untag, align="left", always=True
+            )
         )
         self._tagged_list.itemEntered.connect(self._on_hover)
         self._tagged_list.itemClicked.connect(self._on_click)
@@ -425,6 +450,7 @@ class PriceLookupView(QWidget):
         self._tagged[card_id] = card
         self._take(self._results, card_id)
         self._tagged_list.addItem(self._make_item(card))
+        self._hover_card = None  # show the tagged gallery, not the just-tagged card
         self._rebuild_chart()
         self._update_display()
 
@@ -434,6 +460,7 @@ class PriceLookupView(QWidget):
             return
         self._take(self._tagged_list, card_id)
         self._results.insertItem(0, self._make_item(card))
+        self._hover_card = None
         self._rebuild_chart()
         self._update_display()
 
