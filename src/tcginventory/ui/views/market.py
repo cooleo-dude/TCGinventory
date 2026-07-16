@@ -15,18 +15,14 @@ import sqlite3
 from datetime import date, datetime
 
 from PySide6.QtCharts import QChart, QDateTimeAxis, QLineSeries, QValueAxis
-from PySide6.QtCore import QDateTime, QEvent, QPoint, QRect, QSize, Qt
+from PySide6.QtCore import QDateTime, QEvent, QRect, Qt
 from PySide6.QtGui import QColor, QPainter, QPalette
 from PySide6.QtWidgets import (
-    QFrame,
     QLabel,
-    QLayout,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QScrollArea,
     QSplitter,
-    QStackedLayout,
     QStyle,
     QStyledItemDelegate,
     QVBoxLayout,
@@ -34,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from tcginventory.data.repositories import CardCatalogRepository
-from tcginventory.ui.card_preview import CardImagePane
+from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.charts import HoverChartView
 from tcginventory.ui.formatting import money
 
@@ -120,119 +116,6 @@ class _ArrowDelegate(QStyledItemDelegate):
         return super().editorEvent(event, model, option, index)
 
 
-class _FlowLayout(QLayout):
-    """Left-to-right layout that wraps to a new row when it runs out of width."""
-
-    def __init__(self, parent=None, spacing: int = 8) -> None:
-        super().__init__(parent)
-        self._items: list = []
-        self._spacing = spacing
-        self.setContentsMargins(0, 0, 0, 0)
-
-    def addItem(self, item) -> None:
-        self._items.append(item)
-
-    def count(self) -> int:
-        return len(self._items)
-
-    def itemAt(self, i):
-        return self._items[i] if 0 <= i < len(self._items) else None
-
-    def takeAt(self, i):
-        return self._items.pop(i) if 0 <= i < len(self._items) else None
-
-    def expandingDirections(self):
-        return Qt.Orientation(0)
-
-    def hasHeightForWidth(self) -> bool:
-        return True
-
-    def heightForWidth(self, width: int) -> int:
-        return self._arrange(QRect(0, 0, width, 0), apply=False)
-
-    def setGeometry(self, rect) -> None:
-        super().setGeometry(rect)
-        self._arrange(rect, apply=True)
-
-    def sizeHint(self) -> QSize:
-        return self.minimumSize()
-
-    def minimumSize(self) -> QSize:
-        size = QSize()
-        for item in self._items:
-            size = size.expandedTo(item.minimumSize())
-        return size
-
-    def _arrange(self, rect: QRect, *, apply: bool) -> int:
-        x, y, line_h = rect.x(), rect.y(), 0
-        for item in self._items:
-            hint = item.sizeHint()
-            nx = x + hint.width() + self._spacing
-            if nx - self._spacing > rect.right() and line_h > 0:
-                x = rect.x()
-                y += line_h + self._spacing
-                nx = x + hint.width() + self._spacing
-                line_h = 0
-            if apply:
-                item.setGeometry(QRect(QPoint(x, y), hint))
-            x = nx
-            line_h = max(line_h, hint.height())
-        return y + line_h - rect.y()
-
-
-class _CardDisplay(QWidget):
-    """Shows either one hovered card, or a wrapping gallery of tagged cards, each
-    framed in its graph-line colour."""
-
-    _THUMB = QSize(150, 210)
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._single = CardImagePane()
-        self._gallery_widget = QWidget()
-        self._gallery = _FlowLayout(self._gallery_widget)
-        self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setWidget(self._gallery_widget)
-        self._stack = QStackedLayout(self)
-        self._stack.addWidget(self._single)  # 0
-        self._stack.addWidget(self._scroll)  # 1
-
-    def show_single(self, card_id, url) -> None:
-        self._single.show_card(card_id, url)
-        self._stack.setCurrentIndex(0)
-
-    def show_gallery(self, entries: list[tuple[str, str, str]]) -> None:
-        while self._gallery.count():
-            item = self._gallery.takeAt(0)
-            if item.widget() is not None:
-                item.widget().deleteLater()
-        if not entries:
-            hint = QLabel("Hover a card to preview it; tag cards to gather them here.")
-            hint.setWordWrap(True)
-            hint.setStyleSheet("color:#a89984;")
-            self._gallery.addWidget(hint)
-        else:
-            for card_id, url, color in entries:
-                self._gallery.addWidget(self._thumb(card_id, url, color))
-        self._stack.setCurrentIndex(1)
-
-    def _thumb(self, card_id, url, color: str) -> QFrame:
-        frame = QFrame()
-        frame.setFixedSize(self._THUMB)
-        frame.setStyleSheet(
-            f"QFrame {{ border: 3px solid {color}; border-radius: 6px; "
-            "background: #1d2021; }"
-        )
-        inner = QVBoxLayout(frame)
-        inner.setContentsMargins(4, 4, 4, 4)
-        pane = CardImagePane()
-        pane.set_border("#1d2021", width=0)  # the frame provides the coloured edge
-        pane.show_card(card_id, url)
-        inner.addWidget(pane)
-        return frame
-
-
 def _configure_list(lst: QListWidget) -> None:
     lst.setMouseTracking(True)  # so itemEntered fires on hover
     lst.setUniformItemSizes(True)
@@ -295,7 +178,9 @@ class PriceLookupView(QWidget):
         lists.setStretchFactor(0, 1)
         lists.setStretchFactor(1, 1)
 
-        self._display = _CardDisplay()
+        self._display = CardGallery(
+            empty_hint="Hover a card to preview it; tag cards to gather them here."
+        )
         self._current = QLabel("Hover a card for its image; click for its graph.")
         self._current.setStyleSheet("color: #689d6a; font-weight: 600;")
         left = QWidget()
@@ -317,6 +202,7 @@ class PriceLookupView(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(body)
         self._rebuild_chart()
+        self._refresh_gallery()
         self._update_display()
 
         from PySide6.QtWidgets import QApplication
@@ -402,15 +288,22 @@ class PriceLookupView(QWidget):
         self._update_display()
 
     def _update_display(self) -> None:
+        """Flip between the hovered single card and the tagged gallery — cheap;
+        the gallery contents are (re)built only by _refresh_gallery."""
         card = self._cards.get(self._hover_card) if self._hover_card else None
         if card is not None:
             self._display.show_single(card.card_id, getattr(card, "image_small", None))
         else:
-            entries = [
-                (cid, getattr(c, "image_small", None), self._color_for(cid))
-                for cid, c in self._tagged.items()
-            ]
-            self._display.show_gallery(entries)
+            self._display.show_gallery()
+
+    def _refresh_gallery(self) -> None:
+        """Rebuild the tagged-card gallery (only when the tagged set changes, so
+        thumbnail images load once and persist across hover toggles)."""
+        entries = [
+            (cid, getattr(c, "image_small", None), self._color_for(cid))
+            for cid, c in self._tagged.items()
+        ]
+        self._display.set_cards(entries)
 
     def _on_click(self, item: QListWidgetItem) -> None:
         card = self._cards.get(item.data(_CARD_ID_ROLE))
@@ -452,6 +345,7 @@ class PriceLookupView(QWidget):
         self._tagged_list.addItem(self._make_item(card))
         self._hover_card = None  # show the tagged gallery, not the just-tagged card
         self._rebuild_chart()
+        self._refresh_gallery()
         self._update_display()
 
     def _untag(self, card_id: str) -> None:
@@ -462,6 +356,7 @@ class PriceLookupView(QWidget):
         self._results.insertItem(0, self._make_item(card))
         self._hover_card = None
         self._rebuild_chart()
+        self._refresh_gallery()
         self._update_display()
 
     def _clear_preview(self) -> None:
