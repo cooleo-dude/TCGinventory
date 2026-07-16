@@ -1,10 +1,12 @@
 """Price Lookup view — chart the price history of any card, and overlay several.
 
 Two side-by-side lists act as a shuttle: search results on the left, tagged
-cards on the right. Move a card between them with the arrow that appears on the
-selected row (or a double-click). Hovering a row shows its image in the (wide)
-card display; clicking a row updates the graph. Tagged cards' graphs persist and
-overlay for comparison. Backed by the catalog-wide ``pricehistory.db``.
+cards on the right. Move a card between them with the hover arrow (or a
+double-click). Hovering a card shows it in the display; with nothing hovered the
+display becomes a gallery of the tagged cards, each bordered in its graph-line
+colour. Clicking a card charts it; tagged cards' graphs persist and overlay.
+Clicking off a card drops its (untagged) preview line. Backed by the
+catalog-wide ``pricehistory.db``.
 """
 
 from __future__ import annotations
@@ -14,13 +16,15 @@ from datetime import date, datetime
 
 from PySide6.QtCharts import QChart, QDateTimeAxis, QLineSeries, QValueAxis
 from PySide6.QtCore import QDateTime, QEvent, QRect, Qt
-from PySide6.QtGui import QPainter, QPalette
+from PySide6.QtGui import QColor, QPainter, QPalette
 from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QScrollArea,
     QSplitter,
+    QStackedLayout,
     QStyle,
     QStyledItemDelegate,
     QVBoxLayout,
@@ -35,6 +39,12 @@ from tcginventory.ui.formatting import money
 _CARD_ID_ROLE = Qt.UserRole + 1
 _DAY_MS = 86_400_000
 _ARROW_W = 22
+# Distinct line/border colours cycled by tag order; preview uses a neutral tone.
+_PALETTE = [
+    "#cc241d", "#458588", "#98971a", "#d79921",
+    "#b16286", "#689d6a", "#d65d0e", "#8ec07c",
+]
+_PREVIEW_COLOR = "#a89984"
 
 
 def _msecs(day: str) -> float:
@@ -53,8 +63,8 @@ def _label(card) -> str:
 class _ArrowDelegate(QStyledItemDelegate):
     """Paint a move-arrow chip on the hovered row; clicking it moves that card.
 
-    The chip is drawn with the palette's highlight/highlighted-text colours so it
-    stands out in both light and dark themes.
+    The chip uses the palette's highlight / highlighted-text colours so it stays
+    visible in both light and dark themes.
     """
 
     def __init__(self, glyph: str, view: QListWidget, on_move) -> None:
@@ -90,6 +100,52 @@ class _ArrowDelegate(QStyledItemDelegate):
         return super().editorEvent(event, model, option, index)
 
 
+class _CardDisplay(QWidget):
+    """Shows either one hovered card, or a gallery of tagged cards (each bordered
+    in its graph-line colour)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._single = CardImagePane()
+        gallery = QWidget()
+        self._gallery = QVBoxLayout(gallery)
+        self._gallery.setContentsMargins(4, 4, 4, 4)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setWidget(gallery)
+        self._stack = QStackedLayout(self)
+        self._stack.addWidget(self._single)  # 0
+        self._stack.addWidget(self._scroll)  # 1
+
+    def show_single(self, card_id, url) -> None:
+        self._single.show_card(card_id, url)
+        self._stack.setCurrentIndex(0)
+
+    def show_gallery(self, entries: list[tuple[str, str, str]]) -> None:
+        while self._gallery.count():
+            w = self._gallery.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
+        if not entries:
+            hint = QLabel("Hover a card to preview it; tag cards to gather them here.")
+            hint.setWordWrap(True)
+            hint.setAlignment(Qt.AlignCenter)
+            hint.setStyleSheet("color:#a89984;")
+            self._gallery.addWidget(hint)
+        else:
+            row = QWidget()
+            row_layout = QVBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            for card_id, url, color in entries:
+                thumb = CardImagePane()
+                thumb.setMinimumHeight(150)
+                thumb.set_border(color, width=3)
+                thumb.show_card(card_id, url)
+                row_layout.addWidget(thumb)
+            self._gallery.addWidget(row)
+        self._stack.setCurrentIndex(1)
+
+
 def _configure_list(lst: QListWidget) -> None:
     lst.setMouseTracking(True)  # so itemEntered fires on hover
     lst.setUniformItemSizes(True)
@@ -104,23 +160,20 @@ class PriceLookupView(QWidget):
         self._history = None  # PriceHistoryRepository, opened lazily
         self._cards: dict[str, object] = {}  # card_id -> CatalogCard (any seen)
         self._selected = None  # CatalogCard whose graph is previewed (click)
-        self._tagged: dict[str, object] = {}  # card_id -> CatalogCard
+        self._tagged: dict[str, object] = {}  # ordered: card_id -> CatalogCard
+        self._hover_card: str | None = None
 
-        # -- top: search list and tagged list, side by side --------------------
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search a card — name, set, and/or number…")
         self._search.textChanged.connect(self._on_search)
         self._results = QListWidget()
         _configure_list(self._results)
-        self._results.setItemDelegate(
-            _ArrowDelegate("→", self._results, self._tag)
-        )
+        self._results.setItemDelegate(_ArrowDelegate("→", self._results, self._tag))
         self._results.itemEntered.connect(self._on_hover)
         self._results.itemClicked.connect(self._on_click)
         self._results.itemDoubleClicked.connect(
             lambda it: self._tag(it.data(_CARD_ID_ROLE))
         )
-
         self._tagged_list = QListWidget()
         _configure_list(self._tagged_list)
         self._tagged_list.setItemDelegate(
@@ -137,31 +190,27 @@ class PriceLookupView(QWidget):
         rp.setContentsMargins(0, 0, 0, 0)
         rp.addWidget(self._search)
         rp.addWidget(self._results, 1)
-
         tagged_panel = QWidget()
         tp = QVBoxLayout(tagged_panel)
         tp.setContentsMargins(0, 0, 0, 0)
         tp.addWidget(QLabel("Tagged cards"))
         tp.addWidget(self._tagged_list, 1)
-
-        lists = QSplitter(Qt.Horizontal)  # the two columns, side by side
+        lists = QSplitter(Qt.Horizontal)
         lists.addWidget(results_panel)
         lists.addWidget(tagged_panel)
         lists.setStretchFactor(0, 1)
         lists.setStretchFactor(1, 1)
 
-        # -- left side: the two lists above a wide card display ----------------
-        self._preview = CardImagePane()
+        self._display = _CardDisplay()
         self._current = QLabel("Hover a card for its image; click for its graph.")
         self._current.setStyleSheet("color: #689d6a; font-weight: 600;")
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.addWidget(lists, 3)  # columns extend down to the card display
+        left_layout.addWidget(lists, 2)  # shorter columns…
         left_layout.addWidget(self._current)
-        left_layout.addWidget(self._preview, 2)
+        left_layout.addWidget(self._display, 3)  # …above the larger card display
 
-        # -- right side: the graph, full height --------------------------------
         self._chart = HoverChartView()
         self._chart.setMinimumHeight(240)
 
@@ -174,6 +223,44 @@ class PriceLookupView(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(body)
         self._rebuild_chart()
+        self._update_display()
+
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.instance().installEventFilter(self)
+
+    # -- app event filter: hover→gallery transitions + click-off clears preview
+
+    def eventFilter(self, obj, event) -> bool:
+        try:
+            if not self.isVisible():
+                return False
+            etype = event.type()
+            if etype == QEvent.MouseButtonPress:
+                if self._selected is not None and not self._click_on_card(obj, event):
+                    self._clear_preview()
+            elif etype == QEvent.Leave and self._is_list_viewport(obj):
+                self._set_hover(None)
+            elif etype == QEvent.MouseMove and self._is_list_viewport(obj):
+                lst = (
+                    self._results
+                    if obj is self._results.viewport()
+                    else self._tagged_list
+                )
+                if not lst.indexAt(event.position().toPoint()).isValid():
+                    self._set_hover(None)
+        except RuntimeError:
+            pass  # our C++ widget was deleted (teardown)
+        return False
+
+    def _is_list_viewport(self, obj) -> bool:
+        return obj in (self._results.viewport(), self._tagged_list.viewport())
+
+    def _click_on_card(self, obj, event) -> bool:
+        for lst in (self._results, self._tagged_list):
+            if obj is lst.viewport():
+                return lst.indexAt(event.position().toPoint()).isValid()
+        return False
 
     # -- history db (opened on first use) -----------------------------------
 
@@ -199,7 +286,7 @@ class PriceLookupView(QWidget):
             return
         for card in self._catalog.search(text, limit=50):
             if card.card_id in self._tagged:
-                continue  # already on the right; don't list it twice
+                continue
             self._cards[card.card_id] = card
             self._results.addItem(self._make_item(card))
 
@@ -209,12 +296,27 @@ class PriceLookupView(QWidget):
         item.setData(_CARD_ID_ROLE, card.card_id)
         return item
 
-    # -- hover (image) / click (graph) --------------------------------------
+    # -- hover (display) / click (graph) ------------------------------------
 
     def _on_hover(self, item: QListWidgetItem) -> None:
-        card = self._cards.get(item.data(_CARD_ID_ROLE))
+        self._set_hover(item.data(_CARD_ID_ROLE))
+
+    def _set_hover(self, card_id: str | None) -> None:
+        if card_id == self._hover_card:
+            return
+        self._hover_card = card_id
+        self._update_display()
+
+    def _update_display(self) -> None:
+        card = self._cards.get(self._hover_card) if self._hover_card else None
         if card is not None:
-            self._preview.show_card(card.card_id, getattr(card, "image_small", None))
+            self._display.show_single(card.card_id, getattr(card, "image_small", None))
+        else:
+            entries = [
+                (cid, getattr(c, "image_small", None), self._color_for(cid))
+                for cid, c in self._tagged.items()
+            ]
+            self._display.show_gallery(entries)
 
     def _on_click(self, item: QListWidgetItem) -> None:
         card = self._cards.get(item.data(_CARD_ID_ROLE))
@@ -229,6 +331,14 @@ class PriceLookupView(QWidget):
             else f"{_label(card)} — no market price recorded yet."
         )
         self._rebuild_chart()
+
+    # -- colours ------------------------------------------------------------
+
+    def _color_for(self, card_id: str) -> str:
+        keys = list(self._tagged.keys())
+        if card_id in keys:
+            return _PALETTE[keys.index(card_id) % len(_PALETTE)]
+        return _PREVIEW_COLOR
 
     # -- shuttle: tag / untag -----------------------------------------------
 
@@ -247,33 +357,43 @@ class PriceLookupView(QWidget):
         self._take(self._results, card_id)
         self._tagged_list.addItem(self._make_item(card))
         self._rebuild_chart()
+        self._update_display()
 
     def _untag(self, card_id: str) -> None:
         card = self._tagged.pop(card_id, None)
         if card is None:
             return
         self._take(self._tagged_list, card_id)
-        # Return it to the search side so it's visibly "moved back".
         self._results.insertItem(0, self._make_item(card))
+        self._rebuild_chart()
+        self._update_display()
+
+    def _clear_preview(self) -> None:
+        if self._selected is None:
+            return
+        self._selected = None
+        self._results.clearSelection()
+        self._tagged_list.clearSelection()
+        self._current.setText("Hover a card for its image; click for its graph.")
         self._rebuild_chart()
 
     # -- chart --------------------------------------------------------------
 
     def _rebuild_chart(self) -> None:
         hist = self._hist()
-        entries: list[tuple[str, list[tuple[str, int]]]] = []
-        for card in self._tagged.values():
-            pts = hist.history_for_card(card.card_id) if hist else []
+        entries: list[tuple[str, list[tuple[str, int]], str]] = []
+        for card_id, card in self._tagged.items():
+            pts = hist.history_for_card(card_id) if hist else []
             if pts:
-                entries.append((_label(card), pts))
+                entries.append((_label(card), pts, self._color_for(card_id)))
         if self._selected is not None and self._selected.card_id not in self._tagged:
             pts = hist.history_for_card(self._selected.card_id) if hist else []
             if pts:
-                entries.append((_label(self._selected), pts))
+                entries.append((_label(self._selected), pts, _PREVIEW_COLOR))
         self._chart.setChart(_overlay_chart(entries))
 
 
-def _overlay_chart(entries: list[tuple[str, list[tuple[str, int]]]]) -> QChart:
+def _overlay_chart(entries: list[tuple[str, list[tuple[str, int]], str]]) -> QChart:
     chart = QChart()
     if not entries:
         chart.setTitle("Click a card for its graph; tag cards to compare.")
@@ -282,7 +402,7 @@ def _overlay_chart(entries: list[tuple[str, list[tuple[str, int]]]]) -> QChart:
     today_x = _msecs(date.today().isoformat())
     all_x: list[float] = []
     all_y: list[float] = []
-    for label, points in entries:
+    for label, points, color in entries:
         pts = [(_msecs(a), c / 100.0) for a, c in points]
         if pts and pts[-1][0] < today_x:  # carry last price to today
             pts.append((today_x, pts[-1][1]))
@@ -291,6 +411,7 @@ def _overlay_chart(entries: list[tuple[str, list[tuple[str, int]]]]) -> QChart:
             pts.insert(0, (x - _DAY_MS, y))
         series = QLineSeries()
         series.setName(label)
+        series.setColor(QColor(color))
         for x, y in pts:
             series.append(x, y)
             all_x.append(x)

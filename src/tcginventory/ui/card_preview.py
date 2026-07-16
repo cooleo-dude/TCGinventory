@@ -135,6 +135,13 @@ class CardImagePane(QLabel):
         # Take whatever space the layout gives (don't let the pixmap's size hint
         # drive/inflate the layout) — the image is scaled to fit that space.
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+
+    def set_border(self, color: str = "#504945", width: int = 1) -> None:
+        """Recolour the frame — used to tint a thumbnail to match its graph line."""
+        self.setStyleSheet(
+            f"border:{width}px solid {color}; border-radius:4px; "
+            "background:#1d2021; color:#a89984;"
+        )
         self.setStyleSheet(
             "border:1px solid #504945; border-radius:4px; "
             "background:#1d2021; color:#a89984;"

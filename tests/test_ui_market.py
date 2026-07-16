@@ -97,12 +97,34 @@ def test_shuttle_tag_and_untag(app, conn):
     view.deleteLater()
 
 
+def test_click_off_drops_untagged_preview_line(app, conn):
+    from tcginventory.ui.views.market import PriceLookupView
+
+    _seed(conn)
+    view = PriceLookupView(conn)
+    view._history = _FakeHistory({
+        "sv9-1": [("2026-06-01", 500), ("2026-07-01", 750)],
+        "cel-5": [("2026-06-01", 9000), ("2026-07-01", 12000)],
+    })
+    # Tag one card, preview another → two lines.
+    view._search.setText("Charizard")
+    view._tag("cel-5")
+    view._search.setText("Pikachu")
+    view._on_click(view._results.item(0))
+    assert _line_count(view) == 2
+
+    # Clicking off the card removes only the untagged preview line.
+    view._clear_preview()
+    assert _line_count(view) == 1  # the tagged card's line persists
+    view.deleteLater()
+
+
 def test_overlay_chart_forward_fills_and_single_point(app):
     from tcginventory.ui.views.market import _overlay_chart
 
     multi = _overlay_chart([
-        ("A", [("2026-06-01", 500), ("2026-07-01", 750)]),
-        ("B", [("2026-07-01", 900)]),  # single point → synthesised second vertex
+        ("A", [("2026-06-01", 500), ("2026-07-01", 750)], "#cc241d"),
+        ("B", [("2026-07-01", 900)], "#458588"),  # single pt → synthesised vertex
     ])
     lines = multi.series()
     assert len(lines) == 2
