@@ -130,3 +130,20 @@ def test_overlay_chart_forward_fills_and_single_point(app):
     assert len(lines) == 2
     assert all(s.count() >= 2 for s in lines)
     assert not _overlay_chart([]).series()  # empty → message chart, no lines
+
+
+def test_gallery_set_cards_does_not_accumulate(app):
+    """Rebuilding the gallery must replace, not stack, thumbnails — a regression
+    guard: deleteLater() is deferred, so old frames used to linger on top of the
+    new ones and only the last-tagged card showed."""
+    from tcginventory.ui.card_gallery import CardGallery
+    from tcginventory.ui.card_preview import CardImagePane
+
+    g = CardGallery()
+    for n in (1, 2, 3, 2):  # grow then shrink the tagged set
+        entries = [(f"c{i}", None, "#cc241d") for i in range(n)]
+        g.set_cards(entries)
+        assert g._gallery.count() == n
+        # No stale panes accumulate under the gallery widget across rebuilds.
+        assert len(g._gallery_widget.findChildren(CardImagePane)) == n
+    g.deleteLater()

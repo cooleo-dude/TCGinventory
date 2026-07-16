@@ -119,8 +119,14 @@ class CardGallery(QWidget):
         """Rebuild the gallery. ``entries`` = ``(card_id, image_url, border)``."""
         while self._gallery.count():
             item = self._gallery.takeAt(0)
-            if item.widget() is not None:
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                # Detach synchronously: deleteLater() is deferred and isn't
+                # delivered by processEvents(), so on rapid rebuilds the old
+                # thumbnails would linger — still parented and visible, piling
+                # up at (0, 0) on top of the new ones (only the last shows).
+                widget.setParent(None)
+                widget.deleteLater()
         if not entries:
             hint = QLabel(self._empty_hint)
             hint.setWordWrap(True)
