@@ -1,4 +1,4 @@
-"""Price Lookup view: search, chart, and multi-card overlay (offscreen)."""
+"""Price Lookup view: search/tag shuttle + multi-card overlay (offscreen)."""
 
 from __future__ import annotations
 
@@ -22,8 +22,6 @@ def app():
 
 
 class _FakeHistory:
-    """Returns per-card history/current price from a dict."""
-
     def __init__(self, by_card):
         self._by_card = by_card  # card_id -> list[(as_of, cents)]
 
@@ -51,7 +49,13 @@ def _seed(conn):
     conn.commit()
 
 
-def test_select_shows_current_and_charts(app, conn):
+def _line_count(view):
+    from PySide6.QtCharts import QLineSeries
+
+    return sum(isinstance(s, QLineSeries) for s in view._chart.chart().series())
+
+
+def test_click_updates_graph(app, conn):
     from tcginventory.ui.views.market import PriceLookupView
 
     _seed(conn)
@@ -59,13 +63,13 @@ def test_select_shows_current_and_charts(app, conn):
     view._history = _FakeHistory({"sv9-1": [("2026-06-01", 500), ("2026-07-01", 750)]})
     view._search.setText("Pikachu")
     assert view._results.count() == 1
-    view._results.setCurrentRow(0)
+    view._on_click(view._results.item(0))  # clicking updates the graph
     assert "current market" in view._current.text().lower()
-    assert view._chart.chart().series()  # previewed the selected card
+    assert _line_count(view) == 1
     view.deleteLater()
 
 
-def test_tag_persists_and_overlays_multiple(app, conn):
+def test_shuttle_tag_and_untag(app, conn):
     from tcginventory.ui.views.market import PriceLookupView
 
     _seed(conn)
@@ -75,26 +79,21 @@ def test_tag_persists_and_overlays_multiple(app, conn):
         "cel-5": [("2026-06-01", 9000), ("2026-07-01", 12000)],
     })
 
-    def line_count():
-        from PySide6.QtCharts import QLineSeries
-        return sum(isinstance(s, QLineSeries) for s in view._chart.chart().series())
-
     view._search.setText("Pikachu")
-    view._results.setCurrentRow(0)
-    view._tag_selected()
+    view._tag("sv9-1")  # move Pikachu → tagged
     assert view._tagged_list.count() == 1
+    assert view._results.count() == 0  # removed from the search list
 
-    # Select a different card → its preview overlays the tagged one (2 lines).
     view._search.setText("Charizard")
-    view._results.setCurrentRow(0)
-    assert line_count() == 2
-
-    view._tag_selected()  # now both tagged
+    assert view._results.count() == 1  # a non-tagged card is listable
+    view._tag("cel-5")
     assert view._tagged_list.count() == 2
-    assert line_count() == 2
+    assert _line_count(view) == 2  # two graphs overlaid
 
-    view._clear_tags()
-    assert view._tagged_list.count() == 0
+    view._untag("sv9-1")  # move one back to the search side
+    assert view._tagged_list.count() == 1
+    assert view._results.count() >= 1  # Pikachu returned to the search list
+    assert _line_count(view) == 1
     view.deleteLater()
 
 
@@ -108,5 +107,4 @@ def test_overlay_chart_forward_fills_and_single_point(app):
     lines = multi.series()
     assert len(lines) == 2
     assert all(s.count() >= 2 for s in lines)
-
     assert not _overlay_chart([]).series()  # empty → message chart, no lines
