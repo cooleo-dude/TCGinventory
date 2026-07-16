@@ -486,3 +486,21 @@ _Template for new entries:_
 - **Consequences:** JP items priced-on-pick get a TCGplayer JP product URL, so
   the daily refresh joins them by product id like English. Prices are USD market
   (≈ NM). Verified live.
+
+### 2026-07-16 — Catalog-wide price history (market outlook)
+- **Decision:** Record a daily market-price series for every catalog card in a
+  **separate SQLite file** (`pricehistory.db`, beside the main DB), populated by
+  a per-set sweep of tcgcsv (EN cat 3 via products number-join, JP cat 85 via the
+  productId embedded in `jp-<id>`). **Dedup-on-change** (append a snapshot only
+  when the price moves; `catalog_price_latest` holds the current price + drives
+  dedup). Live retention ~1 year (rolling prune); the history is backed up
+  separately, **trimmed to ~3 months, keep 3**.
+- **Context / why:** A full daily table for ~47.7k cards would be ~17M rows and
+  ~1.7 GB/yr, and the ledger's keep-10 auto-backup would balloon to ~19 GB. The
+  separate file keeps the ledger backup small/fast (history is excluded from it),
+  dedup + 1yr prune keep the live file to hundreds of MB, and the trimmed 3-month
+  history backup caps its own footprint. Total ~1–2 GB.
+- **Wiring:** the daily headless task runs the sweep after the owned-item refresh
+  and writes a trimmed history backup; File ▸ "Update market prices" triggers it
+  manually. Owned-card sets are swept first. Foundation for the market-trend
+  feature (surfacing per-card history in the UI is a follow-on).

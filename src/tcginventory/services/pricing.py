@@ -177,6 +177,19 @@ class TcgcsvProvider:
                     quotes.append(PriceQuote(item_id=item.id, price_cents=cents))
         return quotes
 
+    # -- public accessors (used by the catalog-wide price sweep) ------------
+
+    def resolve_group(
+        self, set_name: str | None, set_code: str | None, category: int
+    ) -> int | None:
+        return self._resolve_group(set_name, set_code, category)
+
+    def market_prices(self, category: int, group_id: int) -> dict[int, int]:
+        return self._prices_for_group(category, group_id)
+
+    def products(self, category: int, group_id: int) -> list[tuple[int, str, str]]:
+        return self._products_for_group(category, group_id)
+
     # -- internals ----------------------------------------------------------
 
     @staticmethod

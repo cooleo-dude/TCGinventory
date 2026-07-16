@@ -47,6 +47,37 @@ def refresh_prices_headless() -> int:
             log.exception("headless price refresh failed")
             had_error = True
 
+        # Catalog-wide market sweep → separate price-history DB (+ trimmed backup).
+        try:
+            from tcginventory.data.backup import (
+                backup_price_history,
+                timestamp_for_filename,
+            )
+            from tcginventory.data.pricehistory import open_history
+            from tcginventory.services.marketprices import sweep
+
+            hist_conn = open_history()
+            try:
+                s = sweep(conn, hist_conn)
+                log.info(
+                    "headless market sweep: sets=%d priced=%d snapshots=%d errors=%s",
+                    s.sets,
+                    s.priced,
+                    s.snapshots,
+                    s.errors,
+                )
+                had_error = had_error or bool(s.errors)
+                backup_price_history(
+                    hist_conn,
+                    config.data_dir() / "backups",
+                    timestamp_for_filename(),
+                )
+            finally:
+                hist_conn.close()
+        except Exception:
+            log.exception("headless market sweep failed")
+            had_error = True
+
         states = list(config.get_pref("show_states", []))
         if states:
             try:

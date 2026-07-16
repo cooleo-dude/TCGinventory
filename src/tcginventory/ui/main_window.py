@@ -113,6 +113,50 @@ class _CatalogUpdateWorker(QThread):
         self.done.emit(summary)
 
 
+class _MarketSweepWorker(QThread):
+    """Price the whole catalog into the price-history DB, off the UI thread."""
+
+    done = Signal(object)  # SweepSummary
+
+    def __init__(self, db_path) -> None:
+        super().__init__()
+        self._db_path = db_path
+
+    def run(self) -> None:
+        import logging
+
+        from tcginventory import config
+        from tcginventory.data.backup import (
+            backup_price_history,
+            timestamp_for_filename,
+        )
+        from tcginventory.data.db import open_database
+        from tcginventory.data.pricehistory import open_history
+        from tcginventory.services.marketprices import SweepSummary, sweep
+
+        try:
+            conn = open_database(self._db_path)
+            hist = open_history()
+            try:
+                summary = sweep(conn, hist)
+                backup_price_history(
+                    hist, config.data_dir() / "backups", timestamp_for_filename()
+                )
+            finally:
+                hist.close()
+                conn.close()
+        except Exception as exc:
+            summary = SweepSummary(errors=[str(exc)])
+        logging.getLogger(__name__).info(
+            "market sweep: sets=%d priced=%d snapshots=%d errors=%d",
+            summary.sets,
+            summary.priced,
+            summary.snapshots,
+            len(summary.errors),
+        )
+        self.done.emit(summary)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, conn: sqlite3.Connection | None = None) -> None:
         super().__init__()
@@ -124,6 +168,7 @@ class MainWindow(QMainWindow):
         self._db_file = self._resolve_db_file()  # None for in-memory (tests)
         self._price_worker: _PriceRefreshWorker | None = None
         self._catalog_worker: _CatalogUpdateWorker | None = None
+        self._market_worker: _MarketSweepWorker | None = None
 
         self.setWindowTitle(f"TCGinventory {__version__}")
         self.setWindowIcon(app_icon())
@@ -258,6 +303,9 @@ class MainWindow(QMainWindow):
         self._catalog_action_ja = self._file_menu.addAction(
             "Update card database (Japanese)…", lambda: self._update_catalog("JP")
         )
+        self._market_action = self._file_menu.addAction(
+            "Update market prices…", self._update_market_prices
+        )
         self._build_auto_update_action()
 
     def _update_catalog(self, language: str = "EN") -> None:
@@ -292,6 +340,36 @@ class MainWindow(QMainWindow):
             if summary.errors:
                 msg += f"\n({len(summary.errors)} set(s) skipped)"
             QMessageBox.information(self, "Card database updated", msg)
+
+    def _update_market_prices(self) -> None:
+        if not self._db_file:
+            QMessageBox.information(
+                self, "Market prices", "Not available for an in-memory database."
+            )
+            return
+        if self._market_worker is not None and self._market_worker.isRunning():
+            return
+        self._market_action.setEnabled(False)
+        self.statusBar().showMessage("Updating market prices… (pricing the catalog)")
+        self._market_worker = _MarketSweepWorker(self._db_file)
+        self._market_worker.done.connect(self._on_market_swept)
+        self._market_worker.start()
+
+    def _on_market_swept(self, summary) -> None:
+        self._market_action.setEnabled(True)
+        self._market_worker = None
+        if summary.errors and not summary.priced:
+            QMessageBox.warning(
+                self,
+                "Market prices",
+                "Update failed:\n" + "\n".join(summary.errors[:5]),
+            )
+        else:
+            self.statusBar().showMessage(
+                f"Market prices updated: {summary.priced:,} cards across "
+                f"{summary.sets} sets ({summary.snapshots:,} changes recorded).",
+                8000,
+            )
 
     def _build_auto_update_action(self) -> None:
         from tcginventory import scheduling
