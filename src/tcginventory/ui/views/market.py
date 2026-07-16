@@ -15,10 +15,12 @@ import sqlite3
 from datetime import date, datetime
 
 from PySide6.QtCharts import QChart, QDateTimeAxis, QLineSeries, QValueAxis
-from PySide6.QtCore import QDateTime, QEvent, QRect, Qt
+from PySide6.QtCore import QDateTime, QEvent, QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QPainter, QPalette
 from PySide6.QtWidgets import (
+    QFrame,
     QLabel,
+    QLayout,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -100,19 +102,80 @@ class _ArrowDelegate(QStyledItemDelegate):
         return super().editorEvent(event, model, option, index)
 
 
+class _FlowLayout(QLayout):
+    """Left-to-right layout that wraps to a new row when it runs out of width."""
+
+    def __init__(self, parent=None, spacing: int = 8) -> None:
+        super().__init__(parent)
+        self._items: list = []
+        self._spacing = spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._arrange(QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect) -> None:
+        super().setGeometry(rect)
+        self._arrange(rect, apply=True)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    def _arrange(self, rect: QRect, *, apply: bool) -> int:
+        x, y, line_h = rect.x(), rect.y(), 0
+        for item in self._items:
+            hint = item.sizeHint()
+            nx = x + hint.width() + self._spacing
+            if nx - self._spacing > rect.right() and line_h > 0:
+                x = rect.x()
+                y += line_h + self._spacing
+                nx = x + hint.width() + self._spacing
+                line_h = 0
+            if apply:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = nx
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y()
+
+
 class _CardDisplay(QWidget):
-    """Shows either one hovered card, or a gallery of tagged cards (each bordered
-    in its graph-line colour)."""
+    """Shows either one hovered card, or a wrapping gallery of tagged cards, each
+    framed in its graph-line colour."""
+
+    _THUMB = QSize(150, 210)
 
     def __init__(self) -> None:
         super().__init__()
         self._single = CardImagePane()
-        gallery = QWidget()
-        self._gallery = QVBoxLayout(gallery)
-        self._gallery.setContentsMargins(4, 4, 4, 4)
+        self._gallery_widget = QWidget()
+        self._gallery = _FlowLayout(self._gallery_widget)
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
-        self._scroll.setWidget(gallery)
+        self._scroll.setWidget(self._gallery_widget)
         self._stack = QStackedLayout(self)
         self._stack.addWidget(self._single)  # 0
         self._stack.addWidget(self._scroll)  # 1
@@ -123,27 +186,33 @@ class _CardDisplay(QWidget):
 
     def show_gallery(self, entries: list[tuple[str, str, str]]) -> None:
         while self._gallery.count():
-            w = self._gallery.takeAt(0).widget()
-            if w is not None:
-                w.deleteLater()
+            item = self._gallery.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
         if not entries:
             hint = QLabel("Hover a card to preview it; tag cards to gather them here.")
             hint.setWordWrap(True)
-            hint.setAlignment(Qt.AlignCenter)
             hint.setStyleSheet("color:#a89984;")
             self._gallery.addWidget(hint)
         else:
-            row = QWidget()
-            row_layout = QVBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
             for card_id, url, color in entries:
-                thumb = CardImagePane()
-                thumb.setMinimumHeight(150)
-                thumb.set_border(color, width=3)
-                thumb.show_card(card_id, url)
-                row_layout.addWidget(thumb)
-            self._gallery.addWidget(row)
+                self._gallery.addWidget(self._thumb(card_id, url, color))
         self._stack.setCurrentIndex(1)
+
+    def _thumb(self, card_id, url, color: str) -> QFrame:
+        frame = QFrame()
+        frame.setFixedSize(self._THUMB)
+        frame.setStyleSheet(
+            f"QFrame {{ border: 3px solid {color}; border-radius: 6px; "
+            "background: #1d2021; }"
+        )
+        inner = QVBoxLayout(frame)
+        inner.setContentsMargins(4, 4, 4, 4)
+        pane = CardImagePane()
+        pane.set_border("#1d2021", width=0)  # the frame provides the coloured edge
+        pane.show_card(card_id, url)
+        inner.addWidget(pane)
+        return frame
 
 
 def _configure_list(lst: QListWidget) -> None:
