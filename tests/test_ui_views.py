@@ -39,6 +39,31 @@ def test_inventory_view_populates(app, seeded_conn):
     view.deleteLater()
 
 
+def test_inventory_trend_column_renders_arrows(app, seeded_conn):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor
+
+    from tcginventory.services.trends import Trend
+    from tcginventory.ui.models.inventory_model import TREND_COL, InventoryTableModel
+
+    model = InventoryTableModel()
+    from tcginventory.services.inventory import InventoryService
+
+    model.set_rows(InventoryService(seeded_conn).inventory_rows())
+    item_id = model.row_at(0).item.id
+    # A strong up-trend → green up-arrows scaling with magnitude.
+    model.set_trends({
+        item_id: Trend("up", 12.0, 40.0, 3, 30, 30),
+    })
+    idx = model.index(0, TREND_COL)
+    assert model.data(idx, Qt.DisplayRole) == "▲▲▲"
+    assert model.data(idx, Qt.ForegroundRole).color() == QColor("#2e7d32")
+    assert model.data(idx, Qt.UserRole) == 40.0  # sorts by signed %
+    # An item with no computed trend shows the neutral placeholder.
+    other = model.index(1, TREND_COL)
+    assert model.data(other, Qt.DisplayRole) == "·"
+
+
 def test_history_view_populates_and_details(app, seeded_conn):
     from tcginventory.ui.views.history import HistoryView
 
