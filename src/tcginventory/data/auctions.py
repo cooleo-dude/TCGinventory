@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS auction (
     url            TEXT,
     shipping_cents INTEGER NOT NULL DEFAULT 0,
     tax_rate_bps   INTEGER NOT NULL DEFAULT 600,
+    ends_at        TEXT,
     notes          TEXT,
     created_at     TEXT    NOT NULL,
     updated_at     TEXT    NOT NULL
@@ -81,9 +82,14 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     ``CREATE TABLE IF NOT EXISTS`` won't touch an existing table, so new columns
     are added here with an idempotent ``ALTER``.
     """
-    have = {r[1] for r in conn.execute("PRAGMA table_info(auction_card)")}
-    if "tcgplayer_url" not in have:
+    # A missing table yields an empty column set (PRAGMA doesn't error) — the
+    # `cols and` guard then skips its ALTER rather than failing on a bad table.
+    card_cols = {r[1] for r in conn.execute("PRAGMA table_info(auction_card)")}
+    if card_cols and "tcgplayer_url" not in card_cols:
         conn.execute("ALTER TABLE auction_card ADD COLUMN tcgplayer_url TEXT")
+    auction_cols = {r[1] for r in conn.execute("PRAGMA table_info(auction)")}
+    if auction_cols and "ends_at" not in auction_cols:
+        conn.execute("ALTER TABLE auction ADD COLUMN ends_at TEXT")
 
 
 @dataclass
@@ -111,6 +117,7 @@ class Auction:
     url: str | None = None
     shipping_cents: int = 0
     tax_rate_bps: int = DEFAULT_TAX_RATE_BPS
+    ends_at: str | None = None  # ISO local datetime the auction ends (for countdown)
     notes: str | None = None
     cards: list[AuctionCard] = field(default_factory=list)
     id: int | None = None
@@ -171,6 +178,7 @@ class AuctionRepository:
             url=row["url"],
             shipping_cents=row["shipping_cents"],
             tax_rate_bps=row["tax_rate_bps"],
+            ends_at=row["ends_at"],
             notes=row["notes"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -187,13 +195,14 @@ class AuctionRepository:
             if auction.id is None:
                 cur = self.conn.execute(
                     "INSERT INTO auction (title, url, shipping_cents, "
-                    "tax_rate_bps, notes, created_at, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?)",
+                    "tax_rate_bps, ends_at, notes, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
                     (
                         auction.title,
                         auction.url,
                         auction.shipping_cents,
                         auction.tax_rate_bps,
+                        auction.ends_at,
                         auction.notes,
                         now,
                         now,
@@ -204,12 +213,13 @@ class AuctionRepository:
             else:
                 self.conn.execute(
                     "UPDATE auction SET title=?, url=?, shipping_cents=?, "
-                    "tax_rate_bps=?, notes=?, updated_at=? WHERE id=?",
+                    "tax_rate_bps=?, ends_at=?, notes=?, updated_at=? WHERE id=?",
                     (
                         auction.title,
                         auction.url,
                         auction.shipping_cents,
                         auction.tax_rate_bps,
+                        auction.ends_at,
                         auction.notes,
                         now,
                         auction.id,

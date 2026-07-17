@@ -20,8 +20,9 @@ user deletes entries at their discretion.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 
-from PySide6.QtCore import QModelIndex, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QDateTime, QModelIndex, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QDesktopServices,
     QStandardItem,
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
     QCompleter,
+    QDateTimeEdit,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -68,12 +70,35 @@ _CARD_WIDTHS = [200, 150, 70, 90, 50, 96, 30]
 
 _WATCH_HEADERS = [
     "Title", "Cards", "Value", "70%", "80%", "90%", "100%", "Ship", "Tax",
-    "", "Link", "",
+    "Time left", "", "Link", "",
 ]
-_WATCH_WIDTHS = [220, 50, 90, 90, 90, 90, 90, 80, 60, 34, 60, 30]
+_WATCH_WIDTHS = [220, 50, 90, 90, 90, 90, 90, 80, 60, 110, 34, 60, 30]
+_TIME_LEFT_COL = _WATCH_HEADERS.index("Time left")
+_FIRST_BUTTON_COL = _TIME_LEFT_COL + 1  # refresh / link / delete follow
 _ID_ROLE = Qt.UserRole + 1
+_ENDS_ROLE = Qt.UserRole + 2  # ISO end datetime stored on the "Time left" cell
 _UNSET = object()  # sentinel: history not supplied -> open the default DB
 _THUMB_BORDER = "#504945"  # neutral thumbnail frame (no chart-line colours here)
+
+
+def _countdown_text(ends_at: str | None, now: datetime) -> str:
+    """Human countdown to ``ends_at`` (ISO local): "ENDED" once past, "—" when
+    unset/unparseable, else "Xd HH:MM:SS" (days dropped when zero)."""
+    if not ends_at:
+        return "—"
+    try:
+        end = datetime.fromisoformat(ends_at)
+    except ValueError:
+        return "—"
+    secs = int((end - now).total_seconds())
+    if secs <= 0:
+        return "ENDED"
+    days, rem = divmod(secs, 86_400)
+    hours, rem = divmod(rem, 3_600)
+    minutes, seconds = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours:02}:{minutes:02}:{seconds:02}"
+    return f"{hours:02}:{minutes:02}:{seconds:02}"
 
 
 class _GallerySink:
@@ -351,9 +376,32 @@ class AuctionsView(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(body)
 
+        # Once-a-second timer drives the live countdowns (editor label + the
+        # watchlist "Time left" column). Runs only while the screen is shown.
+        self._tick_timer = QTimer(self)
+        self._tick_timer.setInterval(1000)
+        self._tick_timer.timeout.connect(self._on_tick)
+
         self.refresh()
         self._update_breakdown()
         self._refresh_gallery()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._tick_timer.start()
+        self._on_tick()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._tick_timer.stop()
+
+    def _on_tick(self) -> None:
+        now = datetime.now()
+        self._countdown.setText(_countdown_text(self._ends_iso(), now))
+        for r in range(self._watch.rowCount()):
+            item = self._watch.item(r, _TIME_LEFT_COL)
+            if item is not None:
+                item.setText(_countdown_text(item.data(_ENDS_ROLE), now))
 
     # -- watchlist ----------------------------------------------------------
 
@@ -403,11 +451,17 @@ class AuctionsView(QWidget):
         for col, cell in enumerate(cells):
             self._watch.setItem(r, col, cell)
 
+        # Live countdown cell — the end time rides on the item so the timer can
+        # recompute it in place each second (see _on_tick).
+        time_left = QTableWidgetItem(_countdown_text(auction.ends_at, datetime.now()))
+        time_left.setData(_ENDS_ROLE, auction.ends_at)
+        self._watch.setItem(r, _TIME_LEFT_COL, time_left)
+
         refresh = QPushButton("↻")
         refresh.setFixedWidth(30)
         refresh.setToolTip("Refresh card values from current market prices")
         refresh.clicked.connect(lambda _=False, a=auction: self._refresh_values(a))
-        self._watch.setCellWidget(r, 9, refresh)
+        self._watch.setCellWidget(r, _FIRST_BUTTON_COL, refresh)
 
         link = QPushButton("Open ↗")
         link.setEnabled(bool(auction.url))
@@ -416,17 +470,17 @@ class AuctionsView(QWidget):
             link.clicked.connect(
                 lambda _=False, u=auction.url: QDesktopServices.openUrl(QUrl(u))
             )
-        self._watch.setCellWidget(r, 10, link)
+        self._watch.setCellWidget(r, _FIRST_BUTTON_COL + 1, link)
 
         remove = QPushButton("✕")
         remove.setFixedWidth(28)
         remove.setToolTip("Delete this auction")
         remove.clicked.connect(lambda _=False, a=auction: self._delete(a))
-        self._watch.setCellWidget(r, 11, remove)
+        self._watch.setCellWidget(r, _FIRST_BUTTON_COL + 2, remove)
 
     def _on_watch_cell_clicked(self, row: int, col: int) -> None:
-        # The Link (9) and Delete (10) columns are buttons; other cells load.
-        if col >= 9:
+        # The trailing refresh/link/delete columns are buttons; data cells load.
+        if col >= _FIRST_BUTTON_COL:
             return
         item = self._watch.item(row, 0)
         if item is None:
@@ -547,11 +601,25 @@ class AuctionsView(QWidget):
         self._tax.setToolTip("Sales tax applied to bid + shipping")
         self._tax.valueChanged.connect(self._update_breakdown)
 
+        # End date/time + a live countdown beside it.
+        self._ends = QDateTimeEdit()
+        self._ends.setCalendarPopup(True)
+        self._ends.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self._ends.setDateTime(QDateTime.currentDateTime().addDays(7))
+        self._ends.dateTimeChanged.connect(self._update_countdown)
+        self._countdown = QLabel("")
+        self._countdown.setStyleSheet("font-weight: 600;")
+        ends_row = QHBoxLayout()
+        ends_row.addWidget(self._ends)
+        ends_row.addWidget(self._countdown)
+        ends_row.addStretch(1)
+
         form = QFormLayout()
         form.addRow("Title:", self._title)
         form.addRow("eBay URL:", self._url)
         form.addRow("Shipping:", self._shipping)
         form.addRow("Sales tax:", self._tax)
+        form.addRow("Ends:", ends_row)
 
         # Card table + add / auto-detect.
         self._card_table = QTableWidget(0, len(_CARD_HEADERS))
@@ -726,6 +794,13 @@ class AuctionsView(QWidget):
     def _tax_bps(self) -> int:
         return round(self._tax.value() * 100)
 
+    def _ends_iso(self) -> str:
+        """The editor's end date/time as an ISO local string."""
+        return self._ends.dateTime().toString(Qt.ISODate)
+
+    def _update_countdown(self, *_args) -> None:
+        self._countdown.setText(_countdown_text(self._ends_iso(), datetime.now()))
+
     def _update_breakdown(self, *_args) -> None:
         value = self._current_value_cents()
         shipping = round(self._shipping.value() * 100)
@@ -748,6 +823,7 @@ class AuctionsView(QWidget):
             url=self._url.text().strip() or None,
             shipping_cents=round(self._shipping.value() * 100),
             tax_rate_bps=self._tax_bps(),
+            ends_at=self._ends_iso(),
             cards=cards,
         )
         saved = self._repo.save(auction)
@@ -766,10 +842,15 @@ class AuctionsView(QWidget):
         self._url.setText(auction.url or "")
         self._shipping.setValue(auction.shipping_cents / 100)
         self._tax.setValue(auction.tax_rate_bps / 100)
+        if auction.ends_at:
+            dt = QDateTime.fromString(auction.ends_at, Qt.ISODate)
+            if dt.isValid():
+                self._ends.setDateTime(dt)
         for card in auction.cards:
             row = self._add_card_row()
             row.set_card(card)
         self._update_breakdown()
+        self._update_countdown()
         self._refresh_gallery()
 
     def _new(self) -> None:
@@ -785,7 +866,9 @@ class AuctionsView(QWidget):
         self._url.clear()
         self._shipping.setValue(0.0)
         self._tax.setValue(auction_math.DEFAULT_TAX_RATE_BPS / 100)
+        self._ends.setDateTime(QDateTime.currentDateTime().addDays(7))
         self._edit_id = None
+        self._update_countdown()
 
 
 def _safe_open_history():

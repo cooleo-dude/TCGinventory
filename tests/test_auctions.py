@@ -332,3 +332,81 @@ def test_button_disabled_without_url(app):
     row = view._add_card_row()
     assert not row.tcg_btn.isEnabled()  # no link until one resolves
     view.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# end time / countdown
+# ---------------------------------------------------------------------------
+
+
+def test_countdown_text_formats():
+    from datetime import datetime
+
+    from tcginventory.ui.views.auctions import _countdown_text
+
+    now = datetime(2026, 7, 17, 12, 0, 0)
+    assert _countdown_text(None, now) == "—"
+    assert _countdown_text("not-a-date", now) == "—"
+    assert _countdown_text("2026-07-17T11:00:00", now) == "ENDED"  # past
+    assert _countdown_text("2026-07-17T12:00:00", now) == "ENDED"  # exactly now
+    assert _countdown_text("2026-07-17T12:00:30", now) == "00:00:30"
+    assert _countdown_text("2026-07-19T14:01:05", now) == "2d 02:01:05"
+
+
+def test_auction_ends_at_roundtrip(auctions_conn):
+    repo = AuctionRepository(auctions_conn)
+    a = Auction(
+        title="t", ends_at="2026-07-20T10:00:00", cards=[AuctionCard(name="x")]
+    )
+    repo.save(a, now="2026-07-17T00:00:00+00:00")
+    assert repo.get(a.id).ends_at == "2026-07-20T10:00:00"
+
+
+def test_ensure_columns_adds_ends_at_to_old_db():
+    import sqlite3
+
+    from tcginventory.data.auctions import _ensure_columns
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE auction (id INTEGER PRIMARY KEY, title TEXT)")
+    conn.execute("CREATE TABLE auction_card (id INTEGER PRIMARY KEY, name TEXT)")
+    _ensure_columns(conn)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(auction)")}
+    assert "ends_at" in cols
+    conn.close()
+
+
+def test_editor_end_time_saves_and_counts_down(app):
+    from PySide6.QtCore import QDateTime
+
+    from tcginventory.ui.views.auctions import _TIME_LEFT_COL
+
+    view = _view(app)
+    row = view._add_card_row()
+    row.name.setText("Zard")
+    row.market.setValue(10.0)
+    view._ends.setDateTime(QDateTime.currentDateTime().addSecs(3600))  # +1h
+    view._save()
+
+    assert view._repo.get(view._edit_id).ends_at  # persisted
+    view._on_tick()  # refresh the live counter
+    text = view._watch.item(0, _TIME_LEFT_COL).text()
+    assert text not in ("ENDED", "—")  # a running countdown
+    assert view._countdown.text() not in ("ENDED", "—")  # editor label too
+    view.deleteLater()
+
+
+def test_watchlist_shows_ended_for_past_auction(app):
+    from tcginventory.ui.views.auctions import _TIME_LEFT_COL
+
+    view = _view(app)
+    a = Auction(
+        title="old",
+        ends_at="2000-01-01T00:00:00",  # long past
+        cards=[AuctionCard(name="x", market_value_cents=100)],
+    )
+    view._repo.save(a, now="2026-07-17T00:00:00+00:00")
+    view.refresh()
+    view._on_tick()
+    assert view._watch.item(0, _TIME_LEFT_COL).text() == "ENDED"
+    view.deleteLater()
