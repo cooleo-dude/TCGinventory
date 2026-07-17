@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS auction_card (
     quantity           INTEGER NOT NULL DEFAULT 1,
     market_value_cents INTEGER NOT NULL DEFAULT 0,
     image_url          TEXT,
+    tcgplayer_url      TEXT,
     position           INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_auction_card ON auction_card(auction_id);
@@ -70,7 +71,19 @@ def open_auctions(path: str | Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")  # cascade auction_card on delete
     conn.executescript(_SCHEMA)
+    _ensure_columns(conn)
     return conn
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a DB was first created (forward-only).
+
+    ``CREATE TABLE IF NOT EXISTS`` won't touch an existing table, so new columns
+    are added here with an idempotent ``ALTER``.
+    """
+    have = {r[1] for r in conn.execute("PRAGMA table_info(auction_card)")}
+    if "tcgplayer_url" not in have:
+        conn.execute("ALTER TABLE auction_card ADD COLUMN tcgplayer_url TEXT")
 
 
 @dataclass
@@ -86,6 +99,7 @@ class AuctionCard:
     quantity: int = 1
     market_value_cents: int = 0
     image_url: str | None = None
+    tcgplayer_url: str | None = None
     id: int | None = None
 
 
@@ -143,6 +157,7 @@ class AuctionRepository:
                 quantity=c["quantity"],
                 market_value_cents=c["market_value_cents"],
                 image_url=c["image_url"],
+                tcgplayer_url=c["tcgplayer_url"],
             )
             for c in self.conn.execute(
                 "SELECT * FROM auction_card WHERE auction_id = ? "
@@ -209,8 +224,8 @@ class AuctionRepository:
                 self.conn.execute(
                     "INSERT INTO auction_card (auction_id, card_id, name, "
                     "set_name, set_code, number, language, quantity, "
-                    "market_value_cents, image_url, position) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    "market_value_cents, image_url, tcgplayer_url, position) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         auction.id,
                         card.card_id,
@@ -222,6 +237,7 @@ class AuctionRepository:
                         card.quantity,
                         card.market_value_cents,
                         card.image_url,
+                        card.tcgplayer_url,
                         pos,
                     ),
                 )

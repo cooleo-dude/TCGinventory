@@ -271,3 +271,64 @@ def test_gallery_reflects_editor_cards(app, monkeypatch):
     view._refresh_gallery()
     assert [e[0] for e in captured["e"]] == ["a", "b"]
     view.deleteLater()
+
+
+def test_auction_card_tcgplayer_url_roundtrip(auctions_conn):
+    repo = AuctionRepository(auctions_conn)
+    a = Auction(
+        title="lot",
+        cards=[AuctionCard(name="Zard", tcgplayer_url="https://tcgplayer.com/z")],
+    )
+    repo.save(a, now="2026-07-17T00:00:00+00:00")
+    assert repo.get(a.id).cards[0].tcgplayer_url == "https://tcgplayer.com/z"
+
+
+def test_ensure_columns_adds_tcgplayer_url_to_old_db():
+    import sqlite3
+
+    from tcginventory.data.auctions import _ensure_columns
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE auction_card (id INTEGER PRIMARY KEY, name TEXT)")
+    _ensure_columns(conn)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(auction_card)")}
+    assert "tcgplayer_url" in cols
+    _ensure_columns(conn)  # idempotent — no error on a second run
+    conn.close()
+
+
+def test_price_result_populates_tcgplayer_button(app):
+    view = _view(app)
+    row = view._add_card_row()
+    row.name.setText("Charizard")
+    # Simulate the live tcgcsv lookup returning (price_cents, product_url).
+    view._on_price_ready(
+        row, None, (1850, "https://www.tcgplayer.com/product/123"), had_hist_price=False
+    )
+    assert row.tcg_btn.isEnabled()
+    assert row.market.value() == 18.50  # backfilled since history had no price
+    assert row.to_card().tcgplayer_url == "https://www.tcgplayer.com/product/123"
+    view.deleteLater()
+
+
+def test_tcgplayer_button_opens_url(app, monkeypatch):
+    view = _view(app)
+    row = view._add_card_row()
+    row.set_tcgplayer_url("https://tcgplayer.com/x")
+    assert row.tcg_btn.isEnabled()
+
+    opened: list[str] = []
+    monkeypatch.setattr(
+        "tcginventory.ui.views.auctions.QDesktopServices",
+        type("D", (), {"openUrl": staticmethod(lambda u: opened.append(u.toString()))}),
+    )
+    row.tcg_btn.click()
+    assert opened == ["https://tcgplayer.com/x"]
+    view.deleteLater()
+
+
+def test_button_disabled_without_url(app):
+    view = _view(app)
+    row = view._add_card_row()
+    assert not row.tcg_btn.isEnabled()  # no link until one resolves
+    view.deleteLater()

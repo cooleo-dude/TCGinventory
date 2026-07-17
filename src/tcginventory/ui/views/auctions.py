@@ -63,8 +63,8 @@ from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.card_preview import install_hover_preview
 from tcginventory.ui.formatting import money, percent
 
-_CARD_HEADERS = ["Name", "Set", "#", "Market", "Qty", ""]
-_CARD_WIDTHS = [200, 150, 70, 90, 50, 30]
+_CARD_HEADERS = ["Name", "Set", "#", "Market", "Qty", "TCGplayer", ""]
+_CARD_WIDTHS = [200, 150, 70, 90, 50, 96, 30]
 
 _WATCH_HEADERS = [
     "Title", "Cards", "Value", "70%", "80%", "90%", "100%", "Ship", "Tax",
@@ -167,6 +167,7 @@ class _AuctionCardRow:
         self._matches: dict[str, object] = {}
         self._card_id: str | None = None
         self._image_url: str | None = None
+        self._tcgplayer_url: str | None = None
         self._language: str = "EN"
 
         self.name = QLineEdit()
@@ -196,9 +197,26 @@ class _AuctionCardRow:
         self.qty.setMaximum(9999)
         self.qty.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.qty.valueChanged.connect(lambda *_: on_change())
+        # TCGplayer link button — enabled once a product URL is resolved (from
+        # the price-on-pick lookup). Clicking opens the listing.
+        self.tcg_btn = QPushButton("TCGplayer")
+        self.tcg_btn.setEnabled(False)
+        self.tcg_btn.setToolTip("Open this card on TCGplayer")
+        self.tcg_btn.clicked.connect(self._open_tcgplayer)
 
     def widgets(self) -> list[QWidget]:
-        return [self.name, self.set, self.number, self.market, self.qty]
+        return [self.name, self.set, self.number, self.market, self.qty, self.tcg_btn]
+
+    def _open_tcgplayer(self) -> None:
+        if self._tcgplayer_url:
+            QDesktopServices.openUrl(QUrl(self._tcgplayer_url))
+
+    def set_tcgplayer_url(self, url: str | None) -> None:
+        self._tcgplayer_url = url or None
+        self.tcg_btn.setEnabled(bool(self._tcgplayer_url))
+        self.tcg_btn.setToolTip(
+            self._tcgplayer_url or "No TCGplayer link for this card"
+        )
 
     # -- catalog autofill ---------------------------------------------------
 
@@ -245,6 +263,7 @@ class _AuctionCardRow:
         self._card_id = card.card_id
         self._image_url = getattr(card, "image_small", None)
         self._language = getattr(card, "language", None) or "EN"
+        self.set_tcgplayer_url(None)  # cleared until the price lookup resolves it
         self.name.setText(card.name)
         self.set.setText(card.set_name or "")
         self.number.setText(card.full_number or card.number or "")
@@ -261,6 +280,7 @@ class _AuctionCardRow:
         self._card_id = card.card_id
         self._image_url = card.image_url
         self._language = card.language or "EN"
+        self.set_tcgplayer_url(card.tcgplayer_url)
         self.name.setText(card.name)
         self.set.setText(card.set_name or "")
         self.number.setText(card.number or "")
@@ -289,6 +309,7 @@ class _AuctionCardRow:
             quantity=self.qty.value(),
             market_value_cents=round(self.market.value() * 100),
             image_url=self._image_url,
+            tcgplayer_url=self._tcgplayer_url,
         )
 
 
@@ -491,8 +512,10 @@ class AuctionsView(QWidget):
             self._price_workers.remove(worker)
         if result is None:
             return
-        cents, _url = result
+        cents, url = result
         card.market_value_cents = cents
+        if url:
+            card.tcgplayer_url = url
         self._repo.save(auction)
         # Watchlist only (no editor reload) so an async result never clobbers
         # in-progress edits.
@@ -659,35 +682,40 @@ class AuctionsView(QWidget):
     # -- price autofill -----------------------------------------------------
 
     def _request_price(self, row: _AuctionCardRow, card) -> None:
-        """Fill Market from ``pricehistory.db`` (instant); fall back to a live
-        tcgcsv fetch for cards not yet in the local history."""
-        price = None
+        """Fill Market from ``pricehistory.db`` (instant, offline-friendly), then
+        run a live tcgcsv lookup to resolve the exact TCGplayer product URL (and
+        the price, if history had none)."""
+        hist_price = None
         if self._history is not None and getattr(card, "card_id", None):
             try:
-                price = self._history.current_price(card.card_id)
+                hist_price = self._history.current_price(card.card_id)
             except Exception:
-                price = None
-        if price:
-            row.set_market_cents(price)
+                hist_price = None
+        if hist_price:
+            row.set_market_cents(hist_price)
             self._update_breakdown()
-            return
         if not card.set_name or not card.number:
             return
         category = 85 if getattr(card, "language", "EN") == "JP" else 3
         worker = _LivePriceWorker(card.set_name, card.number, card.name, category)
         worker.done.connect(
-            lambda result, r=row, w=worker: self._on_price_ready(r, w, result)
+            lambda result, r=row, w=worker, had=bool(hist_price): self._on_price_ready(
+                r, w, result, had
+            )
         )
         self._price_workers.append(worker)
         worker.start()
 
-    def _on_price_ready(self, row, worker, result) -> None:
+    def _on_price_ready(self, row, worker, result, had_hist_price=False) -> None:
         if worker in self._price_workers:
             self._price_workers.remove(worker)
         if result is None or row not in self._rows:
             return
-        cents, _url = result
-        row.set_market_cents(cents)
+        cents, url = result
+        if url:
+            row.set_tcgplayer_url(url)  # exact product link for the button
+        if not had_hist_price:  # history is preferred; live only backfills price
+            row.set_market_cents(cents)
         self._update_breakdown()
 
     # -- breakdown / save / load --------------------------------------------
