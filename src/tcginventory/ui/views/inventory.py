@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from PySide6.QtCharts import (
     QChart,
@@ -18,8 +19,10 @@ from PySide6.QtCore import (
     Qt,
     QThread,
     QTimer,
+    QUrl,
     Signal,
 )
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -56,16 +59,21 @@ from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inventory import InventoryRow, InventoryService
 from tcginventory.services.review import with_review_note, without_review_note
 from tcginventory.services.transactions import TransactionService
+from tcginventory.services.trends import TrendService
 from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
 from tcginventory.ui.charts import HoverChartView
 from tcginventory.ui.models.inventory_model import (
+    EBAY_COL,
     INTENT_COL,
+    LINK_URL_ROLE,
     MARKET_CURRENT_COL,
+    TCGPLAYER_COL,
     InventoryTableModel,
     combo_columns,
 )
 from tcginventory.ui.views._combo_delegate import ComboDelegate
 from tcginventory.ui.views._intent_delegate import IntentDelegate
+from tcginventory.ui.views._link_delegate import LinkButtonDelegate
 from tcginventory.ui.views._review_delegate import ReviewPriceDelegate
 from tcginventory.ui.views.item_detail import ItemDetailDialog
 
@@ -78,14 +86,19 @@ _GRADED = ["All", "Singles", "Graded"]
 
 class _PreviewPrefetchWorker(QThread):
     """Pre-fetch, off the UI thread, everything a hover needs so it's instant:
-    each row's card image (resolved + cached to disk) and each item's price
-    history. Uses its own DB connection (sqlite handles aren't shareable across
-    threads) and emits the image map ``{lot_id: (card_id, url)}`` and the history
-    map ``{item_id: [PriceSnapshot]}``. The chart itself is still built on the UI
-    thread (QtCharts isn't thread-safe), but from this cache — no DB round-trip.
+    each row's card image (resolved + cached to disk), each item's price history,
+    and each item's market **trend**. Uses its own DB connections (sqlite handles
+    aren't shareable across threads) and exposes three maps as attributes:
+    ``images`` ``{lot_id: (card_id, url)}``, ``history``
+    ``{item_id: [PriceSnapshot]}``, and ``trends`` ``{item_id: Trend}``. The
+    argless ``resolved`` signal just says "read them now" — dicts of Python
+    objects don't survive marshalling across a queued cross-thread signal, so the
+    results are handed over as attributes rather than signal arguments. The chart
+    itself is still built on the UI thread (QtCharts isn't thread-safe), but from
+    this cache — no DB round-trip.
     """
 
-    resolved = Signal(dict, dict)
+    resolved = Signal()
 
     def __init__(
         self, db_file: str, rows: list[tuple[int, int, str, str, str]], since: str
@@ -94,17 +107,29 @@ class _PreviewPrefetchWorker(QThread):
         self._db_file = db_file
         self._rows = rows
         self._since = since
+        self.images: dict[int, tuple[str, str]] = {}
+        self.history: dict[int, list] = {}
+        self.trends: dict[int, object] = {}
 
     def run(self) -> None:  # pragma: no cover - exercised via the UI
         from tcginventory.data.db import connect
+        from tcginventory.data.pricehistory import open_history
 
         images: dict[int, tuple[str, str]] = {}
         history: dict[int, list] = {}
+        trends: dict[int, object] = {}
         try:
             conn = connect(self._db_file)
+            hist_conn = None
             try:
+                try:
+                    hist_conn = open_history()
+                except Exception:
+                    hist_conn = None  # no catalog history → snapshot fallback
                 catalog = CardCatalogRepository(conn)
                 snaps = PriceSnapshotRepository(conn)
+                trend_svc = TrendService(conn, hist_conn)
+                today = date.today()
                 for lot_id, item_id, name, set_name, number in self._rows:
                     if self.isInterruptionRequested():
                         break
@@ -116,11 +141,20 @@ class _PreviewPrefetchWorker(QThread):
                         history[item_id] = snaps.history_for_item(
                             item_id, since=self._since
                         )
+                    if item_id not in trends:
+                        item = SimpleNamespace(
+                            id=item_id, name=name, set_name=set_name,
+                            card_number=number,
+                        )
+                        trends[item_id] = trend_svc.trend_for(item, as_of=today)
             finally:
                 conn.close()
+                if hist_conn is not None:
+                    hist_conn.close()
         except Exception:
             pass  # best-effort warming; never break the UI
-        self.resolved.emit(images, history)
+        self.images, self.history, self.trends = images, history, trends
+        self.resolved.emit()
 
 
 class _InventoryFilterProxy(QSortFilterProxyModel):
@@ -195,6 +229,7 @@ class InventoryView(QWidget):
         # don't re-query the catalog or wait on the network.
         self._row_image: dict[int, tuple[str, str]] = {}
         self._row_history: dict[int, list] = {}  # item_id -> price snapshots
+        self._row_trends: dict[int, object] = {}  # item_id -> Trend
         self._prefetch_worker: _PreviewPrefetchWorker | None = None
         self._columns_sized = False  # auto-size grid columns once, on first load
         self._model = InventoryTableModel(
@@ -292,6 +327,46 @@ class InventoryView(QWidget):
             self._combo_delegates.append(delegate)
             self._table.setItemDelegateForColumn(col, delegate)
 
+        # The two link columns are shown only in the side panel, not the grid.
+        self._table.setColumnHidden(TCGPLAYER_COL, True)
+        self._table.setColumnHidden(EBAY_COL, True)
+
+        # -- links panel: a companion view on the SAME proxy so its rows track
+        # the grid's sort/filter/order exactly. Shows only the TCGplayer (left)
+        # and eBay (right) button columns; clicking a button opens the listing.
+        self._links = QTableView()
+        self._links.setModel(self._proxy)
+        self._links.setSelectionModel(self._table.selectionModel())  # shared
+        self._links.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._links.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._links.setMouseTracking(True)  # button hover feedback
+        self._links.setAlternatingRowColors(True)
+        self._links.verticalHeader().setVisible(False)
+        self._links.horizontalHeader().setSectionsClickable(False)
+        self._links.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._links.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        for c in range(self._model.columnCount()):
+            self._links.setColumnHidden(c, c not in (TCGPLAYER_COL, EBAY_COL))
+        self._links.setColumnWidth(TCGPLAYER_COL, 92)
+        self._links.setColumnWidth(EBAY_COL, 92)
+        self._tcg_delegate = LinkButtonDelegate(self._links, "TCGplayer")
+        self._ebay_delegate = LinkButtonDelegate(self._links, "eBay")
+        self._links.setItemDelegateForColumn(TCGPLAYER_COL, self._tcg_delegate)
+        self._links.setItemDelegateForColumn(EBAY_COL, self._ebay_delegate)
+        self._links.clicked.connect(self._open_link)
+        self._links.setFixedWidth(200)
+        # Keep the two views' rows aligned: identical fixed row height + synced
+        # vertical scrolling (the grid owns the visible scrollbar).
+        for _v in (self._table, self._links):
+            _v.verticalHeader().setDefaultSectionSize(28)
+            _v.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self._table.verticalScrollBar().valueChanged.connect(
+            self._links.verticalScrollBar().setValue
+        )
+        self._links.verticalScrollBar().valueChanged.connect(
+            self._table.verticalScrollBar().setValue
+        )
+
         self._empty = QLabel("Nothing here yet — record your first purchase.")
         self._empty.setAlignment(Qt.AlignCenter)
         self._empty.setVisible(False)
@@ -315,7 +390,12 @@ class InventoryView(QWidget):
         table_box = QWidget()
         table_layout = QVBoxLayout(table_box)
         table_layout.setContentsMargins(0, 0, 0, 0)
-        table_layout.addWidget(self._table)
+        grid_row = QHBoxLayout()
+        grid_row.setContentsMargins(0, 0, 0, 0)
+        grid_row.setSpacing(4)
+        grid_row.addWidget(self._table, 1)  # the grid shrinks to make room…
+        grid_row.addWidget(self._links)  # …for the fixed-width links panel
+        table_layout.addLayout(grid_row, 1)
         table_layout.addWidget(self._empty)
         splitter.addWidget(table_box)
 
@@ -350,6 +430,7 @@ class InventoryView(QWidget):
             self._columns_sized = True
         self._empty.setVisible(not rows)
         self._table.setVisible(bool(rows))
+        self._links.setVisible(bool(rows))
         self._prefetch_previews(rows)
         self._on_selection()
 
@@ -363,7 +444,9 @@ class InventoryView(QWidget):
     def _apply_column_widths(self) -> None:
         """Widen the Holo / Edition / Intent drop-down columns so their editors
         have room; Notes (last column) stretches to absorb the leftover width."""
-        for header, width in (("Holo", 70), ("Edition", 110), ("Intent", 110)):
+        for header, width in (
+            ("Holo", 70), ("Edition", 110), ("Intent", 110), ("Trend", 70),
+        ):
             self._table.setColumnWidth(self._col(header), width)
 
     def _db_file(self) -> str | None:
@@ -387,13 +470,17 @@ class InventoryView(QWidget):
             for r in rows
         ]
         worker = _PreviewPrefetchWorker(db_file, payload, self._history_since())
-        worker.resolved.connect(self._on_previews_resolved)
+        worker.resolved.connect(lambda w=worker: self._on_previews_resolved(w))
         self._prefetch_worker = worker
         worker.start()
 
-    def _on_previews_resolved(self, images: dict, history: dict) -> None:
-        self._row_image = images
-        self._row_history = history
+    def _on_previews_resolved(self, worker: _PreviewPrefetchWorker) -> None:
+        # Results are read from the finished worker's attributes, not signal args
+        # (dicts of Python objects don't survive a cross-thread queued signal).
+        self._row_image = worker.images
+        self._row_history = worker.history
+        self._row_trends = worker.trends
+        self._model.set_trends(worker.trends)
 
     @staticmethod
     def _history_since() -> str:
@@ -451,6 +538,12 @@ class InventoryView(QWidget):
         chart = QChart()
         chart.setTitle(text)
         self._chart_view.setChart(chart)
+
+    def _open_link(self, proxy_index: QModelIndex) -> None:
+        """Open a card's TCGplayer/eBay listing (from the links-panel buttons)."""
+        url = proxy_index.data(LINK_URL_ROLE)
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
 
     def _open_detail(self, proxy_index: QModelIndex) -> None:
         source_index = self._proxy.mapToSource(proxy_index)
