@@ -67,6 +67,7 @@ from tcginventory.domain.models import Item
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inventory import InventoryService
 from tcginventory.services.reporting import ReportingService
+from tcginventory.services.review import without_review_note
 from tcginventory.services.transactions import (
     IncomingCard,
     OutgoingCard,
@@ -198,15 +199,18 @@ class _GiveRow:
         return [self.name, self.qty]
 
     @staticmethod
-    def _label(item: Item, available: int) -> str:
+    def _label(item: Item) -> str:
+        """Card name (+set), then its Notes — with the auto "Manual price…"
+        review marker stripped out. No notes → just the name."""
         name = item.name + (f" ({item.set_name})" if item.set_name else "")
-        return f"{name} — {available} on hand"
+        note = without_review_note(item.notes)
+        return f"{name} — {note}" if note else name
 
     def _fill(self, needle: str) -> None:
         self._model.clear()
         needle = needle.strip().lower()
-        for item, available in self._sellable:
-            label = self._label(item, available)
+        for item, _available in self._sellable:
+            label = self._label(item)
             if needle and needle not in label.lower():
                 continue
             entry = QStandardItem(label)
@@ -229,8 +233,8 @@ class _GiveRow:
     def _on_text_changed(self, *_) -> None:
         # Editing away from the chosen card's label drops the selection.
         if self._chosen_id is not None:
-            item, available = self._by_id[self._chosen_id]
-            if self.name.text() != self._label(item, available):
+            item, _available = self._by_id[self._chosen_id]
+            if self.name.text() != self._label(item):
                 self._chosen_id = None
                 self.qty.setMaximum(1)
         self._on_change()
@@ -247,7 +251,7 @@ class _GiveRow:
             return
         item, available = pair
         self._chosen_id = item_id
-        self.name.setText(self._label(item, available))
+        self.name.setText(self._label(item))
         self.qty.setMaximum(max(1, available))
         self._preview(item_id)
         self._on_change()

@@ -89,6 +89,42 @@ def test_add_button_is_the_bottom_table_row(app, conn):
     view.deleteLater()
 
 
+def test_give_dropdown_shows_notes_without_review_marker(app, conn):
+    from tcginventory.services.review import with_review_note
+    from tcginventory.services.transactions import (
+        TransactionRequest,
+        TransactionService,
+    )
+    from tcginventory.ui.views.transaction import TransactionView
+
+    # A resale card whose notes carry user text + the auto review marker.
+    notes = with_review_note("Signed by artist")  # + "Manual price changed detected."
+    TransactionService(conn).post(
+        TransactionRequest(
+            occurred_at="2026-07-20",
+            cash_out_cents=1000,
+            incoming=[
+                IncomingCard(
+                    item=Item(name="Pikachu", category=Category.SINGLE, notes=notes),
+                    quantity=1,
+                    market_value_cents=1000,
+                    intent=Intent.RESALE,
+                )
+            ],
+        )
+    )
+    view = TransactionView(conn)
+    row = view._add_give_row()
+    row._fill("")  # populate the completion model (as typing/focus would)
+    labels = [row._model.item(i).text() for i in range(row._model.rowCount())]
+
+    assert labels
+    assert any("Signed by artist" in label for label in labels)  # user note shown
+    assert all("on hand" not in label for label in labels)  # count removed
+    assert all("Manual price" not in label for label in labels)  # marker stripped
+    view.deleteLater()
+
+
 def test_give_side_hover_resolves_card_image(app, conn):
     from tcginventory.data.repositories import CardCatalogRepository
     from tcginventory.domain.models import CatalogCard
