@@ -15,7 +15,9 @@ is deferred to M3: it needs a market-value history the V1 schema does not record
 
 from __future__ import annotations
 
+import bisect
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass
 
 from tcginventory.domain.enums import Intent
@@ -177,4 +179,75 @@ class ReportingService:
         for r in self.conn.execute(sql, params).fetchall():
             running += r["realized"]
             out.append(SeriesPoint(at=r["at"], value_cents=running))
+        return out
+
+    def collection_value_series(
+        self, intent: Intent | None = None
+    ) -> list[SeriesPoint]:
+        """Market value of holdings over time, sampled at each recorded price
+        date (``price_snapshot``).
+
+        At each snapshot date it values the holdings **as they stood then** —
+        lots acquired by that date, less quantities disposed by then (FIFO
+        draw-downs) — using the most recent recorded price for each item on/
+        before that date. Ripping lots count as $0. Empty when no price history
+        has been recorded yet; items with no recorded snapshot don't contribute.
+        """
+        dates = [
+            r["as_of"]
+            for r in self.conn.execute(
+                "SELECT DISTINCT as_of FROM price_snapshot ORDER BY as_of"
+            ).fetchall()
+        ]
+        if not dates:
+            return []
+
+        lots = self.conn.execute(
+            "SELECT id, item_id, acquired_at, quantity, intent FROM lot"
+        ).fetchall()
+
+        disposals: dict[int, list[tuple[str, int]]] = defaultdict(list)
+        for r in self.conn.execute(
+            "SELECT lc.lot_id AS lot_id, t.occurred_at AS at, lc.quantity AS qty "
+            "FROM lot_consumption lc "
+            "JOIN transaction_line tl ON tl.id = lc.transaction_line_id "
+            'JOIN "transaction" t ON t.id = tl.transaction_id '
+            "WHERE t.status = 'posted'"
+        ).fetchall():
+            disposals[r["lot_id"]].append((r["at"], r["qty"]))
+
+        times: dict[int, list[str]] = defaultdict(list)
+        cents: dict[int, list[int]] = defaultdict(list)
+        for r in self.conn.execute(
+            "SELECT item_id, as_of, price_cents FROM price_snapshot ORDER BY as_of"
+        ).fetchall():
+            times[r["item_id"]].append(r["as_of"])
+            cents[r["item_id"]].append(r["price_cents"])
+
+        def price_at(item_id: int, when: str) -> int | None:
+            ts = times.get(item_id)
+            if not ts:
+                return None
+            idx = bisect.bisect_right(ts, when) - 1
+            return cents[item_id][idx] if idx >= 0 else None
+
+        out: list[SeriesPoint] = []
+        for d in dates:
+            total = 0
+            for lot in lots:
+                if lot["intent"] == "ripping":
+                    continue  # ripping is always $0
+                if intent is not None and lot["intent"] != intent.value:
+                    continue
+                if lot["acquired_at"] > d:
+                    continue  # not yet acquired at this date
+                held = lot["quantity"] - sum(
+                    q for cd, q in disposals.get(lot["id"], ()) if cd <= d
+                )
+                if held <= 0:
+                    continue
+                price = price_at(lot["item_id"], d)
+                if price is not None:
+                    total += held * price
+            out.append(SeriesPoint(at=d, value_cents=total))
         return out

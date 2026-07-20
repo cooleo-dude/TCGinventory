@@ -1,9 +1,8 @@
-"""Dashboard view — summary tiles + money-movement/realized-profit charts.
+"""Dashboard view — summary tiles + over-time charts.
 
-Charts: the two exact, event-based series from ReportingService (F-VW-6). Tiles
-show the current portfolio summary, intent-filterable (F-VW-8). The historical
-collection-value line (F-VW-7) is deferred (see decisions log); current
-collection value is shown as a tile.
+Charts: net cash and realized gain/loss (the exact, event-based series) plus a
+**collection-value** line reconstructed from recorded price history (F-VW-6/7).
+Tiles show the current portfolio summary, intent-filterable (F-VW-8).
 """
 
 from __future__ import annotations
@@ -154,38 +153,49 @@ class DashboardView(QWidget):
         self._tiles["cash"].set_value(money(summary.net_cash_cents))
 
         money_series = self._reporting.money_movement_series()
+        collection_series = self._reporting.collection_value_series(intent)
         self._chart_view.setChart(
             self._build_chart(
                 money_series,
                 self._reporting.realized_profit_series(intent),
+                collection_series,
             )
         )
-        if money_series:
-            self._note.setText(
-                "Collection-value-over-time chart is planned; the current value "
-                "is shown above."
-            )
-        else:
+        if not money_series:
             self._note.setText(
                 "No data yet — open the Transaction tab to record your first "
                 "purchase, sale, or trade."
             )
+        elif not collection_series:
+            self._note.setText(
+                "Collection Value line needs price history — run "
+                "File ▸ Refresh prices to start recording it."
+            )
+        else:
+            self._note.setText("")
 
     def _build_chart(
-        self, money_pts: list[SeriesPoint], profit_pts: list[SeriesPoint]
+        self,
+        money_pts: list[SeriesPoint],
+        profit_pts: list[SeriesPoint],
+        collection_pts: list[SeriesPoint],
     ) -> QChart:
         chart = QChart()
-        chart.setTitle("Money movement & realized profit over time")
+        chart.setTitle("Net cash, realized gain/loss & collection value over time")
 
         cash_series = _line_series("Net cash", money_pts)
-        profit_series = _line_series("Realized profit", profit_pts)
-        all_pts = money_pts + profit_pts
+        profit_series = _line_series("Realized Gain/Loss", profit_pts)
+        collection_series = _line_series("Collection Value", collection_pts)
+        all_pts = money_pts + profit_pts + collection_pts
         if not all_pts:
             chart.setTitle("No transactions yet")
             return chart
 
-        chart.addSeries(cash_series)
-        chart.addSeries(profit_series)
+        plotted = [cash_series, profit_series]
+        if collection_pts:
+            plotted.append(collection_series)
+        for series in plotted:
+            chart.addSeries(series)
 
         axis_x = QDateTimeAxis()
         axis_x.setFormat("MMM d")
@@ -196,7 +206,7 @@ class DashboardView(QWidget):
         axis_y.setTitleText("USD")
         chart.addAxis(axis_y, Qt.AlignLeft)
 
-        for series in (cash_series, profit_series):
+        for series in plotted:
             series.attachAxis(axis_x)
             series.attachAxis(axis_y)
 

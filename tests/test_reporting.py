@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 from conftest import buy, sell
+from tcginventory.data.repositories import PriceSnapshotRepository
 from tcginventory.domain.enums import Intent
+from tcginventory.domain.models import PriceSnapshot
 from tcginventory.services.reporting import ReportingService
 from tcginventory.services.transactions import TransactionService
 
@@ -18,6 +20,47 @@ def svc(conn):
 @pytest.fixture()
 def rpt(conn):
     return ReportingService(conn)
+
+
+def _snap(conn, item_id, price_cents, as_of):
+    PriceSnapshotRepository(conn).add(
+        PriceSnapshot(item_id=item_id, price_cents=price_cents, source="t", as_of=as_of)
+    )
+
+
+def test_collection_value_series_values_holdings_at_recorded_prices(svc, rpt, conn):
+    p = buy(svc, "Pikachu", 1000, 500, "2026-01-01", quantity=2)
+    item_id = p.lots[0].item_id
+    _snap(conn, item_id, 600, "2026-02-01T00:00:00")
+    _snap(conn, item_id, 800, "2026-03-01T00:00:00")
+    conn.commit()
+
+    series = rpt.collection_value_series()
+    # Held 2 across both dates → 2×600, then 2×800.
+    assert [(pt.at, pt.value_cents) for pt in series] == [
+        ("2026-02-01T00:00:00", 1200),
+        ("2026-03-01T00:00:00", 1600),
+    ]
+
+
+def test_collection_value_series_respects_holdings_and_sales_over_time(svc, rpt, conn):
+    p = buy(svc, "Pikachu", 1000, 500, "2026-01-01", quantity=2)
+    item_id = p.lots[0].item_id
+    _snap(conn, item_id, 600, "2026-02-01T00:00:00")  # hold 2 → 1200
+    sell(svc, item_id, 1, 900, "2026-02-15")  # now hold 1
+    _snap(conn, item_id, 700, "2026-03-01T00:00:00")  # hold 1 → 700
+    conn.commit()
+
+    series = rpt.collection_value_series()
+    assert [(pt.at, pt.value_cents) for pt in series] == [
+        ("2026-02-01T00:00:00", 1200),
+        ("2026-03-01T00:00:00", 700),
+    ]
+
+
+def test_collection_value_series_empty_without_price_history(svc, rpt):
+    buy(svc, "Pikachu", 1000, 500, "2026-01-01")
+    assert rpt.collection_value_series() == []
 
 
 def test_realized_pl_and_net_cash_after_a_sale(svc, rpt):
