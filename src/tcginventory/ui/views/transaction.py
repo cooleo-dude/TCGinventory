@@ -141,83 +141,143 @@ class _PriceLookupWorker(QThread):
         self.done.emit(result)
 
 
+class _FocusLineEdit(QLineEdit):
+    """A line edit that announces focus-in, so an empty picker can pop its list."""
+
+    focused = Signal()
+
+    def focusInEvent(self, event) -> None:
+        super().focusInEvent(event)
+        self.focused.emit()
+
+
 class _GiveRow:
-    """Inline row for a card you give: pick an on-hand card + quantity."""
+    """Inline row for a card you give: search your on-hand cards + quantity.
+
+    Starts **empty** — the user types (or focuses to browse) and picks a match.
+    Hovering a match in the popup, or the chosen card in the field, previews its
+    image in the shared card display.
+    """
+
+    _ITEM_ID_ROLE = Qt.UserRole + 1
 
     def __init__(
         self, conn, sellable: list[tuple[Item, int]], on_change, sink=None
     ) -> None:
         self._conn = conn
-        self._sellable = sellable
+        self._sellable = sellable  # [(Item, available)]
+        self._by_id = {item.id: (item, avail) for item, avail in sellable}
         self._sink = sink
-        self.combo = QComboBox()
-        for item, available in sellable:
-            label = item.name
-            if item.set_name:
-                label += f" ({item.set_name})"
-            label += f" — {available} on hand"
-            self.combo.addItem(label, item.id)
-        # Type-to-search over our resale cards (the picker only lists resale
-        # lots); the arrow still opens the full dropdown.
-        self.combo.setEditable(True)
-        self.combo.setInsertPolicy(QComboBox.NoInsert)
-        self.combo.lineEdit().setPlaceholderText("Type to search your resale cards…")
-        completer = self.combo.completer()
-        completer.setCompletionMode(QCompleter.PopupCompletion)
-        completer.setCaseSensitivity(Qt.CaseInsensitive)
-        completer.setFilterMode(Qt.MatchContains)
-        # Preview on hover. The combo is editable, so its QLineEdit child covers
-        # the text area and swallows the combo's own Enter event — install on the
-        # line edit too so hovering the field (not just the arrow) previews.
-        install_hover_preview(self.combo, self._hover_card, sink)
-        install_hover_preview(self.combo.lineEdit(), self._hover_card, sink)
-        # Hovering an item in the open dropdown previews it in the pane too.
-        self.combo.view().setMouseTracking(True)
-        self.combo.view().entered.connect(self._on_dropdown_hover)
+        self._on_change = on_change
+        self._chosen_id: int | None = None
+
+        self.name = _FocusLineEdit()
+        self.name.setPlaceholderText("Type to search your cards to give…")
+        self._model = QStandardItemModel(self.name)
+        self._completer = QCompleter(self._model, self.name)
+        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
+        self.name.setCompleter(self._completer)
+        self.name.textEdited.connect(self._on_edited)
+        self.name.focused.connect(self._show_all)
+        self._completer.activated[QModelIndex].connect(self._pick)
+        self.name.textChanged.connect(self._on_text_changed)
+        install_hover_preview(self.name, self._hover_card, sink)
+        popup = self._completer.popup()
+        popup.setMouseTracking(True)
+        popup.entered.connect(self._on_popup_hover)
+        install_hover_preview(popup, lambda: None, sink)
+
         self.qty = QSpinBox()
         self.qty.setMinimum(1)
+        self.qty.setMaximum(1)  # widened once a card is chosen
         self.qty.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        self.combo.currentIndexChanged.connect(self._sync_max)
-        self.combo.currentIndexChanged.connect(lambda *_: on_change())
         self.qty.valueChanged.connect(lambda *_: on_change())
-        self._sync_max()
 
     def widgets(self) -> list[QWidget]:
-        return [self.combo, self.qty]
+        return [self.name, self.qty]
 
-    def _hover_card(self) -> tuple[str, str] | None:
-        return self._image_for_index(self.combo.currentIndex())
+    @staticmethod
+    def _label(item: Item, available: int) -> str:
+        name = item.name + (f" ({item.set_name})" if item.set_name else "")
+        return f"{name} — {available} on hand"
 
-    def _image_for_index(self, i: int) -> tuple[str, str] | None:
-        if not (0 <= i < len(self._sellable)):
-            return None
-        item = self._sellable[i][0]
+    def _fill(self, needle: str) -> None:
+        self._model.clear()
+        needle = needle.strip().lower()
+        for item, available in self._sellable:
+            label = self._label(item, available)
+            if needle and needle not in label.lower():
+                continue
+            entry = QStandardItem(label)
+            entry.setData(item.id, self._ITEM_ID_ROLE)
+            self._model.appendRow(entry)
+
+    def _on_edited(self, text: str) -> None:
+        self._fill(text)
+        if self._model.rowCount():
+            self._completer.complete()
+
+    def _show_all(self) -> None:
+        # Focus an empty field → list everything you can give.
+        if self.name.text().strip():
+            return
+        self._fill("")
+        if self._model.rowCount():
+            self._completer.complete()
+
+    def _on_text_changed(self, *_) -> None:
+        # Editing away from the chosen card's label drops the selection.
+        if self._chosen_id is not None:
+            item, available = self._by_id[self._chosen_id]
+            if self.name.text() != self._label(item, available):
+                self._chosen_id = None
+                self.qty.setMaximum(1)
+        self._on_change()
+
+    def _on_popup_hover(self, index: QModelIndex) -> None:
+        self._preview(index.data(self._ITEM_ID_ROLE))
+
+    def _pick(self, index: QModelIndex) -> None:
+        self._set_chosen(index.data(self._ITEM_ID_ROLE))
+
+    def _set_chosen(self, item_id) -> None:
+        pair = self._by_id.get(item_id)
+        if pair is None:
+            return
+        item, available = pair
+        self._chosen_id = item_id
+        self.name.setText(self._label(item, available))
+        self.qty.setMaximum(max(1, available))
+        self._preview(item_id)
+        self._on_change()
+
+    def _image_for(self, item: Item) -> tuple[str, str] | None:
         return CardCatalogRepository(self._conn).image_for(
             item.name, item.set_name, item.card_number
         )
 
-    def _on_dropdown_hover(self, index: QModelIndex) -> None:
-        if self._sink is not None:
-            res = self._image_for_index(index.row())
+    def _preview(self, item_id) -> None:
+        if self._sink is None or item_id is None:
+            return
+        pair = self._by_id.get(item_id)
+        if pair is not None:
+            res = self._image_for(pair[0])
             self._sink.show_card(*(res if res else (None, None)))
 
-    def _sync_max(self, *_) -> None:
-        i = self.combo.currentIndex()
-        if 0 <= i < len(self._sellable):
-            self.qty.setMaximum(self._sellable[i][1])
+    def _hover_card(self) -> tuple[str, str] | None:
+        if self._chosen_id is None:
+            return None
+        return self._image_for(self._by_id[self._chosen_id][0])
 
     def set_item(self, item_id: int, quantity: int) -> None:
-        idx = self.combo.findData(item_id)
-        if idx >= 0:
-            self.combo.setCurrentIndex(idx)
-        self._sync_max()
+        self._set_chosen(item_id)
         self.qty.setValue(quantity)
 
     def to_card(self):
-        item_id = self.combo.currentData()
-        if item_id is None:
+        if self._chosen_id is None:
             return None
-        return OutgoingCard(item_id=item_id, quantity=self.qty.value())
+        return OutgoingCard(item_id=self._chosen_id, quantity=self.qty.value())
 
 
 class _MatchDelegate(QStyledItemDelegate):
@@ -546,11 +606,9 @@ class TransactionView(QWidget):
         self._out_table = QTableWidget(0, len(_GIVE_HEADERS))
         self._out_table.setHorizontalHeaderLabels(_GIVE_HEADERS)
         _tidy(self._out_table, _GIVE_WIDTHS)
-
-        add = QPushButton("＋")
-        add.setToolTip("Add a card you're giving")
-        add.setFixedWidth(32)
-        add.clicked.connect(self._add_give_row)
+        self._install_add_row(
+            self._out_table, self._add_give_row, "Add a card you're giving"
+        )
 
         self._cash_out = money_spin()
         self._cash_out.valueChanged.connect(self._update_summary)
@@ -559,14 +617,8 @@ class TransactionView(QWidget):
         cash_row.addWidget(self._cash_out)
         cash_row.addStretch(1)
 
-        # Add button sits directly below the table (under the last row).
-        add_row = QHBoxLayout()
-        add_row.addWidget(add)
-        add_row.addStretch(1)
-
         layout = QVBoxLayout(box)
         layout.addWidget(self._out_table)
-        layout.addLayout(add_row)
         layout.addLayout(cash_row)
         return box
 
@@ -575,11 +627,9 @@ class TransactionView(QWidget):
         self._in_table = QTableWidget(0, len(_RECV_HEADERS))
         self._in_table.setHorizontalHeaderLabels(_RECV_HEADERS)
         _tidy(self._in_table, _RECV_WIDTHS)
-
-        add = QPushButton("＋")
-        add.setToolTip("Add a card you're receiving")
-        add.setFixedWidth(32)
-        add.clicked.connect(self._add_receive_row)
+        self._install_add_row(
+            self._in_table, self._add_receive_row, "Add a card you're receiving"
+        )
 
         self._auto_detect_cb = QCheckBox("Auto Detect Card")
         self._auto_detect_cb.setToolTip(
@@ -606,15 +656,9 @@ class TransactionView(QWidget):
         head.addStretch(1)
         head.addWidget(self._auto_detect_cb)  # top-right of the receive panel
 
-        # Add button sits directly below the table (under the last row).
-        add_row = QHBoxLayout()
-        add_row.addWidget(add)
-        add_row.addStretch(1)
-
         layout = QVBoxLayout(box)
         layout.addLayout(head)
         layout.addWidget(self._in_table)
-        layout.addLayout(add_row)
         layout.addLayout(cash_row)
         self._update_catalog_hint()
         return box
@@ -649,6 +693,17 @@ class TransactionView(QWidget):
         btn.clicked.connect(lambda _=False, r=row, k=kind: self._remove_row(k, r))
         return btn
 
+    def _install_add_row(self, table, handler, tooltip: str) -> None:
+        """Put a ＋ button in a fresh bottom row so it sits directly under the
+        last card (and scrolls with the rows)."""
+        add = QPushButton("＋")
+        add.setFixedWidth(32)
+        add.setToolTip(tooltip)
+        add.clicked.connect(handler)
+        r = table.rowCount()
+        table.insertRow(r)
+        table.setCellWidget(r, 0, add)
+
     def _remove_row(self, kind: str, row) -> None:
         rows = self._give_rows if kind == "out" else self._receive_rows
         table = self._out_table if kind == "out" else self._in_table
@@ -668,10 +723,10 @@ class TransactionView(QWidget):
         row = _GiveRow(
             self._conn, sellable, self._update_summary, sink=self._preview_pane
         )
-        self._give_rows.append(row)
-        index = self._out_table.rowCount()
+        index = len(self._give_rows)  # insert above the trailing ＋ add-row
         self._out_table.insertRow(index)
         self._place_row(self._out_table, index, row, "out")
+        self._give_rows.append(row)
         self._update_summary()
         return row
 
@@ -683,10 +738,10 @@ class TransactionView(QWidget):
             on_pick=self._request_price,
             sink=self._preview_pane,
         )
-        self._receive_rows.append(row)
-        index = self._in_table.rowCount()
+        index = len(self._receive_rows)  # insert above the trailing ＋ add-row
         self._in_table.insertRow(index)
         self._place_row(self._in_table, index, row, "in")
+        self._receive_rows.append(row)
         row.name.setFocus()
         self._update_summary()
         return row
@@ -864,6 +919,13 @@ class TransactionView(QWidget):
         self._receive_rows.clear()
         self._out_table.setRowCount(0)
         self._in_table.setRowCount(0)
+        # setRowCount(0) removed the ＋ add-rows too — re-install them.
+        self._install_add_row(
+            self._out_table, self._add_give_row, "Add a card you're giving"
+        )
+        self._install_add_row(
+            self._in_table, self._add_receive_row, "Add a card you're receiving"
+        )
         self._cash_in.setValue(0.0)
         self._cash_out.setValue(0.0)
         self._counterparty.clear()

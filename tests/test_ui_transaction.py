@@ -68,6 +68,27 @@ def _first_item_id(conn, name):
     raise AssertionError(f"item {name} not found")
 
 
+def test_add_button_is_the_bottom_table_row(app, conn):
+    from PySide6.QtWidgets import QPushButton
+
+    from tcginventory.ui.views.transaction import TransactionView
+
+    view = TransactionView(conn)
+
+    def add_is_last(table) -> bool:
+        w = table.cellWidget(table.rowCount() - 1, 0)
+        return isinstance(w, QPushButton) and w.text() == "＋"
+
+    # Empty table: just the trailing ＋ add-row.
+    assert view._in_table.rowCount() == 1
+    assert add_is_last(view._in_table)
+    # After adding a card, the ＋ stays directly below the last data row.
+    view._add_receive_row()
+    assert view._in_table.rowCount() == 2
+    assert add_is_last(view._in_table)
+    view.deleteLater()
+
+
 def test_give_side_hover_resolves_card_image(app, conn):
     from tcginventory.data.repositories import CardCatalogRepository
     from tcginventory.domain.models import CatalogCard
@@ -116,7 +137,11 @@ def test_give_side_hover_resolves_card_image(app, conn):
     view = TransactionView(conn)
     row = view._add_give_row()
     assert row is not None
-    # Hovering the give row resolves the picked card's catalog image.
+    # The give row starts empty — nothing to preview until a card is chosen.
+    assert row._hover_card() is None
+    assert row.to_card() is None
+    # After choosing a card, hovering resolves its catalog image.
+    row.set_item(_first_item_id(conn, "Pikachu"), 1)
     assert row._hover_card() == ("cel-5", "http://img/pika.png")
     view.deleteLater()
 
@@ -290,7 +315,7 @@ def test_removing_a_middle_receive_row_does_not_crash(app, conn):
     # Remove the first (not the last) row — used to delete surviving widgets.
     view._remove_row("in", r0)
     assert len(view._receive_rows) == 2
-    assert view._in_table.rowCount() == 2
+    assert view._in_table.rowCount() == 3  # 2 data rows + the trailing ＋ add-row
     # Surviving rows' widgets are still live and correct.
     assert view._receive_rows[-1].name.text() == "third"
     # Deleting again still works.

@@ -705,15 +705,13 @@ class AuctionsView(QWidget):
         form.addRow("Sales tax:", self._tax)
         form.addRow("Ends:", ends_row)
 
-        # Card table + add / auto-detect.
+        # Card table + auto-detect. The ＋ lives in a bottom row of the table
+        # itself (see _install_card_add_row) so it sits under the last card.
         self._card_table = QTableWidget(0, len(_CARD_HEADERS))
         self._card_table.setHorizontalHeaderLabels(_CARD_HEADERS)
         _tidy(self._card_table, _CARD_WIDTHS)
+        self._install_card_add_row()
 
-        add = QPushButton("＋")
-        add.setFixedWidth(32)
-        add.setToolTip("Add a card in this auction")
-        add.clicked.connect(self._add_card_row)
         self._auto_detect = QCheckBox("Auto Detect Card")
         self._auto_detect.setChecked(bool(config.get_pref("auction_auto_detect", True)))
         self._auto_detect.toggled.connect(
@@ -726,15 +724,9 @@ class AuctionsView(QWidget):
         head.addStretch(1)
         head.addWidget(self._auto_detect)
 
-        # Add button sits directly below the table (under the last row).
-        add_row = QHBoxLayout()
-        add_row.addWidget(add)
-        add_row.addStretch(1)
-
         cards_col = QVBoxLayout()
         cards_col.addLayout(head)
         cards_col.addWidget(self._card_table, 1)
-        cards_col.addLayout(add_row)
         cards_widget = QWidget()
         cards_widget.setLayout(cards_col)
 
@@ -787,17 +779,28 @@ class AuctionsView(QWidget):
             on_pick=self._on_card_picked,
             sink=self._row_sink,
         )
-        self._rows.append(row)
-        index = self._card_table.rowCount()
+        index = len(self._rows)  # insert above the trailing ＋ add-row
         self._card_table.insertRow(index)
         for col, widget in enumerate(row.widgets()):
             self._card_table.setCellWidget(index, col, widget)
         self._card_table.setCellWidget(
             index, len(_CARD_HEADERS) - 1, self._delete_button(row)
         )
+        self._rows.append(row)
         row.name.setFocus()
         self._update_breakdown()
         return row
+
+    def _install_card_add_row(self) -> None:
+        """Put the ＋ button in a bottom row of the table so it sits directly
+        under the last card (and scrolls with the rows)."""
+        add = QPushButton("＋")
+        add.setFixedWidth(32)
+        add.setToolTip("Add a card in this auction")
+        add.clicked.connect(self._add_card_row)
+        r = self._card_table.rowCount()
+        self._card_table.insertRow(r)
+        self._card_table.setCellWidget(r, 0, add)
 
     def _delete_button(self, row: _AuctionCardRow) -> QPushButton:
         btn = QPushButton("✕")
@@ -952,6 +955,7 @@ class AuctionsView(QWidget):
     def _clear_editor(self) -> None:
         self._rows.clear()
         self._card_table.setRowCount(0)
+        self._install_card_add_row()  # setRowCount(0) removed the ＋ add-row
         self._title.clear()
         self._url.clear()
         self._shipping.setValue(0.0)

@@ -194,12 +194,12 @@ def test_view_save_load_and_delete_roundtrip(app):
     assert saved_id is not None
 
     view._new()
-    assert view._card_table.rowCount() == 0
+    assert len(view._rows) == 0  # (table also holds a trailing ＋ add-row)
     assert view._edit_id is None
 
     view._load_auction(saved_id)
     assert view._title.text() == "Test lot"
-    assert view._card_table.rowCount() == 1
+    assert len(view._rows) == 1
     assert view._edit_id == saved_id
 
     # Deleting the loaded auction clears the editor and empties the watchlist.
@@ -463,6 +463,24 @@ def test_tick_resorts_when_ended_set_changes(app):
     view._ended_ids = {999_999}  # pretend the ended set is stale
     view._on_tick()  # detects the mismatch and re-sorts (recomputes _ended_ids)
     assert view._ended_ids == set()
+    view.deleteLater()
+
+
+def test_add_button_is_the_bottom_card_row(app):
+    from PySide6.QtWidgets import QPushButton
+
+    view = _view(app)
+
+    def add_is_last() -> bool:
+        t = view._card_table
+        w = t.cellWidget(t.rowCount() - 1, 0)
+        return isinstance(w, QPushButton) and w.text() == "＋"
+
+    assert view._card_table.rowCount() == 1  # just the ＋ add-row
+    assert add_is_last()
+    view._add_card_row()
+    assert view._card_table.rowCount() == 2  # 1 card + add-row
+    assert add_is_last()
     view.deleteLater()
 
 
