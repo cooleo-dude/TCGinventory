@@ -166,7 +166,11 @@ class _GiveRow:
         completer.setCompletionMode(QCompleter.PopupCompletion)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
         completer.setFilterMode(Qt.MatchContains)
+        # Preview on hover. The combo is editable, so its QLineEdit child covers
+        # the text area and swallows the combo's own Enter event — install on the
+        # line edit too so hovering the field (not just the arrow) previews.
         install_hover_preview(self.combo, self._hover_card, sink)
+        install_hover_preview(self.combo.lineEdit(), self._hover_card, sink)
         # Hovering an item in the open dropdown previews it in the pane too.
         self.combo.view().setMouseTracking(True)
         self.combo.view().entered.connect(self._on_dropdown_hover)
@@ -555,13 +559,14 @@ class TransactionView(QWidget):
         cash_row.addWidget(self._cash_out)
         cash_row.addStretch(1)
 
-        head = QHBoxLayout()
-        head.addWidget(add)
-        head.addStretch(1)
+        # Add button sits directly below the table (under the last row).
+        add_row = QHBoxLayout()
+        add_row.addWidget(add)
+        add_row.addStretch(1)
 
         layout = QVBoxLayout(box)
-        layout.addLayout(head)
         layout.addWidget(self._out_table)
+        layout.addLayout(add_row)
         layout.addLayout(cash_row)
         return box
 
@@ -597,14 +602,19 @@ class TransactionView(QWidget):
         cash_row.addStretch(1)
 
         head = QHBoxLayout()
-        head.addWidget(add)
         head.addWidget(self._catalog_hint)
         head.addStretch(1)
         head.addWidget(self._auto_detect_cb)  # top-right of the receive panel
 
+        # Add button sits directly below the table (under the last row).
+        add_row = QHBoxLayout()
+        add_row.addWidget(add)
+        add_row.addStretch(1)
+
         layout = QVBoxLayout(box)
         layout.addLayout(head)
         layout.addWidget(self._in_table)
+        layout.addLayout(add_row)
         layout.addLayout(cash_row)
         self._update_catalog_hint()
         return box

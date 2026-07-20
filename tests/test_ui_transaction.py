@@ -68,6 +68,59 @@ def _first_item_id(conn, name):
     raise AssertionError(f"item {name} not found")
 
 
+def test_give_side_hover_resolves_card_image(app, conn):
+    from tcginventory.data.repositories import CardCatalogRepository
+    from tcginventory.domain.models import CatalogCard
+    from tcginventory.services.transactions import (
+        TransactionRequest,
+        TransactionService,
+    )
+    from tcginventory.ui.views.transaction import TransactionView
+
+    # Catalog card with an image, matching the purchased card's identity.
+    CardCatalogRepository(conn).replace_all(
+        [
+            CatalogCard(
+                card_id="cel-5",
+                name="Pikachu",
+                set_id="cel",
+                set_name="Celebrations",
+                set_code="CEL",
+                number="5",
+                image_small="http://img/pika.png",
+                language="EN",
+            )
+        ],
+        "t",
+    )
+    # Buy one so it's sellable (resale) stock the give side can pick.
+    TransactionService(conn).post(
+        TransactionRequest(
+            occurred_at="2026-07-20",
+            cash_out_cents=1000,
+            incoming=[
+                IncomingCard(
+                    item=Item(
+                        name="Pikachu",
+                        category=Category.SINGLE,
+                        set_name="Celebrations",
+                        card_number="5",
+                    ),
+                    quantity=1,
+                    market_value_cents=1000,
+                    intent=Intent.RESALE,
+                )
+            ],
+        )
+    )
+    view = TransactionView(conn)
+    row = view._add_give_row()
+    assert row is not None
+    # Hovering the give row resolves the picked card's catalog image.
+    assert row._hover_card() == ("cel-5", "http://img/pika.png")
+    view.deleteLater()
+
+
 def test_ui_purchase_infers_type_and_allocates(app, conn):
     from tcginventory.ui.views.transaction import TransactionView
 

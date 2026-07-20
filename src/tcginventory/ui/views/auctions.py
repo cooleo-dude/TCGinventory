@@ -722,14 +722,19 @@ class AuctionsView(QWidget):
         self._catalog_hint = QLabel("")
         self._catalog_hint.setStyleSheet("color: #b26a00;")
         head = QHBoxLayout()
-        head.addWidget(add)
         head.addWidget(self._catalog_hint)
         head.addStretch(1)
         head.addWidget(self._auto_detect)
 
+        # Add button sits directly below the table (under the last row).
+        add_row = QHBoxLayout()
+        add_row.addWidget(add)
+        add_row.addStretch(1)
+
         cards_col = QVBoxLayout()
         cards_col.addLayout(head)
         cards_col.addWidget(self._card_table, 1)
+        cards_col.addLayout(add_row)
         cards_widget = QWidget()
         cards_widget.setLayout(cards_col)
 
