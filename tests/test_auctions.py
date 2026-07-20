@@ -119,6 +119,28 @@ def test_repo_delete_cascades(auctions_conn):
     assert auctions_conn.execute("SELECT COUNT(*) FROM auction_card").fetchone()[0] == 0
 
 
+def test_repo_list_sorted_soonest_ending_first(auctions_conn):
+    repo = AuctionRepository(auctions_conn)
+    repo.save(
+        Auction(
+            title="late", ends_at="2026-08-10T00:00:00", cards=[AuctionCard(name="a")]
+        ),
+        now="2026-07-20T00:00:00+00:00",
+    )
+    repo.save(
+        Auction(
+            title="soon", ends_at="2026-07-21T00:00:00", cards=[AuctionCard(name="b")]
+        ),
+        now="2026-07-20T00:00:01+00:00",
+    )
+    repo.save(
+        Auction(title="no-end", cards=[AuctionCard(name="c")]),
+        now="2026-07-20T00:00:02+00:00",
+    )
+    # soonest end first; the no-end auction sinks to the bottom.
+    assert [a.title for a in repo.list_all()] == ["soon", "late", "no-end"]
+
+
 def test_repo_list_newest_first(auctions_conn):
     repo = AuctionRepository(auctions_conn)
     first = Auction(title="first", cards=[AuctionCard(name="A")])
@@ -237,9 +259,7 @@ def test_refresh_values_from_history(app, monkeypatch):
 
     from PySide6.QtWidgets import QMessageBox
 
-    monkeypatch.setattr(
-        QMessageBox, "information", staticmethod(lambda *a, **k: None)
-    )
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
     view._refresh_values(view._repo.get(a.id))
 
     got = view._repo.get(a.id)
@@ -355,9 +375,7 @@ def test_countdown_text_formats():
 
 def test_auction_ends_at_roundtrip(auctions_conn):
     repo = AuctionRepository(auctions_conn)
-    a = Auction(
-        title="t", ends_at="2026-07-20T10:00:00", cards=[AuctionCard(name="x")]
-    )
+    a = Auction(title="t", ends_at="2026-07-20T10:00:00", cards=[AuctionCard(name="x")])
     repo.save(a, now="2026-07-17T00:00:00+00:00")
     assert repo.get(a.id).ends_at == "2026-07-20T10:00:00"
 
@@ -413,4 +431,11 @@ def test_watchlist_shows_ended_for_past_auction(app):
     view.refresh()
     view._on_tick()
     assert view._watch.item(0, _TIME_LEFT_COL).text() == "ENDED"
+    view.deleteLater()
+
+
+def test_countdown_timer_runs_without_needing_show(app):
+    view = _view(app)
+    # Always-on so a countdown flips to ENDED live, without a refresh/nav.
+    assert view._tick_timer.isActive()
     view.deleteLater()

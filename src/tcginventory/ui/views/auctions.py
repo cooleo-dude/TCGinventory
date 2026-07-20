@@ -378,23 +378,16 @@ class AuctionsView(QWidget):
         layout.addWidget(body)
 
         # Once-a-second timer drives the live countdowns (editor label + the
-        # watchlist "Time left" column). Runs only while the screen is shown.
+        # watchlist "Time left" column). Always running so a row flips to
+        # "ENDED" on its own, with no refresh/navigation needed.
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(1000)
         self._tick_timer.timeout.connect(self._on_tick)
+        self._tick_timer.start()
 
         self.refresh()
         self._update_breakdown()
         self._refresh_gallery()
-
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        self._tick_timer.start()
-        self._on_tick()
-
-    def hideEvent(self, event) -> None:
-        super().hideEvent(event)
-        self._tick_timer.stop()
 
     def _on_tick(self) -> None:
         now = datetime.now()

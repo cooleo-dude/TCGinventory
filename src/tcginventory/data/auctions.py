@@ -139,9 +139,15 @@ class AuctionRepository:
         self.conn = conn
 
     def list_all(self) -> list[Auction]:
-        """Every watched auction, newest first."""
+        """Every watched auction, **soonest-ending first**.
+
+        Ordered by end time ascending so imminent auctions surface at the top;
+        auctions with no end time sort last (``ends_at IS NULL`` → 1), with
+        newest-first as the final tiebreak.
+        """
         rows = self.conn.execute(
-            "SELECT * FROM auction ORDER BY created_at DESC, id DESC"
+            "SELECT * FROM auction "
+            "ORDER BY (ends_at IS NULL), ends_at ASC, created_at DESC, id DESC"
         ).fetchall()
         return [self._load(r) for r in rows]
 
