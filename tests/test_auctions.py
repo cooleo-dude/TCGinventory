@@ -376,8 +376,8 @@ def test_ensure_columns_adds_ends_at_to_old_db():
     conn.close()
 
 
-def test_editor_end_time_saves_and_counts_down(app):
-    from PySide6.QtCore import QDateTime
+def test_editor_end_date_and_time_are_separate_fields(app):
+    from PySide6.QtCore import QDate, QDateTime, QTime
 
     from tcginventory.ui.views.auctions import _TIME_LEFT_COL
 
@@ -385,11 +385,15 @@ def test_editor_end_time_saves_and_counts_down(app):
     row = view._add_card_row()
     row.name.setText("Zard")
     row.market.setValue(10.0)
-    view._ends.setDateTime(QDateTime.currentDateTime().addSecs(3600))  # +1h
+    # Two independent fields; tomorrow at 14:30.
+    tomorrow = QDate.currentDate().addDays(1)
+    view._ends_date.setDate(tomorrow)
+    view._ends_time.setTime(QTime(14, 30))
     view._save()
 
-    assert view._repo.get(view._edit_id).ends_at  # persisted
-    view._on_tick()  # refresh the live counter
+    ends_at = view._repo.get(view._edit_id).ends_at
+    assert ends_at == QDateTime(tomorrow, QTime(14, 30)).toString("yyyy-MM-ddTHH:mm:ss")
+    view._on_tick()
     text = view._watch.item(0, _TIME_LEFT_COL).text()
     assert text not in ("ENDED", "—")  # a running countdown
     assert view._countdown.text() not in ("ENDED", "—")  # editor label too

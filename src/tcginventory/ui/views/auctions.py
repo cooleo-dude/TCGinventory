@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
     QCompleter,
-    QDateTimeEdit,
+    QDateEdit,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -601,16 +602,23 @@ class AuctionsView(QWidget):
         self._tax.setToolTip("Sales tax applied to bid + shipping")
         self._tax.valueChanged.connect(self._update_breakdown)
 
-        # End date/time + a live countdown beside it.
-        self._ends = QDateTimeEdit()
-        self._ends.setCalendarPopup(True)
-        self._ends.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self._ends.setDateTime(QDateTime.currentDateTime().addDays(7))
-        self._ends.dateTimeChanged.connect(self._update_countdown)
+        # End date and time as two separate editable fields, + a live countdown.
+        self._ends_date = QDateEdit()
+        self._ends_date.setCalendarPopup(True)
+        self._ends_date.setDisplayFormat("yyyy-MM-dd")
+        self._ends_date.setDate(QDateTime.currentDateTime().addDays(7).date())
+        self._ends_date.dateChanged.connect(self._update_countdown)
+        self._ends_time = QTimeEdit()
+        self._ends_time.setDisplayFormat("HH:mm")
+        self._ends_time.setTime(QDateTime.currentDateTime().time())
+        self._ends_time.timeChanged.connect(self._update_countdown)
         self._countdown = QLabel("")
         self._countdown.setStyleSheet("font-weight: 600;")
         ends_row = QHBoxLayout()
-        ends_row.addWidget(self._ends)
+        ends_row.addWidget(QLabel("Date:"))
+        ends_row.addWidget(self._ends_date)
+        ends_row.addWidget(QLabel("Time:"))
+        ends_row.addWidget(self._ends_time)
         ends_row.addWidget(self._countdown)
         ends_row.addStretch(1)
 
@@ -795,8 +803,10 @@ class AuctionsView(QWidget):
         return round(self._tax.value() * 100)
 
     def _ends_iso(self) -> str:
-        """The editor's end date/time as an ISO local string."""
-        return self._ends.dateTime().toString(Qt.ISODate)
+        """The editor's end date + time (two fields) as one ISO local string."""
+        return QDateTime(
+            self._ends_date.date(), self._ends_time.time()
+        ).toString(Qt.ISODate)
 
     def _update_countdown(self, *_args) -> None:
         self._countdown.setText(_countdown_text(self._ends_iso(), datetime.now()))
@@ -845,7 +855,8 @@ class AuctionsView(QWidget):
         if auction.ends_at:
             dt = QDateTime.fromString(auction.ends_at, Qt.ISODate)
             if dt.isValid():
-                self._ends.setDateTime(dt)
+                self._ends_date.setDate(dt.date())
+                self._ends_time.setTime(dt.time())
         for card in auction.cards:
             row = self._add_card_row()
             row.set_card(card)
@@ -866,7 +877,8 @@ class AuctionsView(QWidget):
         self._url.clear()
         self._shipping.setValue(0.0)
         self._tax.setValue(auction_math.DEFAULT_TAX_RATE_BPS / 100)
-        self._ends.setDateTime(QDateTime.currentDateTime().addDays(7))
+        self._ends_date.setDate(QDateTime.currentDateTime().addDays(7).date())
+        self._ends_time.setTime(QDateTime.currentDateTime().time())
         self._edit_id = None
         self._update_countdown()
 
