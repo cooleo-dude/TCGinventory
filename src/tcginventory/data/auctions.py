@@ -139,15 +139,13 @@ class AuctionRepository:
         self.conn = conn
 
     def list_all(self) -> list[Auction]:
-        """Every watched auction, **soonest-ending first**.
+        """Every watched auction, newest first.
 
-        Ordered by end time ascending so imminent auctions surface at the top;
-        auctions with no end time sort last (``ends_at IS NULL`` → 1), with
-        newest-first as the final tiebreak.
+        Watchlist display order (soonest-ending first, ended sink to the bottom)
+        is applied in the view, since "ended" depends on the current time.
         """
         rows = self.conn.execute(
-            "SELECT * FROM auction "
-            "ORDER BY (ends_at IS NULL), ends_at ASC, created_at DESC, id DESC"
+            "SELECT * FROM auction ORDER BY created_at DESC, id DESC"
         ).fetchall()
         return [self._load(r) for r in rows]
 

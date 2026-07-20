@@ -22,7 +22,16 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 
-from PySide6.QtCore import QDateTime, QModelIndex, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QDateTime,
+    QEvent,
+    QModelIndex,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QDesktopServices,
     QStandardItem,
@@ -70,8 +79,19 @@ _CARD_HEADERS = ["Name", "Set", "#", "Market", "Qty", "TCGplayer", ""]
 _CARD_WIDTHS = [200, 150, 70, 90, 50, 96, 30]
 
 _WATCH_HEADERS = [
-    "Title", "Cards", "Value", "70%", "80%", "90%", "100%", "Ship", "Tax",
-    "Time left", "", "Link", "",
+    "Title",
+    "Cards",
+    "Value",
+    "70%",
+    "80%",
+    "90%",
+    "100%",
+    "Ship",
+    "Tax",
+    "Time left",
+    "",
+    "Link",
+    "",
 ]
 _WATCH_WIDTHS = [220, 50, 90, 90, 90, 90, 90, 80, 60, 110, 34, 60, 30]
 _TIME_LEFT_COL = _WATCH_HEADERS.index("Time left")
@@ -80,6 +100,16 @@ _ID_ROLE = Qt.UserRole + 1
 _ENDS_ROLE = Qt.UserRole + 2  # ISO end datetime stored on the "Time left" cell
 _UNSET = object()  # sentinel: history not supplied -> open the default DB
 _THUMB_BORDER = "#504945"  # neutral thumbnail frame (no chart-line colours here)
+
+
+def _is_ended(ends_at: str | None, now: datetime) -> bool:
+    """True when ``ends_at`` (ISO local) is set and already in the past."""
+    if not ends_at:
+        return False
+    try:
+        return (datetime.fromisoformat(ends_at) - now).total_seconds() <= 0
+    except ValueError:
+        return False
 
 
 def _countdown_text(ends_at: str | None, now: datetime) -> str:
@@ -350,9 +380,7 @@ class AuctionsView(QWidget):
     ) -> None:
         super().__init__()
         self._conn = conn  # main DB (catalog search)
-        self._auctions = (
-            auctions_conn if auctions_conn is not None else open_auctions()
-        )
+        self._auctions = auctions_conn if auctions_conn is not None else open_auctions()
         self._repo = AuctionRepository(self._auctions)
         # ``history`` supplied (incl. None) is honoured; omitted -> open default.
         self._history = _safe_open_history() if history is _UNSET else history
@@ -360,6 +388,8 @@ class AuctionsView(QWidget):
         self._rows: list[_AuctionCardRow] = []
         self._price_workers: list[_LivePriceWorker] = []
         self._edit_id: int | None = None
+        self._ended_ids: set[int] = set()  # which auctions were ended last refresh
+        self._hover_watch_row: int | None = None
         # Multi-card display (same widget/logic as the Price Lookup window):
         # shows every card in the auction, or a single focused card on hover.
         self._gallery = CardGallery(
@@ -392,10 +422,21 @@ class AuctionsView(QWidget):
     def _on_tick(self) -> None:
         now = datetime.now()
         self._countdown.setText(_countdown_text(self._ends_iso(), now))
+        ended: set[int] = set()
         for r in range(self._watch.rowCount()):
             item = self._watch.item(r, _TIME_LEFT_COL)
-            if item is not None:
-                item.setText(_countdown_text(item.data(_ENDS_ROLE), now))
+            if item is None:
+                continue
+            ends_at = item.data(_ENDS_ROLE)
+            item.setText(_countdown_text(ends_at, now))
+            if _is_ended(ends_at, now):
+                title = self._watch.item(r, 0)
+                if title is not None:
+                    ended.add(title.data(_ID_ROLE))
+        # An auction just crossed into "ENDED" → re-sort so it sinks to the
+        # bottom (only rebuilds when the ended set actually changes).
+        if ended != self._ended_ids:
+            self.refresh()
 
     # -- watchlist ----------------------------------------------------------
 
@@ -405,6 +446,9 @@ class AuctionsView(QWidget):
         self._watch.setHorizontalHeaderLabels(_WATCH_HEADERS)
         _tidy(self._watch, _WATCH_WIDTHS)
         self._watch.cellClicked.connect(self._on_watch_cell_clicked)
+        self._watch.setMouseTracking(True)  # hover a row -> preview its cards
+        self._watch.cellEntered.connect(self._on_watch_hover)
+        self._watch.viewport().installEventFilter(self)  # leave -> revert gallery
         self._empty = QLabel(
             "No watched auctions yet — add cards below and Save to track one."
         )
@@ -415,12 +459,53 @@ class AuctionsView(QWidget):
         return box
 
     def refresh(self) -> None:
-        """Reload the watchlist from ``auctions.db``."""
+        """Reload + re-sort the watchlist (soonest-ending first, ended last)."""
+        now = datetime.now()
         auctions = self._repo.list_all()
+        auctions.sort(key=lambda a: self._sort_key(a, now))
         self._empty.setVisible(not auctions)
         self._watch.setRowCount(0)
+        self._hover_watch_row = None
         for auction in auctions:
             self._append_watch_row(auction)
+        self._ended_ids = {a.id for a in auctions if _is_ended(a.ends_at, now)}
+
+    @staticmethod
+    def _sort_key(auction: Auction, now: datetime) -> tuple[int, str]:
+        """Group active auctions first (soonest end at top), then no-end-time
+        ones, then ended auctions at the very bottom."""
+        if not auction.ends_at:
+            return (1, "")  # no end time → middle
+        if _is_ended(auction.ends_at, now):
+            return (2, auction.ends_at)  # ended → bottom
+        return (0, auction.ends_at)  # active → top, soonest first
+
+    def _on_watch_hover(self, row: int, _col: int) -> None:
+        """Hovering a watched auction shows its cards in the gallery display."""
+        if row == self._hover_watch_row:
+            return
+        self._hover_watch_row = row
+        title = self._watch.item(row, 0)
+        if title is None:
+            return
+        auction_id = title.data(_ID_ROLE)
+        auction = self._repo.get(int(auction_id)) if auction_id is not None else None
+        if auction is None:
+            return
+        entries = [
+            (c.card_id, c.image_url, _THUMB_BORDER)
+            for c in auction.cards
+            if c.card_id and c.image_url
+        ]
+        self._gallery.set_cards(entries)
+        self._gallery.show_gallery()
+
+    def eventFilter(self, obj, event) -> bool:
+        # Leaving the watchlist reverts the gallery to the editor's own cards.
+        if obj is self._watch.viewport() and event.type() == QEvent.Leave:
+            self._hover_watch_row = None
+            self._refresh_gallery()
+        return super().eventFilter(obj, event)
 
     def _append_watch_row(self, auction: Auction) -> None:
         r = self._watch.rowCount()
@@ -531,9 +616,7 @@ class AuctionsView(QWidget):
 
         for card in live:
             category = 85 if card.language == "JP" else 3
-            worker = _LivePriceWorker(
-                card.set_name, card.number, card.name, category
-            )
+            worker = _LivePriceWorker(card.set_name, card.number, card.name, category)
             worker.done.connect(
                 lambda result, a=auction, c=card, w=worker: self._on_refresh_price(
                     a, c, w, result
@@ -632,9 +715,7 @@ class AuctionsView(QWidget):
         add.setToolTip("Add a card in this auction")
         add.clicked.connect(self._add_card_row)
         self._auto_detect = QCheckBox("Auto Detect Card")
-        self._auto_detect.setChecked(
-            bool(config.get_pref("auction_auto_detect", True))
-        )
+        self._auto_detect.setChecked(bool(config.get_pref("auction_auto_detect", True)))
         self._auto_detect.toggled.connect(
             lambda on: config.set_pref("auction_auto_detect", on)
         )
@@ -797,9 +878,9 @@ class AuctionsView(QWidget):
 
     def _ends_iso(self) -> str:
         """The editor's end date + time (two fields) as one ISO local string."""
-        return QDateTime(
-            self._ends_date.date(), self._ends_time.time()
-        ).toString(Qt.ISODate)
+        return QDateTime(self._ends_date.date(), self._ends_time.time()).toString(
+            Qt.ISODate
+        )
 
     def _update_countdown(self, *_args) -> None:
         self._countdown.setText(_countdown_text(self._ends_iso(), datetime.now()))

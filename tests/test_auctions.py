@@ -119,28 +119,6 @@ def test_repo_delete_cascades(auctions_conn):
     assert auctions_conn.execute("SELECT COUNT(*) FROM auction_card").fetchone()[0] == 0
 
 
-def test_repo_list_sorted_soonest_ending_first(auctions_conn):
-    repo = AuctionRepository(auctions_conn)
-    repo.save(
-        Auction(
-            title="late", ends_at="2026-08-10T00:00:00", cards=[AuctionCard(name="a")]
-        ),
-        now="2026-07-20T00:00:00+00:00",
-    )
-    repo.save(
-        Auction(
-            title="soon", ends_at="2026-07-21T00:00:00", cards=[AuctionCard(name="b")]
-        ),
-        now="2026-07-20T00:00:01+00:00",
-    )
-    repo.save(
-        Auction(title="no-end", cards=[AuctionCard(name="c")]),
-        now="2026-07-20T00:00:02+00:00",
-    )
-    # soonest end first; the no-end auction sinks to the bottom.
-    assert [a.title for a in repo.list_all()] == ["soon", "late", "no-end"]
-
-
 def test_repo_list_newest_first(auctions_conn):
     repo = AuctionRepository(auctions_conn)
     first = Auction(title="first", cards=[AuctionCard(name="A")])
@@ -438,4 +416,69 @@ def test_countdown_timer_runs_without_needing_show(app):
     view = _view(app)
     # Always-on so a countdown flips to ENDED live, without a refresh/nav.
     assert view._tick_timer.isActive()
+    view.deleteLater()
+
+
+def test_is_ended_helper():
+    from datetime import datetime
+
+    from tcginventory.ui.views.auctions import _is_ended
+
+    now = datetime(2026, 7, 20, 12, 0, 0)
+    assert _is_ended("2026-07-20T11:59:59", now)  # past
+    assert not _is_ended("2026-07-20T12:00:01", now)  # future
+    assert not _is_ended(None, now)  # no end time
+    assert not _is_ended("garbage", now)
+
+
+def test_watchlist_active_first_then_no_end_then_ended(app):
+    from datetime import datetime, timedelta
+
+    view = _view(app)
+    soon = (datetime.now() + timedelta(hours=1)).isoformat(timespec="seconds")
+    late = (datetime.now() + timedelta(days=5)).isoformat(timespec="seconds")
+    for title, ends in [
+        ("late", late),
+        ("soon", soon),
+        ("no-end", None),
+        ("ended", "2000-01-01T00:00:00"),
+    ]:
+        view._repo.save(
+            Auction(title=title, ends_at=ends, cards=[AuctionCard(name="x")])
+        )
+    view.refresh()
+    order = [view._watch.item(r, 0).text() for r in range(view._watch.rowCount())]
+    assert order == ["soon", "late", "no-end", "ended"]
+    view.deleteLater()
+
+
+def test_tick_resorts_when_ended_set_changes(app):
+    from datetime import datetime, timedelta
+
+    view = _view(app)
+    future = (datetime.now() + timedelta(days=1)).isoformat(timespec="seconds")
+    view._repo.save(Auction(title="a", ends_at=future, cards=[AuctionCard(name="x")]))
+    view.refresh()
+    assert view._ended_ids == set()
+    view._ended_ids = {999_999}  # pretend the ended set is stale
+    view._on_tick()  # detects the mismatch and re-sorts (recomputes _ended_ids)
+    assert view._ended_ids == set()
+    view.deleteLater()
+
+
+def test_hover_watchlist_shows_auction_cards(app):
+    view = _view(app)
+    view._repo.save(
+        Auction(
+            title="lot",
+            cards=[AuctionCard(name="A", card_id="x", image_url="http://i/x.png")],
+        )
+    )
+    view.refresh()
+    captured: dict = {}
+    view._gallery.set_cards = lambda entries: captured.__setitem__("entries", entries)
+    view._gallery.show_gallery = lambda: captured.__setitem__("shown", True)
+    view._on_watch_hover(0, 0)
+    assert captured.get("shown") is True
+    assert [e[0] for e in captured["entries"]] == ["x"]
     view.deleteLater()
