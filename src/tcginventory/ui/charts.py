@@ -140,11 +140,14 @@ class HoverChartView(QChartView):
         return f"{name}\n{text}" if name else text
 
 
-def apply_date_range(chart: QChart | None, days: int | None) -> None:
-    """Zoom a time-series chart's x-axis to the most recent ``days`` (``None`` =
-    all recorded data) and rescale the y-axis to the values visible in that
-    window. No-op for charts without a datetime x-axis / value y-axis / lines
-    (e.g. an empty "select a card" message chart)."""
+def apply_date_range(
+    chart: QChart | None, days: int | None, now_ms: float | None = None
+) -> None:
+    """Zoom a time-series chart's x-axis and rescale the y-axis to fit the
+    window. A windowed range shows ``[today − days, today]`` (anchored to
+    today); ``None`` = all recorded data (its full extent). No-op for charts
+    without a datetime x-axis / value y-axis / lines (e.g. an empty message
+    chart)."""
     if chart is None:
         return
     x_axes = [a for a in chart.axes(Qt.Horizontal) if isinstance(a, QDateTimeAxis)]
@@ -156,7 +159,13 @@ def apply_date_range(chart: QChart | None, days: int | None) -> None:
     if not xs:
         return
     x_min, x_max = min(xs), max(xs)
-    start = x_min if days is None else max(x_min, x_max - days * _DAY_MS)
+    if days is None:
+        start, end = x_min, x_max  # All Time → the full recorded extent
+    else:
+        if now_ms is None:
+            now_ms = datetime.now().timestamp() * 1000.0
+        end = now_ms  # anchor the window to today
+        start = end - days * _DAY_MS
 
     # y over the visible window: each line's points inside it, plus its
     # interpolated value at the window's left edge so a line crossing into the
@@ -164,14 +173,14 @@ def apply_date_range(chart: QChart | None, days: int | None) -> None:
     ys: list[float] = []
     for series in lines:
         pts = series.points()
-        ys.extend(p.y() for p in pts if start <= p.x() <= x_max)
+        ys.extend(p.y() for p in pts if start <= p.x() <= end)
         edge = HoverChartView._interp_y(pts, start)
         if edge is not None:
             ys.append(edge)
 
     x_axes[0].setRange(
         QDateTime.fromMSecsSinceEpoch(int(start)),
-        QDateTime.fromMSecsSinceEpoch(int(x_max)),
+        QDateTime.fromMSecsSinceEpoch(int(end)),
     )
     if ys:
         low, high = min(ys), max(ys)

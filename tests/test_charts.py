@@ -82,17 +82,30 @@ def _timeseries_chart():
     return chart, ax, ay, base
 
 
-def test_apply_date_range_zooms_x_and_rescales_y(app):
+def test_apply_date_range_anchors_window_to_today(app):
     from tcginventory.ui.charts import apply_date_range
 
     chart, ax, ay, base = _timeseries_chart()
-    apply_date_range(chart, 30)  # last 30 days → window [base+60d, base+90d]
+    # "Today" = the last data point; a 30-day window → [base+60d, base+90d].
+    now_ms = base + 90 * _DAY_MS
+    apply_date_range(chart, 30, now_ms=now_ms)
 
     assert abs(ax.min().toMSecsSinceEpoch() - (base + 60 * _DAY_MS)) < 1000
-    assert abs(ax.max().toMSecsSinceEpoch() - (base + 90 * _DAY_MS)) < 1000
-    # Visible values are 30 (at the left edge) and 40 — not the earlier 10/20.
+    assert abs(ax.max().toMSecsSinceEpoch() - now_ms) < 1000  # right edge = today
+    # Visible values are 30 (left edge) and 40 — not the earlier 10/20.
     assert ay.max() >= 40.0
     assert ay.min() >= 28.0  # interpolated edge (30), not the out-of-window 10
+
+
+def test_apply_date_range_window_is_relative_to_today_not_data(app):
+    from tcginventory.ui.charts import apply_date_range
+
+    chart, ax, _ay, base = _timeseries_chart()
+    # Today is 10 days after the last data point → window ends in the future.
+    now_ms = base + 100 * _DAY_MS
+    apply_date_range(chart, 30, now_ms=now_ms)
+    assert abs(ax.max().toMSecsSinceEpoch() - now_ms) < 1000
+    assert abs(ax.min().toMSecsSinceEpoch() - (now_ms - 30 * _DAY_MS)) < 1000
 
 
 def test_apply_date_range_all_time_uses_full_extent(app):
@@ -132,9 +145,13 @@ def test_ranged_chart_view_applies_range_on_set(app):
     from tcginventory.ui.charts import RangedChartView
 
     view = RangedChartView(default_days=30)
-    chart, _ax, _ay, base = _timeseries_chart()
+    chart, _ax, _ay, _base = _timeseries_chart()
     view.setChart(chart)
     assert view.chart() is chart  # delegates to the inner HoverChartView
+    # A 30-day window is applied (anchored to today, so assert on its span).
     x_axis = next(iter(chart.axes(Qt.Horizontal)))
-    assert abs(x_axis.min().toMSecsSinceEpoch() - (base + 60 * _DAY_MS)) < 1000
+    span_days = (
+        x_axis.max().toMSecsSinceEpoch() - x_axis.min().toMSecsSinceEpoch()
+    ) / _DAY_MS
+    assert abs(span_days - 30) < 1
     view.deleteLater()
