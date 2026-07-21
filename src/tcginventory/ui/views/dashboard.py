@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from tcginventory.domain.enums import Intent
 from tcginventory.services.reporting import ReportingService, SeriesPoint
-from tcginventory.ui.charts import HoverChartView
+from tcginventory.ui.charts import RangedChartView
 from tcginventory.ui.formatting import money
 from tcginventory.ui.views.shows import ShowsView
 
@@ -95,7 +95,7 @@ class DashboardView(QWidget):
         for col, tile in enumerate(self._tiles.values()):
             tile_grid.addWidget(tile, 0, col)
 
-        self._chart_view = HoverChartView()
+        self._chart_view = RangedChartView(default_days=None)  # All Time by default
         self._chart_view.setMinimumHeight(300)
 
         self._note = QLabel("")

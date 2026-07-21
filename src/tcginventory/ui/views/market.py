@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.ui.card_gallery import CardGallery
-from tcginventory.ui.charts import HoverChartView
+from tcginventory.ui.charts import RangedChartView
 from tcginventory.ui.formatting import money
 
 _CARD_ID_ROLE = Qt.UserRole + 1
@@ -190,7 +190,7 @@ class PriceLookupView(QWidget):
         left_layout.addWidget(self._current)
         left_layout.addWidget(self._display, 3)  # …above the larger card display
 
-        self._chart = HoverChartView()
+        self._chart = RangedChartView(default_days=90)  # 3 Months by default
         self._chart.setMinimumHeight(240)
 
         body = QSplitter(Qt.Horizontal)

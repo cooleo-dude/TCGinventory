@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 from types import SimpleNamespace
 
 from PySide6.QtCharts import (
@@ -61,7 +61,7 @@ from tcginventory.services.review import with_review_note, without_review_note
 from tcginventory.services.transactions import TransactionService
 from tcginventory.services.trends import TrendService
 from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
-from tcginventory.ui.charts import HoverChartView
+from tcginventory.ui.charts import RangedChartView
 from tcginventory.ui.models.inventory_model import (
     EBAY_COL,
     INTENT_COL,
@@ -76,8 +76,6 @@ from tcginventory.ui.views._intent_delegate import IntentDelegate
 from tcginventory.ui.views._link_delegate import LinkButtonDelegate
 from tcginventory.ui.views._review_delegate import ReviewPriceDelegate
 from tcginventory.ui.views.item_detail import ItemDetailDialog
-
-_HISTORY_DAYS = 90
 
 _INTENTS = ["All", "personal", "resale", "ripping", "mixed"]
 _SOLD = ["All", "unsold", "partial", "sold"]
@@ -101,7 +99,10 @@ class _PreviewPrefetchWorker(QThread):
     resolved = Signal()
 
     def __init__(
-        self, db_file: str, rows: list[tuple[int, int, str, str, str]], since: str
+        self,
+        db_file: str,
+        rows: list[tuple[int, int, str, str, str]],
+        since: str | None,
     ) -> None:
         super().__init__()
         self._db_file = db_file
@@ -375,7 +376,7 @@ class InventoryView(QWidget):
         # Rebuilding a QChart is heavy, so coalesce rapid hover/selection changes
         # and build it just after the pointer settles — this also keeps single-
         # click cell editing snappy (the click isn't blocked by a chart rebuild).
-        self._chart_view = HoverChartView()
+        self._chart_view = RangedChartView(default_days=90)  # 3 Months by default
         self._chart_view.setMinimumHeight(220)
         self._pending_chart_row: InventoryRow | None = None
         self._chart_timer = QTimer(self)
@@ -483,10 +484,9 @@ class InventoryView(QWidget):
         self._model.set_trends(worker.trends)
 
     @staticmethod
-    def _history_since() -> str:
-        return (
-            datetime.now(timezone.utc) - timedelta(days=_HISTORY_DAYS)
-        ).isoformat()
+    def _history_since() -> str | None:
+        # None → fetch all recorded history; the range selector zooms the view.
+        return None
 
     def _selected_row(self) -> InventoryRow | None:
         indexes = self._table.selectionModel().selectedRows()
@@ -686,7 +686,7 @@ def _history_chart(row: InventoryRow, snapshots: list[PriceSnapshot]) -> QChart:
     if not snapshots:
         chart.setTitle(f"{name} — no price history yet (use File ▸ Refresh prices)")
         return chart
-    chart.setTitle(f"{name} — market price, last {_HISTORY_DAYS} days")
+    chart.setTitle(f"{name} — market price")
 
     price = QLineSeries()
     price.setName("Market price")

@@ -16,10 +16,30 @@ from PySide6.QtCharts import (
     QDateTimeAxis,
     QLineSeries,
     QScatterSeries,
+    QValueAxis,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDateTime, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import QToolTip
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QToolTip,
+    QVBoxLayout,
+    QWidget,
+)
+
+_DAY_MS = 86_400_000
+# Selectable display windows (label, days); None = all recorded data.
+_RANGES: list[tuple[str, int | None]] = [
+    ("1M", 30),
+    ("3M", 90),
+    ("6M", 180),
+    ("9M", 270),
+    ("1Y", 365),
+    ("All Time", None),
+]
 
 
 class HoverChartView(QChartView):
@@ -118,3 +138,103 @@ class HoverChartView(QChartView):
                 pass
         name = line.name()
         return f"{name}\n{text}" if name else text
+
+
+def apply_date_range(chart: QChart | None, days: int | None) -> None:
+    """Zoom a time-series chart's x-axis to the most recent ``days`` (``None`` =
+    all recorded data) and rescale the y-axis to the values visible in that
+    window. No-op for charts without a datetime x-axis / value y-axis / lines
+    (e.g. an empty "select a card" message chart)."""
+    if chart is None:
+        return
+    x_axes = [a for a in chart.axes(Qt.Horizontal) if isinstance(a, QDateTimeAxis)]
+    y_axes = [a for a in chart.axes(Qt.Vertical) if isinstance(a, QValueAxis)]
+    lines = [s for s in chart.series() if isinstance(s, QLineSeries)]
+    if not (x_axes and y_axes and lines):
+        return
+    xs = [p.x() for s in lines for p in s.points()]
+    if not xs:
+        return
+    x_min, x_max = min(xs), max(xs)
+    start = x_min if days is None else max(x_min, x_max - days * _DAY_MS)
+
+    # y over the visible window: each line's points inside it, plus its
+    # interpolated value at the window's left edge so a line crossing into the
+    # window (e.g. a flat reference line) is accounted for at the right height.
+    ys: list[float] = []
+    for series in lines:
+        pts = series.points()
+        ys.extend(p.y() for p in pts if start <= p.x() <= x_max)
+        edge = HoverChartView._interp_y(pts, start)
+        if edge is not None:
+            ys.append(edge)
+
+    x_axes[0].setRange(
+        QDateTime.fromMSecsSinceEpoch(int(start)),
+        QDateTime.fromMSecsSinceEpoch(int(x_max)),
+    )
+    if ys:
+        low, high = min(ys), max(ys)
+        pad = max(1.0, (high - low) * 0.1)
+        y_axes[0].setRange(low - pad, high + pad)
+
+
+class RangeSelector(QWidget):
+    """A row of exclusive range buttons; emits ``changed(days | None)``."""
+
+    changed = Signal(object)
+
+    def __init__(self, default_days: int | None = None, parent=None) -> None:
+        super().__init__(parent)
+        self._days = default_days
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(QLabel("Range:"))
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        for label, days in _RANGES:
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setFixedWidth(64)
+            button.clicked.connect(lambda _=False, d=days: self._select(d))
+            self._group.addButton(button)
+            layout.addWidget(button)
+            if days == default_days:
+                button.setChecked(True)
+        layout.addStretch(1)
+
+    def _select(self, days: int | None) -> None:
+        self._days = days
+        self.changed.emit(days)
+
+    def days(self) -> int | None:
+        return self._days
+
+
+class RangedChartView(QWidget):
+    """A :class:`HoverChartView` with a date-range selector bar above it.
+
+    Drop-in for the plain chart view: ``setChart`` / ``chart`` behave the same,
+    and the selected range is (re)applied automatically whenever a chart is set
+    or the range changes.
+    """
+
+    def __init__(self, default_days: int | None = None, parent=None) -> None:
+        super().__init__(parent)
+        self._range = RangeSelector(default_days)
+        self._range.changed.connect(self._on_range_changed)
+        self._view = HoverChartView()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._range)
+        layout.addWidget(self._view, 1)
+
+    def setChart(self, chart: QChart) -> None:  # noqa: N802 (QChartView-like API)
+        self._view.setChart(chart)
+        apply_date_range(chart, self._range.days())
+
+    def chart(self) -> QChart | None:
+        return self._view.chart()
+
+    def _on_range_changed(self, days: int | None) -> None:
+        apply_date_range(self._view.chart(), days)

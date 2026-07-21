@@ -60,3 +60,81 @@ def test_set_chart_adds_a_tracking_marker(app):
     view.setChart(empty)
     assert view._marker is None
     view.deleteLater()
+
+
+_DAY_MS = 86_400_000
+
+
+def _timeseries_chart():
+    from PySide6.QtCharts import QDateTimeAxis
+
+    chart = QChart()
+    line = QLineSeries()
+    base = 1_700_000_000_000  # arbitrary epoch ms
+    for i, y in enumerate([10.0, 20.0, 30.0, 40.0]):  # 0, 30, 60, 90 days
+        line.append(base + i * 30 * _DAY_MS, y)
+    chart.addSeries(line)
+    ax, ay = QDateTimeAxis(), QValueAxis()
+    chart.addAxis(ax, Qt.AlignBottom)
+    chart.addAxis(ay, Qt.AlignLeft)
+    line.attachAxis(ax)
+    line.attachAxis(ay)
+    return chart, ax, ay, base
+
+
+def test_apply_date_range_zooms_x_and_rescales_y(app):
+    from tcginventory.ui.charts import apply_date_range
+
+    chart, ax, ay, base = _timeseries_chart()
+    apply_date_range(chart, 30)  # last 30 days → window [base+60d, base+90d]
+
+    assert abs(ax.min().toMSecsSinceEpoch() - (base + 60 * _DAY_MS)) < 1000
+    assert abs(ax.max().toMSecsSinceEpoch() - (base + 90 * _DAY_MS)) < 1000
+    # Visible values are 30 (at the left edge) and 40 — not the earlier 10/20.
+    assert ay.max() >= 40.0
+    assert ay.min() >= 28.0  # interpolated edge (30), not the out-of-window 10
+
+
+def test_apply_date_range_all_time_uses_full_extent(app):
+    from tcginventory.ui.charts import apply_date_range
+
+    chart, ax, ay, base = _timeseries_chart()
+    apply_date_range(chart, None)  # All Time
+    assert abs(ax.min().toMSecsSinceEpoch() - base) < 1000
+    assert abs(ax.max().toMSecsSinceEpoch() - (base + 90 * _DAY_MS)) < 1000
+
+
+def test_apply_date_range_ignores_message_chart(app):
+    from tcginventory.ui.charts import apply_date_range
+
+    empty = QChart()
+    empty.setTitle("select a card")
+    apply_date_range(empty, 30)  # no axes/series → no error
+
+
+def test_range_selector_emits_days(app):
+    from tcginventory.ui.charts import RangeSelector
+
+    sel = RangeSelector(default_days=90)
+    assert sel.days() == 90
+    seen = []
+    sel.changed.connect(seen.append)
+    # Click the "1Y" button.
+    for b in sel._group.buttons():
+        if b.text() == "1Y":
+            b.click()
+    assert seen == [365]
+    assert sel.days() == 365
+    sel.deleteLater()
+
+
+def test_ranged_chart_view_applies_range_on_set(app):
+    from tcginventory.ui.charts import RangedChartView
+
+    view = RangedChartView(default_days=30)
+    chart, _ax, _ay, base = _timeseries_chart()
+    view.setChart(chart)
+    assert view.chart() is chart  # delegates to the inner HoverChartView
+    x_axis = next(iter(chart.axes(Qt.Horizontal)))
+    assert abs(x_axis.min().toMSecsSinceEpoch() - (base + 60 * _DAY_MS)) < 1000
+    view.deleteLater()
