@@ -70,13 +70,16 @@ from tcginventory.data.auctions import (
     open_auctions,
 )
 from tcginventory.data.repositories import CardCatalogRepository
+from tcginventory.data.vision import ImageLabel, VisionRepository, open_vision
 from tcginventory.services import auctions as auction_math
+from tcginventory.services import vision as vision_svc
 from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.card_preview import install_hover_preview
 from tcginventory.ui.formatting import money, percent
+from tcginventory.ui.image_capture import ImageCaptureButton
 
-_CARD_HEADERS = ["Name", "Set", "#", "Market", "Qty", "TCGplayer", ""]
-_CARD_WIDTHS = [200, 150, 70, 90, 50, 96, 30]
+_CARD_HEADERS = ["Name", "Set", "#", "Market", "Qty", "TCGplayer", "Photos", ""]
+_CARD_WIDTHS = [200, 150, 70, 90, 50, 96, 56, 30]
 
 _WATCH_HEADERS = [
     "Title",
@@ -259,9 +262,13 @@ class _AuctionCardRow:
         self.tcg_btn.setEnabled(False)
         self.tcg_btn.setToolTip("Open this card on TCGplayer")
         self.tcg_btn.clicked.connect(self._open_tcgplayer)
+        self.images = ImageCaptureButton()  # photos → vision training corpus
 
     def widgets(self) -> list[QWidget]:
-        return [self.name, self.set, self.number, self.market, self.qty, self.tcg_btn]
+        return [
+            self.name, self.set, self.number, self.market, self.qty,
+            self.tcg_btn, self.images,
+        ]
 
     def _open_tcgplayer(self) -> None:
         if self._tcgplayer_url:
@@ -377,9 +384,14 @@ class AuctionsView(QWidget):
         conn: sqlite3.Connection,
         auctions_conn: sqlite3.Connection | None = None,
         history=_UNSET,
+        vision_repo=None,
+        vision_dir=None,
     ) -> None:
         super().__init__()
         self._conn = conn  # main DB (catalog search)
+        # Vision training store (opened lazily on first image ingest; injectable).
+        self._vision_repo = vision_repo
+        self._vision_dir = vision_dir
         self._auctions = auctions_conn if auctions_conn is not None else open_auctions()
         self._repo = AuctionRepository(self._auctions)
         # ``history`` supplied (incl. None) is honoured; omitted -> open default.
@@ -921,7 +933,43 @@ class AuctionsView(QWidget):
         saved = self._repo.save(auction)
         self._edit_id = saved.id
         self._banner.setText(f"Editing saved auction #{saved.id}")
+        self._ingest_images()
         self.refresh()
+
+    def _ingest_images(self) -> None:
+        """Store photos attached to auction cards into the vision training store,
+        labelled with each card's identity. Cleared after ingest so repeated
+        saves don't duplicate. Never fails a save."""
+        jobs = []
+        for row in self._rows:
+            paths = row.images.paths()
+            card = row.to_card()
+            if paths and card is not None:
+                jobs.append(
+                    (
+                        row,
+                        paths,
+                        ImageLabel(
+                            card_id=card.card_id,
+                            name=card.name,
+                            set_name=card.set_name,
+                            card_number=card.number,
+                            language=card.language,
+                        ),
+                    )
+                )
+        if not jobs:
+            return
+        repo = self._vision_repo or VisionRepository(open_vision())
+        for row, paths, label in jobs:
+            for path in paths:
+                try:
+                    vision_svc.ingest(
+                        repo, path, "auction", label, base_dir=self._vision_dir
+                    )
+                except Exception:  # a bad photo must never block the save
+                    pass
+            row.images.set_paths([])  # don't re-ingest on the next save
 
     def _load_auction(self, auction_id: int) -> None:
         auction = self._repo.get(auction_id)

@@ -4,6 +4,40 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-22 — Vision engine, M-V0: image ingestion + labeling corpus
+
+- **Goal (multi-phase):** a reactive engine that learns from listings/sales to
+  determine a card's **identity** and **condition** from an image, plus
+  **monetary significance** (liquidity, average markup, volatility). These are
+  three different problems: identity (image matching — has a no-training
+  baseline vs the catalog reference images), condition (hard, data-hungry), and
+  monetary (pure analytics on data we already have — parallelizable).
+- **M-V0 (this increment):** let the user attach card **photos** on the
+  Transaction (receive) and Auction (card) rows; on commit each photo + the
+  identity/condition the user assigned = one labeled training example. No ML
+  yet — this builds the corpus everything else learns from.
+- **Decisions (ratified with owner):**
+  - **Storage:** a separate **`vision.db`** beside the ledger (`data/vision.py`)
+    for image + label metadata, with image files **content-addressed** on disk
+    at `<data_dir>/vision/images/<sha256><ext>` (identical photos dedup to one
+    file/row). Keeps bulky ML data out of the ledger's exports/keep-10 backup —
+    mirrors `pricehistory.db` / `auctions.db`.
+  - **Compute:** **fully local / offline** (no cloud vision APIs, no keys),
+    consistent with the app. Model options to investigate for M-V1+ (all
+    local): perceptual hashing → pretrained embedding + NN via `onnxruntime` →
+    fine-tuned on the collected corpus.
+  - **Ingest on commit:** photos are held in memory on the row
+    (`ui/image_capture.py` `ImageCaptureButton`) and ingested (`services/vision.py`)
+    when the transaction is submitted / auction saved, labelled from the row's
+    final identity. Never fails the ledger op; auction rows clear after ingest
+    so repeated saves don't duplicate labels. Qt-free data/service layers.
+- **Milestones ahead:** M-V1 baseline identity matcher (no training, vs catalog
+  images) → M-V2 learned identity (train on corpus) → M-V3 condition → M-Market
+  liquidity/markup analytics (buildable now, independent of vision).
+- **M-V0 limitation:** re-opening a saved transaction/auction doesn't re-load
+  previously-attached photos (ingest is one-way into the corpus); a corpus
+  browser/manager is a later increment.
+
 ### 2026-07-16 — Auction editor: multi-card display reuses Price Lookup's gallery
 
 - **Decision:** The auction editor's preview is a **`CardGallery`** (the reusable

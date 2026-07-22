@@ -52,6 +52,7 @@ from tcginventory.data.repositories import (
     TransactionLineRepository,
     TransactionRepository,
 )
+from tcginventory.data.vision import ImageLabel, VisionRepository, open_vision
 from tcginventory.domain.enums import (
     Category,
     Condition,
@@ -64,6 +65,7 @@ from tcginventory.domain.enums import (
     TransactionStatus,
 )
 from tcginventory.domain.models import Item
+from tcginventory.services import vision as vision_svc
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inventory import InventoryService
 from tcginventory.services.reporting import ReportingService
@@ -76,17 +78,18 @@ from tcginventory.services.transactions import (
 )
 from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
 from tcginventory.ui.formatting import money, percent
+from tcginventory.ui.image_capture import ImageCaptureButton
 
 _GIVE_HEADERS = ["Item", "Qty", ""]
 _GIVE_WIDTHS = [280, 55, 30]
 _RECV_HEADERS = [
     "Name", "Category", "Set", "#", "Language", "Graded", "Condition",
     "Holo", "Edition", "Grading Co.", "Grade", "Cert #", "Market", "Qty",
-    "Intent", "Review", "TCGplayer", "eBay", "Notes", "",
+    "Intent", "Review", "TCGplayer", "eBay", "Notes", "Photos", "",
 ]
 _RECV_WIDTHS = [
     150, 85, 100, 55, 65, 55, 80, 55, 90, 90, 55, 85, 85, 45, 85, 55, 120,
-    100, 130, 30,
+    100, 130, 56, 30,
 ]
 
 
@@ -367,6 +370,7 @@ class _ReceiveRow:
         self.tcgplayer = QLineEdit()
         self.ebay = QLineEdit()
         self.notes = QLineEdit()
+        self.images = ImageCaptureButton()  # photos → vision training corpus
         self._toggle_graded(False)
 
     def widgets(self) -> list[QWidget]:
@@ -374,7 +378,7 @@ class _ReceiveRow:
             self.name, self.category, self.set, self.number, self.language,
             self.graded, self.condition, self.holo, self.edition, self.company,
             self.grade, self.cert, self.market, self.qty, self.intent,
-            self.review, self.tcgplayer, self.ebay, self.notes,
+            self.review, self.tcgplayer, self.ebay, self.notes, self.images,
         ]
 
     def _maybe_flag_review(self) -> None:
@@ -515,12 +519,18 @@ class _ReceiveRow:
 class TransactionView(QWidget):
     posted = Signal()
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(
+        self, conn: sqlite3.Connection, vision_repo=None, vision_dir=None
+    ) -> None:
         super().__init__()
         self._conn = conn
         self._service = TransactionService(conn)
         self._inventory = InventoryService(conn)
         self._reporting = ReportingService(conn)
+        # Vision training store (opened lazily on first image ingest); injectable
+        # for tests. vision_dir is the base dir for the content-addressed files.
+        self._vision_repo = vision_repo
+        self._vision_dir = vision_dir
 
         self._give_rows: list[_GiveRow] = []
         self._receive_rows: list[_ReceiveRow] = []
@@ -853,8 +863,32 @@ class TransactionView(QWidget):
         except (ServiceError, ValueError) as exc:
             QMessageBox.warning(self, "Could not post", str(exc))
             return
+        self._ingest_images()
         self.clear()
         self.posted.emit()
+
+    # -- vision corpus ------------------------------------------------------
+
+    def _ingest_images(self) -> None:
+        """Store any photos attached to received cards into the vision training
+        store, labelled with the card's identity/condition. Never fails a post."""
+        jobs = []
+        for row in self._receive_rows:
+            paths = row.images.paths()
+            card = row.to_card()
+            if paths and card is not None:
+                jobs.append((paths, _label_for(row, card)))
+        if not jobs:
+            return
+        repo = self._vision_repo or VisionRepository(open_vision())
+        for paths, label in jobs:
+            for path in paths:
+                try:
+                    vision_svc.ingest(
+                        repo, path, "transaction", label, base_dir=self._vision_dir
+                    )
+                except Exception:  # a bad photo must never block the ledger post
+                    pass
 
     _ITEMS_PER_COLUMN = 25
 
@@ -985,6 +1019,24 @@ class TransactionView(QWidget):
                     )
                 )
         return True
+
+
+def _label_for(row: _ReceiveRow, card: IncomingCard) -> ImageLabel:
+    """Build a vision label from a received card's assigned identity/condition."""
+    item = card.item
+    return ImageLabel(
+        card_id=row._card_id,
+        name=item.name,
+        set_name=item.set_name,
+        card_number=item.card_number,
+        language=item.language.value if item.language else None,
+        condition=item.condition.value if item.condition else None,
+        is_graded=item.is_graded,
+        grade=item.grade,
+        grading_company=(
+            item.grading_company.value if item.grading_company else None
+        ),
+    )
 
 
 def _tidy(table: QTableWidget, widths: list[int]) -> None:
