@@ -1,20 +1,20 @@
-"""Vision ingestion — copy a supplied card photo into the training store and
-record its label. Qt-free.
+"""Vision ingestion — store a transaction/auction's card photos as one **capture**
+and record the cards they document. Qt-free.
 
-Images are **content-addressed**: the file is hashed (SHA-256) and stored at
-``<data_dir>/vision/images/<sha><ext>``, so re-adding the same photo dedups to
-one file and one ``image`` row. The label (the identity/condition the user
-assigned) is recorded per ingest, building the ``(image, label)`` corpus the
-recognition engine will learn from.
+Image files are **content-addressed**: each is hashed (SHA-256) and stored at
+``<data_dir>/vision/images/<sha><ext>``, so identical files dedup on disk. A
+capture groups all the photos supplied for a single entry with the set of cards
+those photos collectively show (the labels the recognition engine learns from).
 """
 
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from pathlib import Path
 
 from tcginventory import config
-from tcginventory.data.vision import ImageLabel, VisionRepository
+from tcginventory.data.vision import CardLabel, VisionRepository
 
 
 def images_dir(base_dir: str | Path | None = None) -> Path:
@@ -41,26 +41,28 @@ def store_file(
     return dest, sha
 
 
-def ingest(
+def ingest_capture(
     repo: VisionRepository,
-    src_path: str | Path,
+    image_paths: Iterable[str | Path],
     source: str,
-    label: ImageLabel,
+    cards: Iterable[CardLabel],
     *,
-    width: int | None = None,
-    height: int | None = None,
     base_dir: str | Path | None = None,
     now: str | None = None,
-) -> int:
-    """Store the photo file and record one labeled example; returns the image id."""
-    dest, sha = store_file(src_path, base_dir)
-    image_id = repo.add_image(
-        sha256=sha,
-        path=str(dest),
-        source=source,
-        width=width,
-        height=height,
-        now=now,
-    )
-    repo.add_label(image_id, label, now=now)
-    return image_id
+) -> int | None:
+    """Record one capture: all the entry's photos + all its cards.
+
+    Returns the new capture id, or ``None`` when there's nothing to store (no
+    photos, or no identifiable cards).
+    """
+    paths = list(image_paths)
+    cards = list(cards)
+    if not paths or not cards:
+        return None
+    capture_id = repo.add_capture(source, now=now)
+    for path in paths:
+        dest, sha = store_file(path, base_dir)
+        repo.add_image(capture_id, sha, str(dest), now=now)
+    for card in cards:
+        repo.add_capture_card(capture_id, card, now=now)
+    return capture_id

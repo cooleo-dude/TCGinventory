@@ -52,7 +52,7 @@ from tcginventory.data.repositories import (
     TransactionLineRepository,
     TransactionRepository,
 )
-from tcginventory.data.vision import ImageLabel, VisionRepository, open_vision
+from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
 from tcginventory.domain.enums import (
     Category,
     Condition,
@@ -85,11 +85,11 @@ _GIVE_WIDTHS = [280, 55, 30]
 _RECV_HEADERS = [
     "Name", "Category", "Set", "#", "Language", "Graded", "Condition",
     "Holo", "Edition", "Grading Co.", "Grade", "Cert #", "Market", "Qty",
-    "Intent", "Review", "TCGplayer", "eBay", "Notes", "Photos", "",
+    "Intent", "Review", "TCGplayer", "eBay", "Notes", "",
 ]
 _RECV_WIDTHS = [
     150, 85, 100, 55, 65, 55, 80, 55, 90, 90, 55, 85, 85, 45, 85, 55, 120,
-    100, 130, 56, 30,
+    100, 130, 30,
 ]
 
 
@@ -370,7 +370,6 @@ class _ReceiveRow:
         self.tcgplayer = QLineEdit()
         self.ebay = QLineEdit()
         self.notes = QLineEdit()
-        self.images = ImageCaptureButton()  # photos → vision training corpus
         self._toggle_graded(False)
 
     def widgets(self) -> list[QWidget]:
@@ -378,7 +377,7 @@ class _ReceiveRow:
             self.name, self.category, self.set, self.number, self.language,
             self.graded, self.condition, self.holo, self.edition, self.company,
             self.grade, self.cert, self.market, self.qty, self.intent,
-            self.review, self.tcgplayer, self.ebay, self.notes, self.images,
+            self.review, self.tcgplayer, self.ebay, self.notes,
         ]
 
     def _maybe_flag_review(self) -> None:
@@ -579,8 +578,16 @@ class TransactionView(QWidget):
         self._save_shortcut.activated.connect(self._submit_via_shortcut)
         clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(self.clear)
+        # One set of photos for the whole transaction — a shot may show several
+        # of the cards being acquired; each is labelled with every received card.
+        self._photos = ImageCaptureButton()
+        self._photos.setToolTip(
+            "Attach photos of the cards you're acquiring (a photo can show "
+            "several). Saved with this transaction's received cards for training."
+        )
         footer = QHBoxLayout()
         footer.addWidget(self._summary, 1)
+        footer.addWidget(self._photos)
         footer.addWidget(clear_btn)
         footer.addWidget(self._submit)
 
@@ -870,25 +877,26 @@ class TransactionView(QWidget):
     # -- vision corpus ------------------------------------------------------
 
     def _ingest_images(self) -> None:
-        """Store any photos attached to received cards into the vision training
-        store, labelled with the card's identity/condition. Never fails a post."""
-        jobs = []
-        for row in self._receive_rows:
-            paths = row.images.paths()
-            card = row.to_card()
-            if paths and card is not None:
-                jobs.append((paths, _label_for(row, card)))
-        if not jobs:
+        """Record the transaction's photos as one capture, documenting **every
+        received card** (the photos collectively show the cards being acquired).
+        Never fails a post."""
+        paths = self._photos.paths()
+        if not paths:
+            return
+        cards = [
+            _label_for(row, card)
+            for row in self._receive_rows
+            if (card := row.to_card()) is not None
+        ]
+        if not cards:  # nothing identifiable to learn from (e.g. a pure sale)
             return
         repo = self._vision_repo or VisionRepository(open_vision())
-        for paths, label in jobs:
-            for path in paths:
-                try:
-                    vision_svc.ingest(
-                        repo, path, "transaction", label, base_dir=self._vision_dir
-                    )
-                except Exception:  # a bad photo must never block the ledger post
-                    pass
+        try:
+            vision_svc.ingest_capture(
+                repo, paths, "transaction", cards, base_dir=self._vision_dir
+            )
+        except Exception:  # a bad photo must never block the ledger post
+            pass
 
     _ITEMS_PER_COLUMN = 25
 
@@ -968,6 +976,7 @@ class TransactionView(QWidget):
         self._cash_out.setValue(0.0)
         self._counterparty.clear()
         self._reference.clear()
+        self._photos.set_paths([])
         self._edit_id = None
         self._edit_banner.setText("")
         self._update_summary()
@@ -1021,10 +1030,10 @@ class TransactionView(QWidget):
         return True
 
 
-def _label_for(row: _ReceiveRow, card: IncomingCard) -> ImageLabel:
+def _label_for(row: _ReceiveRow, card: IncomingCard) -> CardLabel:
     """Build a vision label from a received card's assigned identity/condition."""
     item = card.item
-    return ImageLabel(
+    return CardLabel(
         card_id=row._card_id,
         name=item.name,
         set_name=item.set_name,

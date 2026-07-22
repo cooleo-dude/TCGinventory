@@ -4,6 +4,27 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-22 — Vision M-V0 flow: capture-grouped scene photos (supersedes same-day entry)
+
+- **Reframe:** a supplied photo is a **scene of one or more cards**, and a single
+  transaction/auction typically has **several photos** documenting the *same*
+  purchase — not one photo per card. So photos attach to the **whole entry**
+  (one `📷 Photos` button in the Transaction/Auction footer), never per row.
+- **Model — the `capture`:** on commit, all the entry's photos + all its cards
+  are recorded as one **capture** in `vision.db`
+  (`capture` → many `image`, many `capture_card`). This keeps a lot's photos
+  grouped and documents *which cards the capture shows* without falsely claiming
+  every card appears in every photo (image-level multi-label at the capture
+  granularity; per-photo bounding boxes are a later enhancement). Replaces the
+  earlier per-image `image_label` schema; `services/vision.ingest_capture`
+  replaces `ingest`. `ImageLabel` → `CardLabel`.
+- **Labels:** transaction captures document the **received** cards (the "photograph
+  what you acquired" flow; a pure sale ingests nothing); auction captures
+  document all the auction's cards. Files stay content-addressed on disk; the
+  experimental pre-capture schema is dropped-and-recreated on open (throwaway).
+- **Verified:** ruff clean; vision tests cover capture grouping, multiple photos
+  per entry, on-disk dedup, and ingest-on-commit for both screens; full suite green.
+
 ### 2026-07-22 — Vision engine, M-V0: image ingestion + labeling corpus
 
 - **Goal (multi-phase):** a reactive engine that learns from listings/sales to

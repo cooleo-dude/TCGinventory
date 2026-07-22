@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from tcginventory.data.vision import ImageLabel, VisionRepository, open_vision
+from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
 from tcginventory.services import vision as vision_svc
 
 # ---------------------------------------------------------------------------
@@ -22,43 +22,59 @@ def repo():
     conn.close()
 
 
-def test_ingest_stores_file_and_label(repo, tmp_path):
-    src = tmp_path / "card.png"
-    src.write_bytes(b"fake-png-bytes")
+def test_ingest_capture_groups_photos_and_cards(repo, tmp_path):
+    photos = []
+    for i, content in enumerate((b"photo-one", b"photo-two")):
+        p = tmp_path / f"p{i}.png"
+        p.write_bytes(content)
+        photos.append(p)
     store = tmp_path / "store"
 
-    image_id = vision_svc.ingest(
+    capture_id = vision_svc.ingest_capture(
         repo,
-        src,
+        photos,
         "transaction",
-        ImageLabel(card_id="cel-4", name="Charizard", condition="NM"),
+        [
+            CardLabel(card_id="cel-4", name="Charizard", condition="NM"),
+            CardLabel(card_id="cel-5", name="Blastoise", condition="LP"),
+            CardLabel(card_id="cel-6", name="Venusaur"),
+        ],
         base_dir=store,
     )
-    assert image_id > 0
-    assert repo.image_count() == 1
-    assert repo.label_count() == 1
-    assert repo.labels_for_card("cel-4") == 1
+    assert capture_id is not None
+    assert repo.capture_count() == 1  # one purchase…
+    assert repo.image_count() == 2  # …two photos of it…
+    assert repo.capture_card_count() == 3  # …documenting three cards
+    assert repo.captures_with_card("cel-4") == 1
 
-    # File is content-addressed under the store dir.
-    sha = hashlib.sha256(b"fake-png-bytes").hexdigest()
-    assert (store / "vision" / "images" / f"{sha}.png").exists()
+    # Files are content-addressed under the store dir.
+    for content in (b"photo-one", b"photo-two"):
+        sha = hashlib.sha256(content).hexdigest()
+        assert (store / "vision" / "images" / f"{sha}.png").exists()
 
 
-def test_ingest_dedups_identical_content_but_keeps_labels(repo, tmp_path):
+def test_ingest_capture_dedups_identical_files_on_disk(repo, tmp_path):
     a = tmp_path / "a.png"
     a.write_bytes(b"same")
     b = tmp_path / "b.png"
     b.write_bytes(b"same")  # identical content, different filename
     store = tmp_path / "s"
 
-    i1 = vision_svc.ingest(
-        repo, a, "transaction", ImageLabel(card_id="c1"), base_dir=store
+    vision_svc.ingest_capture(
+        repo, [a, b], "transaction", [CardLabel(card_id="c1")], base_dir=store
     )
-    i2 = vision_svc.ingest(repo, b, "auction", ImageLabel(card_id="c2"), base_dir=store)
+    # Two image rows (two supplied photos) but one file on disk (content hash).
+    assert repo.image_count() == 2
+    sha = hashlib.sha256(b"same").hexdigest()
+    assert list((store / "vision" / "images").glob(f"{sha}*")) != []
 
-    assert i1 == i2  # one image row (deduped by content hash)
-    assert repo.image_count() == 1
-    assert repo.label_count() == 2  # but both labels recorded
+
+def test_ingest_capture_noop_without_photos_or_cards(repo, tmp_path):
+    p = tmp_path / "x.png"
+    p.write_bytes(b"x")
+    assert vision_svc.ingest_capture(repo, [], "transaction", [CardLabel()]) is None
+    assert vision_svc.ingest_capture(repo, [p], "transaction", []) is None
+    assert repo.capture_count() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +107,7 @@ def _png(path):
     return str(path)
 
 
-def test_transaction_submit_ingests_photos(app, _quiet, tmp_path):
+def test_transaction_submit_ingests_scene_photo(app, _quiet, tmp_path):
     from tcginventory.data.db import connect
     from tcginventory.data.migrator import migrate
     from tcginventory.domain.enums import Category, Intent
@@ -104,25 +120,28 @@ def test_transaction_submit_ingests_photos(app, _quiet, tmp_path):
     vrepo = VisionRepository(open_vision(":memory:"))
     view = TransactionView(conn, vision_repo=vrepo, vision_dir=tmp_path)
 
-    # A received card with a photo attached, then submit (a purchase).
-    row = view._add_receive_row()
-    row.set_card(
-        IncomingCard(
-            item=Item(name="Pikachu", category=Category.SINGLE),
-            quantity=1,
-            market_value_cents=1000,
-            intent=Intent.RESALE,
+    # Two received cards + one photo of the pile, then submit (a purchase).
+    for name in ("Pikachu", "Charizard"):
+        row = view._add_receive_row()
+        row.set_card(
+            IncomingCard(
+                item=Item(name=name, category=Category.SINGLE),
+                quantity=1,
+                market_value_cents=1000,
+                intent=Intent.RESALE,
+            )
         )
-    )
-    row.images.set_paths([_png(tmp_path / "pika.png")])
+    # Several photos of the one purchase.
+    view._photos.set_paths([_png(tmp_path / "front.png"), _png(tmp_path / "back.png")])
     view.submit()
 
-    assert vrepo.image_count() == 1
-    assert vrepo.label_count() == 1
+    assert vrepo.capture_count() == 1  # one purchase…
+    assert vrepo.image_count() == 2  # …with both photos…
+    assert vrepo.capture_card_count() == 2  # …documenting both received cards
     view.deleteLater()
 
 
-def test_auction_save_ingests_photos(app, _quiet, tmp_path):
+def test_auction_save_ingests_scene_photo(app, _quiet, tmp_path):
     from tcginventory.data.auctions import open_auctions
     from tcginventory.data.db import connect
     from tcginventory.data.migrator import migrate
@@ -138,15 +157,17 @@ def test_auction_save_ingests_photos(app, _quiet, tmp_path):
         vision_repo=vrepo,
         vision_dir=tmp_path,
     )
-    row = view._add_card_row()
-    row.name.setText("Charizard")
-    row.market.setValue(20.0)
-    row.images.set_paths([_png(tmp_path / "zard.png")])
+    for name in ("Charizard", "Blastoise"):
+        row = view._add_card_row()
+        row.name.setText(name)
+        row.market.setValue(20.0)
+    view._photos.set_paths([_png(tmp_path / "a.png"), _png(tmp_path / "b.png")])
     view._save()
 
-    assert vrepo.image_count() == 1
-    assert vrepo.label_count() == 1
-    # Cleared after ingest so a second save doesn't duplicate the label.
+    assert vrepo.capture_count() == 1  # one auction…
+    assert vrepo.image_count() == 2  # …with both photos…
+    assert vrepo.capture_card_count() == 2  # …documenting both cards
+    # Cleared after ingest so a second save doesn't duplicate the capture.
     view._save()
-    assert vrepo.label_count() == 1
+    assert vrepo.capture_count() == 1
     view.deleteLater()

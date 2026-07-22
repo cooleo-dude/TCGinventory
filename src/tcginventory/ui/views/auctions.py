@@ -70,7 +70,7 @@ from tcginventory.data.auctions import (
     open_auctions,
 )
 from tcginventory.data.repositories import CardCatalogRepository
-from tcginventory.data.vision import ImageLabel, VisionRepository, open_vision
+from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
 from tcginventory.services import auctions as auction_math
 from tcginventory.services import vision as vision_svc
 from tcginventory.ui.card_gallery import CardGallery
@@ -78,8 +78,8 @@ from tcginventory.ui.card_preview import install_hover_preview
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.image_capture import ImageCaptureButton
 
-_CARD_HEADERS = ["Name", "Set", "#", "Market", "Qty", "TCGplayer", "Photos", ""]
-_CARD_WIDTHS = [200, 150, 70, 90, 50, 96, 56, 30]
+_CARD_HEADERS = ["Name", "Set", "#", "Market", "Qty", "TCGplayer", ""]
+_CARD_WIDTHS = [200, 150, 70, 90, 50, 96, 30]
 
 _WATCH_HEADERS = [
     "Title",
@@ -262,12 +262,10 @@ class _AuctionCardRow:
         self.tcg_btn.setEnabled(False)
         self.tcg_btn.setToolTip("Open this card on TCGplayer")
         self.tcg_btn.clicked.connect(self._open_tcgplayer)
-        self.images = ImageCaptureButton()  # photos → vision training corpus
 
     def widgets(self) -> list[QWidget]:
         return [
-            self.name, self.set, self.number, self.market, self.qty,
-            self.tcg_btn, self.images,
+            self.name, self.set, self.number, self.market, self.qty, self.tcg_btn,
         ]
 
     def _open_tcgplayer(self) -> None:
@@ -755,6 +753,13 @@ class AuctionsView(QWidget):
 
         self._breakdown = QLabel("")
         self._breakdown.setTextFormat(Qt.RichText)
+        # One set of photos for the whole auction — a listing shot may show
+        # several cards; each is labelled with every card in the auction.
+        self._photos = ImageCaptureButton()
+        self._photos.setToolTip(
+            "Attach photos of the cards in this auction (a photo can show "
+            "several). Saved with the auction's cards for image training."
+        )
         new_btn = QPushButton("New")
         new_btn.setToolTip("Clear the editor for a fresh auction")
         new_btn.clicked.connect(self._new)
@@ -762,6 +767,7 @@ class AuctionsView(QWidget):
         self._save_btn.clicked.connect(self._save)
         footer = QHBoxLayout()
         footer.addWidget(self._breakdown, 1)
+        footer.addWidget(self._photos)
         footer.addWidget(new_btn)
         footer.addWidget(self._save_btn)
 
@@ -937,39 +943,34 @@ class AuctionsView(QWidget):
         self.refresh()
 
     def _ingest_images(self) -> None:
-        """Store photos attached to auction cards into the vision training store,
-        labelled with each card's identity. Cleared after ingest so repeated
-        saves don't duplicate. Never fails a save."""
-        jobs = []
-        for row in self._rows:
-            paths = row.images.paths()
-            card = row.to_card()
-            if paths and card is not None:
-                jobs.append(
-                    (
-                        row,
-                        paths,
-                        ImageLabel(
-                            card_id=card.card_id,
-                            name=card.name,
-                            set_name=card.set_name,
-                            card_number=card.number,
-                            language=card.language,
-                        ),
-                    )
-                )
-        if not jobs:
+        """Record the auction's photos as one capture, documenting **every card
+        in the auction** (the listing photos collectively show those cards).
+        Cleared after ingest so repeated saves don't duplicate. Never fails a
+        save."""
+        paths = self._photos.paths()
+        if not paths:
+            return
+        cards = [
+            CardLabel(
+                card_id=card.card_id,
+                name=card.name,
+                set_name=card.set_name,
+                card_number=card.number,
+                language=card.language,
+            )
+            for row in self._rows
+            if (card := row.to_card()) is not None
+        ]
+        if not cards:
             return
         repo = self._vision_repo or VisionRepository(open_vision())
-        for row, paths, label in jobs:
-            for path in paths:
-                try:
-                    vision_svc.ingest(
-                        repo, path, "auction", label, base_dir=self._vision_dir
-                    )
-                except Exception:  # a bad photo must never block the save
-                    pass
-            row.images.set_paths([])  # don't re-ingest on the next save
+        try:
+            vision_svc.ingest_capture(
+                repo, paths, "auction", cards, base_dir=self._vision_dir
+            )
+        except Exception:  # a bad photo must never block the save
+            pass
+        self._photos.set_paths([])  # don't re-ingest on the next save
 
     def _load_auction(self, auction_id: int) -> None:
         auction = self._repo.get(auction_id)
@@ -1010,6 +1011,7 @@ class AuctionsView(QWidget):
         self._tax.setValue(auction_math.DEFAULT_TAX_RATE_BPS / 100)
         self._ends_date.setDate(QDateTime.currentDateTime().addDays(7).date())
         self._ends_time.setTime(QDateTime.currentDateTime().time())
+        self._photos.set_paths([])
         self._edit_id = None
         self._update_countdown()
 

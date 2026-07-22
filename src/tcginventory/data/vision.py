@@ -1,13 +1,19 @@
 """Vision training corpus — a **separate** SQLite file (``vision.db``).
 
-Foundation for the (future) card-recognition engine: user-supplied card photos
-are stored as **content-addressed files on disk** (``<data_dir>/vision/images/``)
-with metadata + a **label** (the identity/condition the user assigned to the
-card) recorded here. A photo plus its label is one training example.
+Foundation for the (future) card-recognition engine. The unit is a **capture**:
+one purchase/auction's worth of photos plus the set of cards they collectively
+document. A capture has:
 
-Kept out of the ledger DB on purpose — it's bulky, derived/ML data — so the
-ledger's exports and keep-10 backup stay small (mirrors ``pricehistory.db`` /
-``auctions.db``). Qt-free.
+* **images** — the one or more photos supplied for that entry (a photo is a
+  *scene* that may show several cards), stored as content-addressed files on
+  disk under ``<data_dir>/vision/images/``;
+* **cards** — the identities/conditions the user assigned (the labels the engine
+  learns to recognise against its catalog).
+
+Grouping by capture keeps the several photos of a single lot associated, without
+falsely asserting that every card appears in every photo. Kept out of the ledger
+DB (bulky, derived ML data) so its exports/backups stay small — mirrors
+``pricehistory.db`` / ``auctions.db``. Qt-free.
 """
 
 from __future__ import annotations
@@ -22,18 +28,25 @@ from tcginventory import config
 VISION_FILENAME = "vision.db"
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS capture (
+    id         INTEGER PRIMARY KEY,
+    source     TEXT,                      -- 'transaction' | 'auction' | 'manual'
+    note       TEXT,
+    created_at TEXT    NOT NULL
+);
 CREATE TABLE IF NOT EXISTS image (
     id         INTEGER PRIMARY KEY,
-    sha256     TEXT    NOT NULL UNIQUE,   -- content hash → dedups identical files
-    path       TEXT    NOT NULL,          -- on-disk location
-    source     TEXT,                      -- 'transaction' | 'auction' | 'manual'
+    capture_id INTEGER NOT NULL REFERENCES capture(id) ON DELETE CASCADE,
+    sha256     TEXT    NOT NULL,          -- content hash (files dedup on disk)
+    path       TEXT    NOT NULL,
     width      INTEGER,
     height     INTEGER,
     created_at TEXT    NOT NULL
 );
-CREATE TABLE IF NOT EXISTS image_label (
+CREATE INDEX IF NOT EXISTS idx_image_capture ON image(capture_id);
+CREATE TABLE IF NOT EXISTS capture_card (
     id              INTEGER PRIMARY KEY,
-    image_id        INTEGER NOT NULL REFERENCES image(id) ON DELETE CASCADE,
+    capture_id      INTEGER NOT NULL REFERENCES capture(id) ON DELETE CASCADE,
     card_id         TEXT,                 -- catalog id when the card was matched
     name            TEXT,
     set_name        TEXT,
@@ -43,12 +56,10 @@ CREATE TABLE IF NOT EXISTS image_label (
     is_graded       INTEGER NOT NULL DEFAULT 0,
     grade           TEXT,
     grading_company TEXT,
-    label_source    TEXT    NOT NULL DEFAULT 'user',  -- user | suggested | …
-    confidence      REAL,
     created_at      TEXT    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_image_label_image ON image_label(image_id);
-CREATE INDEX IF NOT EXISTS idx_image_label_card ON image_label(card_id);
+CREATE INDEX IF NOT EXISTS idx_capture_card_capture ON capture_card(capture_id);
+CREATE INDEX IF NOT EXISTS idx_capture_card_card ON capture_card(card_id);
 """
 
 
@@ -66,13 +77,33 @@ def open_vision(path: str | Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
+    _reset_legacy(conn)
     conn.executescript(_SCHEMA)
     return conn
 
 
+def _reset_legacy(conn: sqlite3.Connection) -> None:
+    """Drop the pre-capture experimental schema (per-image labels) if present.
+
+    The vision corpus is new/experimental and the ingestion flow is still being
+    shaped; a stale ``image`` table without ``capture_id`` is thrown away rather
+    than migrated.
+    """
+    has_image = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='image'"
+    ).fetchone()
+    if not has_image:
+        return
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(image)")}
+    if "capture_id" not in cols:
+        conn.executescript(
+            "DROP TABLE IF EXISTS image_label; DROP TABLE IF EXISTS image;"
+        )
+
+
 @dataclass
-class ImageLabel:
-    """The identity/condition assigned to a photographed card (ground truth)."""
+class CardLabel:
+    """A card in a capture (its assigned identity/condition — the ground truth)."""
 
     card_id: str | None = None
     name: str | None = None
@@ -83,8 +114,6 @@ class ImageLabel:
     is_graded: bool = False
     grade: str | None = None
     grading_company: str | None = None
-    label_source: str = "user"
-    confidence: float | None = None
 
 
 def _now() -> str:
@@ -95,63 +124,68 @@ class VisionRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
+    def add_capture(
+        self, source: str | None = None, note: str | None = None, now: str | None = None
+    ) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO capture (source, note, created_at) VALUES (?,?,?)",
+                (source, note, now or _now()),
+            )
+        return int(cur.lastrowid)
+
     def add_image(
         self,
+        capture_id: int,
         sha256: str,
         path: str,
-        source: str | None = None,
         width: int | None = None,
         height: int | None = None,
         now: str | None = None,
     ) -> int:
-        """Record an image (idempotent on ``sha256``); returns its id."""
-        row = self.conn.execute(
-            "SELECT id FROM image WHERE sha256 = ?", (sha256,)
-        ).fetchone()
-        if row is not None:
-            return int(row["id"])
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO image (sha256, path, source, width, height, created_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (sha256, path, source, width, height, now or _now()),
+                "INSERT INTO image (capture_id, sha256, path, width, height, "
+                "created_at) VALUES (?,?,?,?,?,?)",
+                (capture_id, sha256, path, width, height, now or _now()),
             )
         return int(cur.lastrowid)
 
-    def add_label(
-        self, image_id: int, label: ImageLabel, now: str | None = None
+    def add_capture_card(
+        self, capture_id: int, card: CardLabel, now: str | None = None
     ) -> int:
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO image_label (image_id, card_id, name, set_name, "
+                "INSERT INTO capture_card (capture_id, card_id, name, set_name, "
                 "card_number, language, condition, is_graded, grade, "
-                "grading_company, label_source, confidence, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "grading_company, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    image_id,
-                    label.card_id,
-                    label.name,
-                    label.set_name,
-                    label.card_number,
-                    label.language,
-                    label.condition,
-                    1 if label.is_graded else 0,
-                    label.grade,
-                    label.grading_company,
-                    label.label_source,
-                    label.confidence,
+                    capture_id,
+                    card.card_id,
+                    card.name,
+                    card.set_name,
+                    card.card_number,
+                    card.language,
+                    card.condition,
+                    1 if card.is_graded else 0,
+                    card.grade,
+                    card.grading_company,
                     now or _now(),
                 ),
             )
         return int(cur.lastrowid)
 
+    def capture_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM capture").fetchone()[0]
+
     def image_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM image").fetchone()[0]
 
-    def label_count(self) -> int:
-        return self.conn.execute("SELECT COUNT(*) FROM image_label").fetchone()[0]
+    def capture_card_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM capture_card").fetchone()[0]
 
-    def labels_for_card(self, card_id: str) -> int:
+    def captures_with_card(self, card_id: str) -> int:
         return self.conn.execute(
-            "SELECT COUNT(*) FROM image_label WHERE card_id = ?", (card_id,)
+            "SELECT COUNT(DISTINCT capture_id) FROM capture_card WHERE card_id = ?",
+            (card_id,),
         ).fetchone()[0]

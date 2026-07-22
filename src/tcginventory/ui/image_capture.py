@@ -1,8 +1,10 @@
-"""A small button that collects card photos to attach to an entry row.
+"""A button that collects card photos to attach to a transaction/auction.
 
-Holds a list of image file paths in memory while editing; the owning screen
-ingests them into the vision training store when the entry is committed. Clicking
-opens a manager dialog (thumbnails + add/remove).
+A photo is a **scene of one or more cards**; on commit the owning screen ingests
+each photo into the vision store, labelled with **every card in the entry** (the
+system learns to recognise those cards against its catalog). Holds the chosen
+file paths in memory while editing; clicking opens a manager dialog (thumbnails
++ add/remove).
 """
 
 from __future__ import annotations
@@ -27,13 +29,16 @@ _PATH_ROLE = Qt.UserRole + 1
 
 
 class ImageCaptureButton(QPushButton):
-    """Collects image file paths to attach to a card; shows the count."""
+    """Collects image file paths to attach to an entry; shows the count."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, label: str = "📷 Photos", parent=None) -> None:
         super().__init__(parent)
         self._paths: list[str] = []
-        self.setFixedWidth(52)
-        self.setToolTip("Attach photos of this card (for image-recognition training)")
+        self._label = label
+        self.setToolTip(
+            "Attach photos of the cards in this entry (for image-recognition "
+            "training). A photo may contain several cards."
+        )
         self.clicked.connect(self._open_dialog)
         self._sync()
 
@@ -46,7 +51,7 @@ class ImageCaptureButton(QPushButton):
 
     def _sync(self) -> None:
         n = len(self._paths)
-        self.setText(f"📷 {n}" if n else "📷")
+        self.setText(f"{self._label} ({n})" if n else self._label)
 
     def _open_dialog(self) -> None:
         dialog = _ImageListDialog(self._paths, self)
