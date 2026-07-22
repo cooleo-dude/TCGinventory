@@ -164,8 +164,12 @@ def apply_date_range(
     else:
         if now_ms is None:
             now_ms = datetime.now().timestamp() * 1000.0
-        end = now_ms  # anchor the window to today
-        start = end - days * _DAY_MS
+        # Today-anchored window, clamped to the data so the plot fills with data
+        # rather than showing empty margins where there is none.
+        start = max(now_ms - days * _DAY_MS, x_min)
+        end = min(now_ms, x_max)
+        if start >= end:  # the window doesn't overlap the data → show it all
+            start, end = x_min, x_max
 
     # y over the visible window: each line's points inside it, plus its
     # interpolated value at the window's left edge so a line crossing into the

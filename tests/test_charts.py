@@ -97,15 +97,29 @@ def test_apply_date_range_anchors_window_to_today(app):
     assert ay.min() >= 28.0  # interpolated edge (30), not the out-of-window 10
 
 
-def test_apply_date_range_window_is_relative_to_today_not_data(app):
+def test_apply_date_range_fills_plot_when_data_ends_before_today(app):
     from tcginventory.ui.charts import apply_date_range
 
     chart, ax, _ay, base = _timeseries_chart()
-    # Today is 10 days after the last data point → window ends in the future.
+    # Today is 10 days after the last data point.
     now_ms = base + 100 * _DAY_MS
     apply_date_range(chart, 30, now_ms=now_ms)
-    assert abs(ax.max().toMSecsSinceEpoch() - now_ms) < 1000
+    # No empty right margin — the right edge clamps to the last data point…
+    assert abs(ax.max().toMSecsSinceEpoch() - (base + 90 * _DAY_MS)) < 1000
+    # …while the left edge stays today-anchored (today − 30d).
     assert abs(ax.min().toMSecsSinceEpoch() - (now_ms - 30 * _DAY_MS)) < 1000
+
+
+def test_apply_date_range_falls_back_to_all_data_when_window_misses(app):
+    from tcginventory.ui.charts import apply_date_range
+
+    chart, ax, _ay, base = _timeseries_chart()
+    # Today is well past the data → a 30-day window contains none of it, so the
+    # plot fills with the full recorded extent instead of showing empty space.
+    now_ms = base + 400 * _DAY_MS
+    apply_date_range(chart, 30, now_ms=now_ms)
+    assert abs(ax.min().toMSecsSinceEpoch() - base) < 1000
+    assert abs(ax.max().toMSecsSinceEpoch() - (base + 90 * _DAY_MS)) < 1000
 
 
 def test_apply_date_range_all_time_uses_full_extent(app):
@@ -142,16 +156,31 @@ def test_range_selector_emits_days(app):
 
 
 def test_ranged_chart_view_applies_range_on_set(app):
+    from datetime import datetime
+
+    from PySide6.QtCharts import QDateTimeAxis
+
     from tcginventory.ui.charts import RangedChartView
 
+    # 90 days of data ending ~today so a 30-day window overlaps it (real "now").
+    now_ms = datetime.now().timestamp() * 1000.0
+    chart = QChart()
+    line = QLineSeries()
+    for i in range(4):
+        line.append(now_ms - (90 - i * 30) * _DAY_MS, 10.0 * (i + 1))
+    chart.addSeries(line)
+    ax, ay = QDateTimeAxis(), QValueAxis()
+    chart.addAxis(ax, Qt.AlignBottom)
+    chart.addAxis(ay, Qt.AlignLeft)
+    line.attachAxis(ax)
+    line.attachAxis(ay)
+
     view = RangedChartView(default_days=30)
-    chart, _ax, _ay, _base = _timeseries_chart()
     view.setChart(chart)
     assert view.chart() is chart  # delegates to the inner HoverChartView
-    # A 30-day window is applied (anchored to today, so assert on its span).
     x_axis = next(iter(chart.axes(Qt.Horizontal)))
     span_days = (
         x_axis.max().toMSecsSinceEpoch() - x_axis.min().toMSecsSinceEpoch()
     ) / _DAY_MS
-    assert abs(span_days - 30) < 1
+    assert abs(span_days - 30) < 2  # a 30-day window is applied
     view.deleteLater()

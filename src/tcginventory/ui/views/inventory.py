@@ -296,8 +296,12 @@ class InventoryView(QWidget):
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        # Notes is the last column → it stretches to absorb any leftover width.
-        self._table.horizontalHeader().setStretchLastSection(True)
+        # Notes absorbs leftover width. (stretchLastSection would target the
+        # hidden trailing link columns, so stretch the Notes column explicitly.)
+        self._table.horizontalHeader().setStretchLastSection(False)
+        self._table.horizontalHeader().setSectionResizeMode(
+            self._col("Notes"), QHeaderView.Stretch
+        )
         self._table.doubleClicked.connect(self._open_detail)
         self._table.clicked.connect(self._edit_on_click)
         self._table.selectionModel().selectionChanged.connect(self._on_selection)
@@ -449,9 +453,12 @@ class InventoryView(QWidget):
             ("Holo", 70), ("Edition", 110), ("Intent", 110), ("Trend", 70),
         ):
             self._table.setColumnWidth(self._col(header), width)
-        # "Sold For" takes half the width of the Unrealized Gain/Loss column.
-        unrealized_w = self._table.columnWidth(self._col("Unrealized Gain/Loss"))
-        self._table.setColumnWidth(self._col("Sold For"), max(40, unrealized_w // 2))
+        # Halve the Unrealized Gain/Loss column (its freed width flows to the
+        # stretching Notes column); "Sold For" matches that half-width.
+        unrealized_col = self._col("Unrealized Gain/Loss")
+        half = max(40, self._table.columnWidth(unrealized_col) // 2)
+        self._table.setColumnWidth(unrealized_col, half)
+        self._table.setColumnWidth(self._col("Sold For"), half)
 
     def _db_file(self) -> str | None:
         """The backing SQLite file, or None for an in-memory DB (tests)."""
