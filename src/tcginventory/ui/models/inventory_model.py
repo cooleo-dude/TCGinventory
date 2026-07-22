@@ -167,7 +167,7 @@ _COLUMNS: list[_Column] = [
     # Trend arrows are painted from the model's per-item trend map (set_trends),
     # so these lambdas are placeholders — data() intercepts the Trend column.
     _Column("Trend", lambda r: "", lambda r: 0.0),
-    _Column("Unrealized Gain/Loss", _upl_display, _upl_sort, numeric=True, pl=True),
+    _Column("Unrealized G/L", _upl_display, _upl_sort, numeric=True, pl=True),
     _Column("Sold", lambda r: r.sold_status, lambda r: r.sold_status),
     _Column("Sold For", _sold_display, _sold_sort, numeric=True),
     _Column(

@@ -453,9 +453,9 @@ class InventoryView(QWidget):
             ("Holo", 70), ("Edition", 110), ("Intent", 110), ("Trend", 70),
         ):
             self._table.setColumnWidth(self._col(header), width)
-        # Halve the Unrealized Gain/Loss column (its freed width flows to the
+        # Halve the Unrealized G/L column (its freed width flows to the
         # stretching Notes column); "Sold For" matches that half-width.
-        unrealized_col = self._col("Unrealized Gain/Loss")
+        unrealized_col = self._col("Unrealized G/L")
         half = max(40, self._table.columnWidth(unrealized_col) // 2)
         self._table.setColumnWidth(unrealized_col, half)
         self._table.setColumnWidth(self._col("Sold For"), half)
