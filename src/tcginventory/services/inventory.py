@@ -53,6 +53,9 @@ class InventoryRow:
     current_price_cents: int | None
     review: bool  # item marked for manual review (poll-protected, highlighted)
     sold_status: str  # "unsold" | "partial" | "sold"
+    # Per-unit price this lot's disposed units actually sold for (proceeds ÷
+    # units sold); None if none of the lot has been sold.
+    sold_price_cents: int | None = None
 
     @property
     def in_stock(self) -> bool:
@@ -67,9 +70,25 @@ class InventoryRow:
 
 class InventoryService:
     def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
         self.items = ItemRepository(conn)
         self.lots = LotRepository(conn)
         self.prices = PriceSnapshotRepository(conn)
+
+    def _sold_proceeds_by_lot(self) -> dict[int, tuple[int, int]]:
+        """``lot_id -> (total proceeds cents, units sold)`` across posted sales,
+        from the disposal lines that drew each lot down."""
+        rows = self.conn.execute(
+            "SELECT lc.lot_id AS lot_id, "
+            "SUM(tl.unit_price_cents * lc.quantity) AS proceeds, "
+            "SUM(lc.quantity) AS qty "
+            "FROM lot_consumption lc "
+            "JOIN transaction_line tl ON tl.id = lc.transaction_line_id "
+            'JOIN "transaction" t ON t.id = tl.transaction_id '
+            "WHERE t.status = 'posted' AND tl.direction = 'out' "
+            "GROUP BY lc.lot_id"
+        ).fetchall()
+        return {r["lot_id"]: (r["proceeds"], r["qty"]) for r in rows}
 
     def on_hand(self, item_id: int, intent: Intent | None = None) -> int:
         """Units currently on hand for an item (optionally filtered by intent)."""
@@ -135,6 +154,7 @@ class InventoryService:
         """
         rows: list[InventoryRow] = []
         latest_prices = self.prices.latest_prices()
+        sold_by_lot = self._sold_proceeds_by_lot()
         items_by_id = {item.id: item for item in self.items.list_all()}
         for lot in self.lots.list_all():
             item = items_by_id.get(lot.item_id)
@@ -157,6 +177,13 @@ class InventoryService:
             else:
                 sold_status = "partial"
 
+            proceeds_qty = sold_by_lot.get(lot.id)
+            sold_price = (
+                round(proceeds_qty[0] / proceeds_qty[1])
+                if proceeds_qty and proceeds_qty[1]
+                else None
+            )
+
             rows.append(
                 InventoryRow(
                     item=item,
@@ -171,6 +198,7 @@ class InventoryService:
                     current_price_cents=current,
                     review=item.review,
                     sold_status=sold_status,
+                    sold_price_cents=sold_price,
                 )
             )
         return rows

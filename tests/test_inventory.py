@@ -20,6 +20,35 @@ def inv(conn):
     return InventoryService(conn)
 
 
+def test_inventory_row_sold_price(svc, inv):
+    result = buy(svc, "X", 8000, 10000, "2026-01-01")
+    item_id = result.lots[0].item_id
+    lot_id = result.lots[0].id
+
+    # Unsold → no sale price yet.
+    row = next(r for r in inv.inventory_rows() if r.lot_id == lot_id)
+    assert row.sold_status == "unsold"
+    assert row.sold_price_cents is None
+
+    # Sell it for $120 → the row records what it sold for (per unit).
+    sell(svc, item_id, 1, 12000, "2026-02-01")
+    row = next(r for r in inv.inventory_rows() if r.lot_id == lot_id)
+    assert row.sold_status == "sold"
+    assert row.sold_price_cents == 12000
+
+
+def test_inventory_row_sold_price_averages_multi_unit_lot(svc, inv):
+    # A 2-unit lot sold across two sales at $100 and $140 → average $120/unit.
+    result = buy(svc, "Y", 8000, 10000, "2026-01-01", quantity=2)
+    item_id = result.lots[0].item_id
+    lot_id = result.lots[0].id
+    sell(svc, item_id, 1, 10000, "2026-02-01")
+    sell(svc, item_id, 1, 14000, "2026-02-05")
+    row = next(r for r in inv.inventory_rows() if r.lot_id == lot_id)
+    assert row.sold_status == "sold"
+    assert row.sold_price_cents == 12000  # (10000 + 14000) / 2
+
+
 def test_position_reflects_cost_and_current_market(svc, inv):
     # Paid $80 for a card whose market is $100 → basis 80, market 100, +20.
     result = buy(svc, "X", 8000, 10000, "2026-01-01")

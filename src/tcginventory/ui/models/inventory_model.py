@@ -87,6 +87,14 @@ def _upl_sort(r: InventoryRow) -> int:
     return value if value is not None else 0
 
 
+def _sold_display(r: InventoryRow) -> str:
+    return money(r.sold_price_cents) if r.sold_price_cents is not None else "—"
+
+
+def _sold_sort(r: InventoryRow) -> int:
+    return r.sold_price_cents if r.sold_price_cents is not None else -1
+
+
 @dataclass(frozen=True)
 class _Column:
     header: str
@@ -161,6 +169,7 @@ _COLUMNS: list[_Column] = [
     _Column("Trend", lambda r: "", lambda r: 0.0),
     _Column("Unrealized Gain/Loss", _upl_display, _upl_sort, numeric=True, pl=True),
     _Column("Sold", lambda r: r.sold_status, lambda r: r.sold_status),
+    _Column("Sold For", _sold_display, _sold_sort, numeric=True),
     _Column(
         "Notes",
         lambda r: r.item.notes or "",

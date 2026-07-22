@@ -449,6 +449,9 @@ class InventoryView(QWidget):
             ("Holo", 70), ("Edition", 110), ("Intent", 110), ("Trend", 70),
         ):
             self._table.setColumnWidth(self._col(header), width)
+        # "Sold For" takes half the width of the Unrealized Gain/Loss column.
+        unrealized_w = self._table.columnWidth(self._col("Unrealized Gain/Loss"))
+        self._table.setColumnWidth(self._col("Sold For"), max(40, unrealized_w // 2))
 
     def _db_file(self) -> str | None:
         """The backing SQLite file, or None for an in-memory DB (tests)."""
