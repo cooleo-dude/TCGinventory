@@ -39,6 +39,7 @@ from tcginventory.ui.views.dashboard import DashboardView
 from tcginventory.ui.views.history import HistoryView
 from tcginventory.ui.views.inventory import InventoryView
 from tcginventory.ui.views.market import PriceLookupView
+from tcginventory.ui.views.recognition import RecognitionView
 from tcginventory.ui.views.transaction import TransactionView
 
 NAV_ITEMS = [
@@ -48,6 +49,7 @@ NAV_ITEMS = [
     "History",
     "Price Lookup",
     "eBay Auctions",
+    "Recognition",
 ]
 _TRANSACTION_INDEX = 1
 _REFRESH_STALE_HOURS = 12  # startup auto-refresh only if older than this
@@ -200,8 +202,10 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._transaction)  # 1 Transaction
         self._stack.addWidget(self._inventory)  # 2 Inventory
         self._stack.addWidget(self._history)  # 3 History
+        self._recognition = RecognitionView(conn)
         self._stack.addWidget(self._price_lookup)  # 4 Price Lookup
         self._stack.addWidget(self._auctions)  # 5 eBay Auctions
+        self._stack.addWidget(self._recognition)  # 6 Recognition
 
         # Keep read views current as the ledger changes.
         self._transaction.posted.connect(self._on_ledger_changed)

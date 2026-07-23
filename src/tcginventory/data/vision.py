@@ -62,6 +62,28 @@ CREATE TABLE IF NOT EXISTS capture_card (
 );
 CREATE INDEX IF NOT EXISTS idx_capture_card_capture ON capture_card(capture_id);
 CREATE INDEX IF NOT EXISTS idx_capture_card_card ON capture_card(card_id);
+CREATE TABLE IF NOT EXISTS region (
+    id              INTEGER PRIMARY KEY,
+    image_id        INTEGER NOT NULL REFERENCES image(id) ON DELETE CASCADE,
+    number          INTEGER NOT NULL,   -- the box's label on the canvas
+    x               REAL    NOT NULL,   -- box geometry, normalised 0..1 of the
+    y               REAL    NOT NULL,   -- image (resolution-independent)
+    w               REAL    NOT NULL,
+    h               REAL    NOT NULL,
+    side            TEXT,               -- 'give' | 'receive' | NULL (listing)
+    card_id         TEXT,
+    name            TEXT,
+    set_name        TEXT,
+    card_number     TEXT,
+    language        TEXT,
+    condition       TEXT,
+    is_graded       INTEGER NOT NULL DEFAULT 0,
+    grade           TEXT,
+    grading_company TEXT,
+    created_at      TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_region_image ON region(image_id);
+CREATE INDEX IF NOT EXISTS idx_region_card ON region(card_id);
 """
 
 
@@ -197,6 +219,53 @@ class VisionRepository:
                 ),
             )
         return int(cur.lastrowid)
+
+    def add_region(
+        self,
+        image_id: int,
+        number: int,
+        box: tuple[float, float, float, float],
+        side: str | None,
+        card: CardLabel,
+        now: str | None = None,
+    ) -> int:
+        """Record a drawn box: ``box`` = (x, y, w, h) normalised to 0..1."""
+        x, y, w, h = box
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO region (image_id, number, x, y, w, h, side, card_id, "
+                "name, set_name, card_number, language, condition, is_graded, "
+                "grade, grading_company, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    image_id,
+                    number,
+                    x,
+                    y,
+                    w,
+                    h,
+                    side,
+                    card.card_id,
+                    card.name,
+                    card.set_name,
+                    card.card_number,
+                    card.language,
+                    card.condition,
+                    1 if card.is_graded else 0,
+                    card.grade,
+                    card.grading_company,
+                    now or _now(),
+                ),
+            )
+        return int(cur.lastrowid)
+
+    def region_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM region").fetchone()[0]
+
+    def regions_for_image(self, image_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM region WHERE image_id = ? ORDER BY number", (image_id,)
+        ).fetchall()
 
     def capture_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM capture").fetchone()[0]
