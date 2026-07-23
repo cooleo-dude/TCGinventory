@@ -13,6 +13,8 @@ authors = [{ name = "Cole" }]
 dependencies = [
     "PySide6>=6.6",
     "httpx>=0.27",
+    "numpy>=1.26",
+    "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +22,12 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.5",
     "pyinstaller>=6.0",
+]
+# Enables the DINOv2 ONNX identifier (else a lightweight fallback embedder is
+# used). Install with `pip install -e ".[vision]"` and drop the model at
+# <data_dir>/vision/models/dinov2_small.onnx.
+vision = [
+    "onnxruntime>=1.17",
 ]
 
 [project.gui-scripts]

@@ -92,9 +92,15 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
 
 ## Milestones
 
-- **M-V1a** — matcher engine: ONNX embedder + `Recognizer.suggest(crop,
-  candidates)` + reference-embedding cache (`vision.db`, keyed by card + model
-  version). Pool-agnostic, headless.
+- **M-V1a** — matcher engine ✅ **done**: `Recognizer.suggest(image, candidates)`
+  (cosine-NN) + reference-embedding cache (`vision.db.card_embedding`, keyed by
+  card + embedder version), pool-agnostic and headless
+  (`services/recognizer.py`). Embedder is pluggable: **DINOv2-small via
+  onnxruntime** when the optional `vision` extra is installed and the model file
+  is present at `<data_dir>/vision/models/dinov2_small.onnx`; otherwise a
+  dependency-free **PixelEmbedder** fallback (down-scaled grayscale) so the
+  pipeline runs and is testable before the model is provisioned. Deps added:
+  `numpy`, `Pillow` (core); `onnxruntime` (optional `vision` extra).
 - **M-V1b** — the Recognition window: annotation canvas (adjustable zones,
   numbered boxes, multiple images) + segments panel + region storage.
   Model-agnostic; collects training data before any model exists.

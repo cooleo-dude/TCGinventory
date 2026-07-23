@@ -4,6 +4,22 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-23 — M-V1a matcher engine + pluggable embedder (DINOv2 / fallback)
+
+- `services/recognizer.py`: `Recognizer.suggest(image, candidates)` embeds a
+  query and ranks candidates by cosine similarity against per-card **reference
+  embeddings** cached in `vision.db.card_embedding` (keyed by card + embedder
+  version; open-vocabulary, no retrain to grow the catalog). Headless,
+  pool-agnostic; reference-image resolution is injectable.
+- **Embedder is pluggable & version-tagged:** **DINOv2-small via onnxruntime**
+  (optional `vision` extra + model at `<data_dir>/vision/models/dinov2_small.onnx`)
+  or a dependency-free **PixelEmbedder** fallback (down-scaled grayscale) so the
+  engine runs/tests before the ~90 MB model is provisioned — changing embedders
+  re-embeds (cache key includes the version).
+- Core deps added: **numpy, Pillow**; **onnxruntime** kept optional. The DINOv2
+  weights are a provisioning artifact (not committed). Next: M-V1c wires
+  per-box suggestions into the Recognition window.
+
 ### 2026-07-23 — Detection: classic-CV + YOLO-nano as toggleable box proposers
 
 - Both detectors are first-class **box proposers**, shown as canvas overlays the

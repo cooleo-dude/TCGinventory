@@ -84,6 +84,14 @@ CREATE TABLE IF NOT EXISTS region (
 );
 CREATE INDEX IF NOT EXISTS idx_region_image ON region(image_id);
 CREATE INDEX IF NOT EXISTS idx_region_card ON region(card_id);
+CREATE TABLE IF NOT EXISTS card_embedding (
+    card_id       TEXT    NOT NULL,
+    model_version TEXT    NOT NULL,      -- embedder identity; changing it re-embeds
+    dim           INTEGER NOT NULL,
+    vector        BLOB    NOT NULL,      -- float32 bytes, L2-normalised
+    created_at    TEXT    NOT NULL,
+    PRIMARY KEY (card_id, model_version)
+);
 """
 
 
@@ -261,6 +269,35 @@ class VisionRepository:
 
     def region_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM region").fetchone()[0]
+
+    # -- reference-embedding cache (bytes in/out; numpy stays in the service) --
+
+    def get_embedding(self, card_id: str, model_version: str) -> bytes | None:
+        row = self.conn.execute(
+            "SELECT vector FROM card_embedding WHERE card_id = ? AND "
+            "model_version = ?",
+            (card_id, model_version),
+        ).fetchone()
+        return bytes(row["vector"]) if row is not None else None
+
+    def put_embedding(
+        self,
+        card_id: str,
+        model_version: str,
+        dim: int,
+        vector: bytes,
+        now: str | None = None,
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO card_embedding (card_id, model_version, dim, vector, "
+                "created_at) VALUES (?,?,?,?,?) ON CONFLICT(card_id, model_version) "
+                "DO UPDATE SET dim = excluded.dim, vector = excluded.vector",
+                (card_id, model_version, dim, vector, now or _now()),
+            )
+
+    def embedding_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM card_embedding").fetchone()[0]
 
     def regions_for_image(self, image_id: int) -> list[sqlite3.Row]:
         return self.conn.execute(
