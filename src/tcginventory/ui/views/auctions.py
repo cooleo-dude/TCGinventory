@@ -947,8 +947,8 @@ class AuctionsView(QWidget):
         in the auction** (the listing photos collectively show those cards).
         Cleared after ingest so repeated saves don't duplicate. Never fails a
         save."""
-        paths = self._photos.paths()
-        if not paths:
+        photos = self._photos.photos()
+        if not photos:
             return
         cards = [
             CardLabel(
@@ -963,10 +963,11 @@ class AuctionsView(QWidget):
         ]
         if not cards:
             return
+        images = [(p.path, p.side, p.pair) for p in photos]
         repo = self._vision_repo or VisionRepository(open_vision())
         try:
             vision_svc.ingest_capture(
-                repo, paths, "auction", cards, base_dir=self._vision_dir
+                repo, images, "auction", cards, base_dir=self._vision_dir
             )
         except Exception:  # a bad photo must never block the save
             pass

@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS image (
     capture_id INTEGER NOT NULL REFERENCES capture(id) ON DELETE CASCADE,
     sha256     TEXT    NOT NULL,          -- content hash (files dedup on disk)
     path       TEXT    NOT NULL,
+    side       TEXT,                      -- 'front' | 'back' | NULL (unspecified)
+    pair_group INTEGER,                   -- links a front+back of the same cards
     width      INTEGER,
     height     INTEGER,
     created_at TEXT    NOT NULL
@@ -79,7 +81,17 @@ def open_vision(path: str | Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     _reset_legacy(conn)
     conn.executescript(_SCHEMA)
+    _ensure_columns(conn)
     return conn
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a capture-schema DB was first created."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(image)")}
+    if "side" not in cols:
+        conn.execute("ALTER TABLE image ADD COLUMN side TEXT")
+    if "pair_group" not in cols:
+        conn.execute("ALTER TABLE image ADD COLUMN pair_group INTEGER")
 
 
 def _reset_legacy(conn: sqlite3.Connection) -> None:
@@ -139,15 +151,26 @@ class VisionRepository:
         capture_id: int,
         sha256: str,
         path: str,
+        side: str | None = None,
+        pair_group: int | None = None,
         width: int | None = None,
         height: int | None = None,
         now: str | None = None,
     ) -> int:
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO image (capture_id, sha256, path, width, height, "
-                "created_at) VALUES (?,?,?,?,?,?)",
-                (capture_id, sha256, path, width, height, now or _now()),
+                "INSERT INTO image (capture_id, sha256, path, side, pair_group, "
+                "width, height, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    capture_id,
+                    sha256,
+                    path,
+                    side,
+                    pair_group,
+                    width,
+                    height,
+                    now or _now(),
+                ),
             )
         return int(cur.lastrowid)
 

@@ -4,6 +4,15 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-22 — Vision: optional front/back photo pairing within a capture
+
+- A photo can be tagged **front**/**back** and two photos **linked** as the two
+  faces of the same cards; pairing is optional (not every photo has a partner).
+- Stored on `image` as `side` ('front'|'back'|null) + `pair_group` (a small int
+  shared by a linked front+back within the capture; additive migration on open).
+  `services/vision.ingest_capture` now takes `(path, side, pair_group)` photo
+  specs; the `ImageCaptureButton` dialog links a selected pair (topmost = front).
+
 ### 2026-07-22 — Vision M-V0 flow: capture-grouped scene photos (supersedes same-day entry)
 
 - **Reframe:** a supplied photo is a **scene of one or more cards**, and a single

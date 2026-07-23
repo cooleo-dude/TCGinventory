@@ -880,8 +880,8 @@ class TransactionView(QWidget):
         """Record the transaction's photos as one capture, documenting **every
         received card** (the photos collectively show the cards being acquired).
         Never fails a post."""
-        paths = self._photos.paths()
-        if not paths:
+        photos = self._photos.photos()
+        if not photos:
             return
         cards = [
             _label_for(row, card)
@@ -890,10 +890,11 @@ class TransactionView(QWidget):
         ]
         if not cards:  # nothing identifiable to learn from (e.g. a pure sale)
             return
+        images = [(p.path, p.side, p.pair) for p in photos]
         repo = self._vision_repo or VisionRepository(open_vision())
         try:
             vision_svc.ingest_capture(
-                repo, paths, "transaction", cards, base_dir=self._vision_dir
+                repo, images, "transaction", cards, base_dir=self._vision_dir
             )
         except Exception:  # a bad photo must never block the ledger post
             pass

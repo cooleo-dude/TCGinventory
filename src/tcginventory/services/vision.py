@@ -41,9 +41,25 @@ def store_file(
     return dest, sha
 
 
+def _unpack(spec) -> tuple[str | Path, str | None, int | None]:
+    """Normalise a photo spec to ``(path, side, pair_group)``.
+
+    Accepts a bare path, a ``(path[, side[, pair]])`` tuple, or any object with
+    ``.path`` / ``.side`` / ``.pair`` attributes (e.g. a UI ``PhotoEntry``).
+    """
+    if isinstance(spec, (str, Path)):
+        return spec, None, None
+    if isinstance(spec, (tuple, list)):
+        path = spec[0]
+        side = spec[1] if len(spec) > 1 else None
+        pair = spec[2] if len(spec) > 2 else None
+        return path, side, pair
+    return spec.path, getattr(spec, "side", None), getattr(spec, "pair", None)
+
+
 def ingest_capture(
     repo: VisionRepository,
-    image_paths: Iterable[str | Path],
+    images: Iterable,
     source: str,
     cards: Iterable[CardLabel],
     *,
@@ -52,17 +68,20 @@ def ingest_capture(
 ) -> int | None:
     """Record one capture: all the entry's photos + all its cards.
 
-    Returns the new capture id, or ``None`` when there's nothing to store (no
-    photos, or no identifiable cards).
+    Each item of ``images`` may be a path or a ``(path, side, pair_group)`` spec
+    — a ``front``/``back`` pair share a ``pair_group``. Returns the new capture
+    id, or ``None`` when there's nothing to store (no photos, or no cards).
     """
-    paths = list(image_paths)
+    specs = [_unpack(s) for s in images]
     cards = list(cards)
-    if not paths or not cards:
+    if not specs or not cards:
         return None
     capture_id = repo.add_capture(source, now=now)
-    for path in paths:
+    for path, side, pair in specs:
         dest, sha = store_file(path, base_dir)
-        repo.add_image(capture_id, sha, str(dest), now=now)
+        repo.add_image(
+            capture_id, sha, str(dest), side=side, pair_group=pair, now=now
+        )
     for card in cards:
         repo.add_capture_card(capture_id, card, now=now)
     return capture_id

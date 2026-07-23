@@ -69,6 +69,31 @@ def test_ingest_capture_dedups_identical_files_on_disk(repo, tmp_path):
     assert list((store / "vision" / "images").glob(f"{sha}*")) != []
 
 
+def test_ingest_capture_persists_front_back_pair(repo, tmp_path):
+    front = tmp_path / "front.png"
+    front.write_bytes(b"front-face")
+    back = tmp_path / "back.png"
+    back.write_bytes(b"back-face")
+    solo = tmp_path / "solo.png"
+    solo.write_bytes(b"unpaired")
+
+    vision_svc.ingest_capture(
+        repo,
+        [(front, "front", 1), (back, "back", 1), (solo, None, None)],
+        "transaction",
+        [CardLabel(card_id="cel-4")],
+        base_dir=tmp_path / "s",
+    )
+    rows = repo.conn.execute(
+        "SELECT side, pair_group FROM image ORDER BY id"
+    ).fetchall()
+    assert [(r["side"], r["pair_group"]) for r in rows] == [
+        ("front", 1),
+        ("back", 1),
+        (None, None),
+    ]
+
+
 def test_ingest_capture_noop_without_photos_or_cards(repo, tmp_path):
     p = tmp_path / "x.png"
     p.write_bytes(b"x")
@@ -171,3 +196,20 @@ def test_auction_save_ingests_scene_photo(app, _quiet, tmp_path):
     view._save()
     assert vrepo.capture_count() == 1
     view.deleteLater()
+
+
+def test_photo_dialog_links_and_unlinks_front_back(app):
+    from tcginventory.ui.image_capture import PhotoEntry, _ImageListDialog
+
+    dialog = _ImageListDialog([PhotoEntry("a.png"), PhotoEntry("b.png")])
+    dialog._list.selectAll()
+    dialog._link()  # topmost = front, next = back, shared pair
+    assert [(p.side, p.pair) for p in dialog.photos()] == [
+        ("front", 1),
+        ("back", 1),
+    ]
+
+    dialog._list.selectAll()
+    dialog._unlink()
+    assert all(p.side is None and p.pair is None for p in dialog.photos())
+    dialog.deleteLater()
