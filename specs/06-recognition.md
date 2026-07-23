@@ -60,14 +60,21 @@ label) and to tuning the auto-accept vs. flag **thresholds**.
 **Decomposition — a class-agnostic detector + an embedding identifier
 (both decided 2026-07-23):**
 
-1. **Detector (find the cards) — a trained single-class "card" detector**
-   (**YOLO-nano**, ONNX/CPU), learned from the Recognition window's drawn boxes;
-   handles clutter/overlap. Classic CV may *optionally* pre-suggest boxes to
-   speed annotation, but the production detector is learned.
-   - **Bootstrapping consequence:** a learned detector needs labeled boxes
-     first, so **auto-detection is unavailable until enough boxes are
-     annotated** — the manual-annotation Recognition window (Part 1) necessarily
-     comes before Part 2's auto-detect.
+1. **Detector (find the cards) — two box proposers, toggled per method.** Both
+   propose class-agnostic "card" boxes as overlays the user accepts/edits:
+   - **Classic CV** (contour/quadrilateral detection + perspective correction) —
+     zero training, available immediately; strong for cards on a blank
+     background.
+   - **YOLO-nano** (single "card" class, ONNX/CPU) — trained on the drawn boxes;
+     stronger on clutter/overlap; available once trained.
+
+   The detection canvas carries a **checkbox per method** to toggle that
+   method's proposed boxes on/off, so the user can view either, compare both,
+   and promote the good ones into regions (or draw their own). The same
+   proposers feed Part 2's inference autofill.
+   - **Bootstrapping:** classic CV gives usable proposals from day one; YOLO
+     adds a better layer as the corpus grows — so auto-boxing isn't gated on
+     training, it just improves with it.
 2. **Identifier (name the card) — embedding + nearest-neighbour retrieval**
    (not a fixed-class classifier: the ~47k catalog grows constantly, so
    open-vocabulary retrieval — add a reference vector, no retraining — is

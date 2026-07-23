@@ -4,6 +4,15 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-23 — Detection: classic-CV + YOLO-nano as toggleable box proposers
+
+- Both detectors are first-class **box proposers**, shown as canvas overlays the
+  user accepts/edits into regions. A **checkbox per method** toggles that
+  method's boxes on/off (view either, compare both). Classic CV needs no
+  training (usable day one, blank backgrounds); YOLO-nano is trained on the
+  drawn boxes and improves clutter/overlap coverage. Same proposers feed Part 2
+  inference. So auto-boxing is **not gated** on training — it improves with it.
+
 ### 2026-07-23 — Recognition models chosen: DINOv2-small identifier + YOLO-nano detector
 
 - **Identifier:** frozen **DINOv2-small** (ONNX) embeddings + cosine NN retrieval
