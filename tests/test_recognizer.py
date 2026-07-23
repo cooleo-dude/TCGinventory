@@ -10,7 +10,13 @@ from tcginventory.services.recognizer import (
     PixelEmbedder,
     Recognizer,
     Suggestion,
+    model_path,
 )
+
+try:
+    import onnxruntime as _ort
+except Exception:  # pragma: no cover
+    _ort = None
 
 
 @pytest.fixture()
@@ -75,3 +81,19 @@ def test_suggest_skips_candidates_without_a_reference(repo, tmp_path):
     rec = Recognizer(repo, embedder=PixelEmbedder(32), reference_image=refs.get)
     out = rec.suggest(_pattern_png(tmp_path / "q.png", 4), ["A", "B"])
     assert [s.card_id for s in out] == ["A"]
+
+
+@pytest.mark.skipif(
+    _ort is None or model_path() is None,
+    reason="DINOv2 ONNX model / onnxruntime not available",
+)
+def test_dinov2_embedder_produces_normalised_384d_embeddings(tmp_path):
+    from tcginventory.services.recognizer import OnnxEmbedder
+
+    emb = OnnxEmbedder(model_path())
+    a = emb.embed(_pattern_png(tmp_path / "a.png", 11))
+    a2 = emb.embed(_pattern_png(tmp_path / "a2.png", 11))  # identical image
+    assert emb.dim == 384
+    assert a.shape == (384,)
+    assert abs(float(np.linalg.norm(a)) - 1.0) < 1e-4
+    assert float(np.dot(a, a2)) == pytest.approx(1.0, abs=1e-4)

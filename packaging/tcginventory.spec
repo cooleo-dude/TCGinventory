@@ -24,6 +24,12 @@ datas += [
     (os.path.join(assets, "icon.png"), "tcginventory/ui/assets"),
     (icon_ico, "tcginventory/ui/assets"),
 ]
+# DINOv2 identifier weights (LFS in the repo, ~88 MB) — bundled so the frozen
+# app is fully offline and self-contained.
+datas += [
+    (model, "tcginventory/models")
+    for model in glob.glob(os.path.join(src, "tcginventory", "models", "*.onnx"))
+]
 
 a = Analysis(
     [os.path.join(spec_dir, "entry.py")],
@@ -41,6 +47,10 @@ a = Analysis(
         "anyio",
         "sniffio",
         "idna",
+        # Vision identifier — recognizer is imported lazily by the UI, so name it
+        # (and onnxruntime) explicitly to pull the numpy/PIL/ort chain in.
+        "tcginventory.services.recognizer",
+        "onnxruntime",
     ],
     hookspath=[],
     hooksconfig={},

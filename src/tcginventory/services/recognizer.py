@@ -7,9 +7,10 @@ new card just adds a reference vector — no retraining.
 
 Embedder backends (chosen at build time):
 
-* **DINOv2-small via onnxruntime** — the intended identifier. Used when the
-  optional ``onnxruntime`` dep is installed **and** the model file is present at
-  ``<data_dir>/vision/models/dinov2_small.onnx``.
+* **DINOv2-small via onnxruntime** — the intended identifier, active by default.
+  Used when ``onnxruntime`` is installed **and** the model file is found: the
+  bundled package copy (``tcginventory/models/dinov2_small.onnx``, shipped via
+  Git LFS / PyInstaller) first, or a user-dropped file under the data dir.
 * **PixelEmbedder** — a lightweight, dependency-free fallback (down-scaled
   grayscale) so the pipeline runs and is testable before the model is
   provisioned. Weak, but real.
@@ -22,6 +23,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 
 import numpy as np
@@ -30,16 +32,26 @@ from PIL import Image
 from tcginventory import config
 from tcginventory.data.vision import VisionRepository
 
-try:  # optional — enables the DINOv2 backend
+try:
     import onnxruntime as _ort
-except Exception:  # pragma: no cover - absence is the common case
+except Exception:  # pragma: no cover - onnxruntime missing (e.g. minimal env)
     _ort = None
 
 MODEL_FILENAME = "dinov2_small.onnx"
 
 
-def model_path() -> Path:
-    return config.data_dir() / "vision" / "models" / MODEL_FILENAME
+def model_path() -> Path | None:
+    """Locate the DINOv2 ONNX model: the bundled package copy first (dev tree or
+    PyInstaller bundle), then a user-dropped file under the data dir. ``None`` if
+    neither exists."""
+    try:
+        bundled = Path(str(resources.files("tcginventory") / "models" / MODEL_FILENAME))
+        if bundled.is_file():
+            return bundled
+    except Exception:  # pragma: no cover - resource lookup edge cases
+        pass
+    fallback = config.data_dir() / "vision" / "models" / MODEL_FILENAME
+    return fallback if fallback.is_file() else None
 
 
 class PixelEmbedder:
@@ -75,15 +87,24 @@ class OnnxEmbedder:
         self.version = f"onnx:{Path(path).stem}"
         self.dim = 0  # set on first embed (depends on the model head)
 
-    def embed(self, image_path: str | Path) -> np.ndarray:  # pragma: no cover
+    def embed(self, image_path: str | Path) -> np.ndarray:
         with Image.open(image_path) as img:
             rgb = img.convert("RGB").resize((self._size, self._size))
         arr = np.asarray(rgb, dtype=np.float32) / 255.0
         arr = (arr - self._MEAN) / self._STD
         tensor = arr.transpose(2, 0, 1)[None, ...].astype(np.float32)  # NCHW
-        out = self._session.run(None, {self._input: tensor})[0]
-        vec = np.asarray(out, dtype=np.float32).reshape(-1)
-        self.dim = vec.shape[0]
+        raw = self._session.run(None, {self._input: tensor})[0]
+        out = np.asarray(raw, dtype=np.float32)
+        # DINOv2 last_hidden_state is [batch, 1 + num_patches, dim]; token 0 is the
+        # CLS token — the pooled image embedding. Fall back to a flat vector for
+        # models that already emit a pooled output.
+        if out.ndim == 3:
+            vec = out[0, 0]
+        elif out.ndim == 2:
+            vec = out[0]
+        else:
+            vec = out.reshape(-1)
+        self.dim = int(vec.shape[0])
         return _normalise(vec)
 
 
@@ -95,7 +116,7 @@ def _normalise(vec: np.ndarray) -> np.ndarray:
 def build_embedder():
     """DINOv2 if onnxruntime + the model file are available, else the fallback."""
     path = model_path()
-    if _ort is not None and path.exists():
+    if _ort is not None and path is not None:
         try:
             return OnnxEmbedder(path)
         except Exception:  # pragma: no cover - corrupt/incompatible model
