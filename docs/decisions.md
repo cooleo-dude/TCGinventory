@@ -4,6 +4,25 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-23 — Recognition engine architecture ratified (spec 06)
+
+- **Two-part system** (see [`specs/06-recognition.md`](../specs/06-recognition.md)):
+  a **Recognition window** = human-in-the-loop **training baseline** (annotate
+  scenes: draw numbered boxes, adjustable I-Give/They-Give zones or a single
+  listing lot, label each via catalog autofill; saves localized **regions**);
+  and **inference autofill** in Transaction/Auction (image → auto-detect +
+  autofill with confidence + missed-detection flags), built once a model exists.
+- **Data model:** `vision.db` gains a `region` table (box geometry + identity +
+  side), superseding the image-level `capture_card`. The interim per-entry 📷
+  photo buttons are **superseded** (removed when the window is built).
+- **Model paradigm:** **supervised metric-learning + active learning**, not RL
+  (the data is labeled boxes/identities, not a reward signal). Decompose into a
+  **class-agnostic card detector** (classic CV now → small trained detector on
+  drawn boxes) + an **embedding identifier** (open-vocab NN retrieval; frozen
+  DINOv2-small to start → fine-tune on the corpus). Exact model TBD in the
+  model discussion; fully local/offline (onnxruntime inference, offline-script
+  training).
+
 ### 2026-07-22 — Vision: optional front/back photo pairing within a capture
 
 - A photo can be tagged **front**/**back** and two photos **linked** as the two

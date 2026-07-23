@@ -19,6 +19,7 @@ personal operating records live in [`/docs`](../docs).
 | 03 | [Features & Requirements](03-features.md) | Functional requirements for V1 |
 | 04 | [UI / UX](04-ui-ux.md) | Screens, navigation, interactions |
 | 05 | [Roadmap](05-roadmap.md) | Milestones, phasing, future work |
+| 06 | [Recognition](06-recognition.md) | Card image-recognition & learning engine (post-V1, drafting) |
 
 ## Review sign-off
 
