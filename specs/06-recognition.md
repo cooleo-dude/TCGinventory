@@ -57,23 +57,26 @@ sample-efficient and stable than RL for detection/recognition. RL-style thinking
 maps only to the *acquisition* policy (which uncertain cases to ask the human to
 label) and to tuning the auto-accept vs. flag **thresholds**.
 
-**Decomposition — a class-agnostic detector + an embedding identifier:**
+**Decomposition — a class-agnostic detector + an embedding identifier
+(both decided 2026-07-23):**
 
-1. **Detector (find the cards).** Class-agnostic "card" boxes, not per-card.
-   - Now: **classic CV** (contour/quadrilateral detection + perspective
-     correction) — zero training, works for the blank-background case.
-   - Later: a small trained detector (e.g. YOLO-nano, ONNX/CPU) learned from the
-     Recognition window's drawn boxes; handles clutter/overlap.
-2. **Identifier (name the card).** **Embedding + nearest-neighbour retrieval**,
-   not a fixed-class classifier — the catalog (~47k) grows constantly, so
-   open-vocabulary retrieval (add a reference vector, no retraining) is
-   essential.
-   - M-V1: **frozen embeddings** from a compact ONNX encoder (DINOv2-small the
-     leading candidate) + cosine NN against a narrowed/growing candidate pool.
-   - M-V2: **fine-tune the embedder** with a metric-learning loss (ArcFace /
-     contrastive) on the accumulated `(crop, identity)` pairs — this is how the
-     "flow of data" improves it, done as periodic **offline batch** fine-tuning
-     (not unstable per-sample online updates).
+1. **Detector (find the cards) — a trained single-class "card" detector**
+   (**YOLO-nano**, ONNX/CPU), learned from the Recognition window's drawn boxes;
+   handles clutter/overlap. Classic CV may *optionally* pre-suggest boxes to
+   speed annotation, but the production detector is learned.
+   - **Bootstrapping consequence:** a learned detector needs labeled boxes
+     first, so **auto-detection is unavailable until enough boxes are
+     annotated** — the manual-annotation Recognition window (Part 1) necessarily
+     comes before Part 2's auto-detect.
+2. **Identifier (name the card) — embedding + nearest-neighbour retrieval**
+   (not a fixed-class classifier: the ~47k catalog grows constantly, so
+   open-vocabulary retrieval — add a reference vector, no retraining — is
+   essential).
+   - M-V1: **frozen DINOv2-small** (ONNX) embeddings + cosine NN against a
+     narrowed/growing candidate pool.
+   - M-V2: **fine-tune the embedder** (ArcFace / contrastive) on the accumulated
+     `(crop, identity)` pairs — how the "flow of data" improves it — as periodic
+     **offline batch** fine-tuning (not unstable per-sample online updates).
 
 **Feedback loop:** model proposes → human confirms/corrects/adds-missed →
 corrections (especially low-confidence / disagreements) are the highest-value
@@ -88,7 +91,7 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
 - **M-V1b** — the Recognition window: annotation canvas (adjustable zones,
   numbered boxes, multiple images) + segments panel + region storage.
   Model-agnostic; collects training data before any model exists.
-- **M-V1.5** — trained class-agnostic detector (from drawn boxes).
+- **M-V1.5** — trained single-class card detector (YOLO-nano) from drawn boxes.
 - **M-V2** — fine-tuned identifier on the corpus.
 - **Inference** — Part 2 autofill in Transaction/Auction with thresholds +
   missed-detection flags.
@@ -102,8 +105,9 @@ replaced by: the Recognition window (training) + Part 2 inference autofill
 (entry-form images become inference-only). They will be removed when the window
 is built.
 
-## Open questions (for the model discussion)
+## Open questions
 
-Exact detector + embedder models and sizes; local training cadence & footprint;
-auto-accept/flag confidence thresholds; overlap/pile handling; whether/when to
-build a full open-set catalog embedding index (bulk image download).
+Model sizes/variants (DINOv2-small vs base; YOLO-nano vs -small); local training
+cadence & footprint; auto-accept/flag confidence thresholds; overlap/pile
+handling; whether/when to build a full open-set catalog embedding index (bulk
+image download).

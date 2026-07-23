@@ -4,6 +4,17 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-23 — Recognition models chosen: DINOv2-small identifier + YOLO-nano detector
+
+- **Identifier:** frozen **DINOv2-small** (ONNX) embeddings + cosine NN retrieval
+  (open-vocabulary) for M-V1 → fine-tuned (ArcFace/contrastive) on the corpus for
+  M-V2. **Detector:** a trained **single-class "card" YOLO-nano** (ONNX/CPU) from
+  the Recognition window's drawn boxes (classic CV only an optional annotation
+  assist). **Not RL** — supervised metric-learning + active learning.
+- **Consequence:** the learned detector needs annotated boxes first, so the
+  manual-annotation Recognition window (Part 1) is built before Part 2's
+  auto-detect. See [`specs/06-recognition.md`](../specs/06-recognition.md).
+
 ### 2026-07-23 — Recognition engine architecture ratified (spec 06)
 
 - **Two-part system** (see [`specs/06-recognition.md`](../specs/06-recognition.md)):
