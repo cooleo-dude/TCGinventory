@@ -44,6 +44,18 @@ def test_pixel_embedder_is_deterministic_and_normalised(tmp_path):
     assert abs(float(np.linalg.norm(a)) - 1.0) < 1e-5  # unit-norm on real content
 
 
+def test_embed_accepts_a_pil_image_like_a_path(tmp_path):
+    from PIL import Image
+
+    emb = PixelEmbedder(size=32)
+    path = _pattern_png(tmp_path / "g.png", 3)
+    from_path = emb.embed(path)
+    with Image.open(path) as im:
+        from_image = emb.embed(im.copy())  # in-memory crop, no temp file
+    assert from_path.shape == from_image.shape
+    assert np.allclose(from_path, from_image)
+
+
 def test_suggest_ranks_the_matching_card_first(repo, tmp_path):
     refs = {
         "A": _pattern_png(tmp_path / "a.png", 1),

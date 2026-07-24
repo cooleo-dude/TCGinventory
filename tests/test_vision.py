@@ -70,6 +70,16 @@ def test_add_region_stores_box_and_label(repo):
     assert (row["x"], row["y"], row["w"], row["h"]) == (0.1, 0.2, 0.3, 0.4)
 
 
+def test_labeled_card_ids_are_distinct_and_skip_unlabeled(repo):
+    capture_id = repo.add_capture()
+    image_id = repo.add_image(capture_id, "sha", "/x.png", width=200, height=100)
+    repo.add_region(image_id, 1, (0, 0, 0.5, 0.5), None, CardLabel(card_id="cel-4"))
+    repo.add_region(image_id, 2, (0.5, 0, 0.5, 0.5), None, CardLabel(card_id="cel-4"))
+    repo.add_region(image_id, 3, (0, 0.5, 0.5, 0.5), None, CardLabel(card_id="cel-5"))
+    repo.add_region(image_id, 4, (0.5, 0.5, 0.5, 0.5), None, CardLabel(name="mystery"))
+    assert repo.labeled_card_ids() == ["cel-4", "cel-5"]
+
+
 # ---------------------------------------------------------------------------
 # Recognition window (offscreen)
 # ---------------------------------------------------------------------------
@@ -154,4 +164,107 @@ def test_recognition_listing_mode_has_no_side(app, _quiet, tmp_path):
 
     row = vrepo.conn.execute("SELECT side FROM region").fetchone()
     assert row["side"] is None
+    view.deleteLater()
+
+
+def _catalog_conn():
+    from tcginventory.data.db import connect
+    from tcginventory.data.migrator import migrate
+    from tcginventory.data.repositories import CardCatalogRepository
+    from tcginventory.domain.models import CatalogCard
+
+    conn = connect(":memory:")
+    migrate(conn)
+    CardCatalogRepository(conn).replace_all(
+        [
+            CatalogCard(
+                card_id="cel-4", name="Charizard", set_id="cel",
+                set_name="Celebrations", number="4", printed_total=25,
+            ),
+            CatalogCard(
+                card_id="cel-5", name="Blastoise", set_id="cel",
+                set_name="Celebrations", number="5", printed_total=25,
+            ),
+        ],
+        "2026-01-01",
+    )
+    return conn
+
+
+class _FakeRecognizer:
+    """Returns canned rankings, restricted to the given candidate pool."""
+
+    def __init__(self, ranked):
+        self._ranked = ranked  # list[(card_id, score)]
+
+    def suggest(self, image, candidates, top=5):
+        from tcginventory.services.recognizer import Suggestion
+
+        return [Suggestion(c, s) for c, s in self._ranked if c in candidates][:top]
+
+
+def test_suggestions_populate_and_picking_labels_the_box(app, _quiet, tmp_path):
+    from PySide6.QtCore import QRectF
+
+    from tcginventory.ui.views.recognition import RecognitionView
+
+    conn = _catalog_conn()
+    vrepo = VisionRepository(open_vision(":memory:"))
+    # Seed the corpus so the candidate pool is non-empty.
+    cap = vrepo.add_capture()
+    img = vrepo.add_image(cap, "sha", "/x.png", width=10, height=10)
+    vrepo.add_region(img, 1, (0, 0, 0.5, 1), None, CardLabel(card_id="cel-4"))
+    vrepo.add_region(img, 2, (0.5, 0, 0.5, 1), None, CardLabel(card_id="cel-5"))
+
+    view = RecognitionView(
+        conn,
+        vision_repo=vrepo,
+        vision_dir=tmp_path,
+        recognizer=_FakeRecognizer([("cel-5", 0.92), ("cel-4", 0.30)]),
+    )
+    view._mode.setCurrentIndex(1)  # listing
+    view.add_image_paths([_png(tmp_path / "scene.png", 200, 100)])
+    box = view._add_box(QRectF(10, 10, 40, 60))  # unlabeled
+
+    view._run_suggestions()
+
+    combo = view._suggest_boxes[box.number]
+    assert combo.isEnabled()
+    assert combo.count() == 3  # "— pick —" + two ranked guesses
+    assert "Blastoise" in combo.itemText(1) and "92%" in combo.itemText(1)
+    assert combo.itemText(2).startswith("⚠")  # low-confidence second guess
+
+    combo._on_activated(1)  # simulate picking the top suggestion
+    assert box.card.card_id == "cel-5"
+    assert view._name_fields[box.number].text() == "Blastoise"
+    view.deleteLater()
+
+
+def test_suggestions_notify_when_no_labeled_corpus(app, monkeypatch, tmp_path):
+    from PySide6.QtCore import QRectF
+    from PySide6.QtWidgets import QMessageBox
+
+    from tcginventory.ui.views.recognition import RecognitionView
+
+    calls: list = []
+    monkeypatch.setattr(
+        QMessageBox, "information", lambda *a, **k: calls.append(a) or QMessageBox.Ok
+    )
+
+    conn = _catalog_conn()
+    vrepo = VisionRepository(open_vision(":memory:"))  # empty corpus
+    view = RecognitionView(
+        conn,
+        vision_repo=vrepo,
+        vision_dir=tmp_path,
+        recognizer=_FakeRecognizer([("cel-5", 0.9)]),
+    )
+    view._mode.setCurrentIndex(1)
+    view.add_image_paths([_png(tmp_path / "scene.png", 200, 100)])
+    box = view._add_box(QRectF(10, 10, 40, 60))  # unlabeled → pool stays empty
+
+    view._run_suggestions()
+
+    assert calls  # the user was told the corpus is empty
+    assert not view._suggest_boxes[box.number].isEnabled()  # nothing suggested
     view.deleteLater()

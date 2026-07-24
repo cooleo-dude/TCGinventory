@@ -21,7 +21,8 @@ Qt-free. Vectors are L2-normalised, so a dot product is the cosine similarity.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -38,6 +39,19 @@ except Exception:  # pragma: no cover - onnxruntime missing (e.g. minimal env)
     _ort = None
 
 MODEL_FILENAME = "dinov2_small.onnx"
+
+
+@contextmanager
+def _open_image(src) -> Iterator[Image.Image]:
+    """Yield a PIL image for ``src``, closing it only if we opened it here."""
+    if isinstance(src, Image.Image):
+        yield src
+    else:
+        img = Image.open(src)
+        try:
+            yield img
+        finally:
+            img.close()
 
 
 def model_path() -> Path | None:
@@ -62,8 +76,8 @@ class PixelEmbedder:
         self.dim = size * size
         self.version = f"pixel-{size}"
 
-    def embed(self, image_path: str | Path) -> np.ndarray:
-        with Image.open(image_path) as img:
+    def embed(self, image) -> np.ndarray:
+        with _open_image(image) as img:
             gray = img.convert("L").resize((self.size, self.size))
         vec = np.asarray(gray, dtype=np.float32).reshape(-1)
         vec -= float(vec.mean())
@@ -87,8 +101,8 @@ class OnnxEmbedder:
         self.version = f"onnx:{Path(path).stem}"
         self.dim = 0  # set on first embed (depends on the model head)
 
-    def embed(self, image_path: str | Path) -> np.ndarray:
-        with Image.open(image_path) as img:
+    def embed(self, image) -> np.ndarray:
+        with _open_image(image) as img:
             rgb = img.convert("RGB").resize((self._size, self._size))
         arr = np.asarray(rgb, dtype=np.float32) / 255.0
         arr = (arr - self._MEAN) / self._STD
@@ -148,11 +162,13 @@ class Recognizer:
     def model_version(self) -> str:
         return self._embedder.version
 
-    def suggest(
-        self, image_path: str | Path, candidates, top: int = 5
-    ) -> list[Suggestion]:
-        """Top ``top`` candidate card_ids ranked by similarity to the query."""
-        query = self._embedder.embed(image_path)
+    def suggest(self, image, candidates, top: int = 5) -> list[Suggestion]:
+        """Top ``top`` candidate card_ids ranked by similarity to the query.
+
+        ``image`` is a file path or an already-loaded PIL image (e.g. a crop of a
+        larger scene), so callers need not spill crops to disk.
+        """
+        query = self._embedder.embed(image)
         scored: list[Suggestion] = []
         for card_id in candidates:
             ref = self._reference_vector(card_id)

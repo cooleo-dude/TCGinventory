@@ -835,6 +835,12 @@ class CardCatalogRepository:
     def count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM card_catalog").fetchone()[0]
 
+    def get(self, card_id: str) -> CatalogCard | None:
+        row = self.conn.execute(
+            "SELECT * FROM card_catalog WHERE card_id = ?", (card_id,)
+        ).fetchone()
+        return self._to_model(row) if row else None
+
     def _insert_many(self, cards: list[CatalogCard], updated_at: str) -> None:
         self.conn.executemany(
             """

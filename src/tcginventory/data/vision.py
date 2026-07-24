@@ -270,6 +270,16 @@ class VisionRepository:
     def region_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM region").fetchone()[0]
 
+    def labeled_card_ids(self) -> list[str]:
+        """Distinct catalog ids that appear in saved regions — the growing pool
+        of cards the identity matcher can retrieve against (active learning:
+        the more you label, the richer the candidate set)."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT card_id FROM region WHERE card_id IS NOT NULL "
+            "ORDER BY card_id"
+        ).fetchall()
+        return [r["card_id"] for r in rows]
+
     # -- reference-embedding cache (bytes in/out; numpy stays in the service) --
 
     def get_embedding(self, card_id: str, model_version: str) -> bytes | None:

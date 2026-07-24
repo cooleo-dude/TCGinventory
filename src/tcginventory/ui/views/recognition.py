@@ -27,6 +27,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QCompleter,
@@ -56,6 +57,9 @@ from tcginventory.services import vision as vision_svc
 _IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
 _MODES = ["Transaction (I Give / They Give)", "Listing (one lot)"]
 _BOX_PEN = QColor("#d79921")
+# Cosine below this gets a ⚠ in the suggestion list (advisory; frozen DINOv2 on
+# photo-vs-catalog-render is a weak baseline until the M-V2 fine-tune).
+_LOW_CONFIDENCE = 0.6
 
 
 @dataclass
@@ -173,18 +177,73 @@ class _NameField(QLineEdit):
         if text and text != (self._box.card.name or ""):
             self._box.card = CardLabel(name=text)
 
+    def apply_label(self, card: CardLabel) -> None:
+        """Adopt a card identity picked elsewhere (e.g. a matcher suggestion)."""
+        self._box.card = card
+        self.setText(card.name or "")
+
+
+class _SuggestBox(QComboBox):
+    """Per-row dropdown of the matcher's ranked guesses; picking one labels the box.
+
+    Starts as a placeholder; :meth:`set_suggestions` fills it after the recognizer
+    runs. Selecting an entry copies that identity into the box and the name field.
+    """
+
+    def __init__(self, box: _Box, name_field: _NameField) -> None:
+        super().__init__()
+        self._box = box
+        self._name_field = name_field
+        self._labels: list[CardLabel | None] = [None]
+        self.addItem("— suggest —")
+        self.setEnabled(False)
+        self.activated.connect(self._on_activated)
+
+    def set_suggestions(self, items: list[tuple[CardLabel, float]]) -> None:
+        self.blockSignals(True)
+        self.clear()
+        self._labels = [None]
+        if not items:
+            self.addItem("no match in corpus")
+            self.setEnabled(False)
+        else:
+            self.addItem("— pick a match —")
+            for card, score in items:
+                pct = int(round(max(0.0, min(1.0, score)) * 100))
+                mark = "⚠ " if score < _LOW_CONFIDENCE else ""
+                label = card.name or card.card_id or "?"
+                if card.set_name:
+                    label += f" · {card.set_name}"
+                self.addItem(f"{mark}{label}  ({pct}%)")
+                self._labels.append(card)
+            self.setEnabled(True)
+        self.setCurrentIndex(0)
+        self.blockSignals(False)
+
+    def _on_activated(self, index: int) -> None:
+        if 0 <= index < len(self._labels) and self._labels[index] is not None:
+            self._name_field.apply_label(self._labels[index])
+
 
 class RecognitionView(QWidget):
     def __init__(
-        self, conn: sqlite3.Connection, vision_repo=None, vision_dir=None
+        self,
+        conn: sqlite3.Connection,
+        vision_repo=None,
+        vision_dir=None,
+        recognizer=None,
     ) -> None:
         super().__init__()
         self._conn = conn
         self._vision_repo = vision_repo
         self._vision_dir = vision_dir
+        self._recognizer = recognizer  # lazily built on first Suggest if None
+        self._rec_repo = None  # the vision repo backing the recognizer
         self._sessions: list[_Session] = []
         self._current: int = -1
         self._items: dict[int, QGraphicsRectItem] = {}  # number -> item (current)
+        self._name_fields: dict[int, _NameField] = {}
+        self._suggest_boxes: dict[int, _SuggestBox] = {}
         self._divider = None  # QGraphicsLineItem for the current image
 
         # -- toolbar
@@ -198,6 +257,12 @@ class RecognitionView(QWidget):
         self._draw_btn.toggled.connect(lambda on: self._scene.set_draw(on))
         del_btn = QPushButton("Delete box")
         del_btn.clicked.connect(self._delete_selected)
+        self._suggest_btn = QPushButton("Suggest labels")
+        self._suggest_btn.setToolTip(
+            "Rank catalog matches for each box against the cards you've already "
+            "labeled (identity matcher)"
+        )
+        self._suggest_btn.clicked.connect(self._run_suggestions)
         # Auto-proposal toggles — wired to the detectors in a later increment.
         self._cv_toggle = QCheckBox("Classic-CV boxes")
         self._yolo_toggle = QCheckBox("YOLO boxes")
@@ -212,6 +277,7 @@ class RecognitionView(QWidget):
         toolbar.addWidget(add_btn)
         toolbar.addWidget(self._draw_btn)
         toolbar.addWidget(del_btn)
+        toolbar.addWidget(self._suggest_btn)
         toolbar.addWidget(self._cv_toggle)
         toolbar.addWidget(self._yolo_toggle)
         toolbar.addStretch(1)
@@ -225,13 +291,14 @@ class RecognitionView(QWidget):
         self._strip.currentRowChanged.connect(self._switch_image)
 
         # -- segments panel
-        self._panel = QTableWidget(0, 3)
-        self._panel.setHorizontalHeaderLabels(["#", "Card", "Side"])
+        self._panel = QTableWidget(0, 4)
+        self._panel.setHorizontalHeaderLabels(["#", "Card", "Suggestion", "Side"])
         self._panel.verticalHeader().setVisible(False)
         self._panel.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._panel.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self._panel.setColumnWidth(0, 30)
-        self._panel.setColumnWidth(2, 80)
+        self._panel.setColumnWidth(2, 190)
+        self._panel.setColumnWidth(3, 70)
 
         self._empty = QLabel("Add images, then draw a box around each card.")
         self._empty.setAlignment(Qt.AlignCenter)
@@ -372,6 +439,8 @@ class RecognitionView(QWidget):
 
     def _refresh_panel(self) -> None:
         self._panel.setRowCount(0)
+        self._name_fields.clear()
+        self._suggest_boxes.clear()
         if not (0 <= self._current < len(self._sessions)):
             return
         session = self._sessions[self._current]
@@ -381,9 +450,14 @@ class RecognitionView(QWidget):
             num = QTableWidgetItem(str(box.number))
             num.setTextAlignment(Qt.AlignCenter)
             self._panel.setItem(r, 0, num)
-            self._panel.setCellWidget(r, 1, _NameField(self._conn, box))
+            name_field = _NameField(self._conn, box)
+            suggest_box = _SuggestBox(box, name_field)
+            self._name_fields[box.number] = name_field
+            self._suggest_boxes[box.number] = suggest_box
+            self._panel.setCellWidget(r, 1, name_field)
+            self._panel.setCellWidget(r, 2, suggest_box)
             side = self._side_for(box, session) or "—"
-            self._panel.setItem(r, 2, QTableWidgetItem(side))
+            self._panel.setItem(r, 3, QTableWidgetItem(side))
 
     def _side_for(self, box: _Box, session: _Session) -> str | None:
         if not self._is_transaction():
@@ -392,6 +466,112 @@ class RecognitionView(QWidget):
         if divider is None:
             divider = session.pixmap.width() / 2
         return "give" if box.rect.center().x() < divider else "receive"
+
+    # -- identity suggestions (matcher) -------------------------------------
+
+    def _ensure_recognizer(self):
+        """Build the identity matcher on first use (embedder + catalog references)."""
+        if self._recognizer is None:
+            from tcginventory.services.recognizer import (
+                Recognizer,
+                catalog_reference_resolver,
+            )
+
+            self._rec_repo = self._vision_repo or VisionRepository(open_vision())
+            self._recognizer = Recognizer(
+                self._rec_repo,
+                reference_image=catalog_reference_resolver(self._conn),
+            )
+        elif self._rec_repo is None:
+            self._rec_repo = self._vision_repo
+        return self._recognizer
+
+    def _candidate_pool(self) -> list[str]:
+        """Cards to rank against: the saved-region corpus plus anything already
+        labeled in the current (unsaved) session."""
+        ids: set[str] = set()
+        if self._rec_repo is not None:
+            ids.update(self._rec_repo.labeled_card_ids())
+        for session in self._sessions:
+            for box in session.boxes:
+                if box.card and box.card.card_id:
+                    ids.add(box.card.card_id)
+        return sorted(ids)
+
+    def _crop_for(self, full, box: _Box, session: _Session):
+        """Crop ``box`` out of the full-resolution image via its normalised rect."""
+        pw = max(1, session.pixmap.width())
+        ph = max(1, session.pixmap.height())
+        rect = box.rect
+        w_img, h_img = full.size
+        left = int(rect.x() / pw * w_img)
+        top = int(rect.y() / ph * h_img)
+        right = int((rect.x() + rect.width()) / pw * w_img)
+        bottom = int((rect.y() + rect.height()) / ph * h_img)
+        left = max(0, min(left, w_img - 1))
+        top = max(0, min(top, h_img - 1))
+        right = max(left + 1, min(right, w_img))
+        bottom = max(top + 1, min(bottom, h_img))
+        return full.crop((left, top, right, bottom))
+
+    def _decorate(self, suggestions) -> list[tuple[CardLabel, float]]:
+        """Turn ranked (card_id, score) pairs into (CardLabel, score) for display."""
+        catalog = CardCatalogRepository(self._conn)
+        out: list[tuple[CardLabel, float]] = []
+        for s in suggestions:
+            card = catalog.get(s.card_id)
+            if card is None:
+                label = CardLabel(card_id=s.card_id)
+            else:
+                label = CardLabel(
+                    card_id=card.card_id,
+                    name=card.name,
+                    set_name=card.set_name,
+                    card_number=card.full_number or card.number,
+                    language=getattr(card, "language", None),
+                )
+            out.append((label, s.score))
+        return out
+
+    def _run_suggestions(self) -> None:
+        from PIL import Image
+
+        if not (0 <= self._current < len(self._sessions)):
+            return
+        self._sync_scene_to_model()
+        session = self._sessions[self._current]
+        if not session.boxes:
+            QMessageBox.information(
+                self, "No boxes", "Draw a box around a card first."
+            )
+            return
+        try:
+            recognizer = self._ensure_recognizer()
+        except Exception as exc:  # embedder/model failed to load
+            QMessageBox.warning(self, "Suggestions unavailable", str(exc))
+            return
+        pool = self._candidate_pool()
+        if not pool:
+            QMessageBox.information(
+                self,
+                "No labeled cards yet",
+                "Suggestions rank against cards you've already labeled. Label a "
+                "few cards and save — the matcher improves as your corpus grows.",
+            )
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            with Image.open(session.path) as raw:
+                full = raw.convert("RGB")
+                for box in session.boxes:
+                    combo = self._suggest_boxes.get(box.number)
+                    if combo is None:
+                        continue
+                    crop = self._crop_for(full, box, session)
+                    ranked = recognizer.suggest(crop, pool, top=5)
+                    combo.set_suggestions(self._decorate(ranked))
+        finally:
+            QApplication.restoreOverrideCursor()
 
     # -- save ---------------------------------------------------------------
 
@@ -438,6 +618,8 @@ class RecognitionView(QWidget):
         self._sessions.clear()
         self._current = -1
         self._items.clear()
+        self._name_fields.clear()
+        self._suggest_boxes.clear()
         self._divider = None
         self._strip.clear()
         self._scene.clear()
