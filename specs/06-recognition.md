@@ -95,12 +95,15 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
 - **M-V1a** — matcher engine ✅ **done**: `Recognizer.suggest(image, candidates)`
   (cosine-NN) + reference-embedding cache (`vision.db.card_embedding`, keyed by
   card + embedder version), pool-agnostic and headless
-  (`services/recognizer.py`). Embedder is pluggable: **DINOv2-small via
-  onnxruntime** when the optional `vision` extra is installed and the model file
-  is present at `<data_dir>/vision/models/dinov2_small.onnx`; otherwise a
-  dependency-free **PixelEmbedder** fallback (down-scaled grayscale) so the
-  pipeline runs and is testable before the model is provisioned. Deps added:
-  `numpy`, `Pillow` (core); `onnxruntime` (optional `vision` extra).
+  (`services/recognizer.py`). Embedder is pluggable and defaults to
+  **DINOv2-small via onnxruntime** — the fp32 ONNX encoder (~88 MB) now ships as
+  package data (`tcginventory/models/dinov2_small.onnx`) via **Git LFS** in the
+  repo and is **bundled into the frozen exe** by PyInstaller, so the identifier
+  is active out of the box (CLS-token embedding, 384-dim, ImageNet preprocess).
+  `model_path()` resolves the bundled package copy first, then a user-dropped
+  file under the data dir. A dependency-free **PixelEmbedder** fallback
+  (down-scaled grayscale) still kicks in if the model/onnxruntime are absent.
+  Deps: `numpy`, `Pillow`, `onnxruntime` (all core).
 - **M-V1b** — the Recognition window: annotation canvas (adjustable zones,
   numbered boxes, multiple images) + segments panel + region storage.
   Model-agnostic; collects training data before any model exists.

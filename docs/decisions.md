@@ -4,6 +4,23 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-23 — DINOv2 identifier provisioned: LFS-tracked, bundled, active by default
+
+- The fp32 **DINOv2-small ONNX** encoder (~88 MB) is now committed to the repo
+  as package data (`src/tcginventory/models/dinov2_small.onnx`) via **Git LFS**
+  and **bundled into the PyInstaller exe** (spec `datas` + `recognizer`/
+  `onnxruntime` hidden imports). Rationale: LFS delivers the blob to clones and
+  the build; bundling makes the frozen app self-contained and offline. So the
+  DINOv2 identifier is **active out of the box**, not gated on a manual download.
+- **onnxruntime promoted to a core dependency** (the `[vision]` extra is gone);
+  `model_path()` resolves the bundled package copy first (via
+  `importlib.resources`, mirroring the app icon), then a user-dropped data-dir
+  file, else `None` → PixelEmbedder fallback.
+- Fixed `OnnxEmbedder` to use the **CLS token** (`last_hidden_state[0,0]`,
+  384-dim) as the image embedding rather than flattening the full patch grid.
+- Verified: 384-dim unit-norm embeddings, identical-image cosine ≈ 1; frozen
+  exe (now larger) boots and the model + onnxruntime ship in `_internal/`.
+
 ### 2026-07-23 — M-V1a matcher engine + pluggable embedder (DINOv2 / fallback)
 
 - `services/recognizer.py`: `Recognizer.suggest(image, candidates)` embeds a
