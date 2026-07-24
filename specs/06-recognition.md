@@ -107,6 +107,15 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
 - **M-V1b** — the Recognition window: annotation canvas (adjustable zones,
   numbered boxes, multiple images) + segments panel + region storage.
   Model-agnostic; collects training data before any model exists.
+- **M-V1c** — matcher wired into the window ✅ **done**: a **Suggest labels**
+  action crops each drawn box and ranks catalog matches with the DINOv2
+  identifier against a **candidate pool** (the saved-region corpus +
+  current-session labels — `VisionRepository.labeled_card_ids()`). Each segment
+  row gains a **Suggestion** dropdown (score %, low-confidence marker); picking
+  one labels the box and fills the name field. Embedders accept in-memory crops
+  (no temp files); reference embeddings cache in `vision.db`. Frozen-model
+  crop-vs-render is a weak baseline that the M-V2 fine-tune sharpens without UI
+  changes.
 - **M-V1.5** — trained single-class card detector (YOLO-nano) from drawn boxes.
 - **M-V2** — fine-tuned identifier on the corpus.
 - **Inference** — Part 2 autofill in Transaction/Auction with thresholds +

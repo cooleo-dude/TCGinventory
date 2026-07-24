@@ -4,6 +4,21 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-24 — M-V1c: identity suggestions wired into the Recognition window
+
+- A **Suggest labels** button crops each drawn box (in-memory, via the box's
+  normalised rect against the full-res image) and ranks catalog matches with
+  `Recognizer.suggest`. Each segment row gains a **Suggestion** dropdown; picking
+  an entry copies that identity into the box + name field.
+- **Candidate pool = the labeled corpus** (`labeled_card_ids()` over saved
+  regions) **+ current-session labels** — open-vocabulary retrieval that grows as
+  you annotate (active learning), not a fixed classifier. Empty pool → a notice
+  that suggestions improve as you label; references cache in `vision.db`.
+- Embedders now accept a `PIL.Image` as well as a path, so crops never spill to
+  disk. **Known limitation:** frozen DINOv2 on photo-crop-vs-catalog-render is a
+  weak baseline (advisory ⚠ under 0.6 cosine); the M-V2 fine-tune fixes accuracy
+  with no further UI work. The recognizer is injectable for headless UI tests.
+
 ### 2026-07-23 — DINOv2 identifier provisioned: LFS-tracked, bundled, active by default
 
 - The fp32 **DINOv2-small ONNX** encoder (~88 MB) is now committed to the repo
