@@ -113,7 +113,9 @@ def test_dashboard_builds_charts(app, seeded_conn):
     from PySide6.QtCharts import QLineSeries
 
     lines = [s for s in chart.series() if isinstance(s, QLineSeries)]
-    assert len(lines) == 2  # money-movement + realized-profit
+    # money-movement + realized-profit + collection-value (the collection line
+    # now shows for any holdings, valued at current/reviewed prices).
+    assert len(lines) == 3
     view.deleteLater()
 
 

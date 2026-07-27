@@ -20,7 +20,16 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 
+from tcginventory.data.db import now_iso
 from tcginventory.domain.enums import Intent
+
+# Dashboard intent filter → the key stored in collection_value_snapshot.
+_INTENT_KEYS: list[tuple[str, Intent | None]] = [
+    ("all", None),
+    ("personal", Intent.PERSONAL),
+    ("resale", Intent.RESALE),
+    ("ripping", Intent.RIPPING),
+]
 
 # Per-consumption realized P/L = proceeds share − cost drawn from the lot.
 _REALIZED_EXPR = "tl.unit_price_cents * lc.quantity - lc.unit_cost_cents * lc.quantity"
@@ -185,26 +194,65 @@ class ReportingService:
             out.append(SeriesPoint(at=r["at"], value_cents=running))
         return out
 
+    def record_collection_value(self, as_of: str | None = None) -> None:
+        """Record today's **effective** collection value (the tile figure) per
+        intent, so the chart matches the tile and stays accurate going forward.
+
+        Deduped per day (upsert on ``(as_of, intent)``); safe to call repeatedly
+        (startup, after a price refresh). Commits its own row."""
+        day = (as_of or now_iso())[:10]
+        for key, intent in _INTENT_KEYS:
+            self.conn.execute(
+                "INSERT INTO collection_value_snapshot (as_of, intent, value_cents) "
+                "VALUES (?,?,?) ON CONFLICT(as_of, intent) DO UPDATE SET "
+                "value_cents = excluded.value_cents",
+                (day, key, self.collection_value_cents(intent)),
+            )
+        self.conn.commit()
+
+    def _recorded_collection_points(
+        self, intent: Intent | None
+    ) -> list[SeriesPoint]:
+        key = intent.value if intent is not None else "all"
+        return [
+            SeriesPoint(at=r["as_of"], value_cents=r["value_cents"])
+            for r in self.conn.execute(
+                "SELECT as_of, value_cents FROM collection_value_snapshot "
+                "WHERE intent = ? ORDER BY as_of",
+                (key,),
+            ).fetchall()
+        ]
+
     def collection_value_series(
         self, intent: Intent | None = None
     ) -> list[SeriesPoint]:
-        """Market value of holdings over time, sampled at each recorded price
-        date (``price_snapshot``).
+        """Collection value over time, ending exactly at the "Collection Value"
+        tile.
 
-        At each snapshot date it values the holdings **as they stood then** —
-        lots acquired by that date, less quantities disposed by then (FIFO
-        draw-downs) — using the most recent recorded price for each item on/
-        before that date. Ripping lots count as $0. Empty when no price history
-        has been recorded yet; items with no recorded snapshot don't contribute.
+        Two sources, spliced by date: **recorded** daily tile figures
+        (:meth:`record_collection_value`) are authoritative from the day
+        recording began; **before** that they are back-filled by reconstructing
+        from history. The reconstruction values holdings as they stood at each
+        date — using the recorded poll price for polled cards, and the card's
+        **current** value (respecting reviewed/manual values) for reviewed or
+        never-polled cards (graded slabs, manual entries) so nothing is dropped.
+        Ripping/missing lots count as $0.
         """
-        dates = [
-            r["as_of"]
-            for r in self.conn.execute(
-                "SELECT DISTINCT as_of FROM price_snapshot ORDER BY as_of"
-            ).fetchall()
-        ]
-        if not dates:
-            return []
+        recorded = self._recorded_collection_points(intent)
+        reconstructed = self._reconstruct_collection_series(intent)
+        if recorded:
+            first = recorded[0].at
+            reconstructed = [p for p in reconstructed if p.at < first]
+        return reconstructed + recorded
+
+    def _reconstruct_collection_series(
+        self, intent: Intent | None = None
+    ) -> list[SeriesPoint]:
+        items: dict[int, tuple[bool, int]] = {}  # id -> (review, market_value)
+        for r in self.conn.execute(
+            "SELECT id, review, market_value_cents FROM item"
+        ).fetchall():
+            items[r["id"]] = (bool(r["review"]), r["market_value_cents"] or 0)
 
         lots = self.conn.execute(
             "SELECT id, item_id, acquired_at, quantity, intent, missing FROM lot"
@@ -228,15 +276,31 @@ class ReportingService:
             times[r["item_id"]].append(r["as_of"])
             cents[r["item_id"]].append(r["price_cents"])
 
-        def price_at(item_id: int, when: str) -> int | None:
-            ts = times.get(item_id)
-            if not ts:
-                return None
+        def effective(item_id: int, when: str) -> int:
+            review, market = items.get(item_id, (False, 0))
+            # Reviewed and never-polled cards are user-maintained — value them at
+            # their current figure (flat) rather than a poll we don't trust/have.
+            if review or item_id not in times:
+                return market
+            ts = times[item_id]
             idx = bisect.bisect_right(ts, when) - 1
-            return cents[item_id][idx] if idx >= 0 else None
+            return cents[item_id][idx] if idx >= 0 else market
+
+        if not lots:
+            return []
+        # Sample at acquisitions + poll dates so the line spans the collection's
+        # life; the final "now" point is the exact tile figure so the chart's
+        # endpoint always equals the Collection Value tile.
+        dates: set[str] = {lot["acquired_at"] for lot in lots}
+        dates.update(
+            r["as_of"]
+            for r in self.conn.execute(
+                "SELECT DISTINCT as_of FROM price_snapshot"
+            ).fetchall()
+        )
 
         out: list[SeriesPoint] = []
-        for d in dates:
+        for d in sorted(dates):
             total = 0
             for lot in lots:
                 if lot["intent"] == "ripping" or lot["missing"]:
@@ -248,10 +312,12 @@ class ReportingService:
                 held = lot["quantity"] - sum(
                     q for cd, q in disposals.get(lot["id"], ()) if cd <= d
                 )
-                if held <= 0:
-                    continue
-                price = price_at(lot["item_id"], d)
-                if price is not None:
-                    total += held * price
+                if held > 0:
+                    total += held * effective(lot["item_id"], d)
             out.append(SeriesPoint(at=d, value_cents=total))
+        # Anchor the endpoint to the tile (same computation), so the two never
+        # disagree at "now".
+        out.append(
+            SeriesPoint(at=now_iso(), value_cents=self.collection_value_cents(intent))
+        )
         return out

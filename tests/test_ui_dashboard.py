@@ -54,12 +54,14 @@ def test_dashboard_plots_collection_value_line(app, conn):
     view.deleteLater()
 
 
-def test_dashboard_omits_collection_line_without_price_history(app, conn):
+def test_dashboard_plots_collection_line_without_price_history(app, conn):
+    # Even with no poll history, the collection line now reflects current values
+    # (e.g. graded/manual cards the poll never touches), ending at the tile.
     from tcginventory.ui.views.dashboard import DashboardView
 
     buy(TransactionService(conn), "Pikachu", 1000, 500, "2026-01-01")
     view = DashboardView(conn)
     names = _line_names(view)
-    assert "Collection Value" not in names  # no snapshots recorded yet
+    assert "Collection Value" in names
     assert "Net cash" in names
     view.deleteLater()

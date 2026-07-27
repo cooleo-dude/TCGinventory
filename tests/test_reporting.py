@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import buy, sell
-from tcginventory.data.repositories import PriceSnapshotRepository
+from tcginventory.data.repositories import ItemRepository, PriceSnapshotRepository
 from tcginventory.domain.enums import Intent
 from tcginventory.domain.models import PriceSnapshot
 from tcginventory.services.reporting import ReportingService
@@ -28,19 +28,29 @@ def _snap(conn, item_id, price_cents, as_of):
     )
 
 
+def _set_market(conn, item_id, cents):
+    """Mimic what a price refresh does: sync the item's current value."""
+    items = ItemRepository(conn)
+    it = items.get(item_id)
+    it.market_value_cents = cents
+    items.update(it)
+    conn.commit()
+
+
 def test_collection_value_series_values_holdings_at_recorded_prices(svc, rpt, conn):
     p = buy(svc, "Pikachu", 1000, 500, "2026-01-01", quantity=2)
     item_id = p.lots[0].item_id
     _snap(conn, item_id, 600, "2026-02-01T00:00:00")
     _snap(conn, item_id, 800, "2026-03-01T00:00:00")
-    conn.commit()
+    _set_market(conn, item_id, 800)  # current value tracks the latest poll
 
     series = rpt.collection_value_series()
-    # Held 2 across both dates → 2×600, then 2×800.
-    assert [(pt.at, pt.value_cents) for pt in series] == [
-        ("2026-02-01T00:00:00", 1200),
-        ("2026-03-01T00:00:00", 1600),
-    ]
+    by_date = {pt.at: pt.value_cents for pt in series}
+    # Held 2 valued at each date's recorded price.
+    assert by_date["2026-02-01T00:00:00"] == 1200
+    assert by_date["2026-03-01T00:00:00"] == 1600
+    # The line's endpoint always equals the Collection Value tile.
+    assert series[-1].value_cents == rpt.collection_value_cents() == 1600
 
 
 def test_collection_value_series_respects_holdings_and_sales_over_time(svc, rpt, conn):
@@ -49,18 +59,50 @@ def test_collection_value_series_respects_holdings_and_sales_over_time(svc, rpt,
     _snap(conn, item_id, 600, "2026-02-01T00:00:00")  # hold 2 → 1200
     sell(svc, item_id, 1, 900, "2026-02-15")  # now hold 1
     _snap(conn, item_id, 700, "2026-03-01T00:00:00")  # hold 1 → 700
+    _set_market(conn, item_id, 700)
+
+    series = rpt.collection_value_series()
+    by_date = {pt.at: pt.value_cents for pt in series}
+    assert by_date["2026-02-01T00:00:00"] == 1200
+    assert by_date["2026-03-01T00:00:00"] == 700
+    assert series[-1].value_cents == rpt.collection_value_cents() == 700
+
+
+def test_collection_value_series_includes_never_polled_at_current_value(svc, rpt):
+    # No price history at all → the line still reflects the current value (a
+    # graded slab or manual entry that the poll never touches), ending at the
+    # tile. (Previously this returned an empty line.)
+    buy(svc, "Graded Charizard", 20000, 25000, "2026-01-01")
+    series = rpt.collection_value_series()
+    assert series  # not empty
+    assert series[-1].value_cents == rpt.collection_value_cents() == 25000
+
+
+def test_collection_value_series_uses_reviewed_value_not_poll(svc, rpt, conn):
+    # A reviewed (condition-discounted) card: the poll records a higher NM price
+    # but the line + tile must use the user's reviewed value.
+    p = buy(svc, "MP Blastoise", 5000, 8000, "2026-01-01")
+    item_id = p.lots[0].item_id
+    _snap(conn, item_id, 16000, "2026-02-01T00:00:00")  # NM poll, ignored
+    items = ItemRepository(conn)
+    it = items.get(item_id)
+    it.review = True
+    it.market_value_cents = 8000  # user's MP value
+    items.update(it)
     conn.commit()
 
     series = rpt.collection_value_series()
-    assert [(pt.at, pt.value_cents) for pt in series] == [
-        ("2026-02-01T00:00:00", 1200),
-        ("2026-03-01T00:00:00", 700),
-    ]
+    assert series[-1].value_cents == rpt.collection_value_cents() == 8000
+    assert all(pt.value_cents == 8000 for pt in series)  # never the 16000 poll
 
 
-def test_collection_value_series_empty_without_price_history(svc, rpt):
-    buy(svc, "Pikachu", 1000, 500, "2026-01-01")
-    assert rpt.collection_value_series() == []
+def test_recorded_collection_value_drives_the_series(svc, rpt, conn):
+    buy(svc, "Pikachu", 1000, 1200, "2026-01-01")
+    rpt.record_collection_value(as_of="2026-05-01T12:00:00")
+    series = rpt.collection_value_series()
+    # The recorded daily point (the tile figure) is the authoritative endpoint.
+    assert series[-1].at == "2026-05-01"
+    assert series[-1].value_cents == 1200
 
 
 def test_realized_pl_and_net_cash_after_a_sale(svc, rpt):

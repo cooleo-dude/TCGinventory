@@ -4,6 +4,28 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-27 — Dashboard collection-value chart reconciles with the tile
+
+- The "Collection Value" **tile** uses current `item.market_value_cents` (incl.
+  reviewed/manual/graded), while the **chart line** reconstructed value from raw
+  poll `price_snapshot`s only — so the line excluded never-polled/graded/manual
+  cards and used NM polls for reviewed cards, ending well below the tile
+  (observed ~$1.25k gap). Confusing: two "Collection Value" figures disagreeing.
+- **Fix 1 (reconcile):** `collection_value_series` now values each held lot at
+  each date using the recorded poll for polled cards and the card's **current**
+  value (reviewed/manual) for reviewed/never-polled cards; ripping/missing = $0;
+  samples at acquisition + poll dates; and **appends a final point = the tile
+  figure** (`collection_value_cents`) so the endpoint always equals the tile.
+  Historical values for manual/reviewed cards are back-projected flat (honest:
+  we lack their past prices).
+- **Fix 2 (accurate going forward):** new `collection_value_snapshot` table
+  (migration 0015) records the daily effective tile value per intent
+  (`record_collection_value`, deduped per day), written on startup, after a
+  price refresh (GUI + headless). The series prefers recorded points and
+  back-fills older history with the reconstruction.
+- Also clarified for the user: **net cash falls when buying** (purchases are
+  cash out) — the money-movement line trending down is correct, not a bug.
+
 ### 2026-07-27 — Stolen / missing items: reversible $0 impairment (not a transaction)
 
 - Right-click an Inventory row → **mark as stolen / missing** (and unmark). Backed

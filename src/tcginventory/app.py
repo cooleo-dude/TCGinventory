@@ -43,6 +43,11 @@ def refresh_prices_headless() -> int:
                 summary.errors,
             )
             had_error = had_error or bool(summary.errors)
+            # Record today's effective collection value (drives the dashboard
+            # chart) now that prices are fresh.
+            from tcginventory.services.reporting import ReportingService
+
+            ReportingService(conn).record_collection_value()
         except Exception:
             log.exception("headless price refresh failed")
             had_error = True
@@ -146,6 +151,15 @@ def main() -> int:
             log.info("Startup backup: %s", dest)
         except Exception:
             log.exception("Startup backup failed (continuing)")
+
+        # Record today's collection-value point so the dashboard chart has a
+        # current anchor even before any price refresh runs (deduped per day).
+        try:
+            from tcginventory.services.reporting import ReportingService
+
+            ReportingService(conn).record_collection_value()
+        except Exception:
+            log.exception("Collection-value recording failed (continuing)")
 
     # Imported lazily so headless tooling (tests, tools) can import this module
     # without requiring a Qt display or the PySide6 dependency at import time.

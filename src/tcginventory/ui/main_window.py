@@ -292,6 +292,14 @@ class MainWindow(QMainWindow):
     def _on_prices_refreshed(self, summary) -> None:
         self._refresh_action.setEnabled(True)
         self._price_worker = None
+        # Record the fresh collection value so the dashboard chart tracks the
+        # tile (deduped per day).
+        try:
+            from tcginventory.services.reporting import ReportingService
+
+            ReportingService(self._conn).record_collection_value()
+        except Exception:
+            pass  # best-effort; never block the refresh completion
         self._on_ledger_changed()  # re-read views (prices now live)
         if not self._refresh_silent:
             msg = f"Priced {summary.priced} item(s)."
