@@ -123,7 +123,7 @@ class TcgcsvProvider:
         can't be resolved. The URL lets the caller store it so future refreshes
         join by product id.
         """
-        group_id = self._resolve_group(set_name, None, category)
+        group_id = self._resolve_group_for(set_name, None, number, category)
         if group_id is None:
             return None
         want = _norm_number(number)
@@ -200,9 +200,31 @@ class TcgcsvProvider:
         return int(match.group(1)) if match else None
 
     def _group_id(self, item: Item) -> int | None:
-        return self._resolve_group(
-            item.set_name, item.set_code, self._category_for(item)
+        return self._resolve_group_for(
+            item.set_name, item.set_code, item.card_number, self._category_for(item)
         )
+
+    def _resolve_group_for(
+        self,
+        set_name: str | None,
+        set_code: str | None,
+        number: str | None,
+        category: int,
+    ) -> int | None:
+        """Resolve the tcgcsv group, accounting for Radiant Collection subsets.
+
+        RC-numbered cards (e.g. "RC19") live under their parent set in the
+        catalog, but tcgcsv prices them in a separate "<Set>: Radiant Collection"
+        group whose abbreviation collides with the parent's (both "GEN"). Match
+        that group by its full name — not the shared code — and fall back to the
+        parent if it isn't found."""
+        if set_name and _norm_number(number).startswith("rc"):
+            rc_gid = self._resolve_group(
+                f"{set_name}: Radiant Collection", None, category
+            )
+            if rc_gid is not None:
+                return rc_gid
+        return self._resolve_group(set_name, set_code, category)
 
     def _resolve_group(
         self, set_name: str | None, set_code: str | None, category: int

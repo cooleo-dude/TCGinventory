@@ -445,7 +445,10 @@ class _ReceiveRow:
         self._image_url = getattr(card, "image_small", None)
         self.name.setText(card.name)
         self.set.setText(card.set_name or "")
-        self.number.setText(card.full_number or card.number or "")
+        # Catalog-derived denominator: correct for prefixed subsets like Radiant
+        # Collection ("RC19/RC32"), where the parent set's total would be wrong.
+        number = CardCatalogRepository(self._conn).display_number(card)
+        self.number.setText(number or card.full_number or card.number or "")
         _select(self.category, Category.SINGLE.value)  # catalog cards are singles
         _select(self.language, getattr(card, "language", None) or Language.EN.value)
         # Keep the chosen card showing in the pane after the popup closes.

@@ -841,6 +841,31 @@ class CardCatalogRepository:
     def count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM card_catalog").fetchone()[0]
 
+    def display_number(self, card: CatalogCard) -> str | None:
+        """Collector number with the correct denominator.
+
+        For a **prefixed subset** number (e.g. Radiant Collection "RC19"), the
+        parent set's ``printed_total`` is the wrong denominator — the subset has
+        its own size. Derive it from the count of same-prefixed cards in the set,
+        yielding "RC19/RC32". Numeric numbers use the plain ``full_number``
+        (numerator + parent total)."""
+        if not card.number:
+            return None
+        prefix = ""
+        for ch in card.number:
+            if ch.isdigit():
+                break
+            prefix += ch
+        if not prefix:  # purely numeric → parent total is correct
+            return card.full_number
+        row = self.conn.execute(
+            "SELECT COUNT(DISTINCT number) AS n FROM card_catalog "
+            "WHERE set_id = ? AND language = ? AND number LIKE ?",
+            (card.set_id, card.language, f"{prefix}%"),
+        ).fetchone()
+        total = row["n"] if row else 0
+        return f"{card.number}/{prefix}{total}" if total else card.number
+
     def get(self, card_id: str) -> CatalogCard | None:
         row = self.conn.execute(
             "SELECT * FROM card_catalog WHERE card_id = ?", (card_id,)
