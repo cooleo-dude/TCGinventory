@@ -68,6 +68,30 @@ def _first_item_id(conn, name):
     raise AssertionError(f"item {name} not found")
 
 
+def test_autofill_radiant_collection_number(app, conn):
+    """Picking a Radiant Collection card fills the subset denominator (RC2/RC25),
+    not the parent set's total (RC2/RC113)."""
+    from tcginventory.data.repositories import CardCatalogRepository
+    from tcginventory.domain.models import CatalogCard
+    from tcginventory.ui.views.transaction import TransactionView
+
+    cards = [
+        CatalogCard(
+            card_id=f"bw11-RC{i}", name=("Servine" if i == 2 else f"C{i}"),
+            set_id="bw11", set_name="Legendary Treasures", set_code="LTR",
+            number=f"RC{i}", printed_total=113, language="EN",
+        )
+        for i in range(1, 26)  # RC1..RC25
+    ]
+    CardCatalogRepository(conn).replace_all(cards, "t")
+    conn.commit()
+
+    view = TransactionView(conn)
+    row = view._add_receive_row()
+    row.apply_catalog_card(CardCatalogRepository(conn).get("bw11-RC2"))
+    assert row.number.text() == "RC2/RC25"
+
+
 def test_add_button_is_the_bottom_table_row(app, conn):
     from PySide6.QtWidgets import QPushButton
 

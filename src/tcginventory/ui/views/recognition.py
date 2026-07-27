@@ -146,12 +146,14 @@ class _NameField(QLineEdit):
     def _on_edited(self, text: str) -> None:
         if len(text.strip()) < 2:
             return
-        matches = CardCatalogRepository(self._conn).search(text, limit=20)
+        repo = CardCatalogRepository(self._conn)
+        matches = repo.search(text, limit=20)
         self._matches = {c.card_id: c for c in matches}
         self._model.clear()
         for card in matches:
             item = QStandardItem(
-                f"{card.name}  ·  {card.set_name or '?'}  #{card.full_number or '?'}"
+                f"{card.name}  ·  {card.set_name or '?'}  "
+                f"#{repo.display_number(card) or '?'}"
             )
             item.setData(card.card_id, self._CARD_ID_ROLE)
             self._model.appendRow(item)
@@ -162,11 +164,12 @@ class _NameField(QLineEdit):
         card = self._matches.get(index.data(self._CARD_ID_ROLE))
         if card is None:
             return
+        number = CardCatalogRepository(self._conn).display_number(card)
         self._box.card = CardLabel(
             card_id=card.card_id,
             name=card.name,
             set_name=card.set_name,
-            card_number=card.full_number or card.number,
+            card_number=number or card.number,
             language=getattr(card, "language", None),
         )
         self.setText(card.name)
@@ -527,7 +530,7 @@ class RecognitionView(QWidget):
                     card_id=card.card_id,
                     name=card.name,
                     set_name=card.set_name,
-                    card_number=card.full_number or card.number,
+                    card_number=catalog.display_number(card) or card.number,
                     language=getattr(card, "language", None),
                 )
             out.append((label, s.score))

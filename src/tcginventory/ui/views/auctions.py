@@ -281,13 +281,15 @@ class _AuctionCardRow:
     def _on_name_edited(self, text: str) -> None:
         if not self._is_auto() or len(text.strip()) < 2:
             return
-        matches = CardCatalogRepository(self._conn).search(text, limit=25)
+        repo = CardCatalogRepository(self._conn)
+        matches = repo.search(text, limit=25)
         self._matches = {c.card_id: c for c in matches}
         self._search_model.clear()
         for card in matches:
             item = QStandardItem(card.name)
             label = (
-                f"{card.name}  ·  {card.set_name or '?'}  #{card.full_number or '?'}"
+                f"{card.name}  ·  {card.set_name or '?'}  "
+                f"#{repo.display_number(card) or '?'}"
             )
             item.setData(card.card_id, self._CARD_ID_ROLE)
             item.setData(label, self._LABEL_ROLE)
@@ -324,7 +326,8 @@ class _AuctionCardRow:
         self.set_tcgplayer_url(None)  # cleared until the price lookup resolves it
         self.name.setText(card.name)
         self.set.setText(card.set_name or "")
-        self.number.setText(card.full_number or card.number or "")
+        number = CardCatalogRepository(self._conn).display_number(card)
+        self.number.setText(number or card.full_number or card.number or "")
         if self._sink is not None and self._image_url:
             self._sink.show_card(self._card_id, self._image_url)
         self._on_change()

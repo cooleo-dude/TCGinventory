@@ -271,7 +271,8 @@ class PriceLookupView(QWidget):
             self._results.addItem(self._make_item(card))
 
     def _make_item(self, card) -> QListWidgetItem:
-        label = f"{card.name}  ·  {card.set_name or '?'}  #{card.full_number or '?'}"
+        number = self._catalog.display_number(card) or card.full_number
+        label = f"{card.name}  ·  {card.set_name or '?'}  #{number or '?'}"
         item = QListWidgetItem(label)
         item.setData(_CARD_ID_ROLE, card.card_id)
         return item

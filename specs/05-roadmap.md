@@ -139,11 +139,32 @@ tags / identification labels for a card show).
   barcoding), build the Show Prep registry window (add/reorder/remove), and wire
   CSV export.
 
-### Stolen / missing items — **next (design below)**
+### Stolen / missing items — **done**
 Right-click an Inventory row → **mark as stolen/missing** (reversible). A missing
 lot shows **"Missing"** in the Sold column and is written down so the portfolio
 totals drop by its cost basis. See
 [data model → missing lots](02-data-model.md#missing--stolen-lots).
+
+### Radiant Collection / prefixed-subset cards — **mostly fixed**
+Cards in a prefixed subset (Radiant Collection "RC…", and likely Trainer/Galarian
+Gallery "TG…/GG…", Shiny Vault "SV…") are stored in the catalog **under their
+parent set** with the **parent's** `printed_total` (e.g. Swirlix `g1-RC19`:
+set "Generations", `printed_total=83`). tcgcsv prices them in a **separate
+`"<Set>: Radiant Collection"` group** whose abbreviation collides with the
+parent's ("GEN"). This broke autofill three ways.
+
+- **Fixed:** the collector-number denominator (`CardCatalogRepository.display_number`
+  derives the subset size from the catalog → "RC19/RC32", now used by every
+  autofill picker + label: transaction, auctions, recognition, market); and
+  pricing (`TcgcsvProvider._resolve_group_for` routes RC-numbered cards to the
+  subset group by full name, fixing price + TCGplayer link on the entry lookup
+  and the owned-item daily refresh).
+- **Remaining gap:** the **catalog-wide sweep** (`marketprices.sweep` →
+  `pricehistory.db`) still prices only by parent-set group, so RC-subset cards
+  are **absent from the market-outlook history / Price Lookup graph / catalog
+  trend**. Owned-item pricing works; the catalog history does not yet. Fix would
+  teach the sweep to also pull each `"<Set>: Radiant Collection"` group and match
+  its RC products.
 
 ## Sequencing rationale
 
