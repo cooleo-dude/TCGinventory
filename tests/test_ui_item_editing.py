@@ -54,6 +54,33 @@ def test_inventory_intent_edit_updates_lot(app, conn):
     view.deleteLater()
 
 
+def test_inventory_edit_market_at_purchase(app, conn):
+    from PySide6.QtCore import Qt
+
+    from tcginventory.ui.models.inventory_model import MARKET_AT_PURCHASE_COL
+    from tcginventory.ui.views.inventory import InventoryView
+
+    # Paid $80; market-at-purchase recorded as $100 (an NM figure to correct).
+    result = buy(TransactionService(conn), "Alakazam", 8000, 10000, "2026-01-01")
+    lot_id = result.lots[0].id
+    assert LotRepository(conn).get(lot_id).unit_cost_cents == 8000
+
+    view = InventoryView(conn)
+    idx = view._model.index(0, MARKET_AT_PURCHASE_COL)
+    assert view._model.data(idx, Qt.EditRole) == "100.00"  # dollars, editable
+    assert view._model.setData(idx, "62.50", Qt.EditRole)
+
+    lot = LotRepository(conn).get(lot_id)
+    assert lot.acquired_market_value_cents == 6250  # corrected snapshot
+    assert lot.unit_cost_cents == 8000  # cost basis untouched (record fix only)
+
+    # Invalid / unchanged edits are rejected without a write.
+    assert view._model.setData(idx, "-5", Qt.EditRole) is False
+    assert view._model.setData(idx, "abc", Qt.EditRole) is False
+    assert LotRepository(conn).get(lot_id).acquired_market_value_cents == 6250
+    view.deleteLater()
+
+
 def test_inventory_review_filter(app, conn):
     from tcginventory.ui.views.inventory import InventoryView
 

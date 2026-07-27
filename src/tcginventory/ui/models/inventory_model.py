@@ -199,6 +199,9 @@ def combo_columns() -> list[tuple[int, list[str]]]:
 
 # Column index of "Current Market" (the review-editable column).
 MARKET_CURRENT_COL = [c.header for c in _COLUMNS].index("Current Market")
+# Column index of "Market at Purchase" (editable acquisition snapshot; a record
+# correction only — never feeds cost basis or P/L).
+MARKET_AT_PURCHASE_COL = [c.header for c in _COLUMNS].index("Market at Purchase")
 # Column index of "Trend" (arrows painted from the model's trend map).
 TREND_COL = [c.header for c in _COLUMNS].index("Trend")
 # Column index of "Intent" (edited inline via a combo-box delegate).
@@ -225,6 +228,7 @@ class InventoryTableModel(QAbstractTableModel):
         on_edit_price=None,  # (item_id, per_unit_cents) -> None
         on_edit_intent=None,  # (lot_id, intent_str) -> None
         on_edit_item=None,  # (item_id, field, value) -> None : inline item edit
+        on_edit_market_at_purchase=None,  # (lot_id, per_unit_cents) -> None
     ) -> None:
         super().__init__()
         self._rows: list[InventoryRow] = rows or []
@@ -232,6 +236,7 @@ class InventoryTableModel(QAbstractTableModel):
         self._on_edit_price = on_edit_price
         self._on_edit_intent = on_edit_intent
         self._on_edit_item = on_edit_item
+        self._on_edit_market_at_purchase = on_edit_market_at_purchase
 
     def set_rows(self, rows: list[InventoryRow]) -> None:
         self.beginResetModel()
@@ -301,6 +306,11 @@ class InventoryTableModel(QAbstractTableModel):
                 return row.item.notes
             if index.column() == MARKET_CURRENT_COL and row.review:
                 return "Reviewed price. Click ✕ to unmark, then ↻ to refresh."
+            if index.column() == MARKET_AT_PURCHASE_COL:
+                return (
+                    "Market value recorded at purchase — click to edit for "
+                    "corrections. Does not change cost basis or P/L."
+                )
         if role == ITEM_ID_ROLE:
             return row.item.id
         if role == REVIEW_ROLE:
@@ -309,6 +319,9 @@ class InventoryTableModel(QAbstractTableModel):
             return row.lot_id
         if index.column() == MARKET_CURRENT_COL and role == Qt.EditRole:
             return (row.current_price_cents or 0) / 100.0
+        if index.column() == MARKET_AT_PURCHASE_COL and role == Qt.EditRole:
+            # Dollars as text → a plain line-edit editor (no spin-box range cap).
+            return f"{row.market_at_purchase_cents / 100:.2f}"
         if index.column() == INTENT_COL and role == Qt.EditRole:
             return row.intent
         if role == Qt.EditRole:
@@ -346,6 +359,8 @@ class InventoryTableModel(QAbstractTableModel):
         row = self._rows[index.row()]
         if col == MARKET_CURRENT_COL:  # always editable → sets a manual price
             base |= Qt.ItemIsEditable
+        elif col == MARKET_AT_PURCHASE_COL:  # editable acquisition snapshot
+            base |= Qt.ItemIsEditable
         elif col == INTENT_COL:
             base |= Qt.ItemIsEditable
         else:
@@ -373,6 +388,16 @@ class InventoryTableModel(QAbstractTableModel):
                 return False
             if self._on_edit_price is not None:
                 self._on_edit_price(row.item.id, per_unit_cents)
+            return True
+        if index.column() == MARKET_AT_PURCHASE_COL:
+            try:
+                per_unit_cents = round(float(value) * 100)
+            except (TypeError, ValueError):
+                return False
+            if per_unit_cents < 0 or per_unit_cents == row.market_at_purchase_cents:
+                return False  # invalid or unchanged → no write/refresh
+            if self._on_edit_market_at_purchase is not None:
+                self._on_edit_market_at_purchase(row.lot_id, per_unit_cents)
             return True
         coldef = _COLUMNS[index.column()]
         if coldef.field is not None:

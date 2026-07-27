@@ -238,6 +238,7 @@ class InventoryView(QWidget):
             on_edit_price=self._set_manual_price,
             on_edit_intent=self._set_lot_intent,
             on_edit_item=self._set_item_field,
+            on_edit_market_at_purchase=self._set_market_at_purchase,
         )
         self._proxy = _InventoryFilterProxy()
         self._proxy.setSourceModel(self._model)
@@ -688,6 +689,21 @@ class InventoryView(QWidget):
         if lot.intent is new_intent:
             return
         lot.intent = new_intent
+        lots.update(lot)
+        self._conn.commit()
+        self.refresh()
+
+    def _set_market_at_purchase(self, lot_id: int, per_unit_cents: int) -> None:
+        """Inline-edit handler: correct a lot's market-value-at-purchase snapshot.
+
+        A record fix only — it does not re-run cost allocation, so cost basis and
+        P/L are untouched (see spec 02: this field is the acquisition snapshot,
+        not a valuation input)."""
+        lots = LotRepository(self._conn)
+        lot = lots.get(lot_id)
+        if lot is None or per_unit_cents < 0:
+            return
+        lot.acquired_market_value_cents = per_unit_cents
         lots.update(lot)
         self._conn.commit()
         self.refresh()
