@@ -8,16 +8,18 @@ current ``market_value_cents``.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 
 from tcginventory.data.repositories import (
+    AuditLogRepository,
     ItemRepository,
     LotRepository,
     PriceSnapshotRepository,
 )
-from tcginventory.domain.enums import Intent
-from tcginventory.domain.models import Item
+from tcginventory.domain.enums import AuditAction, Intent
+from tcginventory.domain.models import AuditLogEntry, Item
 
 
 @dataclass
@@ -52,14 +54,15 @@ class InventoryRow:
     # value for reviewed items; otherwise the latest polled price.
     current_price_cents: int | None
     review: bool  # item marked for manual review (poll-protected, highlighted)
-    sold_status: str  # "unsold" | "partial" | "sold"
+    sold_status: str  # "unsold" | "partial" | "sold" | "Missing"
     # Per-unit price this lot's disposed units actually sold for (proceeds ÷
     # units sold); None if none of the lot has been sold.
     sold_price_cents: int | None = None
+    missing: bool = False  # stolen/lost write-down (valued at $0, not on hand)
 
     @property
     def in_stock(self) -> bool:
-        return self.on_hand > 0
+        return self.on_hand > 0 and not self.missing
 
     @property
     def unrealized_cents(self) -> int | None:
@@ -74,6 +77,7 @@ class InventoryService:
         self.items = ItemRepository(conn)
         self.lots = LotRepository(conn)
         self.prices = PriceSnapshotRepository(conn)
+        self.audit = AuditLogRepository(conn)
 
     def _sold_proceeds_by_lot(self) -> dict[int, tuple[int, int]]:
         """``lot_id -> (total proceeds cents, units sold)`` across posted sales,
@@ -91,11 +95,15 @@ class InventoryService:
         return {r["lot_id"]: (r["proceeds"], r["qty"]) for r in rows}
 
     def on_hand(self, item_id: int, intent: Intent | None = None) -> int:
-        """Units currently on hand for an item (optionally filtered by intent)."""
+        """Units currently on hand for an item (optionally filtered by intent).
+
+        Missing (stolen/lost) lots are excluded — those units are gone."""
         return sum(
             lot.remaining_qty
             for lot in self.lots.list_for_item(item_id)
-            if lot.remaining_qty > 0 and (intent is None or lot.intent is intent)
+            if lot.remaining_qty > 0
+            and not lot.missing
+            and (intent is None or lot.intent is intent)
         )
 
     def item_position(self, item_id: int, intent: Intent | None = None) -> Position:
@@ -103,7 +111,7 @@ class InventoryService:
         current_mv = (item.market_value_cents or 0) if item else 0
         remaining = cost = market = 0
         for lot in self.lots.list_for_item(item_id):
-            if lot.remaining_qty <= 0:
+            if lot.remaining_qty <= 0 or lot.missing:
                 continue
             if intent is not None and lot.intent is not intent:
                 continue
@@ -140,7 +148,9 @@ class InventoryService:
             available = sum(
                 lot.remaining_qty
                 for lot in self.lots.list_for_item(item.id)
-                if lot.remaining_qty > 0 and lot.intent is Intent.RESALE
+                if lot.remaining_qty > 0
+                and not lot.missing
+                and lot.intent is Intent.RESALE
             )
             if available > 0:
                 out.append((item, available))
@@ -161,16 +171,18 @@ class InventoryService:
             if item is None:
                 continue
 
-            # Per-unit current market: ripping is nil; reviewed items use their
-            # manual value; others use the latest polled price.
-            if lot.intent is Intent.RIPPING:
+            # Per-unit current market: missing (stolen/lost) and ripping are
+            # nil; reviewed items use their manual value; others the latest poll.
+            if lot.missing or lot.intent is Intent.RIPPING:
                 current = 0
             elif item.review:
                 current = item.market_value_cents
             else:
                 current = latest_prices.get(item.id)
 
-            if lot.remaining_qty == 0:
+            if lot.missing:
+                sold_status = "Missing"
+            elif lot.remaining_qty == 0:
                 sold_status = "sold"
             elif lot.remaining_qty == lot.quantity:
                 sold_status = "unsold"
@@ -199,6 +211,32 @@ class InventoryService:
                     review=item.review,
                     sold_status=sold_status,
                     sold_price_cents=sold_price,
+                    missing=lot.missing,
                 )
             )
         return rows
+
+    def set_lot_missing(
+        self, lot_id: int, missing: bool, note: str | None = None
+    ) -> bool:
+        """Flag (or unflag) a lot as stolen/lost — a reversible impairment that
+        values the lot at $0 while keeping its cost basis. Writes an append-only
+        ``audit_log`` entry since it moves money. Caller commits. Returns True if
+        the flag changed."""
+        lot = self.lots.get(lot_id)
+        if lot is None or lot.missing == missing:
+            return False
+        before = {"missing": lot.missing}
+        lot.missing = missing
+        self.lots.update(lot)
+        self.audit.add(
+            AuditLogEntry(
+                entity="lot",
+                entity_id=lot_id,
+                action=AuditAction.EDIT,
+                before_json=json.dumps(before),
+                after_json=json.dumps({"missing": missing}),
+                note=note or ("marked missing" if missing else "unmarked missing"),
+            )
+        )
+        return True

@@ -64,6 +64,32 @@ def test_inventory_trend_column_renders_arrows(app, seeded_conn):
     assert model.data(other, Qt.DisplayRole) == "·"
 
 
+def test_inventory_mark_missing_from_view(app, seeded_conn):
+    from tcginventory.ui.views.inventory import InventoryView
+
+    view = InventoryView(seeded_conn)
+    row = view._model.row_at(0)
+    assert not row.missing
+
+    view._toggle_missing(row)  # the right-click action handler
+    updated = next(
+        view._model.row_at(i)
+        for i in range(view._model.rowCount())
+        if view._model.row_at(i).lot_id == row.lot_id
+    )
+    assert updated.sold_status == "Missing"
+    assert updated.missing is True
+
+    view._toggle_missing(updated)  # reversible
+    restored = next(
+        view._model.row_at(i)
+        for i in range(view._model.rowCount())
+        if view._model.row_at(i).lot_id == row.lot_id
+    )
+    assert restored.missing is False
+    view.deleteLater()
+
+
 def test_history_view_populates_and_details(app, seeded_conn):
     from tcginventory.ui.views.history import HistoryView
 

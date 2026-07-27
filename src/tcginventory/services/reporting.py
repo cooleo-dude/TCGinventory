@@ -81,9 +81,13 @@ class ReportingService:
         return self.conn.execute(sql, params).fetchone()["v"]
 
     def collection_value_cents(self, intent: Intent | None = None) -> int:
-        """Current market value of holdings; ripping lots count as $0."""
+        """Current market value of holdings; ripping and missing lots count as $0.
+
+        Cost basis still includes missing lots, so their unrealized P/L is a loss
+        equal to their cost basis (impairment write-down)."""
         sql = (
-            "SELECT COALESCE(SUM(CASE WHEN l.intent = 'ripping' THEN 0 "
+            "SELECT COALESCE(SUM(CASE WHEN l.intent = 'ripping' OR l.missing = 1 "
+            "THEN 0 "
             "ELSE l.remaining_qty * COALESCE(i.market_value_cents, 0) END), 0) AS v "
             "FROM lot l JOIN item i ON i.id = l.item_id "
             "WHERE l.remaining_qty > 0"
@@ -203,7 +207,7 @@ class ReportingService:
             return []
 
         lots = self.conn.execute(
-            "SELECT id, item_id, acquired_at, quantity, intent FROM lot"
+            "SELECT id, item_id, acquired_at, quantity, intent, missing FROM lot"
         ).fetchall()
 
         disposals: dict[int, list[tuple[str, int]]] = defaultdict(list)
@@ -235,8 +239,8 @@ class ReportingService:
         for d in dates:
             total = 0
             for lot in lots:
-                if lot["intent"] == "ripping":
-                    continue  # ripping is always $0
+                if lot["intent"] == "ripping" or lot["missing"]:
+                    continue  # ripping and missing lots are always $0
                 if intent is not None and lot["intent"] != intent.value:
                     continue
                 if lot["acquired_at"] > d:

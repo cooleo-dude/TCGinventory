@@ -237,6 +237,7 @@ class LotRepository:
             acquired_market_value_cents=row["acquired_market_value_cents"],
             intent=Intent(row["intent"]),
             sku=row["sku"],
+            missing=bool(row["missing"]),
             source=row["source"],
             notes=row["notes"],
             created_at=row["created_at"],
@@ -249,8 +250,8 @@ class LotRepository:
             INSERT INTO lot (
                 item_id, acquired_txn_line_id, acquired_at, quantity,
                 remaining_qty, unit_cost_cents, acquired_market_value_cents,
-                intent, sku, source, notes, created_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                intent, sku, missing, source, notes, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 lot.item_id,
@@ -262,6 +263,7 @@ class LotRepository:
                 lot.acquired_market_value_cents,
                 lot.intent.value,
                 lot.sku,
+                int(lot.missing),
                 lot.source,
                 lot.notes,
                 lot.created_at,
@@ -282,11 +284,14 @@ class LotRepository:
         return [self._to_model(r) for r in rows]
 
     def open_lots_for_item(self, item_id: int) -> list[Lot]:
-        """Open (unsold) lots for an item in FIFO order — oldest acquisition first."""
+        """Open (unsold) lots for an item in FIFO order — oldest acquisition first.
+
+        Missing (stolen/lost) lots are excluded: they are no longer on hand, so a
+        disposal can never draw from them (mirrors ripping's exclusion)."""
         rows = self.conn.execute(
             """
             SELECT * FROM lot
-            WHERE item_id = ? AND remaining_qty > 0
+            WHERE item_id = ? AND remaining_qty > 0 AND missing = 0
             ORDER BY acquired_at, id
             """,
             (item_id,),
@@ -344,7 +349,7 @@ class LotRepository:
                 item_id = ?, acquired_txn_line_id = ?, acquired_at = ?,
                 quantity = ?, remaining_qty = ?, unit_cost_cents = ?,
                 acquired_market_value_cents = ?, intent = ?, sku = ?,
-                source = ?, notes = ?
+                missing = ?, source = ?, notes = ?
             WHERE id = ?
             """,
             (
@@ -357,6 +362,7 @@ class LotRepository:
                 lot.acquired_market_value_cents,
                 lot.intent.value,
                 lot.sku,
+                int(lot.missing),
                 lot.source,
                 lot.notes,
                 lot.id,

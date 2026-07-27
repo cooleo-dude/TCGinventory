@@ -103,6 +103,48 @@ Prioritized backlog once the baseline is solid:
 10. **Cloud sync / backup** (e.g. to a user's Drive) — optional, opt-in.
 11. **Other games** — MTG/sports-specific fields and imports.
 
+## Post-V1 — in flight (as of 2026-07-26)
+
+Work happening now, beyond the ratified V1 baseline. Kept here so the plan and
+next steps survive across sessions.
+
+### Catalog price history + market-trend — **done**
+- Catalog-wide daily price history in a separate `pricehistory.db`
+  (dedup-on-change, ~1yr live / ~3mo backup); Price Lookup view with tag/overlay
+  graphs.
+- **Market-trend**: `services/trends.py` (least-squares slope over ~30d →
+  signed % + magnitude tier) drives a sortable **Trend** arrow column in the
+  Inventory grid (green ▲ up / red ▼ down, more arrows = steeper; grey flat/none).
+
+### Show Prep + printable-label export — **planned, paused**
+Goal: a **Show Prep** window to add cards to a registry **in a chosen sequence**,
+then export a **CSV** that an external program turns into printable labels (price
+tags / identification labels for a card show).
+
+- **Web sweep done (2026-07-17)** — candidate label tools, free prioritized:
+  - **LibreOffice Writer** (Labels + Mail Merge) — free/OSS, offline, maintained;
+    best for Avery/laser sheets. **Recommended default.**
+  - **Avery Design & Print Online** — free (account), cloud; easiest, barcode/QR
+    generator; data leaves the machine.
+  - **Printer-bundled** (Dymo Connect / Brother P-touch / Zebra ZebraDesigner) —
+    free with the respective label printer; natural for thermal labels.
+  - **Label LIVE** — $49 one-time, printer-agnostic, polished (paid fallback).
+  - **Avoid:** gLabels on Windows (Linux-only now, no maintained Windows build);
+    freemium barcode tools with watermark/symbology traps.
+- **Key insight:** we generate the CSV, so tool choice is low-stakes/reversible —
+  a clean header + one row per label (in sequence) feeds any of them.
+- **Next steps (blocked on user):** confirm (1) label hardware (Avery sheets vs a
+  dedicated label printer) and (2) whether labels need a barcode/QR — both steer
+  the CSV columns. Then: design the CSV schema (incl. a SKU/ID column for future
+  barcoding), build the Show Prep registry window (add/reorder/remove), and wire
+  CSV export.
+
+### Stolen / missing items — **next (design below)**
+Right-click an Inventory row → **mark as stolen/missing** (reversible). A missing
+lot shows **"Missing"** in the Sold column and is written down so the portfolio
+totals drop by its cost basis. See
+[data model → missing lots](02-data-model.md#missing--stolen-lots).
+
 ## Sequencing rationale
 
 - **Money math (M2) before UI** so the correctness-critical logic — allocation,

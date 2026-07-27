@@ -4,6 +4,24 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-27 — Stolen / missing items: reversible $0 impairment (not a transaction)
+
+- Right-click an Inventory row → **mark as stolen / missing** (and unmark). Backed
+  by a reversible per-lot flag `lot.missing` (migration `0014`), **not** a
+  transaction — the user wanted a lightweight toggle.
+- **Accounting = impairment, mirroring ripping** (chosen over a realized
+  write-off, confirmed by owner): a missing lot is valued at **$0 market** while
+  **keeping its cost basis**, so unrealized P/L = `0 − cost` → it shows a loss
+  equal to its purchase price, and portfolio collection value / unrealized drop
+  accordingly. The realized-profit line is untouched. Picked for consistency with
+  the existing $0-lot pattern and a small, contained code footprint; a stricter
+  realized write-off (hitting the realized series, needing a loss date) is a
+  possible later refinement.
+- Missing lots are excluded from on-hand, the sell/give picker, and FIFO
+  disposal (can't sell what's gone); the **Sold** column reads "Missing". Each
+  toggle writes an append-only `audit_log` `edit` entry on the lot (money moved,
+  no transaction). New invariant 9 in [spec 02](../specs/02-data-model.md#invariants-must-always-hold).
+
 ### 2026-07-24 — M-V1c: identity suggestions wired into the Recognition window
 
 - A **Suggest labels** button crops each drawn box (in-memory, via the box's

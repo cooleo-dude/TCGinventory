@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -313,6 +314,9 @@ class InventoryView(QWidget):
         install_hover_preview(
             self._table.viewport(), lambda: None, self._preview_pane
         )  # clear on leave
+        # Right-click a row → mark/unmark as stolen (missing).
+        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._show_row_menu)
 
         # Review column: amber highlight + inline editor + two-stage button.
         self._review_delegate = ReviewPriceDelegate(
@@ -554,6 +558,28 @@ class InventoryView(QWidget):
         url = proxy_index.data(LINK_URL_ROLE)
         if url:
             QDesktopServices.openUrl(QUrl(url))
+
+    def _show_row_menu(self, pos) -> None:
+        """Right-click menu on an inventory row: mark/unmark as stolen."""
+        index = self._table.indexAt(pos)
+        if not index.isValid():
+            return
+        row = self._model.row_at(self._proxy.mapToSource(index).row())
+        menu = QMenu(self._table)
+        if row.missing:
+            act = menu.addAction("Unmark stolen (restore)")
+        else:
+            act = menu.addAction("Mark as stolen / missing")
+        act.triggered.connect(lambda: self._toggle_missing(row))
+        menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _toggle_missing(self, row: InventoryRow) -> None:
+        """Flag/unflag the row's lot as stolen — a reversible $0 write-down."""
+        if not self._service.set_lot_missing(row.lot_id, not row.missing):
+            return
+        self._conn.commit()
+        self.refresh()
+        self.changed.emit()  # portfolio totals moved → refresh dashboard
 
     def _open_detail(self, proxy_index: QModelIndex) -> None:
         source_index = self._proxy.mapToSource(proxy_index)

@@ -67,6 +67,7 @@ class Lot:
     acquired_market_value_cents: int
     intent: Intent
     sku: str | None = None  # auto-generated per-copy lookup SKU
+    missing: bool = False  # stolen/lost write-down (reversible; valued at $0)
     acquired_txn_line_id: int | None = None
     source: str | None = None
     notes: str | None = None

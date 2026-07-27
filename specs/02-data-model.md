@@ -174,6 +174,25 @@ which lives on the lot — not against either market-value field.
   per the integer-cents rule). A transaction's total margin is the sum of its
   `out`-line realized P/L; a pure purchase has no margin (nothing disposed).
 
+### Missing / stolen lots
+
+A lot can be flagged **missing** (stolen or lost) — a reversible write-down set
+from the Inventory grid (right-click → *mark as stolen*), not a transaction. Its
+accounting mirrors **ripping**, the existing "in inventory but valued at $0"
+pattern:
+
+- A missing lot is **valued at $0 market** while **retaining its cost basis**, so
+  its unrealized P/L = `0 − cost basis` — the lot shows a **loss equal to its
+  purchase price**, and the portfolio's collection value / unrealized total drop
+  accordingly. (This is the impairment view; a stricter *realized* write-off is a
+  possible later refinement.)
+- It is **never sellable** and **never consumed** by a disposal (like ripping),
+  and is **excluded from on-hand counts** — the units are physically gone.
+- The Inventory **Sold** column reads **"Missing"** for these lots.
+- **Reversible:** clearing the flag restores the lot to normal valuation exactly.
+  Because it moves money, each toggle writes an `audit_log` `edit` entry on the
+  lot (before/after), honouring the append-only audit rule without a transaction.
+
 ### Feeding the Dashboard (Window 1) line graphs
 
 - **Money-movement series** = running cumulative **net cash** (`Σ cash_delta`
@@ -233,6 +252,7 @@ CREATE TABLE lot (
     unit_cost_cents     INTEGER NOT NULL,      -- inferred basis / unit (market-value-weighted split)
     acquired_market_value_cents INTEGER NOT NULL, -- per-unit market value at acquisition (allocation snapshot)
     intent              TEXT    NOT NULL,      -- enum: personal | resale | ripping (editable, no history in V1)
+    missing             INTEGER NOT NULL DEFAULT 0, -- 1 = stolen/lost write-down, reversible (added in 0014)
     sku                 TEXT,                  -- auto-generated per-copy lookup SKU (added in 0003)
     source              TEXT,                  -- vendor/seller/friend
     notes               TEXT,                  -- acquisition notes (per this lot)
@@ -382,3 +402,6 @@ Transactions are **never hard-deleted**.
    non-null `acquired_market_value_cents`.
 8. `ripping` lots are never consumed by a disposal (they cannot appear on an
    `out` line) and are always valued at $0 market → unrealized loss = cost basis.
+9. A lot flagged `missing` is excluded from on-hand quantity and is never
+   sellable/consumed; it is valued at $0 market while keeping its cost basis
+   (unrealized loss = cost basis). Clearing the flag restores it exactly.
