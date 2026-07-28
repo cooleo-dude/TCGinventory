@@ -946,6 +946,16 @@ class TransactionView(QWidget):
     def refresh(self) -> None:
         self._update_summary()
 
+    def set_deal_context(
+        self, *, counterparty: str | None = None, reference: str | None = None
+    ) -> None:
+        """Prefill the counterparty / reference (e.g. when exporting an auction)."""
+        if counterparty is not None:
+            self._counterparty.setText(counterparty)
+        if reference is not None:
+            self._reference.setText(reference)
+        self._update_summary()
+
     # -- edit pre-load ------------------------------------------------------
 
     def load_transaction(self, transaction_id: int) -> bool:

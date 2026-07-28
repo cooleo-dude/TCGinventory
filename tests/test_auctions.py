@@ -295,7 +295,7 @@ def test_ensure_columns_adds_tcgplayer_url_to_old_db():
     conn.close()
 
 
-def test_price_result_populates_tcgplayer_button(app):
+def test_price_result_populates_tcgplayer_field(app):
     view = _view(app)
     row = view._add_card_row()
     row.name.setText("Charizard")
@@ -303,32 +303,115 @@ def test_price_result_populates_tcgplayer_button(app):
     view._on_price_ready(
         row, None, (1850, "https://www.tcgplayer.com/product/123"), had_hist_price=False
     )
-    assert row.tcg_btn.isEnabled()
+    assert row.tcgplayer.text() == "https://www.tcgplayer.com/product/123"
     assert row.market.value() == 18.50  # backfilled since history had no price
     assert row.to_card().tcgplayer_url == "https://www.tcgplayer.com/product/123"
     view.deleteLater()
 
 
-def test_tcgplayer_button_opens_url(app, monkeypatch):
+def test_set_tcgplayer_url_fills_field(app):
     view = _view(app)
     row = view._add_card_row()
+    assert row.tcgplayer.text() == ""  # empty until one resolves
     row.set_tcgplayer_url("https://tcgplayer.com/x")
-    assert row.tcg_btn.isEnabled()
-
-    opened: list[str] = []
-    monkeypatch.setattr(
-        "tcginventory.ui.views.auctions.QDesktopServices",
-        type("D", (), {"openUrl": staticmethod(lambda u: opened.append(u.toString()))}),
-    )
-    row.tcg_btn.click()
-    assert opened == ["https://tcgplayer.com/x"]
+    assert row.tcgplayer.text() == "https://tcgplayer.com/x"
     view.deleteLater()
 
 
-def test_button_disabled_without_url(app):
+# ---------------------------------------------------------------------------
+# full parity + export + archive
+# ---------------------------------------------------------------------------
+
+
+def test_row_full_parity_roundtrip(app):
     view = _view(app)
+    ac = AuctionCard(
+        name="Blastoise", set_name="Base", number="2/102", language="EN",
+        quantity=3, market_value_cents=4200, condition="MP", intent="personal",
+        review=True, tcgplayer_url="http://t", ebay_url="http://e", notes="chase",
+    )
     row = view._add_card_row()
-    assert not row.tcg_btn.isEnabled()  # no link until one resolves
+    row.set_card(ac)
+    out = row.to_card()
+    assert (out.name, out.condition, out.quantity) == ("Blastoise", "MP", 3)
+    assert out.market_value_cents == 4200
+    assert out.intent == "personal" and out.review is True
+    assert (out.tcgplayer_url, out.ebay_url, out.notes) == (
+        "http://t", "http://e", "chase",
+    )
+    view.deleteLater()
+
+
+def test_row_graded_roundtrip(app):
+    view = _view(app)
+    ac = AuctionCard(
+        name="Slab", is_graded=True, grading_company="PSA", grade="10",
+        cert_number="99", market_value_cents=90000,
+    )
+    row = view._add_card_row()
+    row.set_card(ac)
+    out = row.to_card()
+    assert out.is_graded and out.condition is None
+    assert (out.grading_company, out.grade, out.cert_number) == ("PSA", "10", "99")
+    view.deleteLater()
+
+
+def test_export_current_emits_incoming_cards(app):
+    view = _view(app)
+    captured = {}
+    view.export_to_transaction.connect(
+        lambda p: captured.update(title=p[0], cards=p[1])
+    )
+    row = view._add_card_row()
+    row.set_card(AuctionCard(
+        name="Pikachu", set_name="Base", number="58/102", condition="LP",
+        quantity=2, market_value_cents=1500, intent="resale", review=True,
+    ))
+    view._title.setText("My eBay lot")
+    view._export_current()
+    assert captured["title"] == "My eBay lot"
+    inc = captured["cards"][0]
+    assert inc.item.name == "Pikachu" and inc.item.condition.value == "LP"
+    assert inc.quantity == 2 and inc.market_value_cents == 1500
+    assert inc.intent.value == "resale" and inc.review is True
+    view.deleteLater()
+
+
+def test_main_window_export_populates_transaction(app):
+    from tcginventory.data.db import connect
+    from tcginventory.data.migrator import migrate
+    from tcginventory.ui.main_window import MainWindow
+
+    conn = connect(":memory:")
+    migrate(conn)
+    win = MainWindow(conn)
+    win._auctions._add_card_row().set_card(AuctionCard(
+        name="Charizard", set_name="Base", number="4/102", condition="MP",
+        quantity=2, market_value_cents=25000, intent="resale", review=True,
+    ))
+    win._auctions._title.setText("Vintage lot")
+    win._auctions._export_current()
+
+    tx = win._transaction
+    assert win._nav.currentRow() == 1  # switched to the Transaction tab
+    assert len(tx._receive_rows) == 1
+    r = tx._receive_rows[0]
+    assert r.name.text() == "Charizard" and r.condition.currentData() == "MP"
+    assert r.qty.value() == 2 and r.review.isChecked()
+    assert tx._counterparty.text() == "eBay" and tx._reference.text() == "Vintage lot"
+    assert tx._cash_out.value() == 0.0  # winning bid left blank for the user
+    win.deleteLater()
+
+
+def test_archive_toggle_and_filter(app):
+    view = _view(app)
+    view._add_card_row().set_card(AuctionCard(name="X", market_value_cents=100))
+    view._save()
+    assert view._watch.rowCount() == 1
+    view._toggle_archived(view._repo.get(view._edit_id))
+    assert view._watch.rowCount() == 0  # archived → hidden from the active list
+    view._show_archived.setChecked(True)
+    assert view._watch.rowCount() == 1  # revealed under "Show archived"
     view.deleteLater()
 
 

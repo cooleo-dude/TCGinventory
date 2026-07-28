@@ -87,14 +87,40 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     card_cols = {r[1] for r in conn.execute("PRAGMA table_info(auction_card)")}
     if card_cols and "tcgplayer_url" not in card_cols:
         conn.execute("ALTER TABLE auction_card ADD COLUMN tcgplayer_url TEXT")
+    # Full-parity card fields (added later so the auction can export to a purchase).
+    _parity_cols = {
+        "category": "TEXT NOT NULL DEFAULT 'single'",
+        "condition": "TEXT",
+        "holo_pattern": "TEXT",
+        "edition": "TEXT",
+        "is_graded": "INTEGER NOT NULL DEFAULT 0",
+        "grading_company": "TEXT",
+        "grade": "TEXT",
+        "cert_number": "TEXT",
+        "ebay_url": "TEXT",
+        "notes": "TEXT",
+        "intent": "TEXT NOT NULL DEFAULT 'resale'",
+        "review": "INTEGER NOT NULL DEFAULT 0",
+    }
+    for name, decl in _parity_cols.items():
+        if card_cols and name not in card_cols:
+            conn.execute(f"ALTER TABLE auction_card ADD COLUMN {name} {decl}")
     auction_cols = {r[1] for r in conn.execute("PRAGMA table_info(auction)")}
     if auction_cols and "ends_at" not in auction_cols:
         conn.execute("ALTER TABLE auction ADD COLUMN ends_at TEXT")
+    if auction_cols and "archived" not in auction_cols:
+        conn.execute(
+            "ALTER TABLE auction ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 @dataclass
 class AuctionCard:
-    """One card bundled inside a watched auction (a scratch estimate, not a lot)."""
+    """One card bundled inside a watched auction (a scratch estimate, not a lot).
+
+    Carries the **full** transaction card field set so a saved/archived auction
+    can be exported straight into the Transaction window as a purchase.
+    """
 
     name: str
     card_id: str | None = None  # catalog id (drives image + price refresh)
@@ -106,6 +132,19 @@ class AuctionCard:
     market_value_cents: int = 0
     image_url: str | None = None
     tcgplayer_url: str | None = None
+    # Full parity with a Transaction incoming card (stored as enum .value strings).
+    category: str = "single"
+    condition: str | None = None
+    holo_pattern: str | None = None
+    edition: str | None = None
+    is_graded: bool = False
+    grading_company: str | None = None
+    grade: str | None = None
+    cert_number: str | None = None
+    ebay_url: str | None = None
+    notes: str | None = None
+    intent: str = "resale"
+    review: bool = False
     id: int | None = None
 
 
@@ -119,6 +158,7 @@ class Auction:
     tax_rate_bps: int = DEFAULT_TAX_RATE_BPS
     ends_at: str | None = None  # ISO local datetime the auction ends (for countdown)
     notes: str | None = None
+    archived: bool = False  # saved for later (hidden from the active watchlist)
     cards: list[AuctionCard] = field(default_factory=list)
     id: int | None = None
     created_at: str | None = None
@@ -138,16 +178,31 @@ class AuctionRepository:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
-    def list_all(self) -> list[Auction]:
-        """Every watched auction, newest first.
+    def list_all(self, archived: bool | None = False) -> list[Auction]:
+        """Watched auctions, newest first. ``archived`` filters by the flag
+        (``False`` = active watchlist, ``True`` = archived, ``None`` = both).
 
         Watchlist display order (soonest-ending first, ended sink to the bottom)
         is applied in the view, since "ended" depends on the current time.
         """
-        rows = self.conn.execute(
-            "SELECT * FROM auction ORDER BY created_at DESC, id DESC"
-        ).fetchall()
+        if archived is None:
+            rows = self.conn.execute(
+                "SELECT * FROM auction ORDER BY created_at DESC, id DESC"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM auction WHERE archived = ? "
+                "ORDER BY created_at DESC, id DESC",
+                (1 if archived else 0,),
+            ).fetchall()
         return [self._load(r) for r in rows]
+
+    def set_archived(self, auction_id: int, archived: bool) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE auction SET archived = ? WHERE id = ?",
+                (1 if archived else 0, auction_id),
+            )
 
     def get(self, auction_id: int) -> Auction | None:
         row = self.conn.execute(
@@ -169,6 +224,18 @@ class AuctionRepository:
                 market_value_cents=c["market_value_cents"],
                 image_url=c["image_url"],
                 tcgplayer_url=c["tcgplayer_url"],
+                category=c["category"],
+                condition=c["condition"],
+                holo_pattern=c["holo_pattern"],
+                edition=c["edition"],
+                is_graded=bool(c["is_graded"]),
+                grading_company=c["grading_company"],
+                grade=c["grade"],
+                cert_number=c["cert_number"],
+                ebay_url=c["ebay_url"],
+                notes=c["notes"],
+                intent=c["intent"],
+                review=bool(c["review"]),
             )
             for c in self.conn.execute(
                 "SELECT * FROM auction_card WHERE auction_id = ? "
@@ -184,6 +251,7 @@ class AuctionRepository:
             tax_rate_bps=row["tax_rate_bps"],
             ends_at=row["ends_at"],
             notes=row["notes"],
+            archived=bool(row["archived"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             cards=cards,
@@ -199,8 +267,8 @@ class AuctionRepository:
             if auction.id is None:
                 cur = self.conn.execute(
                     "INSERT INTO auction (title, url, shipping_cents, "
-                    "tax_rate_bps, ends_at, notes, created_at, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "tax_rate_bps, ends_at, notes, archived, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
                     (
                         auction.title,
                         auction.url,
@@ -208,6 +276,7 @@ class AuctionRepository:
                         auction.tax_rate_bps,
                         auction.ends_at,
                         auction.notes,
+                        1 if auction.archived else 0,
                         now,
                         now,
                     ),
@@ -217,7 +286,8 @@ class AuctionRepository:
             else:
                 self.conn.execute(
                     "UPDATE auction SET title=?, url=?, shipping_cents=?, "
-                    "tax_rate_bps=?, ends_at=?, notes=?, updated_at=? WHERE id=?",
+                    "tax_rate_bps=?, ends_at=?, notes=?, archived=?, updated_at=? "
+                    "WHERE id=?",
                     (
                         auction.title,
                         auction.url,
@@ -225,6 +295,7 @@ class AuctionRepository:
                         auction.tax_rate_bps,
                         auction.ends_at,
                         auction.notes,
+                        1 if auction.archived else 0,
                         now,
                         auction.id,
                     ),
@@ -238,8 +309,10 @@ class AuctionRepository:
                 self.conn.execute(
                     "INSERT INTO auction_card (auction_id, card_id, name, "
                     "set_name, set_code, number, language, quantity, "
-                    "market_value_cents, image_url, tcgplayer_url, position) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "market_value_cents, image_url, tcgplayer_url, category, "
+                    "condition, holo_pattern, edition, is_graded, grading_company, "
+                    "grade, cert_number, ebay_url, notes, intent, review, position) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         auction.id,
                         card.card_id,
@@ -252,6 +325,18 @@ class AuctionRepository:
                         card.market_value_cents,
                         card.image_url,
                         card.tcgplayer_url,
+                        card.category,
+                        card.condition,
+                        card.holo_pattern,
+                        card.edition,
+                        1 if card.is_graded else 0,
+                        card.grading_company,
+                        card.grade,
+                        card.cert_number,
+                        card.ebay_url,
+                        card.notes,
+                        card.intent,
+                        1 if card.review else 0,
                         pos,
                     ),
                 )

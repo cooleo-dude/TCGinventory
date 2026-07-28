@@ -4,6 +4,26 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-28 — Auctions: full-parity inputs, Export to Transaction, Archive
+
+- **Full parity:** the auction card row now carries the **entire** Transaction
+  incoming field set (category, language, condition/graded+company/grade/cert,
+  holo, edition, intent, review, tcgplayer, ebay, notes) — the `auction_card`
+  table + `AuctionCard` gained those columns (forward-only `_ensure_columns`
+  ALTERs). Chose to **expand the self-contained `_AuctionCardRow`** rather than
+  reuse the Transaction `_ReceiveRow`, to avoid coupling to / destabilizing the
+  tested Transaction window. The per-row TCGplayer *button* became an editable
+  *field* (matches the Transaction row; still auto-fills on pick).
+- **Export to Transaction:** a button in the editor footer and per watchlist row
+  emits `(title, [IncomingCard])`; the main window clears the Transaction form,
+  adds the incoming rows, sets counterparty "eBay" + reference = auction title,
+  and switches to the Transaction tab. **Cash out is left blank** — the auction
+  stores card market values + shipping/tax estimates, not the hammer price, so
+  the user types the actual winning bid.
+- **Archive:** `auction.archived` flag; the watchlist shows active auctions with
+  a "Show archived" toggle, and each row has Archive/Unarchive. Archived
+  auctions persist and can still be exported.
+
 ### 2026-07-27 — Dashboard collection-value chart reconciles with the tile
 
 - The "Collection Value" **tile** uses current `item.market_value_cents` (incl.

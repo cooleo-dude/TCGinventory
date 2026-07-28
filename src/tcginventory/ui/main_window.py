@@ -212,6 +212,7 @@ class MainWindow(QMainWindow):
         self._history.changed.connect(self._on_ledger_changed)
         self._inventory.changed.connect(self._on_ledger_changed)
         self._history.edit_requested.connect(self._start_edit)
+        self._auctions.export_to_transaction.connect(self._export_from_auction)
 
         self._nav = QListWidget()
         self._nav.addItems(NAV_ITEMS)
@@ -555,6 +556,16 @@ class MainWindow(QMainWindow):
     def _start_edit(self, transaction_id: int) -> None:
         if self._transaction.load_transaction(transaction_id):
             self._nav.setCurrentRow(_TRANSACTION_INDEX)
+
+    def _export_from_auction(self, payload) -> None:
+        """Auction → Transaction: prefill a fresh purchase with the auction's
+        cards (you enter the winning bid as cash out)."""
+        title, incoming = payload
+        self._transaction.clear()
+        for card in incoming:
+            self._transaction.add_incoming(card)
+        self._transaction.set_deal_context(counterparty="eBay", reference=title)
+        self._nav.setCurrentRow(_TRANSACTION_INDEX)
 
     def _update_status(self) -> None:
         count = self._conn.execute("SELECT COUNT(*) FROM item").fetchone()[0]

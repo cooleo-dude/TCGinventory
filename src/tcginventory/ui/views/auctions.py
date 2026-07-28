@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
     QCheckBox,
+    QComboBox,
     QCompleter,
     QDateEdit,
     QDoubleSpinBox,
@@ -70,13 +71,82 @@ from tcginventory.data.auctions import (
     open_auctions,
 )
 from tcginventory.data.repositories import CardCatalogRepository
+from tcginventory.domain.enums import (
+    Category,
+    Condition,
+    Edition,
+    GradingCompany,
+    HoloPattern,
+    Intent,
+    Language,
+)
+from tcginventory.domain.models import Item
 from tcginventory.services import auctions as auction_math
+from tcginventory.services.transactions import IncomingCard
 from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.card_preview import install_hover_preview
 from tcginventory.ui.formatting import money, percent
 
-_CARD_HEADERS = ["Name", "Set", "#", "Market", "Qty", "TCGplayer", ""]
-_CARD_WIDTHS = [200, 150, 70, 90, 50, 96, 30]
+
+def _auction_card_to_incoming(ac: AuctionCard) -> IncomingCard:
+    """Translate a saved auction card into a Transaction incoming card."""
+    item = Item(
+        name=ac.name,
+        category=Category(ac.category or "single"),
+        set_name=ac.set_name,
+        set_code=ac.set_code,
+        card_number=ac.number,
+        language=Language(ac.language or "EN"),
+        condition=(
+            None
+            if ac.is_graded
+            else Condition(ac.condition) if ac.condition else Condition.NM
+        ),
+        holo_pattern=HoloPattern(ac.holo_pattern) if ac.holo_pattern else None,
+        edition=Edition(ac.edition) if ac.edition else None,
+        is_graded=ac.is_graded,
+        grading_company=(
+            GradingCompany(ac.grading_company) if ac.grading_company else None
+        ),
+        grade=ac.grade,
+        cert_number=ac.cert_number,
+        tcgplayer_url=ac.tcgplayer_url,
+        ebay_url=ac.ebay_url,
+        notes=ac.notes,
+    )
+    return IncomingCard(
+        item=item,
+        quantity=ac.quantity,
+        market_value_cents=ac.market_value_cents,
+        intent=Intent(ac.intent or "resale"),
+        review=ac.review,
+    )
+
+
+def _combo(enum_cls, capitalize: bool = False) -> QComboBox:
+    """A drop-down of an enum's values (value stored as item data)."""
+    box = QComboBox()
+    for e in enum_cls:
+        box.addItem(e.value.capitalize() if capitalize else e.value, e.value)
+    return box
+
+
+def _select(combo: QComboBox, value: str | None) -> None:
+    idx = combo.findData(value) if value is not None else -1
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
+
+
+# Full parity with the Transaction "receive" row so an auction exports cleanly.
+_CARD_HEADERS = [
+    "Name", "Cat", "Set", "#", "Lang", "Graded", "Cond", "Holo", "Edition",
+    "Co", "Grade", "Cert", "Market", "Qty", "Intent", "Rev", "TCGplayer",
+    "eBay", "Notes", "",
+]
+_CARD_WIDTHS = [
+    170, 80, 130, 60, 60, 55, 70, 90, 80, 70, 55, 70, 90, 45, 90, 40, 150,
+    130, 140, 30,
+]
 
 _WATCH_HEADERS = [
     "Title",
@@ -89,13 +159,16 @@ _WATCH_HEADERS = [
     "Ship",
     "Tax",
     "Time left",
-    "",
+    "",  # refresh
     "Link",
-    "",
+    "Export",
+    "Archive",
+    "",  # delete
 ]
-_WATCH_WIDTHS = [220, 50, 90, 90, 90, 90, 90, 80, 60, 110, 34, 60, 30]
+_WATCH_WIDTHS = [220, 50, 90, 90, 90, 90, 90, 80, 60, 110, 34, 60, 84, 84, 30]
 _TIME_LEFT_COL = _WATCH_HEADERS.index("Time left")
-_FIRST_BUTTON_COL = _TIME_LEFT_COL + 1  # refresh / link / delete follow
+# refresh / link / export / archive / delete follow the countdown column.
+_FIRST_BUTTON_COL = _TIME_LEFT_COL + 1
 _ID_ROLE = Qt.UserRole + 1
 _ENDS_ROLE = Qt.UserRole + 2  # ISO end datetime stored on the "Time left" cell
 _UNSET = object()  # sentinel: history not supplied -> open the default DB
@@ -244,8 +317,21 @@ class _AuctionCardRow:
         popup.setItemDelegate(self._match_delegate)
         install_hover_preview(popup, lambda: None, self._sink)
 
+        # Full transaction-parity field set (so an auction exports as a purchase).
+        self.category = _combo(Category, capitalize=True)
         self.set = QLineEdit()
         self.number = QLineEdit()
+        self.language = _combo(Language)
+        self.graded = QCheckBox()
+        self.graded.toggled.connect(self._toggle_graded)
+        self.graded.toggled.connect(lambda *_: on_change())
+        self.condition = _combo(Condition)
+        self.condition.currentIndexChanged.connect(self._maybe_flag_review)
+        self.holo = _combo(HoloPattern)
+        self.edition = _combo(Edition)
+        self.company = _combo(GradingCompany)
+        self.grade = QLineEdit()
+        self.cert = QLineEdit()
         self.market = _money_spin()
         self.market.valueChanged.connect(lambda *_: on_change())
         self.qty = QSpinBox()
@@ -253,28 +339,40 @@ class _AuctionCardRow:
         self.qty.setMaximum(9999)
         self.qty.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.qty.valueChanged.connect(lambda *_: on_change())
-        # TCGplayer link button — enabled once a product URL is resolved (from
-        # the price-on-pick lookup). Clicking opens the listing.
-        self.tcg_btn = QPushButton("TCGplayer")
-        self.tcg_btn.setEnabled(False)
-        self.tcg_btn.setToolTip("Open this card on TCGplayer")
-        self.tcg_btn.clicked.connect(self._open_tcgplayer)
+        self.intent = _combo(Intent, capitalize=True)
+        _select(self.intent, Intent.RESALE.value)
+        self.review = QCheckBox()
+        self.tcgplayer = QLineEdit()
+        self.tcgplayer.setPlaceholderText("auto-fills on pick")
+        self.ebay = QLineEdit()
+        self.notes = QLineEdit()
+        self._toggle_graded(False)
 
     def widgets(self) -> list[QWidget]:
         return [
-            self.name, self.set, self.number, self.market, self.qty, self.tcg_btn,
+            self.name, self.category, self.set, self.number, self.language,
+            self.graded, self.condition, self.holo, self.edition, self.company,
+            self.grade, self.cert, self.market, self.qty, self.intent,
+            self.review, self.tcgplayer, self.ebay, self.notes,
         ]
 
-    def _open_tcgplayer(self) -> None:
-        if self._tcgplayer_url:
-            QDesktopServices.openUrl(QUrl(self._tcgplayer_url))
+    def _toggle_graded(self, graded: bool) -> None:
+        # Graded slabs are identified by grade, not condition (mirrors the
+        # Transaction row): grey out condition/holo, enable company/grade/cert.
+        self.condition.setEnabled(not graded)
+        self.holo.setEnabled(not graded)
+        self.company.setEnabled(graded)
+        self.grade.setEnabled(graded)
+        self.cert.setEnabled(graded)
+
+    def _maybe_flag_review(self) -> None:
+        if not self.graded.isChecked():
+            self.review.setChecked(self.condition.currentData() != Condition.NM.value)
 
     def set_tcgplayer_url(self, url: str | None) -> None:
         self._tcgplayer_url = url or None
-        self.tcg_btn.setEnabled(bool(self._tcgplayer_url))
-        self.tcg_btn.setToolTip(
-            self._tcgplayer_url or "No TCGplayer link for this card"
-        )
+        if url:
+            self.tcgplayer.setText(url)
 
     # -- catalog autofill ---------------------------------------------------
 
@@ -322,9 +420,11 @@ class _AuctionCardRow:
     def apply_catalog_card(self, card) -> None:
         self._card_id = card.card_id
         self._image_url = getattr(card, "image_small", None)
-        self._language = getattr(card, "language", None) or "EN"
-        self.set_tcgplayer_url(None)  # cleared until the price lookup resolves it
+        self.tcgplayer.clear()  # cleared until the price lookup resolves it
+        self._tcgplayer_url = None
         self.name.setText(card.name)
+        _select(self.category, Category.SINGLE.value)  # catalog cards are singles
+        _select(self.language, getattr(card, "language", None) or Language.EN.value)
         self.set.setText(card.set_name or "")
         number = CardCatalogRepository(self._conn).display_number(card)
         self.number.setText(number or card.full_number or card.number or "")
@@ -340,13 +440,30 @@ class _AuctionCardRow:
     def set_card(self, card: AuctionCard) -> None:
         self._card_id = card.card_id
         self._image_url = card.image_url
-        self._language = card.language or "EN"
-        self.set_tcgplayer_url(card.tcgplayer_url)
         self.name.setText(card.name)
+        _select(self.category, card.category or Category.SINGLE.value)
         self.set.setText(card.set_name or "")
         self.number.setText(card.number or "")
+        _select(self.language, card.language or Language.EN.value)
+        self.graded.setChecked(card.is_graded)
+        if card.condition is not None:
+            _select(self.condition, card.condition)
+        if card.holo_pattern is not None:
+            _select(self.holo, card.holo_pattern)
+        if card.edition is not None:
+            _select(self.edition, card.edition)
+        if card.grading_company is not None:
+            _select(self.company, card.grading_company)
+        self.grade.setText(card.grade or "")
+        self.cert.setText(card.cert_number or "")
         self.market.setValue(card.market_value_cents / 100)
         self.qty.setValue(card.quantity)
+        _select(self.intent, card.intent or Intent.RESALE.value)
+        self.tcgplayer.setText(card.tcgplayer_url or "")
+        self._tcgplayer_url = card.tcgplayer_url
+        self.ebay.setText(card.ebay_url or "")
+        self.notes.setText(card.notes or "")
+        self.review.setChecked(card.review)  # last: overrides condition auto-flag
 
     def card_id(self) -> str | None:
         return self._card_id
@@ -361,21 +478,37 @@ class _AuctionCardRow:
         name = self.name.text().strip()
         if not name:
             return None
+        graded = self.graded.isChecked()
         return AuctionCard(
             name=name,
             card_id=self._card_id,
             set_name=self.set.text().strip() or None,
             number=self.number.text().strip() or None,
-            language=self._language,
+            language=self.language.currentData(),
             quantity=self.qty.value(),
             market_value_cents=round(self.market.value() * 100),
             image_url=self._image_url,
-            tcgplayer_url=self._tcgplayer_url,
+            tcgplayer_url=self.tcgplayer.text().strip() or None,
+            category=self.category.currentData(),
+            condition=None if graded else self.condition.currentData(),
+            holo_pattern=self.holo.currentData(),
+            edition=self.edition.currentData(),
+            is_graded=graded,
+            grading_company=self.company.currentData() if graded else None,
+            grade=(self.grade.text().strip() or None) if graded else None,
+            cert_number=(self.cert.text().strip() or None) if graded else None,
+            ebay_url=self.ebay.text().strip() or None,
+            notes=self.notes.text().strip() or None,
+            intent=self.intent.currentData(),
+            review=self.review.isChecked(),
         )
 
 
 class AuctionsView(QWidget):
     """The eBay Auctions screen (watchlist + max-bid editor)."""
+
+    # Emitted with (title, [IncomingCard]) to prefill the Transaction window.
+    export_to_transaction = Signal(object)
 
     def __init__(
         self,
@@ -454,11 +587,18 @@ class AuctionsView(QWidget):
         self._watch.setMouseTracking(True)  # hover a row -> preview its cards
         self._watch.cellEntered.connect(self._on_watch_hover)
         self._watch.viewport().installEventFilter(self)  # leave -> revert gallery
+        self._show_archived = QCheckBox("Show archived")
+        self._show_archived.setToolTip("Show saved (archived) auctions instead")
+        self._show_archived.toggled.connect(lambda *_: self.refresh())
         self._empty = QLabel(
             "No watched auctions yet — add cards below and Save to track one."
         )
         self._empty.setStyleSheet("color: #928374;")
+        top = QHBoxLayout()
+        top.addStretch(1)
+        top.addWidget(self._show_archived)
         layout = QVBoxLayout(box)
+        layout.addLayout(top)
         layout.addWidget(self._empty)
         layout.addWidget(self._watch, 1)
         return box
@@ -466,7 +606,13 @@ class AuctionsView(QWidget):
     def refresh(self) -> None:
         """Reload + re-sort the watchlist (soonest-ending first, ended last)."""
         now = datetime.now()
-        auctions = self._repo.list_all()
+        archived = self._show_archived.isChecked()
+        auctions = self._repo.list_all(archived=archived)
+        self._empty.setText(
+            "No archived auctions yet."
+            if archived
+            else "No watched auctions yet — add cards below and Save to track one."
+        )
         auctions.sort(key=lambda a: self._sort_key(a, now))
         self._empty.setVisible(not auctions)
         self._watch.setRowCount(0)
@@ -556,11 +702,23 @@ class AuctionsView(QWidget):
             )
         self._watch.setCellWidget(r, _FIRST_BUTTON_COL + 1, link)
 
+        export = QPushButton("Export →")
+        export.setToolTip("Send these cards to the Transaction window as a purchase")
+        export.clicked.connect(lambda _=False, a=auction: self._export_auction(a))
+        self._watch.setCellWidget(r, _FIRST_BUTTON_COL + 2, export)
+
+        archive = QPushButton("Unarchive" if auction.archived else "Archive")
+        archive.setToolTip("Save this auction for later (hidden from the watchlist)")
+        archive.clicked.connect(
+            lambda _=False, a=auction: self._toggle_archived(a)
+        )
+        self._watch.setCellWidget(r, _FIRST_BUTTON_COL + 3, archive)
+
         remove = QPushButton("✕")
         remove.setFixedWidth(28)
         remove.setToolTip("Delete this auction")
         remove.clicked.connect(lambda _=False, a=auction: self._delete(a))
-        self._watch.setCellWidget(r, _FIRST_BUTTON_COL + 2, remove)
+        self._watch.setCellWidget(r, _FIRST_BUTTON_COL + 4, remove)
 
     def _on_watch_cell_clicked(self, row: int, col: int) -> None:
         # The trailing refresh/link/delete columns are buttons; data cells load.
@@ -751,11 +909,17 @@ class AuctionsView(QWidget):
         new_btn = QPushButton("New")
         new_btn.setToolTip("Clear the editor for a fresh auction")
         new_btn.clicked.connect(self._new)
+        export_btn = QPushButton("Export to Transaction →")
+        export_btn.setToolTip(
+            "Send these cards to the Transaction window to add them as a purchase"
+        )
+        export_btn.clicked.connect(self._export_current)
         self._save_btn = QPushButton("Save auction")
         self._save_btn.clicked.connect(self._save)
         footer = QHBoxLayout()
         footer.addWidget(self._breakdown, 1)
         footer.addWidget(new_btn)
+        footer.addWidget(export_btn)
         footer.addWidget(self._save_btn)
 
         layout = QVBoxLayout(box)
@@ -926,6 +1090,35 @@ class AuctionsView(QWidget):
         saved = self._repo.save(auction)
         self._edit_id = saved.id
         self._banner.setText(f"Editing saved auction #{saved.id}")
+        self.refresh()
+
+    def _export_current(self) -> None:
+        """Send the editor's cards to the Transaction window as a purchase."""
+        cards = [c for c in (r.to_card() for r in self._rows) if c]
+        if not cards:
+            QMessageBox.information(
+                self, "Nothing to export", "Add at least one card first."
+            )
+            return
+        title = self._title.text().strip() or "eBay auction"
+        self.export_to_transaction.emit(
+            (title, [_auction_card_to_incoming(c) for c in cards])
+        )
+
+    def _export_auction(self, auction: Auction) -> None:
+        """Send a saved/archived auction's cards to the Transaction window."""
+        if not auction.cards:
+            QMessageBox.information(
+                self, "Nothing to export", "This auction has no cards."
+            )
+            return
+        title = auction.title or "eBay auction"
+        self.export_to_transaction.emit(
+            (title, [_auction_card_to_incoming(c) for c in auction.cards])
+        )
+
+    def _toggle_archived(self, auction: Auction) -> None:
+        self._repo.set_archived(auction.id, not auction.archived)
         self.refresh()
 
     def _load_auction(self, auction_id: int) -> None:
