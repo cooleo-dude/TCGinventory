@@ -135,7 +135,7 @@ def _process_set(
         prices = provider.market_prices(category, group_id)
         num_to_pid = {
             _norm_number(num): pid
-            for pid, num, _url in provider.products(category, group_id)
+            for pid, num, _url, _name in provider.products(category, group_id)
         }
 
         def price_of(card):

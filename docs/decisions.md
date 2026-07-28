@@ -4,6 +4,24 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-28 — Autofill pricing: use set_code + verify product name
+
+- **Bug:** older cards with generic set names got wrong TCGplayer links. The
+  autofill price-on-pick only passed **set_name** to `price_for_card`, and
+  "Base" fuzzy-substring-matched a modern group ("Scarlet & Violet Base Set"),
+  whose #10 is Vivillon — so Mewtwo Base 10/102 resolved to a Vivillon URL.
+- **Fix 1 — thread `set_code` through** the autofill workers into
+  `price_for_card` → `_resolve_group`. An exact code match (Base "BS" =
+  tcgcsv group 604) beats the fuzzy name match. (The RC subset branch still
+  wins first, so Radiant Collection is unaffected.)
+- **Fix 2 — verify the product name** (safety net). `price_for_card` now matches
+  a product on **number AND name** (normalized containment); if a card name is
+  given and the number-matched product's name disagrees, it returns **None**
+  (better no link than a wrong one). `_products_for_group`/`products()` now carry
+  the product name (4-tuple; `marketprices.sweep` updated). Verified live: Base
+  Mewtwo #10 + code "BS" → correct URL; without the code the wrong Vivillon match
+  is now rejected.
+
 ### 2026-07-28 — Auctions: Export to Transaction, Archive; minimal row (revised)
 
 - **Row stays minimal.** Briefly tried full Transaction-field parity on the

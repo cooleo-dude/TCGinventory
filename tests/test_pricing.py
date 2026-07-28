@@ -74,6 +74,45 @@ def test_refresh_writes_snapshot_and_updates_current_value(conn):
     assert items.get(item.id).market_value_cents == 999
 
 
+def _base_fetch(url: str):
+    # Two "…Base Set" groups whose only reliable difference is the code.
+    if url.endswith("/groups"):
+        return {"results": [
+            {"groupId": 604, "name": "Base Set", "abbreviation": "BS"},
+            {"groupId": 22873, "name": "SV01: Scarlet & Violet Base Set",
+             "abbreviation": "SVI"},
+        ]}
+    if url.endswith("/604/products"):
+        return {"results": [{"productId": 42347, "name": "Mewtwo", "url": "base-mewtwo",
+                             "extendedData": [{"name": "Number", "value": "10/102"}]}]}
+    if url.endswith("/604/prices"):
+        return {"results": [{"productId": 42347, "marketPrice": 77.73}]}
+    if url.endswith("/22873/products"):
+        return {"results": [{"productId": 487842, "name": "Vivillon", "url": "sv-viv",
+                             "extendedData": [{"name": "Number", "value": "010/198"}]}]}
+    if url.endswith("/22873/prices"):
+        return {"results": [{"productId": 487842, "marketPrice": 5.0}]}
+    raise AssertionError(f"unexpected url: {url}")
+
+
+def test_set_code_disambiguates_generic_set_name():
+    # "Base" alone fuzzy-matches "…Scarlet & Violet Base Set"; the "BS" code nails
+    # the original WOTC Base Set (regression: Mewtwo Base 10/102 → wrong URL).
+    p = TcgcsvProvider(fetch_json=_base_fetch)
+    assert p.price_for_card("Base", "10", "Mewtwo", set_code="BS") == (
+        7773, "base-mewtwo",
+    )
+
+
+def test_name_check_rejects_wrong_group_match():
+    # If resolution lands on the wrong group, number 10 there is Vivillon, not
+    # Mewtwo — the name guard returns None rather than a blatantly wrong link.
+    p = TcgcsvProvider(fetch_json=_base_fetch)
+    assert (
+        p.price_for_card("SV01: Scarlet & Violet Base Set", "10", "Mewtwo") is None
+    )
+
+
 def test_unmapped_items_reported(conn):
     items = ItemRepository(conn)
     items.add(_pikachu())

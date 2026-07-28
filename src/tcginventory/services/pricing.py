@@ -100,7 +100,9 @@ class TcgcsvProvider:
         # per-category price/product files live at different URLs.
         self._group_cache: dict[int, tuple[dict[str, int], list[tuple[str, int]]]] = {}
         self._price_cache: dict[tuple[int, int], dict[int, int]] = {}
-        self._product_cache: dict[tuple[int, int], list[tuple[int, str, str]]] = {}
+        self._product_cache: dict[
+            tuple[int, int], list[tuple[int, str, str, str]]
+        ] = {}
 
     @staticmethod
     def _category_for(item: Item) -> int:
@@ -114,36 +116,51 @@ class TcgcsvProvider:
         number: str,
         name: str | None = None,
         category: int = _CATEGORY_POKEMON,
+        *,
+        set_code: str | None = None,
     ) -> tuple[int, str] | None:
         """Current market price for a card identified by set + collector number.
 
         Resolves the set's tcgcsv group (in the given category — 3 English, 85
-        Japanese), finds the product whose number matches, and returns
-        ``(price_cents, tcgplayer_url)``. Returns None if the set/product/price
-        can't be resolved. The URL lets the caller store it so future refreshes
-        join by product id.
+        Japanese), finds the product whose number **and name** match, and returns
+        ``(price_cents, tcgplayer_url)``. Returns None if it can't be resolved.
+
+        ``set_code`` is used for an exact group match ahead of the fuzzier
+        set-name match — important for older sets whose name is generic (e.g.
+        "Base", code "BS") and would otherwise substring-match a modern set
+        ("Scarlet & Violet Base Set"). The **name check** is the safety net: if a
+        card name is given, a product must agree on name as well as number, so a
+        mis-resolved group can't return a blatantly wrong card (returns None
+        instead — better no link than a wrong one).
         """
-        group_id = self._resolve_group_for(set_name, None, number, category)
+        group_id = self._resolve_group_for(set_name, set_code, number, category)
         if group_id is None:
             return None
         want = _norm_number(number)
+        want_name = _norm(name) if name else None
         prices = self._prices_for_group(category, group_id)
-        for product_id, prod_number, url in self._products_for_group(
+        for product_id, prod_number, url, prod_name in self._products_for_group(
             category, group_id
         ):
-            if _norm_number(prod_number) == want:
-                cents = prices.get(product_id)
-                if cents is not None:
-                    return cents, url
+            if _norm_number(prod_number) != want:
+                continue
+            cents = prices.get(product_id)
+            if cents is None:
+                continue
+            if want_name:
+                pn = _norm(prod_name)
+                if pn and want_name not in pn and pn not in want_name:
+                    continue  # have a product name and it disagrees → not this card
+            return cents, url
         return None
 
     def _products_for_group(
         self, category: int, group_id: int
-    ) -> list[tuple[int, str, str]]:
+    ) -> list[tuple[int, str, str, str]]:
         key = (category, group_id)
         if key not in self._product_cache:
             data = self._fetch(f"{_BASE_URL}/{category}/{group_id}/products")
-            products: list[tuple[int, str, str]] = []
+            products: list[tuple[int, str, str, str]] = []
             for row in _results(data):
                 pid = row.get("productId")
                 if pid is None:
@@ -152,7 +169,9 @@ class TcgcsvProvider:
                 for ext in row.get("extendedData") or []:
                     if ext.get("name") == "Number":
                         number = ext.get("value") or ""
-                products.append((pid, number, row.get("url") or ""))
+                products.append(
+                    (pid, number, row.get("url") or "", row.get("name") or "")
+                )
             self._product_cache[key] = products
         return self._product_cache[key]
 
@@ -187,7 +206,9 @@ class TcgcsvProvider:
     def market_prices(self, category: int, group_id: int) -> dict[int, int]:
         return self._prices_for_group(category, group_id)
 
-    def products(self, category: int, group_id: int) -> list[tuple[int, str, str]]:
+    def products(
+        self, category: int, group_id: int
+    ) -> list[tuple[int, str, str, str]]:
         return self._products_for_group(category, group_id)
 
     # -- internals ----------------------------------------------------------

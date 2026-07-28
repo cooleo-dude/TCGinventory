@@ -232,19 +232,24 @@ class _LivePriceWorker(QThread):
 
     done = Signal(object)  # (price_cents, tcgplayer_url) or None
 
-    def __init__(self, set_name, number, name, category=3) -> None:
+    def __init__(self, set_name, number, name, category=3, set_code=None) -> None:
         super().__init__()
         self._set = set_name
         self._number = number
         self._name = name
         self._category = category
+        self._set_code = set_code
 
     def run(self) -> None:
         from tcginventory.services.pricing import TcgcsvProvider
 
         try:
             result = TcgcsvProvider().price_for_card(
-                self._set, self._number, self._name, category=self._category
+                self._set,
+                self._number,
+                self._name,
+                category=self._category,
+                set_code=self._set_code,
             )
         except Exception:  # network/parse failure -> skip the auto-price
             result = None
@@ -743,7 +748,10 @@ class AuctionsView(QWidget):
 
         for card in live:
             category = 85 if card.language == "JP" else 3
-            worker = _LivePriceWorker(card.set_name, card.number, card.name, category)
+            worker = _LivePriceWorker(
+                card.set_name, card.number, card.name, category,
+                set_code=getattr(card, "set_code", None),
+            )
             worker.done.connect(
                 lambda result, a=auction, c=card, w=worker: self._on_refresh_price(
                     a, c, w, result
@@ -988,7 +996,10 @@ class AuctionsView(QWidget):
         if not card.set_name or not card.number:
             return
         category = 85 if getattr(card, "language", "EN") == "JP" else 3
-        worker = _LivePriceWorker(card.set_name, card.number, card.name, category)
+        worker = _LivePriceWorker(
+            card.set_name, card.number, card.name, category,
+            set_code=getattr(card, "set_code", None),
+        )
         worker.done.connect(
             lambda result, r=row, w=worker, had=bool(hist_price): self._on_price_ready(
                 r, w, result, had
