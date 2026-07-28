@@ -21,6 +21,12 @@ Lightweight ADR-style record of significant decisions. Newest first.
   the product name (4-tuple; `marketprices.sweep` updated). Verified live: Base
   Mewtwo #10 + code "BS" → correct URL; without the code the wrong Vivillon match
   is now rejected.
+- **Follow-up — promo alias must win over set_code.** Passing `set_code` then
+  regressed promo sets: "Wizards Black Star Promos" has the generic code "PR",
+  shared by ~20 tcgcsv groups, so an exact "PR" match hit the wrong group. Moved
+  the curated `_PROMO_SET_ALIASES` (by set-name) **ahead of** the code/name exact
+  match in `_resolve_group`. Verified live: Meowth Wizards Black Star Promos #10
+  → `wotc-promo-meowth`.
 
 ### 2026-07-28 — Auctions: Export to Transaction, Archive; minimal row (revised)
 

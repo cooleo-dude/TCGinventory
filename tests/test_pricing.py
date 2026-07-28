@@ -113,6 +113,35 @@ def test_name_check_rejects_wrong_group_match():
     )
 
 
+def _promo_fetch(url: str):
+    # "PR" is shared by many groups; "Deck Exclusives" is indexed first.
+    if url.endswith("/groups"):
+        return {"results": [
+            {"groupId": 1840, "name": "Deck Exclusives", "abbreviation": "PR"},
+            {"groupId": 1418, "name": "WoTC Promo", "abbreviation": "PR"},
+        ]}
+    if url.endswith("/1418/products"):
+        return {"results": [{"productId": 87309, "name": "Meowth", "url": "wotc-meowth",
+                             "extendedData": [{"name": "Number", "value": "10"}]}]}
+    if url.endswith("/1418/prices"):
+        return {"results": [{"productId": 87309, "marketPrice": 62.31}]}
+    if url.endswith("/1840/products"):
+        return {"results": [{"productId": 999, "name": "Something Else", "url": "deck",
+                             "extendedData": [{"name": "Number", "value": "10"}]}]}
+    if url.endswith("/1840/prices"):
+        return {"results": [{"productId": 999, "marketPrice": 1.0}]}
+    raise AssertionError(f"unexpected url: {url}")
+
+
+def test_promo_alias_beats_generic_set_code():
+    # The generic "PR" code alone would hit "Deck Exclusives" (indexed first);
+    # the curated promo alias resolves "Wizards Black Star Promos" → WoTC Promo.
+    p = TcgcsvProvider(fetch_json=_promo_fetch)
+    assert p.price_for_card(
+        "Wizards Black Star Promos", "10", "Meowth", set_code="PR"
+    ) == (6231, "wotc-meowth")
+
+
 def test_unmapped_items_reported(conn):
     items = ItemRepository(conn)
     items.add(_pikachu())

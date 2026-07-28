@@ -251,19 +251,23 @@ class TcgcsvProvider:
         self, set_name: str | None, set_code: str | None, category: int
     ) -> int | None:
         index, candidates = self._groups(category)
-        # 1. Exact (normalized) match on set_code then set_name.
-        for key in (set_code, set_name):
-            if key:
-                group_id = index.get(_norm(key))
-                if group_id is not None:
-                    return group_id
-        # 1b. Known promo-set aliases (pokemontcg.io vs tcgcsv naming).
+        # 1. Known promo-set aliases (pokemontcg.io vs tcgcsv naming) FIRST — a
+        #    curated, unambiguous mapping. It must beat the set_code match because
+        #    promo codes are generic and collide: "Wizards Black Star Promos" has
+        #    code "PR", shared by ~20 tcgcsv groups, so an exact "PR" match would
+        #    otherwise resolve to the wrong (first-indexed) group.
         alias = _PROMO_SET_ALIASES.get(_norm(set_name))
         if alias:
             group_id = index.get(_norm(alias))
             if group_id is not None:
                 return group_id
-        # 2. Closest-match fallback. Set names are recorded inconsistently
+        # 2. Exact (normalized) match on set_code then set_name.
+        for key in (set_code, set_name):
+            if key:
+                group_id = index.get(_norm(key))
+                if group_id is not None:
+                    return group_id
+        # 3. Closest-match fallback. Set names are recorded inconsistently
         #    ("Journey Together" vs tcgcsv's "SV09: Journey Together"), so pick
         #    the best fuzzy match. A substring hit is treated as a strong match.
         best_gid, best_score = None, 0.0
