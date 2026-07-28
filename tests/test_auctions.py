@@ -301,10 +301,10 @@ def test_price_result_populates_tcgplayer_button(app):
     row.name.setText("Charizard")
     # Simulate the live tcgcsv lookup returning (price_cents, product_url).
     view._on_price_ready(
-        row, None, (1850, "https://www.tcgplayer.com/product/123"), had_hist_price=False
+        row, None, (1850, "https://www.tcgplayer.com/product/123")
     )
     assert row.tcg_btn.isEnabled()
-    assert row.market.value() == 18.50  # backfilled since history had no price
+    assert row.market.value() == 18.50  # live price applied
     assert row.to_card().tcgplayer_url == "https://www.tcgplayer.com/product/123"
     assert row.to_card().market_is_manual is False  # an auto price, not a manual edit
     view.deleteLater()
@@ -314,6 +314,29 @@ def test_button_disabled_without_url(app):
     view = _view(app)
     row = view._add_card_row()
     assert not row.tcg_btn.isEnabled()  # no link until one resolves
+    view.deleteLater()
+
+
+def test_live_price_overrides_stale_history_provisional(app):
+    # The cached history value can be stale/mis-resolved (regression: Meowth WoTC
+    # promo cached at $5.52); the authoritative live product price corrects it.
+    view = _view(app)
+    row = view._add_card_row()
+    row.set_market_cents(552)  # instant history provisional
+    assert row.market.value() == 5.52
+    view._on_price_ready(row, None, (6231, "http://t"))  # live product price
+    assert row.market.value() == 62.31
+    view.deleteLater()
+
+
+def test_live_price_respects_manual_override(app):
+    view = _view(app)
+    row = view._add_card_row()
+    row.set_market_cents(552)
+    row.market.setValue(80.00)  # user hand-edits before the live result lands
+    assert row.market_is_manual is True
+    view._on_price_ready(row, None, (6231, "http://t"))
+    assert row.market.value() == 80.00  # manual edit preserved
     view.deleteLater()
 
 
@@ -343,7 +366,7 @@ def test_manual_market_edit_flags_review_and_notes_on_export(app):
     row = view._add_card_row()
     row.name.setText("Charizard")
     # Auto price fills (not manual), then the user overrides it (manual).
-    view._on_price_ready(row, None, (2000, "http://t"), had_hist_price=False)
+    view._on_price_ready(row, None, (2000, "http://t"))
     assert row.to_card().market_is_manual is False
     row.market.setValue(12.00)
     assert row.to_card().market_is_manual is True
@@ -362,7 +385,7 @@ def test_auto_price_export_is_not_flagged(app):
     view = _view(app)
     row = view._add_card_row()
     row.name.setText("Pikachu")
-    view._on_price_ready(row, None, (500, "http://t"), had_hist_price=False)
+    view._on_price_ready(row, None, (500, "http://t"))
     captured = {}
     view.export_to_transaction.connect(lambda p: captured.update(cards=p[1]))
     view._export_current()

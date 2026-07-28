@@ -4,6 +4,25 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-28 — Auction autofill price: prefer live over cached history
+
+- **Bug:** Meowth Wizards Black Star Promos autofilled $5.52 (should be ~$60).
+  The auction price-on-pick was **history-first** and only fell back to the live
+  price when history was absent. `pricehistory.db` had a stale/wrong value
+  (basep-10 = 552¢) recorded by an earlier catalog sweep that mis-resolved the
+  "PR" promo collision. The Transaction window (live-only) already showed the
+  correct $62.31.
+- **Fix:** the auction now treats the cached history value as an **instant
+  provisional**, then the live tcgcsv `price_for_card` (name-checked, set_code
+  aware) **corrects the price to the authoritative product value** — unless the
+  user hand-edited it (`market_is_manual`). Brings the auction window in line
+  with the Transaction window and is robust to a stale/mis-resolved cache.
+- **Still needed:** the `pricehistory.db` cache holds wrong values for promo/
+  older cards from pre-fix sweeps; it self-heals as the sweep re-runs (the
+  resolution is fixed, dedup-on-change rewrites the value). Run File ▸ Update
+  market prices to refresh sooner — this also fixes the Price Lookup graph/trend
+  for those cards.
+
 ### 2026-07-28 — Autofill pricing: use set_code + verify product name
 
 - **Bug:** older cards with generic set names got wrong TCGplayer links. The

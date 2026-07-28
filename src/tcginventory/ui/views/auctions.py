@@ -981,18 +981,19 @@ class AuctionsView(QWidget):
     # -- price autofill -----------------------------------------------------
 
     def _request_price(self, row: _AuctionCardRow, card) -> None:
-        """Fill Market from ``pricehistory.db`` (instant, offline-friendly), then
-        run a live tcgcsv lookup to resolve the exact TCGplayer product URL (and
-        the price, if history had none)."""
-        hist_price = None
+        """Fill Market from ``pricehistory.db`` as an **instant provisional**,
+        then a live tcgcsv lookup resolves the exact TCGplayer product and
+        **corrects the price** to that product's current value (name-checked, so
+        it can't land on the wrong card). The live figure wins because the cached
+        history can be stale/mis-resolved; history is the offline fallback."""
         if self._history is not None and getattr(card, "card_id", None):
             try:
                 hist_price = self._history.current_price(card.card_id)
             except Exception:
                 hist_price = None
-        if hist_price:
-            row.set_market_cents(hist_price)
-            self._update_breakdown()
+            if hist_price:
+                row.set_market_cents(hist_price)
+                self._update_breakdown()
         if not card.set_name or not card.number:
             return
         category = 85 if getattr(card, "language", "EN") == "JP" else 3
@@ -1001,14 +1002,12 @@ class AuctionsView(QWidget):
             set_code=getattr(card, "set_code", None),
         )
         worker.done.connect(
-            lambda result, r=row, w=worker, had=bool(hist_price): self._on_price_ready(
-                r, w, result, had
-            )
+            lambda result, r=row, w=worker: self._on_price_ready(r, w, result)
         )
         self._price_workers.append(worker)
         worker.start()
 
-    def _on_price_ready(self, row, worker, result, had_hist_price=False) -> None:
+    def _on_price_ready(self, row, worker, result) -> None:
         if worker in self._price_workers:
             self._price_workers.remove(worker)
         if result is None or row not in self._rows:
@@ -1016,7 +1015,9 @@ class AuctionsView(QWidget):
         cents, url = result
         if url:
             row.set_tcgplayer_url(url)  # exact product link for the button
-        if not had_hist_price:  # history is preferred; live only backfills price
+        # Live product price is authoritative — apply it over the history
+        # provisional, but never stomp a value the user hand-edited.
+        if not row.market_is_manual:
             row.set_market_cents(cents)
         self._update_breakdown()
 
