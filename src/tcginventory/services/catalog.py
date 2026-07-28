@@ -33,6 +33,14 @@ _RAW = "https://raw.githubusercontent.com/PokemonTCG/pokemon-tcg-data/master"
 _TCGCSV = "https://tcgcsv.com/tcgplayer"
 _CATEGORY_JP = 85  # tcgcsv "Pokemon Japan"
 
+# tcgcsv doesn't carry a collector Number for some vintage JP sets (e.g.
+# "Challenge from the Darkness", 1998). Those products are still cards — identify
+# them by these per-card mechanic fields so they aren't skipped as sealed product.
+_JP_CARD_FIELDS = (
+    "HP", "CardType", "Stage", "Attack 1", "Attack 2", "Weakness",
+    "Resistance", "Retreat Cost",
+)
+
 
 def _fetch_json(url: str):  # pragma: no cover - real network
     import httpx
@@ -167,8 +175,11 @@ def update_catalog_ja(
                 e.get("name"): e.get("value") for e in (p.get("extendedData") or [])
             }
             number = ext.get("Number")
-            if not number:
-                continue  # sealed product / no collector number → not a card
+            # A card either has a collector Number or (for vintage sets tcgcsv
+            # doesn't number) carries per-card mechanic fields. Products with
+            # neither are sealed (boxes/packs/decks) → skip.
+            if not number and not any(ext.get(k) for k in _JP_CARD_FIELDS):
+                continue
             # Drop the embedded " - <number>" segment (see _NUMBER_IN_NAME) so
             # the stored name is clean like the English catalog; a trailing
             # variant label such as "(Mirror Holo)" is kept.

@@ -37,6 +37,35 @@ def _fake_ja_fetch(url: str):
         return _JA_PRODUCTS
     raise AssertionError(f"unexpected url: {url}")
 
+
+# A vintage JP set tcgcsv doesn't give collector Numbers (e.g. "Challenge from
+# the Darkness", 1998): its cards carry per-card mechanic fields instead.
+def _fake_ja_vintage_fetch(url: str):
+    if url.endswith("/85/groups"):
+        return {"results": [{"groupId": 23726,
+                             "name": "Challenge from the Darkness"}]}
+    if url.endswith("/85/23726/products"):
+        return {"results": [
+            {"productId": 575335, "name": "Giovanni's Machamp",
+             "imageUrl": "https://x/gm.jpg",
+             "extendedData": [{"name": "CardType", "value": "Fighting"},
+                              {"name": "HP", "value": "90"},
+                              {"name": "Stage", "value": "Stage 2"}]},
+            # Sealed product: no Number and no card fields → skipped.
+            {"productId": 888, "name": "Challenge Starter Deck",
+             "imageUrl": "https://x/d.jpg", "extendedData": []},
+        ]}
+    raise AssertionError(f"unexpected url: {url}")
+
+
+def test_update_catalog_ja_imports_numberless_vintage_cards(conn):
+    summary = update_catalog_ja(conn, fetch_json=_fake_ja_vintage_fetch)
+    assert summary.cards == 1  # the card kept; the sealed deck skipped
+    (gm,) = CardCatalogRepository(conn).find_by_name("Giovanni's Machamp")
+    assert gm.set_name == "Challenge from the Darkness"
+    assert gm.language == "JP"
+    assert gm.number is None  # tcgcsv has no collector number for this set
+
 _SETS = [
     {"id": "sv9", "name": "Journey Together", "ptcgoCode": "JTG",
      "printedTotal": 159},
