@@ -101,6 +101,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         "notes": "TEXT",
         "intent": "TEXT NOT NULL DEFAULT 'resale'",
         "review": "INTEGER NOT NULL DEFAULT 0",
+        "market_is_manual": "INTEGER NOT NULL DEFAULT 0",
     }
     for name, decl in _parity_cols.items():
         if card_cols and name not in card_cols:
@@ -145,6 +146,7 @@ class AuctionCard:
     notes: str | None = None
     intent: str = "resale"
     review: bool = False
+    market_is_manual: bool = False  # Market hand-edited off the auto price
     id: int | None = None
 
 
@@ -236,6 +238,7 @@ class AuctionRepository:
                 notes=c["notes"],
                 intent=c["intent"],
                 review=bool(c["review"]),
+                market_is_manual=bool(c["market_is_manual"]),
             )
             for c in self.conn.execute(
                 "SELECT * FROM auction_card WHERE auction_id = ? "
@@ -311,8 +314,9 @@ class AuctionRepository:
                     "set_name, set_code, number, language, quantity, "
                     "market_value_cents, image_url, tcgplayer_url, category, "
                     "condition, holo_pattern, edition, is_graded, grading_company, "
-                    "grade, cert_number, ebay_url, notes, intent, review, position) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "grade, cert_number, ebay_url, notes, intent, review, "
+                    "market_is_manual, position) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         auction.id,
                         card.card_id,
@@ -337,6 +341,7 @@ class AuctionRepository:
                         card.notes,
                         card.intent,
                         1 if card.review else 0,
+                        1 if card.market_is_manual else 0,
                         pos,
                     ),
                 )

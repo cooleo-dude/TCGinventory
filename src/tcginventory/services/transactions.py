@@ -690,16 +690,21 @@ class TransactionService:
         """Match the incoming card to an existing item or create one; refresh value."""
         existing = self.items.find_by_identity(inc.item)
         if existing is not None:
-            # A review-protected item's current value is user-maintained: never
-            # let a later acquisition silently overwrite it (or clear the flag).
-            # The new lot still records inc.market_value_cents as its own
-            # acquisition snapshot for cost allocation — that's independent.
-            if not existing.review:
+            # Overwrite the item's current value when the acquisition **deliberately**
+            # carries a reviewed value (``inc.review`` — e.g. a manual auction-export
+            # price), or when the existing item isn't review-protected. An incidental
+            # (non-review) re-acquisition never silently clobbers a user-maintained
+            # reviewed value. Either way the new lot keeps inc.market_value_cents as
+            # its own acquisition snapshot for cost allocation.
+            if inc.review or not existing.review:
                 existing.market_value_cents = inc.market_value_cents
                 existing.market_value_asof = occurred_date
-                existing.review = inc.review
+                existing.review = inc.review or existing.review  # never un-review
                 if inc.review:
-                    existing.notes = with_review_note(existing.notes)
+                    base = existing.notes or ""
+                    if inc.item.notes and inc.item.notes not in base:
+                        base = f"{base} {inc.item.notes}".strip()
+                    existing.notes = with_review_note(base)
             if inc.item.tcgplayer_url:
                 existing.tcgplayer_url = inc.item.tcgplayer_url
             if inc.item.ebay_url:

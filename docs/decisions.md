@@ -4,22 +4,28 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
-### 2026-07-28 — Auctions: full-parity inputs, Export to Transaction, Archive
+### 2026-07-28 — Auctions: Export to Transaction, Archive; minimal row (revised)
 
-- **Full parity:** the auction card row now carries the **entire** Transaction
-  incoming field set (category, language, condition/graded+company/grade/cert,
-  holo, edition, intent, review, tcgplayer, ebay, notes) — the `auction_card`
-  table + `AuctionCard` gained those columns (forward-only `_ensure_columns`
-  ALTERs). Chose to **expand the self-contained `_AuctionCardRow`** rather than
-  reuse the Transaction `_ReceiveRow`, to avoid coupling to / destabilizing the
-  tested Transaction window. The per-row TCGplayer *button* became an editable
-  *field* (matches the Transaction row; still auto-fills on pick).
+- **Row stays minimal.** Briefly tried full Transaction-field parity on the
+  auction card row, but reverted (per owner) to the original minimal columns —
+  Name / Set / # / Market / Qty / TCGplayer(button). The full card details are
+  entered in the Transaction window after export. (`auction_card`/`AuctionCard`
+  keep the extra parity columns from the experiment — harmless, forward-only —
+  they just default and aren't edited by the minimal row.)
 - **Export to Transaction:** a button in the editor footer and per watchlist row
   emits `(title, [IncomingCard])`; the main window clears the Transaction form,
   adds the incoming rows, sets counterparty "eBay" + reference = auction title,
   and switches to the Transaction tab. **Cash out is left blank** — the auction
-  stores card market values + shipping/tax estimates, not the hammer price, so
-  the user types the actual winning bid.
+  stores card market values, not the hammer price, so the user types the actual
+  winning bid.
+- **Manual market edits carry through.** The row tracks whether Market was
+  hand-edited away from the auto-fetched price (`market_is_manual`, persisted).
+  On export such a card is **noted** (a "Market manually set to $X" note),
+  **marked for review**, and its value **overwrites** the item's current market
+  price on post. To make the overwrite land even on an already-owned item,
+  `_match_or_create_item` now overwrites when the acquisition *deliberately*
+  carries a reviewed value (`inc.review`) — while a non-review re-acquisition
+  still never clobbers a user-maintained reviewed value.
 - **Archive:** `auction.archived` flag; the watchlist shows active auctions with
   a "Show archived" toggle, and each row has Archive/Unarchive. Archived
   auctions persist and can still be exported.

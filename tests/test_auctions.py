@@ -295,7 +295,7 @@ def test_ensure_columns_adds_tcgplayer_url_to_old_db():
     conn.close()
 
 
-def test_price_result_populates_tcgplayer_field(app):
+def test_price_result_populates_tcgplayer_button(app):
     view = _view(app)
     row = view._add_card_row()
     row.name.setText("Charizard")
@@ -303,18 +303,17 @@ def test_price_result_populates_tcgplayer_field(app):
     view._on_price_ready(
         row, None, (1850, "https://www.tcgplayer.com/product/123"), had_hist_price=False
     )
-    assert row.tcgplayer.text() == "https://www.tcgplayer.com/product/123"
+    assert row.tcg_btn.isEnabled()
     assert row.market.value() == 18.50  # backfilled since history had no price
     assert row.to_card().tcgplayer_url == "https://www.tcgplayer.com/product/123"
+    assert row.to_card().market_is_manual is False  # an auto price, not a manual edit
     view.deleteLater()
 
 
-def test_set_tcgplayer_url_fills_field(app):
+def test_button_disabled_without_url(app):
     view = _view(app)
     row = view._add_card_row()
-    assert row.tcgplayer.text() == ""  # empty until one resolves
-    row.set_tcgplayer_url("https://tcgplayer.com/x")
-    assert row.tcgplayer.text() == "https://tcgplayer.com/x"
+    assert not row.tcg_btn.isEnabled()  # no link until one resolves
     view.deleteLater()
 
 
@@ -323,57 +322,53 @@ def test_set_tcgplayer_url_fills_field(app):
 # ---------------------------------------------------------------------------
 
 
-def test_row_full_parity_roundtrip(app):
+def test_row_minimal_roundtrip(app):
     view = _view(app)
     ac = AuctionCard(
         name="Blastoise", set_name="Base", number="2/102", language="EN",
-        quantity=3, market_value_cents=4200, condition="MP", intent="personal",
-        review=True, tcgplayer_url="http://t", ebay_url="http://e", notes="chase",
+        quantity=3, market_value_cents=4200, tcgplayer_url="http://t",
     )
     row = view._add_card_row()
     row.set_card(ac)
     out = row.to_card()
-    assert (out.name, out.condition, out.quantity) == ("Blastoise", "MP", 3)
-    assert out.market_value_cents == 4200
-    assert out.intent == "personal" and out.review is True
-    assert (out.tcgplayer_url, out.ebay_url, out.notes) == (
-        "http://t", "http://e", "chase",
-    )
+    assert (out.name, out.set_name, out.number) == ("Blastoise", "Base", "2/102")
+    assert (out.quantity, out.market_value_cents) == (3, 4200)
+    assert out.tcgplayer_url == "http://t"
+    assert out.market_is_manual is False  # loaded value, untouched
     view.deleteLater()
 
 
-def test_row_graded_roundtrip(app):
+def test_manual_market_edit_flags_review_and_notes_on_export(app):
     view = _view(app)
-    ac = AuctionCard(
-        name="Slab", is_graded=True, grading_company="PSA", grade="10",
-        cert_number="99", market_value_cents=90000,
-    )
     row = view._add_card_row()
-    row.set_card(ac)
-    out = row.to_card()
-    assert out.is_graded and out.condition is None
-    assert (out.grading_company, out.grade, out.cert_number) == ("PSA", "10", "99")
-    view.deleteLater()
+    row.name.setText("Charizard")
+    # Auto price fills (not manual), then the user overrides it (manual).
+    view._on_price_ready(row, None, (2000, "http://t"), had_hist_price=False)
+    assert row.to_card().market_is_manual is False
+    row.market.setValue(12.00)
+    assert row.to_card().market_is_manual is True
 
-
-def test_export_current_emits_incoming_cards(app):
-    view = _view(app)
     captured = {}
-    view.export_to_transaction.connect(
-        lambda p: captured.update(title=p[0], cards=p[1])
-    )
-    row = view._add_card_row()
-    row.set_card(AuctionCard(
-        name="Pikachu", set_name="Base", number="58/102", condition="LP",
-        quantity=2, market_value_cents=1500, intent="resale", review=True,
-    ))
-    view._title.setText("My eBay lot")
+    view.export_to_transaction.connect(lambda p: captured.update(cards=p[1]))
     view._export_current()
-    assert captured["title"] == "My eBay lot"
     inc = captured["cards"][0]
-    assert inc.item.name == "Pikachu" and inc.item.condition.value == "LP"
-    assert inc.quantity == 2 and inc.market_value_cents == 1500
-    assert inc.intent.value == "resale" and inc.review is True
+    assert inc.market_value_cents == 1200  # the manual value is carried
+    assert inc.review is True  # marked for review so the poll won't overwrite
+    assert "manually set" in (inc.item.notes or "").lower()  # noted
+    view.deleteLater()
+
+
+def test_auto_price_export_is_not_flagged(app):
+    view = _view(app)
+    row = view._add_card_row()
+    row.name.setText("Pikachu")
+    view._on_price_ready(row, None, (500, "http://t"), had_hist_price=False)
+    captured = {}
+    view.export_to_transaction.connect(lambda p: captured.update(cards=p[1]))
+    view._export_current()
+    inc = captured["cards"][0]
+    assert inc.market_value_cents == 500
+    assert inc.review is False and not inc.item.notes  # nothing manual → plain
     view.deleteLater()
 
 
@@ -386,8 +381,8 @@ def test_main_window_export_populates_transaction(app):
     migrate(conn)
     win = MainWindow(conn)
     win._auctions._add_card_row().set_card(AuctionCard(
-        name="Charizard", set_name="Base", number="4/102", condition="MP",
-        quantity=2, market_value_cents=25000, intent="resale", review=True,
+        name="Charizard", set_name="Base", number="4/102",
+        quantity=2, market_value_cents=25000,
     ))
     win._auctions._title.setText("Vintage lot")
     win._auctions._export_current()
@@ -396,8 +391,8 @@ def test_main_window_export_populates_transaction(app):
     assert win._nav.currentRow() == 1  # switched to the Transaction tab
     assert len(tx._receive_rows) == 1
     r = tx._receive_rows[0]
-    assert r.name.text() == "Charizard" and r.condition.currentData() == "MP"
-    assert r.qty.value() == 2 and r.review.isChecked()
+    assert r.name.text() == "Charizard"  # condition/intent set in Transaction
+    assert r.qty.value() == 2 and r.market.value() == 250.0
     assert tx._counterparty.text() == "eBay" and tx._reference.text() == "Vintage lot"
     assert tx._cash_out.value() == 0.0  # winning bid left blank for the user
     win.deleteLater()

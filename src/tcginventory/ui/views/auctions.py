@@ -41,7 +41,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
     QCheckBox,
-    QComboBox,
     QCompleter,
     QDateEdit,
     QDoubleSpinBox,
@@ -89,7 +88,19 @@ from tcginventory.ui.formatting import money, percent
 
 
 def _auction_card_to_incoming(ac: AuctionCard) -> IncomingCard:
-    """Translate a saved auction card into a Transaction incoming card."""
+    """Translate a saved auction card into a Transaction incoming card.
+
+    A **manually edited** market value is noted, marks the item for review (so
+    the poll won't overwrite it), and — via the review flag — overwrites the
+    item's current market price on post."""
+    manual = ac.market_is_manual
+    note = ac.notes
+    if manual:
+        stamp = (
+            f"Market manually set to ${ac.market_value_cents / 100:,.2f} "
+            "on auction export."
+        )
+        note = f"{note} {stamp}".strip() if note else stamp
     item = Item(
         name=ac.name,
         category=Category(ac.category or "single"),
@@ -112,41 +123,19 @@ def _auction_card_to_incoming(ac: AuctionCard) -> IncomingCard:
         cert_number=ac.cert_number,
         tcgplayer_url=ac.tcgplayer_url,
         ebay_url=ac.ebay_url,
-        notes=ac.notes,
+        notes=note,
     )
     return IncomingCard(
         item=item,
         quantity=ac.quantity,
         market_value_cents=ac.market_value_cents,
         intent=Intent(ac.intent or "resale"),
-        review=ac.review,
+        review=ac.review or manual,
     )
 
 
-def _combo(enum_cls, capitalize: bool = False) -> QComboBox:
-    """A drop-down of an enum's values (value stored as item data)."""
-    box = QComboBox()
-    for e in enum_cls:
-        box.addItem(e.value.capitalize() if capitalize else e.value, e.value)
-    return box
-
-
-def _select(combo: QComboBox, value: str | None) -> None:
-    idx = combo.findData(value) if value is not None else -1
-    if idx >= 0:
-        combo.setCurrentIndex(idx)
-
-
-# Full parity with the Transaction "receive" row so an auction exports cleanly.
-_CARD_HEADERS = [
-    "Name", "Cat", "Set", "#", "Lang", "Graded", "Cond", "Holo", "Edition",
-    "Co", "Grade", "Cert", "Market", "Qty", "Intent", "Rev", "TCGplayer",
-    "eBay", "Notes", "",
-]
-_CARD_WIDTHS = [
-    170, 80, 130, 60, 60, 55, 70, 90, 80, 70, 55, 70, 90, 45, 90, 40, 150,
-    130, 140, 30,
-]
+_CARD_HEADERS = ["Name", "Set", "#", "Market", "Qty", "TCGplayer", ""]
+_CARD_WIDTHS = [200, 150, 70, 90, 50, 96, 30]
 
 _WATCH_HEADERS = [
     "Title",
@@ -317,62 +306,57 @@ class _AuctionCardRow:
         popup.setItemDelegate(self._match_delegate)
         install_hover_preview(popup, lambda: None, self._sink)
 
-        # Full transaction-parity field set (so an auction exports as a purchase).
-        self.category = _combo(Category, capitalize=True)
+        # Minimal field set — the full card details are entered in the
+        # Transaction window after export.
         self.set = QLineEdit()
         self.number = QLineEdit()
-        self.language = _combo(Language)
-        self.graded = QCheckBox()
-        self.graded.toggled.connect(self._toggle_graded)
-        self.graded.toggled.connect(lambda *_: on_change())
-        self.condition = _combo(Condition)
-        self.condition.currentIndexChanged.connect(self._maybe_flag_review)
-        self.holo = _combo(HoloPattern)
-        self.edition = _combo(Edition)
-        self.company = _combo(GradingCompany)
-        self.grade = QLineEdit()
-        self.cert = QLineEdit()
         self.market = _money_spin()
-        self.market.valueChanged.connect(lambda *_: on_change())
+        self.market.valueChanged.connect(self._on_market_changed)
         self.qty = QSpinBox()
         self.qty.setMinimum(1)
         self.qty.setMaximum(9999)
         self.qty.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.qty.valueChanged.connect(lambda *_: on_change())
-        self.intent = _combo(Intent, capitalize=True)
-        _select(self.intent, Intent.RESALE.value)
-        self.review = QCheckBox()
-        self.tcgplayer = QLineEdit()
-        self.tcgplayer.setPlaceholderText("auto-fills on pick")
-        self.ebay = QLineEdit()
-        self.notes = QLineEdit()
-        self._toggle_graded(False)
+        # TCGplayer link button — enabled once a product URL is resolved.
+        self.tcg_btn = QPushButton("TCGplayer")
+        self.tcg_btn.setEnabled(False)
+        self.tcg_btn.setToolTip("Open this card on TCGplayer")
+        self.tcg_btn.clicked.connect(self._open_tcgplayer)
+        # Track whether Market was hand-edited away from the auto-fetched price,
+        # so export can note it, overwrite the item price, and mark for review.
+        self._auto_market_cents: int | None = None
+        self._market_is_manual = False
+        self._setting_market = False
 
     def widgets(self) -> list[QWidget]:
         return [
-            self.name, self.category, self.set, self.number, self.language,
-            self.graded, self.condition, self.holo, self.edition, self.company,
-            self.grade, self.cert, self.market, self.qty, self.intent,
-            self.review, self.tcgplayer, self.ebay, self.notes,
+            self.name, self.set, self.number, self.market, self.qty, self.tcg_btn,
         ]
 
-    def _toggle_graded(self, graded: bool) -> None:
-        # Graded slabs are identified by grade, not condition (mirrors the
-        # Transaction row): grey out condition/holo, enable company/grade/cert.
-        self.condition.setEnabled(not graded)
-        self.holo.setEnabled(not graded)
-        self.company.setEnabled(graded)
-        self.grade.setEnabled(graded)
-        self.cert.setEnabled(graded)
+    def _on_market_changed(self, *_args) -> None:
+        # A user edit (not our own programmatic set) that differs from the last
+        # auto-fetched price counts as a manual override.
+        if not self._setting_market:
+            cents = round(self.market.value() * 100)
+            self._market_is_manual = (
+                self._auto_market_cents is None or cents != self._auto_market_cents
+            )
+        self._on_change()
 
-    def _maybe_flag_review(self) -> None:
-        if not self.graded.isChecked():
-            self.review.setChecked(self.condition.currentData() != Condition.NM.value)
+    def _open_tcgplayer(self) -> None:
+        if self._tcgplayer_url:
+            QDesktopServices.openUrl(QUrl(self._tcgplayer_url))
+
+    @property
+    def market_is_manual(self) -> bool:
+        return self._market_is_manual
 
     def set_tcgplayer_url(self, url: str | None) -> None:
         self._tcgplayer_url = url or None
-        if url:
-            self.tcgplayer.setText(url)
+        self.tcg_btn.setEnabled(bool(self._tcgplayer_url))
+        self.tcg_btn.setToolTip(
+            self._tcgplayer_url or "No TCGplayer link for this card"
+        )
 
     # -- catalog autofill ---------------------------------------------------
 
@@ -420,11 +404,9 @@ class _AuctionCardRow:
     def apply_catalog_card(self, card) -> None:
         self._card_id = card.card_id
         self._image_url = getattr(card, "image_small", None)
-        self.tcgplayer.clear()  # cleared until the price lookup resolves it
-        self._tcgplayer_url = None
+        self._language = getattr(card, "language", None) or "EN"
+        self.set_tcgplayer_url(None)  # cleared until the price lookup resolves it
         self.name.setText(card.name)
-        _select(self.category, Category.SINGLE.value)  # catalog cards are singles
-        _select(self.language, getattr(card, "language", None) or Language.EN.value)
         self.set.setText(card.set_name or "")
         number = CardCatalogRepository(self._conn).display_number(card)
         self.number.setText(number or card.full_number or card.number or "")
@@ -435,35 +417,29 @@ class _AuctionCardRow:
     # -- (de)serialise ------------------------------------------------------
 
     def set_market_cents(self, cents: int) -> None:
+        """Programmatically fill Market from the auto price (not a manual edit)."""
+        self._setting_market = True
         self.market.setValue(cents / 100)
+        self._setting_market = False
+        self._auto_market_cents = cents
+        self._market_is_manual = False
 
     def set_card(self, card: AuctionCard) -> None:
         self._card_id = card.card_id
         self._image_url = card.image_url
+        self._language = card.language or "EN"
+        self.set_tcgplayer_url(card.tcgplayer_url)
         self.name.setText(card.name)
-        _select(self.category, card.category or Category.SINGLE.value)
         self.set.setText(card.set_name or "")
         self.number.setText(card.number or "")
-        _select(self.language, card.language or Language.EN.value)
-        self.graded.setChecked(card.is_graded)
-        if card.condition is not None:
-            _select(self.condition, card.condition)
-        if card.holo_pattern is not None:
-            _select(self.holo, card.holo_pattern)
-        if card.edition is not None:
-            _select(self.edition, card.edition)
-        if card.grading_company is not None:
-            _select(self.company, card.grading_company)
-        self.grade.setText(card.grade or "")
-        self.cert.setText(card.cert_number or "")
+        self._setting_market = True
         self.market.setValue(card.market_value_cents / 100)
+        self._setting_market = False
+        self._market_is_manual = card.market_is_manual
+        self._auto_market_cents = (
+            None if card.market_is_manual else card.market_value_cents
+        )
         self.qty.setValue(card.quantity)
-        _select(self.intent, card.intent or Intent.RESALE.value)
-        self.tcgplayer.setText(card.tcgplayer_url or "")
-        self._tcgplayer_url = card.tcgplayer_url
-        self.ebay.setText(card.ebay_url or "")
-        self.notes.setText(card.notes or "")
-        self.review.setChecked(card.review)  # last: overrides condition auto-flag
 
     def card_id(self) -> str | None:
         return self._card_id
@@ -478,29 +454,17 @@ class _AuctionCardRow:
         name = self.name.text().strip()
         if not name:
             return None
-        graded = self.graded.isChecked()
         return AuctionCard(
             name=name,
             card_id=self._card_id,
             set_name=self.set.text().strip() or None,
             number=self.number.text().strip() or None,
-            language=self.language.currentData(),
+            language=self._language,
             quantity=self.qty.value(),
             market_value_cents=round(self.market.value() * 100),
             image_url=self._image_url,
-            tcgplayer_url=self.tcgplayer.text().strip() or None,
-            category=self.category.currentData(),
-            condition=None if graded else self.condition.currentData(),
-            holo_pattern=self.holo.currentData(),
-            edition=self.edition.currentData(),
-            is_graded=graded,
-            grading_company=self.company.currentData() if graded else None,
-            grade=(self.grade.text().strip() or None) if graded else None,
-            cert_number=(self.cert.text().strip() or None) if graded else None,
-            ebay_url=self.ebay.text().strip() or None,
-            notes=self.notes.text().strip() or None,
-            intent=self.intent.currentData(),
-            review=self.review.isChecked(),
+            tcgplayer_url=self._tcgplayer_url,
+            market_is_manual=self._market_is_manual,
         )
 
 
