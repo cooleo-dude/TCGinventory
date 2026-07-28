@@ -142,6 +142,52 @@ def test_promo_alias_beats_generic_set_code():
     ) == (6231, "wotc-meowth")
 
 
+def _subset_fetch(url: str):
+    # A subset set whose code collides with its parent (both "HIF"), plus a set
+    # (Unified Minds) that lists only the base "79", not the "79a" alt-art.
+    if url.endswith("/groups"):
+        return {"results": [
+            {"groupId": 2480, "name": "Hidden Fates", "abbreviation": "HIF"},
+            {"groupId": 2594, "name": "Hidden Fates: Shiny Vault",
+             "abbreviation": "HIF"},
+            {"groupId": 2464, "name": "SM - Unified Minds", "abbreviation": "SM11"},
+        ]}
+    if url.endswith("/2594/products"):
+        return {"results": [
+            {"productId": 197833, "name": "Silvally GX", "url": "sv79",
+             "extendedData": [{"name": "Number", "value": "SV79/SV94"}]}]}
+    if url.endswith("/2594/prices"):
+        return {"results": [{"productId": 197833, "marketPrice": 13.47}]}
+    if url.endswith("/2480/products"):  # main set has no SV79
+        return {"results": [{"productId": 1, "name": "Gyarados GX", "url": "hf",
+                             "extendedData": [{"name": "Number", "value": "7/68"}]}]}
+    if url.endswith("/2480/prices"):
+        return {"results": [{"productId": 1, "marketPrice": 5.0}]}
+    if url.endswith("/2464/products"):
+        return {"results": [{"productId": 195009, "name": "Jirachi GX", "url": "jira",
+                             "extendedData": [{"name": "Number", "value": "79/236"}]}]}
+    if url.endswith("/2464/prices"):
+        return {"results": [{"productId": 195009, "marketPrice": 13.93}]}
+    raise AssertionError(f"unexpected url: {url}")
+
+
+def test_subset_resolves_by_name_over_colliding_code():
+    # "Hidden Fates Shiny Vault" (code "HIF") must resolve to the Shiny Vault
+    # group, not the main Hidden Fates set that shares the code.
+    p = TcgcsvProvider(fetch_json=_subset_fetch)
+    assert p.price_for_card(
+        "Hidden Fates Shiny Vault", "SV79", "Silvally-GX", set_code="HIF"
+    ) == (1347, "sv79")
+
+
+def test_alt_art_suffix_falls_back_to_base_number():
+    # tcgcsv lists only "79"; the "79a" alt-art reprint falls back to it.
+    p = TcgcsvProvider(fetch_json=_subset_fetch)
+    assert p.price_for_card(
+        "Unified Minds", "79a", "Jirachi-GX", set_code="UNM"
+    ) == (1393, "jira")
+
+
 def test_unmapped_items_reported(conn):
     items = ItemRepository(conn)
     items.add(_pikachu())

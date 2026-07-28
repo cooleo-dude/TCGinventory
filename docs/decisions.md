@@ -4,6 +4,23 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-28 — Pricing: subset-by-name resolution + alt-art number fallback
+
+Two more autofill price/link gaps for special printings:
+- **Subset sets sharing the parent's code.** "Hidden Fates Shiny Vault"
+  (`sma`, code "HIF") is a separate tcgcsv group ("Hidden Fates: Shiny Vault")
+  but shares code "HIF" with the main set, so the code-first exact match resolved
+  the wrong group and SV-numbered cards found no product. Fix: `_resolve_group`
+  now tries the **set_name exact match before set_code** (name is the more
+  specific key; the parent's code collides). Also covers Generations/RC.
+- **"a"-suffixed alt-art reprints.** Unified Minds Jirachi-GX is "79a" in the
+  catalog but tcgcsv lists only "79", so the exact number match failed. Fix:
+  `price_for_card` falls back to the **base number** (`_number_base`: "79a" →
+  "79", prefixes like "sv79" untouched) when no exact-number product matches —
+  still name-verified. Exact matches still win.
+- Verified live: Silvally SV79 → Shiny Vault product; Jirachi 79a → the base
+  #79 product.
+
 ### 2026-07-28 — Auction autofill price: prefer live over cached history
 
 - **Bug:** Meowth Wizards Black Star Promos autofilled $5.52 (should be ~$60).

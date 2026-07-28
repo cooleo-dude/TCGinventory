@@ -57,6 +57,17 @@ def _norm_number(number: str | None) -> str:
     return head.lstrip("0") or head
 
 
+def _number_base(norm: str) -> str:
+    """Drop a trailing-letter suffix on a normalized number ("79a" -> "79") so an
+    alt-art/reprint variant a price source doesn't list separately can fall back
+    to the base printing. Leaves prefixed numbers ("sv79", "rc19") unchanged.
+    """
+    i = len(norm)
+    while i > 0 and norm[i - 1].isalpha():
+        i -= 1
+    return norm[:i] if i > 0 and norm[i - 1].isdigit() else norm
+
+
 # pokemontcg.io names promo sets systematically differently than tcgcsv
 # ("<era> Black Star Promos" vs tcgcsv's era-specific promo group), and the
 # strings are too far apart to fuzzy-match. Bridge them by normalized set name.
@@ -137,22 +148,28 @@ class TcgcsvProvider:
         if group_id is None:
             return None
         want = _norm_number(number)
+        want_base = _number_base(want)  # "79a" → "79" (alt-art reprint fallback)
         want_name = _norm(name) if name else None
         prices = self._prices_for_group(category, group_id)
+        base_match: tuple[int, str] | None = None
         for product_id, prod_number, url, prod_name in self._products_for_group(
             category, group_id
         ):
-            if _norm_number(prod_number) != want:
+            pn = _norm_number(prod_number)
+            if pn != want and pn != want_base:
                 continue
             cents = prices.get(product_id)
             if cents is None:
                 continue
             if want_name:
-                pn = _norm(prod_name)
-                if pn and want_name not in pn and pn not in want_name:
+                pnm = _norm(prod_name)
+                if pnm and want_name not in pnm and pnm not in want_name:
                     continue  # have a product name and it disagrees → not this card
-            return cents, url
-        return None
+            if pn == want:
+                return cents, url  # exact number match wins
+            if base_match is None:
+                base_match = (cents, url)  # suffix-stripped fallback ("79a" → "79")
+        return base_match
 
     def _products_for_group(
         self, category: int, group_id: int
@@ -261,8 +278,12 @@ class TcgcsvProvider:
             group_id = index.get(_norm(alias))
             if group_id is not None:
                 return group_id
-        # 2. Exact (normalized) match on set_code then set_name.
-        for key in (set_code, set_name):
+        # 2. Exact (normalized) match on set_name THEN set_code. Name is tried
+        #    first because it's the more specific key: subset sets share the
+        #    parent's code (Hidden Fates & "Hidden Fates: Shiny Vault" are both
+        #    "HIF"; Generations & its Radiant Collection are both "GEN"), so a
+        #    code-first match would resolve the subset to the wrong (parent) group.
+        for key in (set_name, set_code):
             if key:
                 group_id = index.get(_norm(key))
                 if group_id is not None:
