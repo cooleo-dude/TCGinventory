@@ -4,6 +4,21 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-28 — Modern promo autofill gap: leave as-is (don't merge sources)
+
+- The **EN autofill catalog is built from pokemontcg.io only**; pricing uses
+  tcgcsv. Some newest promo sets (e.g. **"ME: Mega Evolution Promo"** — Tyrunt
+  #070) exist on tcgcsv but **not yet in pokemontcg.io**, so they price correctly
+  but don't appear in autofill.
+- Considered supplementing the EN catalog from tcgcsv, but the two sources name
+  sets differently (tcgcsv "SM - Unified Minds" vs pokemontcg.io "Unified
+  Minds"; tcgcsv "…Promo Cards" vs pokemontcg.io "…Black Star Promos"), so a
+  merge risks duplicate sets in autofill. **Owner chose to leave as-is** — wait
+  for pokemontcg.io to catalogue them.
+- **Workaround for such a card:** enter it manually and paste its TCGplayer
+  product URL into the item's TCGplayer link; the price refresh then resolves it
+  from tcgcsv by product id.
+
 ### 2026-07-28 — Pricing: subset-by-name resolution + alt-art number fallback
 
 Two more autofill price/link gaps for special printings:
