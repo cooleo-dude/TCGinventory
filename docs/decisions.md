@@ -4,6 +4,20 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-29 — Auto eBay links via a derived sold-listings search
+
+- Every card now has an eBay link with no data entry: `services/ebay.py`
+  `sold_search_url(item)` builds an eBay search from the card identity —
+  `Name Set # Condition/Grade` — with the Sold Items filter
+  (`https://www.ebay.com/sch/i.html?_nkw=…&_sacat=0&LH_Sold=1`). Dropped the
+  session/tracking params from the sample URL.
+- **Derived, not stored** (chosen over backfilling `item.ebay_url`): the link
+  always tracks the current identity, needs no migration, and can't go stale.
+  A manually-entered `item.ebay_url` still wins at the call site.
+- The Inventory links panel's eBay button uses `ebay_url or sold_search_url()`
+  (so it's always enabled); the item editor shows the derived URL as the eBay
+  field's placeholder. Graded cards use "PSA 10"-style grade in the query.
+
 ### 2026-07-28 — Modern promo autofill gap: leave as-is (don't merge sources)
 
 - The **EN autofill catalog is built from pokemontcg.io only**; pricing uses

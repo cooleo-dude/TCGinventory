@@ -15,6 +15,7 @@ from PySide6.QtGui import QBrush, QColor
 
 from tcginventory.domain.enums import Condition, Edition, HoloPattern, Language
 from tcginventory.domain.models import Item
+from tcginventory.services.ebay import sold_search_url
 from tcginventory.services.inventory import InventoryRow
 from tcginventory.services.trends import Trend
 from tcginventory.ui.formatting import money
@@ -281,11 +282,11 @@ class InventoryTableModel(QAbstractTableModel):
             return self._trend_data(row, role)
         if col.link is not None:  # link-button column (TCGplayer / eBay)
             if role == LINK_URL_ROLE:
-                return (
-                    row.item.tcgplayer_url
-                    if col.link == "tcgplayer"
-                    else row.item.ebay_url
-                )
+                if col.link == "tcgplayer":
+                    return row.item.tcgplayer_url
+                # eBay: a manual URL wins, else a derived sold-listings search so
+                # every card has a working eBay link.
+                return row.item.ebay_url or sold_search_url(row.item)
             if role == Qt.DisplayRole:
                 return ""
             if role == Qt.UserRole:

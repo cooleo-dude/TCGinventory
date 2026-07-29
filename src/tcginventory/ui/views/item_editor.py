@@ -112,6 +112,13 @@ class ItemEditorDialog(QDialog):
         self._location = QLineEdit(item.location or "" if item else "")
         self._tcgplayer = QLineEdit(item.tcgplayer_url or "" if item else "")
         self._ebay = QLineEdit(item.ebay_url or "" if item else "")
+        # Blank → a derived eBay sold-listings search for this card is used
+        # automatically. Show it as the placeholder so it's visible; typing a URL
+        # overrides it.
+        if item:
+            from tcginventory.services.ebay import sold_search_url
+
+            self._ebay.setPlaceholderText(sold_search_url(item))
         self._notes = QLineEdit(item.notes or "" if item else "")
         self._review = QCheckBox("Mark for review (price is manual, poll-protected)")
         if item:

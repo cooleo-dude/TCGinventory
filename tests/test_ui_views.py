@@ -90,6 +90,21 @@ def test_inventory_mark_missing_from_view(app, seeded_conn):
     view.deleteLater()
 
 
+def test_inventory_ebay_link_auto_populated(app, seeded_conn):
+    from tcginventory.services.inventory import InventoryService
+    from tcginventory.ui.models.inventory_model import (
+        EBAY_COL,
+        LINK_URL_ROLE,
+        InventoryTableModel,
+    )
+
+    model = InventoryTableModel()
+    model.set_rows(InventoryService(seeded_conn).inventory_rows())
+    # Every row's eBay link resolves (derived sold-search when none is stored).
+    url = model.data(model.index(0, EBAY_COL), LINK_URL_ROLE)
+    assert url and "ebay.com/sch" in url and "LH_Sold=1" in url
+
+
 def test_history_view_populates_and_details(app, seeded_conn):
     from tcginventory.ui.views.history import HistoryView
 

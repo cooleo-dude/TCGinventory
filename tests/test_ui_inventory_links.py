@@ -113,11 +113,32 @@ def test_clicking_a_link_button_opens_the_url(app, monkeypatch):
 
 
 def test_missing_link_does_not_open(app, monkeypatch):
+    # TCGplayer has no fallback, so a missing link opens nothing.
+    from tcginventory.ui.models.inventory_model import TCGPLAYER_COL
+
+    conn = connect(":memory:")
+    migrate(conn)
+    _seed(conn, tcg=None)  # no TCGplayer link on this card
+    view = _view(app, conn)
+
+    opened: list[str] = []
+    monkeypatch.setattr(
+        "tcginventory.ui.views.inventory.QDesktopServices",
+        type("D", (), {"openUrl": staticmethod(lambda u: opened.append(u.toString()))}),
+    )
+    view._open_link(view._proxy.index(0, TCGPLAYER_COL))
+    assert opened == []  # nothing to open
+    view.deleteLater()
+
+
+def test_ebay_missing_url_opens_derived_sold_search(app, monkeypatch):
+    # eBay always resolves: with no stored URL it opens a derived sold-listings
+    # search built from the card's identity.
     from tcginventory.ui.models.inventory_model import EBAY_COL
 
     conn = connect(":memory:")
     migrate(conn)
-    _seed(conn, ebay=None)  # no eBay link on this card
+    _seed(conn, ebay=None)
     view = _view(app, conn)
 
     opened: list[str] = []
@@ -126,5 +147,6 @@ def test_missing_link_does_not_open(app, monkeypatch):
         type("D", (), {"openUrl": staticmethod(lambda u: opened.append(u.toString()))}),
     )
     view._open_link(view._proxy.index(0, EBAY_COL))
-    assert opened == []  # nothing to open
+    assert len(opened) == 1
+    assert "ebay.com/sch" in opened[0] and "LH_Sold=1" in opened[0]
     view.deleteLater()
