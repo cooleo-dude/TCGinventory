@@ -338,6 +338,34 @@ def test_ebay_button_opens_derived_sold_search(app, monkeypatch):
     view.deleteLater()
 
 
+def test_condition_flows_into_ebay_search_and_export(app, monkeypatch):
+    from tcginventory.domain.enums import Condition
+
+    view = _view(app)
+    row = view._add_card_row()
+    row.name.setText("Raticate")
+    row.set.setText("Perfect Order")
+    row.number.setText("99/88")
+    row.condition.setCurrentIndex(row.condition.findData(Condition.LP.value))
+
+    # Condition rides into the eBay sold-search…
+    opened: list[str] = []
+    monkeypatch.setattr(
+        "tcginventory.ui.views.auctions.QDesktopServices",
+        type("D", (), {"openUrl": staticmethod(lambda u: opened.append(u.toString()))}),
+    )
+    row._open_ebay()
+    assert opened[0].endswith("99%2F88+LP&_sacat=0&LH_Sold=1")
+
+    # …and into the exported Transaction incoming card.
+    assert row.to_card().condition == "LP"
+    captured = {}
+    view.export_to_transaction.connect(lambda p: captured.update(cards=p[1]))
+    view._export_current()
+    assert captured["cards"][0].item.condition.value == "LP"
+    view.deleteLater()
+
+
 def test_live_price_overrides_stale_history_provisional(app):
     # The cached history value can be stale/mis-resolved (regression: Meowth WoTC
     # promo cached at $5.52); the authoritative live product price corrects it.

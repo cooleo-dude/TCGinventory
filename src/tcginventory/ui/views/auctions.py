@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
     QCheckBox,
+    QComboBox,
     QCompleter,
     QDateEdit,
     QDoubleSpinBox,
@@ -135,8 +136,22 @@ def _auction_card_to_incoming(ac: AuctionCard) -> IncomingCard:
     )
 
 
-_CARD_HEADERS = ["Name", "Set", "#", "Market", "Qty", "TCGplayer", "eBay", ""]
-_CARD_WIDTHS = [200, 150, 70, 90, 50, 96, 70, 30]
+def _combo(enum_cls) -> QComboBox:
+    """A drop-down of an enum's values (value stored as item data)."""
+    box = QComboBox()
+    for e in enum_cls:
+        box.addItem(e.value, e.value)
+    return box
+
+
+def _select(combo: QComboBox, value: str | None) -> None:
+    idx = combo.findData(value) if value is not None else -1
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
+
+
+_CARD_HEADERS = ["Name", "Set", "#", "Cond", "Market", "Qty", "TCGplayer", "eBay", ""]
+_CARD_WIDTHS = [190, 140, 66, 64, 90, 46, 96, 66, 30]
 
 _WATCH_HEADERS = [
     "Title",
@@ -312,10 +327,13 @@ class _AuctionCardRow:
         popup.setItemDelegate(self._match_delegate)
         install_hover_preview(popup, lambda: None, self._sink)
 
-        # Minimal field set — the full card details are entered in the
-        # Transaction window after export.
+        # Minimal field set (+ condition) — the rest of the card details are
+        # entered in the Transaction window after export.
         self.set = QLineEdit()
         self.number = QLineEdit()
+        self.condition = _combo(Condition)
+        _select(self.condition, Condition.NM.value)
+        self.condition.currentIndexChanged.connect(lambda *_: on_change())
         self.market = _money_spin()
         self.market.valueChanged.connect(self._on_market_changed)
         self.qty = QSpinBox()
@@ -345,8 +363,8 @@ class _AuctionCardRow:
 
     def widgets(self) -> list[QWidget]:
         return [
-            self.name, self.set, self.number, self.market, self.qty,
-            self.tcg_btn, self.ebay_btn,
+            self.name, self.set, self.number, self.condition, self.market,
+            self.qty, self.tcg_btn, self.ebay_btn,
         ]
 
     def _on_market_changed(self, *_args) -> None:
@@ -367,7 +385,12 @@ class _AuctionCardRow:
         name = self.name.text().strip()
         if not name:
             return
-        url = search_url(name, self.set.text().strip(), self.number.text().strip())
+        url = search_url(
+            name,
+            self.set.text().strip(),
+            self.number.text().strip(),
+            self.condition.currentData(),
+        )
         QDesktopServices.openUrl(QUrl(url))
 
     @property
@@ -455,6 +478,8 @@ class _AuctionCardRow:
         self.name.setText(card.name)
         self.set.setText(card.set_name or "")
         self.number.setText(card.number or "")
+        if card.condition:
+            _select(self.condition, card.condition)
         self._setting_market = True
         self.market.setValue(card.market_value_cents / 100)
         self._setting_market = False
@@ -483,6 +508,7 @@ class _AuctionCardRow:
             set_name=self.set.text().strip() or None,
             number=self.number.text().strip() or None,
             language=self._language,
+            condition=self.condition.currentData(),
             quantity=self.qty.value(),
             market_value_cents=round(self.market.value() * 100),
             image_url=self._image_url,
