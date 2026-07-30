@@ -22,15 +22,22 @@ def _cond_or_grade(item) -> str:
     return item.condition.value if getattr(item, "condition", None) else ""
 
 
-def sold_search_url(item) -> str:
-    """An eBay sold-listings search for ``item``, keyed on
-    ``Name Set # Condition/Grade`` (blank parts dropped)."""
-    parts = [
-        item.name,
-        item.set_name,
-        item.card_number,
-        _cond_or_grade(item),
-    ]
-    query = " ".join(p for p in parts if p)
+def search_url(
+    name: str,
+    set_name: str | None = None,
+    number: str | None = None,
+    cond_or_grade: str | None = None,
+) -> str:
+    """An eBay sold-listings search keyed on ``Name Set # Condition/Grade``
+    (blank parts dropped). The low-level builder — see :func:`sold_search_url`
+    for the item-based wrapper."""
+    query = " ".join(p for p in (name, set_name, number, cond_or_grade) if p)
     params = urllib.parse.urlencode({"_nkw": query, "_sacat": "0", "LH_Sold": "1"})
     return f"{_EBAY_SEARCH}?{params}"
+
+
+def sold_search_url(item) -> str:
+    """An eBay sold-listings search for a catalog/inventory ``item``."""
+    return search_url(
+        item.name, item.set_name, item.card_number, _cond_or_grade(item)
+    )

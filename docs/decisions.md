@@ -17,6 +17,11 @@ Lightweight ADR-style record of significant decisions. Newest first.
 - The Inventory links panel's eBay button uses `ebay_url or sold_search_url()`
   (so it's always enabled); the item editor shows the derived URL as the eBay
   field's placeholder. Graded cards use "PSA 10"-style grade in the query.
+- **Auction editor (2026-07-30):** each card row gained an **eBay button** beside
+  the TCGplayer button, opening the derived sold-search from the row's
+  Name/Set/# (no condition captured there). Refactored `ebay.py` to expose a
+  parts-based `search_url(name, set, number, cond)` that `sold_search_url(item)`
+  now wraps.
 
 ### 2026-07-28 — Modern promo autofill gap: leave as-is (don't merge sources)
 

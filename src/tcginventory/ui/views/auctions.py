@@ -81,6 +81,7 @@ from tcginventory.domain.enums import (
 )
 from tcginventory.domain.models import Item
 from tcginventory.services import auctions as auction_math
+from tcginventory.services.ebay import search_url
 from tcginventory.services.transactions import IncomingCard
 from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.card_preview import install_hover_preview
@@ -134,8 +135,8 @@ def _auction_card_to_incoming(ac: AuctionCard) -> IncomingCard:
     )
 
 
-_CARD_HEADERS = ["Name", "Set", "#", "Market", "Qty", "TCGplayer", ""]
-_CARD_WIDTHS = [200, 150, 70, 90, 50, 96, 30]
+_CARD_HEADERS = ["Name", "Set", "#", "Market", "Qty", "TCGplayer", "eBay", ""]
+_CARD_WIDTHS = [200, 150, 70, 90, 50, 96, 70, 30]
 
 _WATCH_HEADERS = [
     "Title",
@@ -327,6 +328,15 @@ class _AuctionCardRow:
         self.tcg_btn.setEnabled(False)
         self.tcg_btn.setToolTip("Open this card on TCGplayer")
         self.tcg_btn.clicked.connect(self._open_tcgplayer)
+        # eBay button — a derived sold-listings search from the card identity
+        # (no stored URL needed); enabled as soon as there's a name.
+        self.ebay_btn = QPushButton("eBay")
+        self.ebay_btn.setEnabled(False)
+        self.ebay_btn.setToolTip("Search eBay sold listings for this card")
+        self.ebay_btn.clicked.connect(self._open_ebay)
+        self.name.textChanged.connect(
+            lambda *_: self.ebay_btn.setEnabled(bool(self.name.text().strip()))
+        )
         # Track whether Market was hand-edited away from the auto-fetched price,
         # so export can note it, overwrite the item price, and mark for review.
         self._auto_market_cents: int | None = None
@@ -335,7 +345,8 @@ class _AuctionCardRow:
 
     def widgets(self) -> list[QWidget]:
         return [
-            self.name, self.set, self.number, self.market, self.qty, self.tcg_btn,
+            self.name, self.set, self.number, self.market, self.qty,
+            self.tcg_btn, self.ebay_btn,
         ]
 
     def _on_market_changed(self, *_args) -> None:
@@ -351,6 +362,13 @@ class _AuctionCardRow:
     def _open_tcgplayer(self) -> None:
         if self._tcgplayer_url:
             QDesktopServices.openUrl(QUrl(self._tcgplayer_url))
+
+    def _open_ebay(self) -> None:
+        name = self.name.text().strip()
+        if not name:
+            return
+        url = search_url(name, self.set.text().strip(), self.number.text().strip())
+        QDesktopServices.openUrl(QUrl(url))
 
     @property
     def market_is_manual(self) -> bool:

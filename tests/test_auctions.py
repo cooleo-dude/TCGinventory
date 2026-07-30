@@ -317,6 +317,27 @@ def test_button_disabled_without_url(app):
     view.deleteLater()
 
 
+def test_ebay_button_opens_derived_sold_search(app, monkeypatch):
+    view = _view(app)
+    row = view._add_card_row()
+    assert not row.ebay_btn.isEnabled()  # needs at least a name
+    row.name.setText("Raticate")
+    row.set.setText("Perfect Order")
+    row.number.setText("99/88")
+    assert row.ebay_btn.isEnabled()
+
+    opened: list[str] = []
+    monkeypatch.setattr(
+        "tcginventory.ui.views.auctions.QDesktopServices",
+        type("D", (), {"openUrl": staticmethod(lambda u: opened.append(u.toString()))}),
+    )
+    row._open_ebay()
+    assert len(opened) == 1
+    assert "_nkw=Raticate+Perfect+Order+99%2F88" in opened[0]
+    assert "LH_Sold=1" in opened[0]
+    view.deleteLater()
+
+
 def test_live_price_overrides_stale_history_provisional(app):
     # The cached history value can be stale/mis-resolved (regression: Meowth WoTC
     # promo cached at $5.52); the authoritative live product price corrects it.
