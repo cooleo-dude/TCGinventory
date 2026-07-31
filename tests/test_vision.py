@@ -332,6 +332,54 @@ def test_save_indexes_labeled_crops_as_exemplars(app, _quiet, tmp_path):
     assert cards == ["L", "R"]
 
 
+def test_backs_mode_assesses_condition_and_saves_it(app, _quiet, tmp_path):
+    from PIL import Image
+    from PySide6.QtCore import QRectF
+
+    from tcginventory.data.db import connect
+    from tcginventory.data.migrator import migrate
+    from tcginventory.ui.views.recognition import RecognitionView
+
+    # A back-like scene: white (worn) frame on the left half, clean on the right.
+    scene = tmp_path / "backs.png"
+    img = Image.new("RGB", (200, 120), (30, 40, 90))
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([0, 0, 95, 8], fill=(255, 255, 255))
+    draw.rectangle([0, 112, 95, 119], fill=(255, 255, 255))
+    draw.rectangle([0, 0, 8, 119], fill=(255, 255, 255))
+    img.save(scene)
+
+    conn = connect(":memory:")
+    migrate(conn)
+    vrepo = VisionRepository(open_vision(":memory:"))
+    view = RecognitionView(
+        conn,
+        vision_repo=vrepo,
+        vision_dir=tmp_path,
+        recognizer=_pixel_recognizer(vrepo),
+    )
+    view._mode.setCurrentIndex(1)  # listing
+    view._backs_cb.setChecked(True)  # card-backs mode
+    view.add_image_paths([str(scene)])
+    worn = view._add_box(QRectF(2, 2, 90, 116))  # left half — heavy whitening
+    clean = view._add_box(QRectF(100, 20, 90, 80))  # right half — clean
+
+    view._assess_conditions()
+    assert worn.condition is not None and worn.condition != "NM"
+    assert clean.condition == "NM"
+
+    view._save()
+    rows = vrepo.conn.execute(
+        "SELECT r.condition, i.side FROM region r JOIN image i ON i.id = r.image_id "
+        "ORDER BY r.number"
+    ).fetchall()
+    assert rows[0]["side"] == "back" and rows[0]["condition"] == worn.condition
+    assert rows[1]["condition"] == "NM"
+    view.deleteLater()
+
+
 def test_cv_proposals_overlay_then_accept_into_boxes(app, _quiet, tmp_path):
     from PIL import Image, ImageDraw
 

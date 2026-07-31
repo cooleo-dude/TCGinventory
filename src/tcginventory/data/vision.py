@@ -374,6 +374,16 @@ class VisionRepository:
             "WHERE r.card_id IS NOT NULL ORDER BY r.id"
         ).fetchall()
 
+    def condition_regions(self) -> list[sqlite3.Row]:
+        """Back-side regions carrying a condition label, joined with their image
+        path — the (crop, condition) pairs the condition model trains on."""
+        return self.conn.execute(
+            "SELECT r.id AS region_id, r.condition, r.x, r.y, r.w, r.h, "
+            "i.path AS image_path "
+            "FROM region r JOIN image i ON i.id = r.image_id "
+            "WHERE r.condition IS NOT NULL AND i.side = 'back' ORDER BY r.id"
+        ).fetchall()
+
     def regions_for_image(self, image_id: int) -> list[sqlite3.Row]:
         return self.conn.execute(
             "SELECT * FROM region WHERE image_id = ? ORDER BY number", (image_id,)

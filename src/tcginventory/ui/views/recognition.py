@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 
 from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
+from tcginventory.domain.enums import Condition
 from tcginventory.services import vision as vision_svc
 
 _IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
@@ -71,6 +72,7 @@ class _Box:
     number: int
     rect: QRectF
     card: CardLabel = field(default_factory=CardLabel)
+    condition: str | None = None  # set in card-backs mode (Condition value)
 
 
 @dataclass
@@ -230,6 +232,32 @@ class _SuggestBox(QComboBox):
             self._name_field.apply_label(self._labels[index])
 
 
+class _ConditionBox(QComboBox):
+    """Per-box condition picker (card-backs mode); writes to the box."""
+
+    def __init__(self, box: _Box) -> None:
+        super().__init__()
+        self._box = box
+        self.addItem("—", None)
+        for cond in Condition:
+            if cond is Condition.SEALED:
+                continue  # not a wear grade
+            self.addItem(cond.value, cond.value)
+        if box.condition:
+            pos = self.findData(box.condition)
+            if pos >= 0:
+                self.setCurrentIndex(pos)
+        self.currentIndexChanged.connect(self._on_changed)
+
+    def _on_changed(self, *_args) -> None:
+        self._box.condition = self.currentData()
+
+    def set_condition(self, value: str | None) -> None:
+        pos = self.findData(value)
+        if pos >= 0:
+            self.setCurrentIndex(pos)
+
+
 class RecognitionView(QWidget):
     def __init__(
         self,
@@ -252,6 +280,8 @@ class RecognitionView(QWidget):
         # detector overlays, per proposer source ("cv" | "yolo")
         self._proposals: dict[str, list[QGraphicsRectItem]] = {"cv": [], "yolo": []}
         self._yolo_detector = None  # OnnxCardDetector, lazily built
+        self._condition_boxes: dict[int, _ConditionBox] = {}
+        self._assessor = None  # condition assessor, lazily built
         self._divider = None  # QGraphicsLineItem for the current image
 
         # -- toolbar
@@ -298,6 +328,19 @@ class RecognitionView(QWidget):
             "labeled boxes (training/train_detector.py)"
         )
         self._yolo_toggle.toggled.connect(self._on_yolo_toggle)
+        # Card-backs mode: tag saved images as backs and grade each box.
+        self._backs_cb = QCheckBox("Card backs (condition)")
+        self._backs_cb.setToolTip(
+            "Annotating card backs: saved images are tagged 'back' and each box "
+            "can be graded for condition."
+        )
+        self._backs_cb.toggled.connect(self._on_backs_toggled)
+        self._assess_btn = QPushButton("Assess condition")
+        self._assess_btn.setToolTip(
+            "Estimate each box's condition from edge/corner whitening on the back"
+        )
+        self._assess_btn.clicked.connect(self._assess_conditions)
+        self._assess_btn.setEnabled(False)
         save_btn = QPushButton("Save annotations")
         save_btn.clicked.connect(self._save)
         toolbar = QHBoxLayout()
@@ -310,6 +353,8 @@ class RecognitionView(QWidget):
         toolbar.addWidget(self._cv_toggle)
         toolbar.addWidget(self._accept_btn)
         toolbar.addWidget(self._yolo_toggle)
+        toolbar.addWidget(self._backs_cb)
+        toolbar.addWidget(self._assess_btn)
         toolbar.addStretch(1)
         toolbar.addWidget(save_btn)
 
@@ -321,14 +366,17 @@ class RecognitionView(QWidget):
         self._strip.currentRowChanged.connect(self._switch_image)
 
         # -- segments panel
-        self._panel = QTableWidget(0, 4)
-        self._panel.setHorizontalHeaderLabels(["#", "Card", "Suggestion", "Side"])
+        self._panel = QTableWidget(0, 5)
+        self._panel.setHorizontalHeaderLabels(
+            ["#", "Card", "Suggestion", "Cond", "Side"]
+        )
         self._panel.verticalHeader().setVisible(False)
         self._panel.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._panel.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self._panel.setColumnWidth(0, 30)
-        self._panel.setColumnWidth(2, 190)
-        self._panel.setColumnWidth(3, 70)
+        self._panel.setColumnWidth(2, 180)
+        self._panel.setColumnWidth(3, 60)
+        self._panel.setColumnWidth(4, 70)
 
         self._empty = QLabel("Add images, then draw a box around each card.")
         self._empty.setAlignment(Qt.AlignCenter)
@@ -558,6 +606,7 @@ class RecognitionView(QWidget):
         self._panel.setRowCount(0)
         self._name_fields.clear()
         self._suggest_boxes.clear()
+        self._condition_boxes.clear()
         if not (0 <= self._current < len(self._sessions)):
             return
         session = self._sessions[self._current]
@@ -569,12 +618,15 @@ class RecognitionView(QWidget):
             self._panel.setItem(r, 0, num)
             name_field = _NameField(self._conn, box)
             suggest_box = _SuggestBox(box, name_field)
+            condition_box = _ConditionBox(box)
             self._name_fields[box.number] = name_field
             self._suggest_boxes[box.number] = suggest_box
+            self._condition_boxes[box.number] = condition_box
             self._panel.setCellWidget(r, 1, name_field)
             self._panel.setCellWidget(r, 2, suggest_box)
+            self._panel.setCellWidget(r, 3, condition_box)
             side = self._side_for(box, session) or "—"
-            self._panel.setItem(r, 3, QTableWidgetItem(side))
+            self._panel.setItem(r, 4, QTableWidgetItem(side))
 
     def _side_for(self, box: _Box, session: _Session) -> str | None:
         if not self._is_transaction():
@@ -690,6 +742,48 @@ class RecognitionView(QWidget):
         finally:
             QApplication.restoreOverrideCursor()
 
+    # -- condition assessment (card backs, M-V3) ----------------------------
+
+    def _on_backs_toggled(self, on: bool) -> None:
+        self._assess_btn.setEnabled(on)
+
+    def _ensure_assessor(self):
+        if self._assessor is None:
+            from tcginventory.services.condition import build_condition_assessor
+
+            self._assessor = build_condition_assessor()
+        return self._assessor
+
+    def _assess_conditions(self) -> None:
+        """Estimate each box's condition from its back crop and fill the column."""
+        from PIL import Image
+
+        from tcginventory.services import condition as cond
+
+        if not (0 <= self._current < len(self._sessions)):
+            return
+        self._sync_scene_to_model()
+        session = self._sessions[self._current]
+        if not session.boxes:
+            QMessageBox.information(
+                self, "No boxes", "Draw a box around a card first."
+            )
+            return
+        assessor = self._ensure_assessor()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            with Image.open(session.path) as raw:
+                full = raw.convert("RGB")
+                for box in session.boxes:
+                    crop = self._crop_for(full, box, session)
+                    est = cond.assess_condition(crop, assessor)
+                    box.condition = est.condition.value
+                    combo = self._condition_boxes.get(box.number)
+                    if combo is not None:
+                        combo.set_condition(box.condition)
+        finally:
+            QApplication.restoreOverrideCursor()
+
     # -- save ---------------------------------------------------------------
 
     def _save(self) -> None:
@@ -702,6 +796,7 @@ class RecognitionView(QWidget):
             return
         repo = self._vision_repo or VisionRepository(open_vision())
         source = "transaction" if self._is_transaction() else "listing"
+        side = "back" if self._backs_cb.isChecked() else None
         capture_id = repo.add_capture(source=source)
         entries = []  # (region_id, card_id, image_path, box) for labeled regions
         for session in sessions:
@@ -711,6 +806,7 @@ class RecognitionView(QWidget):
                 capture_id,
                 sha,
                 str(dest),
+                side=side,
                 width=pixmap.width(),
                 height=pixmap.height(),
             )
@@ -724,6 +820,8 @@ class RecognitionView(QWidget):
                     rect.width() / pw,
                     rect.height() / ph,
                 )
+                if box.condition:
+                    box.card.condition = box.condition
                 region_id = repo.add_region(
                     image_id, box.number, norm, self._side_for(box, session), box.card
                 )
@@ -761,6 +859,7 @@ class RecognitionView(QWidget):
         self._items.clear()
         self._name_fields.clear()
         self._suggest_boxes.clear()
+        self._condition_boxes.clear()
         for items in self._proposals.values():
             items.clear()
         self._divider = None
