@@ -116,7 +116,14 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   (no temp files); reference embeddings cache in `vision.db`. Frozen-model
   crop-vs-render is a weak baseline that the M-V2 fine-tune sharpens without UI
   changes.
-- **M-V1.5** — trained single-class card detector (YOLO-nano) from drawn boxes.
+- **M-V1.5** — the card **detector** (two box proposers). **Phase A ✅ done:**
+  a dependency-free **classic-CV proposer** (`services/detector.py`,
+  `propose_card_boxes` — projection-profile segmentation over a background-diff
+  mask) wired to the window's **Classic-CV boxes** toggle; proposals overlay as
+  editable boxes an **Accept proposals** action promotes into regions. **Phase B
+  (pending):** a trained single-class **YOLO-nano** from the drawn boxes — needs
+  a labeled corpus + `ultralytics`/`torch` (dev-only training; the `.onnx` ships
+  bundled like DINOv2) — wiring the currently-disabled **YOLO boxes** toggle.
 - **M-V2** — fine-tuned identifier on the corpus.
 - **Inference** — Part 2 autofill in Transaction/Auction with thresholds +
   missed-detection flags.

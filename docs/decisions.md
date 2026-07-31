@@ -4,6 +4,30 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-31 — M-V1.5 Phase A: classic-CV box proposer (detector, no training)
+
+- Built the **immediately-available** detector half first (the ratified design
+  says auto-boxing is not gated on training): `services/detector.py`
+  `propose_card_boxes(image)` returns normalised `(x,y,w,h)` boxes via a
+  **projection-profile** segmentation — background level from the image border,
+  foreground = deviation past an Otsu threshold (with a noise floor), split into
+  columns then rows, each cell tightened to its bbox. Pure numpy/Pillow (no new
+  deps, no OpenCV), deterministic, Qt-free.
+- **Why projection-profile over OpenCV contours:** the primary use case is cards
+  laid out with gaps on a plain mat, which this segments well with zero new
+  dependency footprint. Touching/overlapping cards merge — accepted, since the
+  trained YOLO proposer (Phase B) is meant to cover clutter. Revisit OpenCV only
+  if the CV proposer proves inadequate.
+- **Window:** the **Classic-CV boxes** toggle overlays proposals (dashed,
+  selectable); **Accept proposals** promotes the selected (or all) into numbered
+  boxes. Proposals never persist as regions unless accepted. **YOLO boxes** stays
+  disabled pending Phase B.
+- **Phase B (pending owner go-ahead):** train single-class YOLO-nano from the
+  drawn boxes. Needs a labeled corpus (now being built in the window) and a
+  **dev-only** `ultralytics`/`torch` training path (~2 GB install; the exported
+  `.onnx` ships via LFS + PyInstaller like DINOv2). Deferred so torch isn't
+  pulled until the corpus and the decision are in place.
+
 ### 2026-07-29 — Auto eBay links via a derived sold-listings search
 
 - Every card now has an eBay link with no data entry: `services/ebay.py`
