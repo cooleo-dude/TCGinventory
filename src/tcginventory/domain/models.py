@@ -153,6 +153,26 @@ class CardShow:
 
 
 @dataclass
+class CalendarEntry:
+    """A user-created personal calendar entry (vacation, obligation, travel…).
+
+    Shown on the Calendar beside scraped shows so overlaps are visible.
+    ``ends_on`` equals ``starts_on`` for a single-day entry.
+    """
+
+    title: str
+    kind: str  # vacation | obligation | travel | other
+    starts_on: str  # ISO date
+    ends_on: str  # ISO date (inclusive)
+    all_day: bool = True
+    start_time: str | None = None
+    color: str | None = None  # hex; None → theme default
+    notes: str | None = None
+    id: int | None = None
+    created_at: str | None = None
+
+
+@dataclass
 class CatalogCard:
     """A reference card from the local catalog (pokemontcg.io dataset).
 

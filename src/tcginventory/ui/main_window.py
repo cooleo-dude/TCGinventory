@@ -39,8 +39,8 @@ from tcginventory.ui.views.dashboard import DashboardView
 from tcginventory.ui.views.history import HistoryView
 from tcginventory.ui.views.inventory import InventoryView
 from tcginventory.ui.views.market import PriceLookupView
+from tcginventory.ui.views.calendar import CalendarView
 from tcginventory.ui.views.recognition import RecognitionView
-from tcginventory.ui.views.shows import ShowsView
 from tcginventory.ui.views.transaction import TransactionView
 
 NAV_ITEMS = [
@@ -48,7 +48,7 @@ NAV_ITEMS = [
     "Transaction",
     "Inventory",
     "History",
-    "Card Shows",
+    "Calendar",
     "Price Lookup",
     "eBay Auctions",
     "Recognition",
@@ -59,7 +59,7 @@ NAV_ICONS = {
     "Transaction": "arrow-left-right",
     "Inventory": "package",
     "History": "scroll-text",
-    "Card Shows": "calendar-days",
+    "Calendar": "calendar-days",
     "Price Lookup": "search",
     "eBay Auctions": "gavel",
     "Recognition": "scan-line",
@@ -210,14 +210,14 @@ class MainWindow(QMainWindow):
             conn, auctions_conn=open_auctions(None if self._db_file else ":memory:")
         )
 
-        self._shows = ShowsView(conn)
+        self._calendar = CalendarView(conn)
         self._recognition = RecognitionView(conn)
         self._stack = QStackedWidget()
         self._stack.addWidget(self._dashboard)  # 0 Dashboard
         self._stack.addWidget(self._transaction)  # 1 Transaction
         self._stack.addWidget(self._inventory)  # 2 Inventory
         self._stack.addWidget(self._history)  # 3 History
-        self._stack.addWidget(self._shows)  # 4 Card Shows
+        self._stack.addWidget(self._calendar)  # 4 Calendar
         self._stack.addWidget(self._price_lookup)  # 5 Price Lookup
         self._stack.addWidget(self._auctions)  # 6 eBay Auctions
         self._stack.addWidget(self._recognition)  # 7 Recognition

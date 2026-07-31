@@ -30,6 +30,7 @@ from tcginventory.domain.enums import (
 )
 from tcginventory.domain.models import (
     AuditLogEntry,
+    CalendarEntry,
     CardShow,
     CatalogCard,
     Item,
@@ -1119,3 +1120,87 @@ class CardCatalogRepository:
         if len(strong) == 1:
             return strong[0]["card_id"], strong[0]["image_small"]
         return None
+
+
+class CalendarEntryRepository:
+    """CRUD for user-created personal calendar entries (calendar_entry)."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    @staticmethod
+    def _to_model(row: sqlite3.Row) -> CalendarEntry:
+        return CalendarEntry(
+            id=row["id"],
+            title=row["title"],
+            kind=row["kind"],
+            starts_on=row["starts_on"],
+            ends_on=row["ends_on"],
+            all_day=bool(row["all_day"]),
+            start_time=row["start_time"],
+            color=row["color"],
+            notes=row["notes"],
+            created_at=row["created_at"],
+        )
+
+    def add(self, entry: CalendarEntry) -> CalendarEntry:
+        entry.created_at = entry.created_at or now_iso()
+        cur = self.conn.execute(
+            "INSERT INTO calendar_entry (title, kind, starts_on, ends_on, all_day, "
+            "start_time, color, notes, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                entry.title,
+                entry.kind,
+                entry.starts_on,
+                entry.ends_on,
+                int(entry.all_day),
+                entry.start_time,
+                entry.color,
+                entry.notes,
+                entry.created_at,
+            ),
+        )
+        entry.id = cur.lastrowid
+        return entry
+
+    def update(self, entry: CalendarEntry) -> CalendarEntry:
+        self.conn.execute(
+            "UPDATE calendar_entry SET title=?, kind=?, starts_on=?, ends_on=?, "
+            "all_day=?, start_time=?, color=?, notes=? WHERE id=?",
+            (
+                entry.title,
+                entry.kind,
+                entry.starts_on,
+                entry.ends_on,
+                int(entry.all_day),
+                entry.start_time,
+                entry.color,
+                entry.notes,
+                entry.id,
+            ),
+        )
+        return entry
+
+    def delete(self, entry_id: int) -> None:
+        self.conn.execute("DELETE FROM calendar_entry WHERE id = ?", (entry_id,))
+
+    def get(self, entry_id: int) -> CalendarEntry | None:
+        row = self.conn.execute(
+            "SELECT * FROM calendar_entry WHERE id = ?", (entry_id,)
+        ).fetchone()
+        return self._to_model(row) if row else None
+
+    def list_overlapping(self, start: str, end: str) -> list[CalendarEntry]:
+        """Entries that intersect the inclusive [start, end] window."""
+        rows = self.conn.execute(
+            "SELECT * FROM calendar_entry WHERE ends_on >= ? AND starts_on <= ? "
+            "ORDER BY starts_on, ends_on, id",
+            (start, end),
+        ).fetchall()
+        return [self._to_model(r) for r in rows]
+
+    def list_all(self) -> list[CalendarEntry]:
+        rows = self.conn.execute(
+            "SELECT * FROM calendar_entry ORDER BY starts_on, id"
+        ).fetchall()
+        return [self._to_model(r) for r in rows]
