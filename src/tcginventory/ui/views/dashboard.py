@@ -73,13 +73,13 @@ _PAGE = 5  # movers rows shown per "Show 5 more" step
 
 # Chart series → token role.
 _SERIES_COLORS = {
-    "Collection Value": "accent",  # magenta headline
-    "Net cash": "accent2",  # cyan
-    "Realized Gain/Loss": "series3",  # gold
+    "Collection Value": "accent",  # orange headline
+    "Net cash": "info",  # cool blue (cash reads cool, not "loss red")
+    "Realized Gain/Loss": "warn",  # amber
 }
 
-# Muted, dark-friendly plate colours for the set chips beside a card.
-_SET_SWATCHES = ("#4a2f6b", "#6b3a2f", "#2f5a6b", "#334a3a", "#524a33", "#3a3352")
+# Muted, warm plate colours for the set chips behind a card (placeholder art).
+_SET_SWATCHES = ("#4a3a24", "#5a3320", "#3f3320", "#463b2a", "#524526", "#3a2f22")
 
 
 # ---------------------------------------------------------------------------
@@ -129,9 +129,13 @@ def _window_slice(points: list[SeriesPoint], cutoff: str | None) -> list[SeriesP
 
 def _series_color(role: str) -> str:
     t = theme.active()
-    return {"accent": t.accent, "accent2": t.accent2, "series3": t.series[3]}.get(
-        role, t.ink2
-    )
+    return {
+        "accent": t.accent,
+        "accent2": t.accent2,
+        "info": t.info,
+        "warn": t.warn,
+        "series3": t.series[3],
+    }.get(role, t.ink2)
 
 
 def _set_color(key: str | None) -> str:
@@ -153,11 +157,12 @@ def _chip(text: str, tone: str) -> QLabel:
     return lbl
 
 
-# attendance status → (label, token role)
+# attendance status → (label, token role). A reserved semantic palette
+# (green / blue / amber / red) kept distinct from the brand accent.
 _STATUS_STYLE = {
     "attending": ("Attending", "pos"),
-    "walking": ("Walking", "accent2"),
-    "pending": ("Pending", "gold"),
+    "walking": ("Walking", "info"),
+    "pending": ("Pending", "warn"),
     "denied": ("Denied", "neg"),
 }
 
@@ -175,8 +180,8 @@ def _status_badge(status: str) -> QLabel:
     label, key = _STATUS_STYLE.get(status, (status.title(), "mut"))
     color = {
         "pos": t.pos,
-        "accent2": t.accent2,
-        "gold": t.series[3],
+        "info": t.info,
+        "warn": t.warn,
         "neg": t.neg,
         "mut": t.ink2,
     }[key]
@@ -742,7 +747,7 @@ class UpcomingShowsBox(_PagedBox):
     """Upcoming card shows (attending/walking), paged like the movers."""
 
     def __init__(self) -> None:
-        super().__init__("Upcoming Shows", theme.active().accent2)
+        super().__init__("Upcoming Shows", theme.active().info)
 
     def set_shows(self, shows: list) -> None:
         self.set_items(shows)
@@ -864,7 +869,7 @@ class DashboardView(QWidget):
         t = theme.active()
         self._gainers = MoversColumn("Top Gainers", t.pos, self._images)
         self._losers = MoversColumn("Top Losers", t.neg, self._images)
-        self._sellers = MoversColumn("Top Sellers", t.accent2, self._images)
+        self._sellers = MoversColumn("Top Sellers", t.warn, self._images)
         self._shows_box = UpcomingShowsBox()
         movers = QHBoxLayout()
         movers.setSpacing(16)
@@ -987,7 +992,7 @@ class DashboardView(QWidget):
             _tone(nc),
             f"cash · {label}",
             money_spark,
-            t.accent2,
+            t.info,
         )
 
         # highlights: price-movement movers + sellers + upcoming shows (windowed).

@@ -1,9 +1,11 @@
-"""Neon Slate — the application's visual theme (colors, fonts, Qt styling).
+"""Ember Duo — the application's visual theme (colors, fonts, Qt styling).
 
 Single source of truth for the look of the app. The design direction is
-"grounded graphite chrome with a magenta + cyan pulse": neutral grey surfaces
-that stay calm for hours of dense tables, with the neon accent confined to
-*punctuation* — the active nav item, primary buttons, the chart, status pills.
+"grounded graphite chrome with an orange + brick-red pop" (a Scrafty palette):
+neutral grey/black surfaces that stay calm for hours of dense tables, with the
+warm accent confined to *punctuation* — the active nav item, primary buttons,
+the chart, status pills. ``info``/``warn`` are a reserved status palette
+(blue/amber) kept separate from the brand accent.
 
 Two token sets (``DARK`` default, ``LIGHT``) are selected by the OS colour
 scheme and applied via **Fusion style + QPalette + one app-level stylesheet**.
@@ -40,18 +42,20 @@ class Tokens:
     ink: str  # primary text
     ink2: str  # secondary text
     ink3: str  # muted text / labels
-    accent: str  # magenta — the headline accent
-    accent2: str  # cyan — the secondary accent
+    accent: str  # orange — the headline accent
+    accent2: str  # brick red — the secondary accent
     accent_soft: str  # translucent accent wash (selection, active nav)
     accent_ink: str  # accent used as text (hover / on-surface)
     accent_on: str  # text/glyph on an accent fill
     pos: str  # gains
-    neg: str  # losses
+    neg: str  # losses (also a "Denied" show)
     neg_soft: str  # translucent loss wash
+    info: str  # reserved status colour — "walking" show / cool secondary (blue)
+    warn: str  # reserved status colour — "pending" show (amber)
     series: tuple[str, ...]  # chart categorical order
 
 
-# Neon Slate · Dark (default)
+# Ember Duo · Dark (default) — graphite ground, orange + brick-red pop (Scrafty)
 DARK = Tokens(
     mode="dark",
     bg="#121319",
@@ -63,38 +67,42 @@ DARK = Tokens(
     ink="#eceaf2",
     ink2="#aab0c0",
     ink3="#6d7386",
-    accent="#ff4fd8",
-    accent2="#2de2e6",
-    accent_soft="rgba(255,79,216,0.15)",
-    accent_ink="#ff6fe0",
+    accent="#f5852e",
+    accent2="#e0533a",
+    accent_soft="rgba(245,133,46,0.15)",
+    accent_ink="#ff9a4d",
     accent_on="#0e0f13",
-    pos="#5ef2b0",
-    neg="#ff5e7e",
-    neg_soft="rgba(255,94,126,0.15)",
-    series=("#ff4fd8", "#2de2e6", "#5ef2b0", "#ffd76e", "#a78bfa", "#60a5fa"),
+    pos="#83d15a",
+    neg="#ff6a5a",
+    neg_soft="rgba(255,106,90,0.15)",
+    info="#5b93a8",
+    warn="#f6c233",
+    series=("#f5852e", "#5b93a8", "#f6c233", "#83d15a", "#e0533a", "#b0784a"),
 )
 
-# Neon Slate · Light (OS auto-selects; neon deepened to stay legible on white)
+# Ember Duo · Light (OS auto-selects; warm cream, accents deepened for white)
 LIGHT = Tokens(
     mode="light",
-    bg="#f4f5f8",
+    bg="#f6f4f0",
     surface="#ffffff",
-    surface2="#eceef3",
-    line="#e3e6ec",
-    line2="#cfd4de",
-    zebra="#f8f9fc",
-    ink="#171922",
-    ink2="#4c5364",
-    ink3="#868da0",
-    accent="#cc1a94",
-    accent2="#0a9fc4",
-    accent_soft="rgba(204,26,148,0.10)",
-    accent_ink="#a3157a",
+    surface2="#efece7",
+    line="#e6e2db",
+    line2="#d3ccc0",
+    zebra="#faf8f4",
+    ink="#1b1712",
+    ink2="#574f44",
+    ink3="#8a8072",
+    accent="#d1611f",
+    accent2="#c0392b",
+    accent_soft="rgba(209,97,31,0.12)",
+    accent_ink="#a94e18",
     accent_on="#ffffff",
-    pos="#12a150",
-    neg="#e11d48",
-    neg_soft="rgba(225,29,72,0.10)",
-    series=("#cc1a94", "#0a9fc4", "#12a150", "#d97706", "#7c3aed", "#2563eb"),
+    pos="#4f8f2f",
+    neg="#c53a2a",
+    neg_soft="rgba(197,58,42,0.10)",
+    info="#3d7a92",
+    warn="#b9821a",
+    series=("#d1611f", "#3d7a92", "#b9821a", "#4f8f2f", "#c0392b", "#8a5a2a"),
 )
 
 # The currently-applied set (defaults to DARK so headless views/tests that never
