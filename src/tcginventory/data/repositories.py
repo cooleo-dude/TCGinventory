@@ -768,17 +768,16 @@ class CardShowRepository:
         show.status = row["status"]
         return show
 
-    def upcoming(self, today: str, limit: int) -> list[CardShow]:
-        """The next ``limit`` shows on/after ``today`` the user plans to be at.
-
-        Only shows marked **attending** or **walking** — the dashboard box is a
-        "where am I going" list, not the full calendar."""
+    def upcoming(self, today: str, limit: int | None) -> list[CardShow]:
+        """The next ``limit`` shows on/after ``today`` the user plans to be at
+        (``limit=None`` → all). Only **attending**/**walking** shows — the
+        dashboard box is a "where am I going" list, not the full calendar."""
         rows = self.conn.execute(
             "SELECT c.*, s.status AS status FROM card_show c "
             "JOIN card_show_status s ON s.source_id = c.source_id "
             "WHERE c.starts_on >= ? AND s.status IN ('attending', 'walking') "
             "ORDER BY c.starts_on, c.start_time, c.name LIMIT ?",
-            (today, limit),
+            (today, limit if limit is not None else -1),  # SQLite LIMIT -1 = all
         ).fetchall()
         return [self._to_model_with_status(r) for r in rows]
 

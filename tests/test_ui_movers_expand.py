@@ -68,3 +68,28 @@ def test_movers_column_no_expand_when_five_or_fewer(app):
     assert col._rows.count() == 3
     assert col._footer.count() == 0  # nothing to expand/collapse
     col.deleteLater()
+
+
+def test_upcoming_shows_box_paginates(app):
+    from tcginventory.domain.models import CardShow
+    from tcginventory.ui.views.dashboard import _PAGE, UpcomingShowsBox
+
+    shows = [
+        CardShow(
+            source_id=i,
+            name=f"Show {i}",
+            state="NJ",
+            starts_on=f"2026-08-0{i % 9 + 1}",
+            city="Town",
+            status="attending",
+        )
+        for i in range(9)
+    ]
+    box = UpcomingShowsBox()
+    box.set_shows(shows)
+    assert box._rows.count() == _PAGE  # 5 shown
+    box._expand()
+    assert box._rows.count() == 9  # rest revealed
+    box._collapse()
+    assert box._rows.count() == _PAGE
+    box.deleteLater()

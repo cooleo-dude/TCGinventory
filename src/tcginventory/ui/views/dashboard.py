@@ -499,28 +499,30 @@ class KpiCard(QFrame):
         self._spark.set_data(spark, rail)
 
 
-class MoversColumn(QFrame):
-    """A card listing Top Gainers / Losers / Sellers rows (with card-art thumbs)."""
+class _PagedBox(QFrame):
+    """A titled highlights card that shows _PAGE items with "Show 5 more" /
+    "Collapse" paging.
 
-    def __init__(self, title: str, dot_color: str, images: _ImageLoader) -> None:
+    It sizes to its own content (no trailing stretch), so sibling boxes laid out
+    in a top-aligned row keep **independent** heights — expanding one doesn't grow
+    the others. Subclasses implement ``_render_item`` and ``_empty_text``."""
+
+    def __init__(self, title: str, dot_color: str) -> None:
         super().__init__()
-        self._images = images
         self.setObjectName("movers")
+        self._dot_color = dot_color
         self._items: list = []
-        self._mode = "gain"  # gain | loss | seller
-        self._label = ""  # window label (sellers empty-state)
         self._visible = _PAGE
         self._outer = QVBoxLayout(self)
         self._outer.setContentsMargins(16, 13, 16, 12)
         self._outer.setSpacing(2)
         head = QHBoxLayout()
         head.setSpacing(7)
-        dot = QLabel()
-        dot.setFixedSize(9, 9)
-        dot.setStyleSheet(f"background:{dot_color};border-radius:3px;")
+        self._dot = QLabel()
+        self._dot.setFixedSize(9, 9)
         self._title = QLabel(title)
         self._title.setObjectName("moversTitle")
-        head.addWidget(dot)
+        head.addWidget(self._dot)
         head.addWidget(self._title)
         head.addStretch(1)
         self._outer.addLayout(head)
@@ -532,11 +534,34 @@ class MoversColumn(QFrame):
         self._footer.setContentsMargins(0, 6, 0, 0)
         self._footer.setSpacing(12)
         self._outer.addLayout(self._footer)
-        self._outer.addStretch(1)
         self._restyle()
+
+    # -- subclass hooks -----------------------------------------------------
+    def _render_item(self, item, first: bool) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def _empty_text(self) -> str:
+        return "Nothing here."
+
+    # -- shared machinery ---------------------------------------------------
+    def set_items(self, items: list) -> None:
+        self._items = items
+        self._render()
+
+    def _render(self) -> None:
+        self._restyle()
+        self._clear()
+        self._clear_footer()
+        if not self._items:
+            self._empty(self._empty_text())
+            return
+        for i, item in enumerate(self._items[: self._visible]):
+            self._render_item(item, first=(i == 0))
+        self._render_footer()
 
     def _restyle(self) -> None:
         t = theme.active()
+        self._dot.setStyleSheet(f"background:{self._dot_color};border-radius:3px;")
         self.setStyleSheet(
             f"QFrame#movers{{background:{t.surface};border:1px solid {t.line};"
             f"border-radius:14px;}}"
@@ -550,11 +575,75 @@ class MoversColumn(QFrame):
             if w:
                 w.deleteLater()
 
+    def _clear_footer(self) -> None:
+        while self._footer.count():
+            item = self._footer.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
     def _empty(self, text: str) -> None:
         t = theme.active()
         lbl = QLabel(text)
         lbl.setStyleSheet(f"color:{t.ink3};padding:10px 2px;")
         self._rows.addWidget(lbl)
+
+    def _render_footer(self) -> None:
+        remaining = len(self._items) - self._visible
+        added = False
+        if remaining > 0:
+            self._footer.addWidget(
+                self._foot_button(
+                    f"Show {min(_PAGE, remaining)} more",
+                    "chevron-down",
+                    theme.active().accent2,
+                    self._expand,
+                )
+            )
+            added = True
+        if self._visible > _PAGE:
+            self._footer.addWidget(
+                self._foot_button(
+                    "Collapse", "chevron-up", theme.active().ink3, self._collapse
+                )
+            )
+            added = True
+        if added:
+            self._footer.addStretch(1)
+
+    def _foot_button(self, text, icon_name, color, slot) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setIcon(icons.icon(icon_name, color, 14))
+        btn.setIconSize(QSize(14, 14))
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet(
+            f"QPushButton{{border:none;background:transparent;color:{color};"
+            "font-size:11px;font-weight:700;padding:2px 4px;}"
+            f"QPushButton:hover{{color:{theme.active().ink};}}"
+        )
+        btn.clicked.connect(slot)
+        return btn
+
+    def _expand(self) -> None:
+        self._visible += _PAGE
+        self._render()
+
+    def _collapse(self) -> None:
+        self._visible = _PAGE
+        self._render()
+
+
+class MoversColumn(_PagedBox):
+    """Top Gainers / Losers / Sellers rows, with card-art thumbnails."""
+
+    def __init__(self, title: str, dot_color: str, images: _ImageLoader) -> None:
+        super().__init__(title, dot_color)
+        self._images = images
+        self._mode = "gain"  # gain | loss | seller
+        self._label = ""  # window label (sellers empty-state)
+
+    def _render_item(self, item, first: bool) -> None:
+        self._row(*self._format(item, self._mode), first=first)
 
     def _row(
         self,
@@ -606,15 +695,13 @@ class MoversColumn(QFrame):
         self._rows.addWidget(row)
 
     def set_movers(self, rows: list[MoverRow], gain: bool) -> None:
-        self._items = rows
         self._mode = "gain" if gain else "loss"
-        self._render()
+        self.set_items(rows)
 
     def set_sellers(self, rows: list[SellerRow], window_label: str) -> None:
-        self._items = rows
         self._mode = "seller"
         self._label = window_label
-        self._render()
+        self.set_items(rows)
 
     @staticmethod
     def _format(item, mode: str):
@@ -623,7 +710,10 @@ class MoversColumn(QFrame):
         if mode == "seller":
             plural = "s" if item.sales != 1 else ""
             return (
-                item.name, item.set_name, item.card_number, sub,
+                item.name,
+                item.set_name,
+                item.card_number,
+                sub,
                 f"{item.units} sold",
                 f"{money(item.revenue_cents)} · {item.sales} sale{plural}",
                 None,
@@ -631,7 +721,10 @@ class MoversColumn(QFrame):
         pct = f" ({item.change_pct:+.0f}%)" if item.change_pct is not None else ""
         arrow = "▲ " if item.change_cents >= 0 else "▼ "
         return (
-            item.name, item.set_name, item.card_number, sub,
+            item.name,
+            item.set_name,
+            item.card_number,
+            sub,
             money(item.price_cents),
             f"{arrow}{money(abs(item.change_cents))}{pct}",
             _tone(item.change_cents),
@@ -644,125 +737,20 @@ class MoversColumn(QFrame):
             return "No gainers in this range."
         return "No losers here."
 
-    def _render(self) -> None:
-        self._restyle()
-        self._clear()
-        self._clear_footer()
-        if not self._items:
-            self._empty(self._empty_text())
-            return
-        for i, item in enumerate(self._items[: self._visible]):
-            fields = self._format(item, self._mode)
-            self._row(*fields, first=(i == 0))
-        self._render_footer()
 
-    def _render_footer(self) -> None:
-        remaining = len(self._items) - self._visible
-        added = False
-        if remaining > 0:
-            self._footer.addWidget(
-                self._foot_button(
-                    f"Show {min(_PAGE, remaining)} more",
-                    "chevron-down",
-                    theme.active().accent2,
-                    self._expand,
-                )
-            )
-            added = True
-        if self._visible > _PAGE:
-            self._footer.addWidget(
-                self._foot_button(
-                    "Collapse", "chevron-up", theme.active().ink3, self._collapse
-                )
-            )
-            added = True
-        if added:
-            self._footer.addStretch(1)
-
-    def _foot_button(self, text, icon_name, color, slot) -> QPushButton:
-        btn = QPushButton(text)
-        btn.setIcon(icons.icon(icon_name, color, 14))
-        btn.setIconSize(QSize(14, 14))
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.setStyleSheet(
-            f"QPushButton{{border:none;background:transparent;color:{color};"
-            "font-size:11px;font-weight:700;padding:2px 4px;}"
-            f"QPushButton:hover{{color:{theme.active().ink};}}"
-        )
-        btn.clicked.connect(slot)
-        return btn
-
-    def _clear_footer(self) -> None:
-        while self._footer.count():
-            item = self._footer.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-
-    def _expand(self) -> None:
-        self._visible += _PAGE
-        self._render()
-
-    def _collapse(self) -> None:
-        self._visible = _PAGE
-        self._render()
-
-
-class UpcomingShowsBox(QFrame):
-    """A compact list of the next few card shows (full calendar has its own tab)."""
+class UpcomingShowsBox(_PagedBox):
+    """Upcoming card shows (attending/walking), paged like the movers."""
 
     def __init__(self) -> None:
-        super().__init__()
-        self.setObjectName("movers")
-        self._outer = QVBoxLayout(self)
-        self._outer.setContentsMargins(16, 13, 16, 12)
-        self._outer.setSpacing(2)
-        head = QHBoxLayout()
-        head.setSpacing(7)
-        self._dot = QLabel()
-        self._dot.setFixedSize(9, 9)
-        self._title = QLabel("Upcoming Shows")
-        self._title.setObjectName("moversTitle")
-        head.addWidget(self._dot)
-        head.addWidget(self._title)
-        head.addStretch(1)
-        self._outer.addLayout(head)
-        self._rows = QVBoxLayout()
-        self._rows.setContentsMargins(0, 4, 0, 0)
-        self._rows.setSpacing(0)
-        self._outer.addLayout(self._rows)
-        self._outer.addStretch(1)
-        self._restyle()
-
-    def _restyle(self) -> None:
-        t = theme.active()
-        self._dot.setStyleSheet(f"background:{t.accent2};border-radius:3px;")
-        self.setStyleSheet(
-            f"QFrame#movers{{background:{t.surface};border:1px solid {t.line};"
-            f"border-radius:14px;}}"
-            f"QLabel#moversTitle{{color:{t.ink2};font-size:12px;font-weight:700;}}"
-        )
-
-    def _clear(self) -> None:
-        while self._rows.count():
-            item = self._rows.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
+        super().__init__("Upcoming Shows", theme.active().accent2)
 
     def set_shows(self, shows: list) -> None:
-        self._restyle()
-        self._clear()
-        if not shows:
-            t = theme.active()
-            lbl = QLabel("No upcoming shows.")
-            lbl.setStyleSheet(f"color:{t.ink3};padding:10px 2px;")
-            self._rows.addWidget(lbl)
-            return
-        for i, s in enumerate(shows):
-            self._row(s, first=(i == 0))
+        self.set_items(shows)
 
-    def _row(self, show, first: bool) -> None:
+    def _empty_text(self) -> str:
+        return "No upcoming shows."
+
+    def _render_item(self, show, first: bool) -> None:
         t = theme.active()
         row = QWidget()
         row.setObjectName("showrow")
@@ -880,8 +868,10 @@ class DashboardView(QWidget):
         self._shows_box = UpcomingShowsBox()
         movers = QHBoxLayout()
         movers.setSpacing(16)
+        # Top-align so each box keeps its own height — expanding one doesn't
+        # stretch its neighbours (they size to their own content).
         for col in (self._gainers, self._losers, self._sellers, self._shows_box):
-            movers.addWidget(col, 1)
+            movers.addWidget(col, 1, Qt.AlignTop)
 
         self._note = QLabel("")
         self._note.setStyleSheet("color: palette(windowText);")
@@ -1008,10 +998,8 @@ class DashboardView(QWidget):
         self._losers.set_movers(
             rpt.top_losers(intent, limit=None, since=cutoff), gain=False
         )
-        self._sellers.set_sellers(
-            rpt.top_sellers(window_days=days, limit=None), label
-        )
-        self._shows_box.set_shows(self._shows_service.upcoming(limit=5))
+        self._sellers.set_sellers(rpt.top_sellers(window_days=days, limit=None), label)
+        self._shows_box.set_shows(self._shows_service.upcoming(limit=None))
 
         # chart
         self._chart_view.setChart(

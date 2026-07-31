@@ -248,8 +248,11 @@ class CardShowService:
         self.shows = CardShowRepository(conn)
         self._fetch = fetch_html or _fetch_html
 
-    def upcoming(self, limit: int = 5, today: str | None = None) -> list[CardShow]:
-        """The next few shows on/after today (for the dashboard summary box)."""
+    def upcoming(
+        self, limit: int | None = 5, today: str | None = None
+    ) -> list[CardShow]:
+        """Upcoming shows on/after today for the dashboard box (``limit=None``
+        → all attending/walking shows, so the box can page)."""
         today = today or datetime.now(timezone.utc).date().isoformat()
         return self.shows.upcoming(today, limit)
 
