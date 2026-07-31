@@ -10,11 +10,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QPen, QPixmap
+from PySide6.QtCore import QModelIndex, QRectF, Qt
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QPen,
+    QPixmap,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QGraphicsScene,
@@ -29,7 +37,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from tcginventory.data.repositories import CardCatalogRepository
+
 _BOX_PEN = QColor("#d3869b")
+_CARD_ID_ROLE = Qt.UserRole + 1
 
 
 @dataclass
@@ -44,16 +55,18 @@ class AcceptedCard:
 
 
 class _Row:
-    __slots__ = (
-        "det", "guessed_name", "guessed_id", "include",
-        "name", "set", "number", "qty",
-    )
+    """One detection's editable row. When a catalog connection is supplied, the
+    Name field autocompletes so a **correction** re-picks a real card_id (the
+    highest-value label for the feedback loop)."""
 
-    def __init__(self, det) -> None:
+    def __init__(self, det, conn=None) -> None:
         self.det = det
         label = det.label
         self.guessed_name = (label.name if label else None) or ""
         self.guessed_id = label.card_id if label else None
+        self.picked_id: str | None = None
+        self.picked_name: str | None = None
+        self._conn = conn
         self.include = QCheckBox()
         self.include.setChecked(True)
         self.name = QLineEdit(self.guessed_name)
@@ -62,6 +75,55 @@ class _Row:
         self.qty = QSpinBox()
         self.qty.setMinimum(1)
         self.qty.setMaximum(9999)
+        if conn is not None:
+            self._install_completer()
+
+    def _install_completer(self) -> None:
+        self._matches: dict[str, object] = {}
+        self._model = QStandardItemModel(self.name)
+        self._completer = QCompleter(self._model, self.name)
+        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
+        self.name.setCompleter(self._completer)
+        self.name.textEdited.connect(self._on_name_edited)
+        self._completer.activated[QModelIndex].connect(self._pick_match)
+
+    def _on_name_edited(self, text: str) -> None:
+        if len(text.strip()) < 2:
+            return
+        repo = CardCatalogRepository(self._conn)
+        matches = repo.search(text, limit=20)
+        self._matches = {c.card_id: c for c in matches}
+        self._model.clear()
+        for card in matches:
+            item = QStandardItem(
+                f"{card.name}  ·  {card.set_name or '?'}  "
+                f"#{repo.display_number(card) or '?'}"
+            )
+            item.setData(card.card_id, _CARD_ID_ROLE)
+            self._model.appendRow(item)
+        if matches:
+            self._completer.complete()
+
+    def _pick_match(self, index: QModelIndex) -> None:
+        card = self._matches.get(index.data(_CARD_ID_ROLE))
+        if card is None:
+            return
+        self.picked_id = card.card_id
+        self.picked_name = card.name
+        self.name.setText(card.name)
+        self.set.setText(card.set_name or "")
+        number = CardCatalogRepository(self._conn).display_number(card)
+        self.number.setText(number or card.full_number or card.number or "")
+
+    def resolved_id(self, name: str) -> str | None:
+        """The card_id backing the current name: a re-pick, or the original guess
+        if it was accepted unedited; None for free-typed text."""
+        if self.picked_id and name == self.picked_name:
+            return self.picked_id
+        if self.guessed_id and name == self.guessed_name:
+            return self.guessed_id
+        return None
 
     def accepted(self) -> AcceptedCard | None:
         if not self.include.isChecked():
@@ -69,8 +131,7 @@ class _Row:
         name = self.name.text().strip()
         if not name:
             return None
-        edited = name != self.guessed_name
-        card_id = self.guessed_id if (self.guessed_id and not edited) else None
+        card_id = self.resolved_id(name)
         return AcceptedCard(
             card_id=card_id,
             name=name,
@@ -85,11 +146,11 @@ class _Row:
 class AutofillDialog(QDialog):
     _HEADERS = ["Add", "#", "Name", "Set", "No.", "Match", "Qty"]
 
-    def __init__(self, image_path: str, detections, parent=None) -> None:
+    def __init__(self, image_path: str, detections, conn=None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Autofill cards from photo")
         self.resize(900, 560)
-        self._rows: list[_Row] = [_Row(d) for d in detections]
+        self._rows: list[_Row] = [_Row(d, conn) for d in detections]
 
         scene = QGraphicsScene(self)
         pixmap = QPixmap(str(image_path))

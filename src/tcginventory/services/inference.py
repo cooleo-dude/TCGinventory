@@ -75,6 +75,39 @@ def run_inference(
     return detections
 
 
+def write_back(pipeline, image_path, source, accepted_cards) -> None:
+    """Feed confirmed autofill results back into the corpus (best-effort).
+
+    ``accepted_cards`` carry ``box`` + ``card_id`` + ``name``/``set_name``/
+    ``card_number``. No-op when ``pipeline`` doesn't expose a ``repo`` (e.g. an
+    injected test fake) or nothing was accepted. Never raises — a feedback-write
+    failure must not disrupt the entry it came from.
+    """
+    repo = getattr(pipeline, "repo", None)
+    if repo is None or not accepted_cards:
+        return
+    embedder = getattr(getattr(pipeline, "recognizer", None), "embedder", None)
+    entries = [
+        (
+            card.box,
+            CardLabel(
+                card_id=card.card_id,
+                name=card.name,
+                set_name=card.set_name,
+                card_number=card.card_number,
+            ),
+            None,
+        )
+        for card in accepted_cards
+    ]
+    try:
+        from tcginventory.services import corpus
+
+        corpus.ingest_labeled_scene(repo, embedder, image_path, source, entries)
+    except Exception:  # feedback is best-effort; never disrupt the entry
+        pass
+
+
 def catalog_label_resolver(conn):
     """A ``card_id -> CardLabel`` resolver over the local catalog (for display)."""
     from tcginventory.data.repositories import CardCatalogRepository
@@ -96,8 +129,32 @@ def catalog_label_resolver(conn):
     return resolve
 
 
-def build_pipeline(conn, vision_repo=None, *, prefer_yolo: bool = True):
-    """Assemble a ready-to-call ``pipeline(image_path) -> list[Detection]``.
+class Pipeline:
+    """A callable ``image_path -> list[Detection]`` that also exposes the pieces
+    the corpus write-back needs (``repo`` + ``recognizer`` for exemplar indexing)."""
+
+    def __init__(
+        self, detect, recognizer, resolve, repo, conf_threshold=DEFAULT_CONFIDENCE
+    ):
+        self.detect = detect
+        self.recognizer = recognizer
+        self.resolve = resolve
+        self.repo = repo
+        self.conf_threshold = conf_threshold
+
+    def __call__(self, image_path: str | Path) -> list[Detection]:
+        return run_inference(
+            image_path,
+            detect=self.detect,
+            recognizer=self.recognizer,
+            pool=self.repo.labeled_card_ids(),
+            resolve=self.resolve,
+            conf_threshold=self.conf_threshold,
+        )
+
+
+def build_pipeline(conn, vision_repo=None, *, prefer_yolo: bool = True) -> Pipeline:
+    """Assemble a ready-to-call :class:`Pipeline`.
 
     Chooses the trained YOLO detector when a model is present, else the classic-CV
     proposer; identifies against the labeled corpus (crop exemplars + catalog
@@ -122,12 +179,4 @@ def build_pipeline(conn, vision_repo=None, *, prefer_yolo: bool = True):
                 detect = det.propose_card_boxes
 
     recognizer = Recognizer(repo, reference_image=catalog_reference_resolver(conn))
-    resolve = catalog_label_resolver(conn)
-
-    def pipeline(image_path: str | Path) -> list[Detection]:
-        pool = repo.labeled_card_ids()
-        return run_inference(
-            image_path, detect=detect, recognizer=recognizer, pool=pool, resolve=resolve
-        )
-
-    return pipeline
+    return Pipeline(detect, recognizer, catalog_label_resolver(conn), repo)

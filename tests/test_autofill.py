@@ -106,6 +106,60 @@ def test_transaction_autofill_adds_receive_rows(app, monkeypatch, tmp_path):
     view.deleteLater()
 
 
+class _CorpusPipe:
+    """A pipeline stand-in that exposes repo + recognizer for write-back."""
+
+    def __init__(self, repo, recognizer, detections):
+        self.repo = repo
+        self.recognizer = recognizer
+        self._detections = detections
+
+    def __call__(self, _path):
+        return self._detections
+
+
+def test_transaction_autofill_writes_confirmed_cards_back_to_corpus(
+    app, monkeypatch, tmp_path
+):
+    from tcginventory.data.db import connect
+    from tcginventory.data.migrator import migrate
+    from tcginventory.data.vision import VisionRepository, open_vision
+    from tcginventory.services.recognizer import PixelEmbedder, Recognizer
+    from tcginventory.ui.views import transaction as txn_mod
+    from tcginventory.ui.views.transaction import TransactionView
+
+    scene = _scene(tmp_path / "scene.png")
+    conn = connect(":memory:")
+    migrate(conn)
+    vrepo = VisionRepository(open_vision(":memory:"))
+    pipe = _CorpusPipe(
+        vrepo,
+        Recognizer(vrepo, embedder=PixelEmbedder(24)),
+        [
+            _det(
+                1,
+                (0, 0, 0.5, 1),
+                CardLabel(card_id="cel-4", name="Charizard"),
+                0.9,
+                True,
+            ),
+            _det(2, (0.5, 0, 0.5, 1), None, 0.0, False),  # unidentified → dropped
+        ],
+    )
+    view = TransactionView(conn)
+    view._inference_pipeline = pipe
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))  # isolate stored image
+    _patch_flow(monkeypatch, scene, txn_mod.AutofillDialog)
+
+    view._autofill_from_photo()
+
+    # The one confirmed, identified card was fed back: a region + a crop exemplar.
+    assert vrepo.region_count() == 1
+    assert vrepo.region_embedding_count() == 1
+    assert [c for c, _ in vrepo.region_vectors("pixel-24")] == ["cel-4"]
+    view.deleteLater()
+
+
 def test_auction_autofill_adds_card_rows(app, monkeypatch, tmp_path):
     from tcginventory.data.auctions import open_auctions
     from tcginventory.data.db import connect

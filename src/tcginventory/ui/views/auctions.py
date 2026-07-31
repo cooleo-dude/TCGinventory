@@ -86,6 +86,7 @@ from tcginventory.domain.enums import (
 from tcginventory.domain.models import Item
 from tcginventory.services import auctions as auction_math
 from tcginventory.services.ebay import search_url
+from tcginventory.services.inference import write_back as inference_write_back
 from tcginventory.services.transactions import IncomingCard
 from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.card_preview import install_hover_preview
@@ -1068,11 +1069,15 @@ class AuctionsView(QWidget):
                     self, "No cards found", f"No cards detected in {path}."
                 )
                 continue
-            dialog = AutofillDialog(path, detections, self)
+            dialog = AutofillDialog(path, detections, self._conn, self)
             if dialog.exec() != QDialog.Accepted:
                 continue
-            for accepted in dialog.result_cards():
+            accepted_cards = dialog.result_cards()
+            for accepted in accepted_cards:
                 self._apply_accepted_card(accepted)
+            inference_write_back(
+                self._inference_pipeline, path, "auction", accepted_cards
+            )
         self._update_breakdown()
 
     def _apply_accepted_card(self, accepted) -> None:

@@ -67,6 +67,7 @@ from tcginventory.domain.enums import (
 )
 from tcginventory.domain.models import Item
 from tcginventory.services.exceptions import ServiceError
+from tcginventory.services.inference import write_back as inference_write_back
 from tcginventory.services.inventory import InventoryService
 from tcginventory.services.reporting import ReportingService
 from tcginventory.services.review import without_review_note
@@ -852,12 +853,16 @@ class TransactionView(QWidget):
                     self, "No cards found", f"No cards detected in {path}."
                 )
                 continue
-            dialog = AutofillDialog(path, detections, self)
+            dialog = AutofillDialog(path, detections, self._conn, self)
             if dialog.exec() != QDialog.Accepted:
                 continue
-            for accepted in dialog.result_cards():
+            accepted_cards = dialog.result_cards()
+            for accepted in accepted_cards:
                 self._apply_accepted_receive(accepted)
                 added += 1
+            inference_write_back(
+                self._inference_pipeline, path, "transaction", accepted_cards
+            )
         if added:
             self._update_summary()
 
