@@ -165,7 +165,15 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   box, and a Condition column is saved onto the region — building the corpus.
   `export_condition_crops` + `training/train_condition.py` (offline, dev-only)
   train the classifier once graded backs exist.
-- **M-Market** — liquidity / markup analytics (ledger + price history; no vision).
+- **M-Market** — liquidity / markup / volatility analytics ✅ **done**:
+  `services/market_signal.py` `MarketSignalService` computes, per resale card,
+  **liquidity** (sell-through, quantity-weighted days-to-sell), **markup**
+  (realized margin + unrealized markup of on-hand stock vs basis), and
+  **volatility** (price coefficient of variation over a window, from per-item
+  price snapshots) — from the ledger + snapshots, **no vision, no feeds**. A
+  sortable read-only **Market** nav screen (`ui/views/market_signal.py`) surfaces
+  them with a portfolio summary. Complements `trends.py` (price direction), not a
+  duplicate.
 
 ## Superseded
 

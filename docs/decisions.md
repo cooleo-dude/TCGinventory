@@ -4,6 +4,27 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-31 — M-Market: liquidity / markup / volatility analytics (completes spec 06)
+
+- `services/market_signal.py` adds a "monetary significance" layer over the
+  **ledger + per-item price snapshots** (no vision, no external feeds): per
+  resale card — **liquidity** (sell-through = units sold / acquired,
+  quantity-weighted days-to-sell from `lot.acquired_at` → sale
+  `transaction.occurred_at`), **markup** (realized margin on sales, unrealized
+  markup of on-hand stock vs FIFO basis), **volatility** (coefficient of
+  variation of `price_snapshot` over a window). `overview()` aggregates the
+  portfolio.
+- **Deliberately separate from `trends.py`** (the concurrent trend framework,
+  which is price *direction* / % change): these are orthogonal risk/quality
+  signals, so M-Market is a new independent service + a new **Market** nav screen
+  (`ui/views/market_signal.py`, sortable read-only table) rather than folded into
+  trends/inventory. Reuses the proven `top_sellers` ledger joins and
+  `PriceSnapshotRepository.history_for_item` (per-item series — no item→card_id
+  bridge needed).
+- **Spec 06 (recognition + market) is now feature-complete** end to end:
+  identity/detection/condition each have a usable-now path + a drop-in trained
+  model, the corpus self-builds and feeds back, and market analytics close it out.
+
 ### 2026-07-31 — M-V3: condition assessment from card backs (heuristic + scaffold)
 
 - Condition grades on the NM/LP/MP/HP/DMG scale from the **back** (identity uses
