@@ -4,6 +4,26 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-31 — M-V1.5 Phase B scaffolding: YOLO pipeline, torch stays out of the app
+
+- Built the whole trained-detector path so a `card_yolo.onnx` can be dropped in
+  and used, **without** adding torch to the app: `services/detector_dataset.py`
+  (`export_yolo_dataset` — regions → YOLO images/labels/data.yaml, single `card`
+  class), `training/train_detector.py` (offline, dev-only; guarded `ultralytics`
+  import; export dataset → yolov8n `single_cls` → ONNX → copy to
+  `models/card_yolo.onnx`), and `OnnxCardDetector` + `yolo_model_path()` for
+  CPU inference (bundled via the existing `models/*.onnx` glob + LFS, like
+  DINOv2).
+- **Design:** YOLO postprocessing is factored into pure functions (`_decode_yolo`
+  handles `[1,5,N]`/`[1,N,5]`, undoes letterbox, normalises; `_nms` greedy IoU)
+  so it's unit-tested without a model. The window tracks proposals **per source**
+  (CV teal / YOLO mauve); the **YOLO boxes** toggle enables only when a model is
+  present and a bad model degrades to zero proposals rather than breaking.
+- **Why now, train later:** the pipeline + wiring are the reusable work; the
+  actual train needs a labeled corpus (being built in the window) and one manual
+  `pip install ultralytics` in a training env. torch (~2 GB) never enters the
+  shipped app.
+
 ### 2026-07-31 — M-V1.5 Phase A: classic-CV box proposer (detector, no training)
 
 - Built the **immediately-available** detector half first (the ratified design

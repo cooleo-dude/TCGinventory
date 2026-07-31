@@ -121,9 +121,15 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   `propose_card_boxes` — projection-profile segmentation over a background-diff
   mask) wired to the window's **Classic-CV boxes** toggle; proposals overlay as
   editable boxes an **Accept proposals** action promotes into regions. **Phase B
-  (pending):** a trained single-class **YOLO-nano** from the drawn boxes — needs
-  a labeled corpus + `ultralytics`/`torch` (dev-only training; the `.onnx` ships
-  bundled like DINOv2) — wiring the currently-disabled **YOLO boxes** toggle.
+  scaffolding ✅ done (training pending a corpus):** the full trained-detector
+  path exists without pulling torch into the app — `detector_dataset.py`
+  exports the labeled regions to a YOLO dataset; `training/train_detector.py`
+  (offline, dev-only `ultralytics`/`torch`) fine-tunes yolov8n and exports
+  `card_yolo.onnx`; `OnnxCardDetector` + `yolo_model_path()` load it (bundled via
+  the `models/*.onnx` glob, like DINOv2) and the **YOLO boxes** toggle lights up
+  and overlays proposals once a model is present. Postprocessing (`_decode_yolo`,
+  `_nms`) is pure + unit-tested. **Remaining:** label a corpus → run the trainer
+  → drop the `.onnx` in (LFS).
 - **M-V2** — fine-tuned identifier on the corpus.
 - **Inference** — Part 2 autofill in Transaction/Auction with thresholds +
   missed-detection flags.
