@@ -4,6 +4,26 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-31 — M-V2: crop-exemplar retrieval makes identification usable on ingest
+
+- **The insight:** the matcher's weakness was comparing a photo **crop** against
+  clean **catalog renders** (domain gap). The fix that needs *no training* and
+  works from the first labels: embed each labeled crop and retrieve **crop-vs-
+  crop**. So `Recognizer.suggest` now scores a card by its **best** vector —
+  accumulated crop **exemplars** first (`region_embedding`, keyed by
+  region + model_version), catalog reference only as a cold-start fallback for
+  unlabeled cards. Every save auto-indexes its crops → suggestions improve with
+  ingestion (nonparametric active learning). Backward compatible.
+- **Fine-tune (Part 2) scaffolded, torch stays out of the app:**
+  `exemplars.export_identity_crops` + `training/train_identifier.py` (offline,
+  dev-only; ArcFace on DINOv2 → `identifier_finetuned.onnx`). `model_path()`
+  prefers a fine-tuned model when present and bundles it via the `models/*.onnx`
+  glob like DINOv2; a new embedder version re-embeds the caches automatically.
+- **Why exemplars before fine-tune:** exemplar retrieval is the sample-efficient,
+  immediately-usable form of "the flow of data improves it"; the parametric
+  fine-tune is the higher-ceiling upgrade for when the corpus is large. Ship the
+  usable path now; keep the ~2 GB training stack a manual, offline step.
+
 ### 2026-07-31 — M-V1.5 Phase B scaffolding: YOLO pipeline, torch stays out of the app
 
 - Built the whole trained-detector path so a `card_yolo.onnx` can be dropped in

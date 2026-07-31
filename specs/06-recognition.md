@@ -130,7 +130,18 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   and overlays proposals once a model is present. Postprocessing (`_decode_yolo`,
   `_nms`) is pure + unit-tested. **Remaining:** label a corpus → run the trainer
   → drop the `.onnx` in (LFS).
-- **M-V2** — fine-tuned identifier on the corpus.
+- **M-V2** — learning from the ingested corpus. **Crop-exemplar retrieval ✅
+  done (usable now):** every labeled region is embedded and stored
+  (`region_embedding`), and `Recognizer.suggest` scores each card by its best
+  matching **crop exemplar** (same visual domain as the query — accurate from
+  the first labels, better with every ingested card), falling back to the
+  catalog render only for unlabeled cards. Saving indexes crops automatically;
+  `exemplars.reindex_all` backfills. **Fine-tune scaffold ✅ (train later):**
+  `exemplars.export_identity_crops` + `training/train_identifier.py` (offline,
+  dev-only torch; ArcFace on DINOv2 → `identifier_finetuned.onnx`, which
+  `model_path()` auto-prefers and bundles like DINOv2). torch never enters the
+  app; the exemplar path already delivers the "flow of data improves it" without
+  it.
 - **Inference** — Part 2 autofill in Transaction/Auction with thresholds +
   missed-detection flags.
 - **M-V3** — condition assessment (uses card **backs**; identity uses **fronts**).
