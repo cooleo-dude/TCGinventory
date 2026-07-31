@@ -22,11 +22,19 @@ from PySide6.QtCore import (
     QUrl,
     Signal,
 )
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import (
+    QDesktopServices,
+    QFont,
+    QPainter,
+    QPainterPath,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -34,6 +42,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QTableView,
     QVBoxLayout,
@@ -61,8 +70,10 @@ from tcginventory.services.inventory import InventoryRow, InventoryService
 from tcginventory.services.review import with_review_note, without_review_note
 from tcginventory.services.transactions import TransactionService
 from tcginventory.services.trends import TrendService
+from tcginventory.ui import theme
 from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
 from tcginventory.ui.charts import RangedChartView
+from tcginventory.ui.formatting import money
 from tcginventory.ui.models.inventory_model import (
     EBAY_COL,
     INTENT_COL,
@@ -71,9 +82,14 @@ from tcginventory.ui.models.inventory_model import (
     TCGPLAYER_COL,
     InventoryTableModel,
     combo_columns,
+    subline_for,
 )
 from tcginventory.ui.views._combo_delegate import ComboDelegate
-from tcginventory.ui.views._intent_delegate import IntentDelegate
+from tcginventory.ui.views._inventory_delegates import (
+    BadgeDelegate,
+    CardCellDelegate,
+    IntentChipDelegate,
+)
 from tcginventory.ui.views._link_delegate import LinkButtonDelegate
 from tcginventory.ui.views._review_delegate import ReviewPriceDelegate
 from tcginventory.ui.views.item_detail import ItemDetailDialog
@@ -145,7 +161,9 @@ class _PreviewPrefetchWorker(QThread):
                         )
                     if item_id not in trends:
                         item = SimpleNamespace(
-                            id=item_id, name=name, set_name=set_name,
+                            id=item_id,
+                            name=name,
+                            set_name=set_name,
                             card_number=number,
                         )
                         trends[item_id] = trend_svc.trend_for(item, as_of=today)
@@ -232,6 +250,7 @@ class InventoryView(QWidget):
         self._row_image: dict[int, tuple[str, str]] = {}
         self._row_history: dict[int, list] = {}  # item_id -> price snapshots
         self._row_trends: dict[int, object] = {}  # item_id -> Trend
+        self._thumb_cache: dict[int, QPixmap | None] = {}  # lot_id -> row thumbnail
         self._prefetch_worker: _PreviewPrefetchWorker | None = None
         self._columns_sized = False  # auto-size grid columns once, on first load
         self._model = InventoryTableModel(
@@ -298,11 +317,11 @@ class InventoryView(QWidget):
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        # Notes absorbs leftover width. (stretchLastSection would target the
-        # hidden trailing link columns, so stretch the Notes column explicitly.)
+        # The Card cell absorbs leftover width. (stretchLastSection would target
+        # a link column, so stretch the Name/Card column explicitly.)
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.horizontalHeader().setSectionResizeMode(
-            self._col("Notes"), QHeaderView.Stretch
+            self._col("Name"), QHeaderView.Stretch
         )
         self._table.doubleClicked.connect(self._open_detail)
         self._table.clicked.connect(self._edit_on_click)
@@ -319,63 +338,62 @@ class InventoryView(QWidget):
         self._table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_row_menu)
 
+        # -- stylized delegates -------------------------------------------
         # Review column: amber highlight + inline editor + two-stage button.
         self._review_delegate = ReviewPriceDelegate(
             self._table, self._unmark_and_refresh
         )
         self._table.setItemDelegateForColumn(MARKET_CURRENT_COL, self._review_delegate)
-
-        # Intent column: edit inline with a drop-down (personal/resale/ripping).
-        self._intent_delegate = IntentDelegate(self._table)
+        # Intent → coloured chip (keeps the inline personal/resale/ripping editor).
+        self._intent_delegate = IntentChipDelegate(self._table)
         self._table.setItemDelegateForColumn(INTENT_COL, self._intent_delegate)
-
-        # Lang / Cond / Holo / Edition: inline drop-downs of their enum values.
-        # (Name / Set / # / Notes use the default text editor.)
+        # Name → composite Card cell: thumbnail + name + sold tag + sub-line
+        # (set · # · holo · edition · notes). Edits open the detail dialog.
+        self._card_delegate = CardCellDelegate(self._table, self._thumb_pixmap)
+        self._card_delegate.setObjectName("cardCell")
+        self._table.setItemDelegateForColumn(self._col("Name"), self._card_delegate)
+        # Cond/Grade → badge (graded slabs tinted); other combos keep plain
+        # editors even though they're hidden here (used elsewhere / on unhide).
         self._combo_delegates = []
+        cond_col = self._col("Cond/Grade")
         for col, options in combo_columns():
-            delegate = ComboDelegate(options, self._table)
+            delegate = (
+                BadgeDelegate(options, self._table)
+                if col == cond_col
+                else ComboDelegate(options, self._table)
+            )
             self._combo_delegates.append(delegate)
             self._table.setItemDelegateForColumn(col, delegate)
+        # TCGplayer / eBay link buttons, inline in the grid.
+        self._tcg_delegate = LinkButtonDelegate(self._table, "TCGplayer")
+        self._ebay_delegate = LinkButtonDelegate(self._table, "eBay")
+        self._table.setItemDelegateForColumn(TCGPLAYER_COL, self._tcg_delegate)
+        self._table.setItemDelegateForColumn(EBAY_COL, self._ebay_delegate)
 
-        # The two link columns are shown only in the side panel, not the grid.
-        self._table.setColumnHidden(TCGPLAYER_COL, True)
-        self._table.setColumnHidden(EBAY_COL, True)
-
-        # -- links panel: a companion view on the SAME proxy so its rows track
-        # the grid's sort/filter/order exactly. Shows only the TCGplayer (left)
-        # and eBay (right) button columns; clicking a button opens the listing.
-        self._links = QTableView()
-        self._links.setModel(self._proxy)
-        self._links.setSelectionModel(self._table.selectionModel())  # shared
-        self._links.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._links.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._links.setMouseTracking(True)  # button hover feedback
-        self._links.setAlternatingRowColors(True)
-        self._links.verticalHeader().setVisible(False)
-        self._links.horizontalHeader().setSectionsClickable(False)
-        self._links.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._links.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Show only the curated columns; the rest fold into the Card cell and the
+        # dossier (they stay in the model for sort/filter/dialog editing).
+        visible = {
+            "Name",
+            "Cond/Grade",
+            "Intent",
+            "Acquired",
+            "Purchase Price",
+            "Current Market",
+            "Trend",
+            "Unrealized G/L",
+            "Sold For",
+            "TCGplayer",
+            "eBay",
+        }
         for c in range(self._model.columnCount()):
-            self._links.setColumnHidden(c, c not in (TCGPLAYER_COL, EBAY_COL))
-        self._links.setColumnWidth(TCGPLAYER_COL, 92)
-        self._links.setColumnWidth(EBAY_COL, 92)
-        self._tcg_delegate = LinkButtonDelegate(self._links, "TCGplayer")
-        self._ebay_delegate = LinkButtonDelegate(self._links, "eBay")
-        self._links.setItemDelegateForColumn(TCGPLAYER_COL, self._tcg_delegate)
-        self._links.setItemDelegateForColumn(EBAY_COL, self._ebay_delegate)
-        self._links.clicked.connect(self._open_link)
-        self._links.setFixedWidth(200)
-        # Keep the two views' rows aligned: identical fixed row height + synced
-        # vertical scrolling (the grid owns the visible scrollbar).
-        for _v in (self._table, self._links):
-            _v.verticalHeader().setDefaultSectionSize(28)
-            _v.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        self._table.verticalScrollBar().valueChanged.connect(
-            self._links.verticalScrollBar().setValue
-        )
-        self._links.verticalScrollBar().valueChanged.connect(
-            self._table.verticalScrollBar().setValue
-        )
+            header = self._model.headerData(c, Qt.Horizontal)
+            self._table.setColumnHidden(c, header not in visible)
+        # Taller rows so the two-line Card cell breathes.
+        self._table.verticalHeader().setDefaultSectionSize(46)
+        self._table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+
+        # Clicking a link cell opens the listing (handled in _edit_on_click).
+        self._table.clicked.connect(self._open_link)
 
         self._empty = QLabel("Nothing here yet — record your first purchase.")
         self._empty.setAlignment(Qt.AlignCenter)
@@ -386,7 +404,7 @@ class InventoryView(QWidget):
         # and build it just after the pointer settles — this also keeps single-
         # click cell editing snappy (the click isn't blocked by a chart rebuild).
         self._chart_view = RangedChartView(default_days=90)  # 3 Months by default
-        self._chart_view.setMinimumHeight(220)
+        self._chart_view.setMinimumHeight(180)
         self._pending_chart_row: InventoryRow | None = None
         self._chart_timer = QTimer(self)
         self._chart_timer.setSingleShot(True)
@@ -396,40 +414,43 @@ class InventoryView(QWidget):
         )
         self._show_chart_message("Select a card to see its price history.")
 
-        splitter = QSplitter(Qt.Vertical)
-        table_box = QWidget()
-        table_layout = QVBoxLayout(table_box)
-        table_layout.setContentsMargins(0, 0, 0, 0)
-        grid_row = QHBoxLayout()
-        grid_row.setContentsMargins(0, 0, 0, 0)
-        grid_row.setSpacing(4)
-        grid_row.addWidget(self._table, 1)  # the grid shrinks to make room…
-        grid_row.addWidget(self._links)  # …for the fixed-width links panel
-        table_layout.addLayout(grid_row, 1)
-        table_layout.addWidget(self._empty)
-        splitter.addWidget(table_box)
+        # -- body: the grid (left) beside a card "dossier" (right).
+        grid_box = QWidget()
+        grid_layout = QVBoxLayout(grid_box)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+        grid_layout.setSpacing(0)
+        grid_layout.addWidget(self._table, 1)
+        grid_layout.addWidget(self._empty)
 
-        # Bottom pane: card preview (left) beside the price-history chart.
-        bottom = QWidget()
-        bottom_layout = QHBoxLayout(bottom)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        preview_box = QVBoxLayout()
-        preview_box.addWidget(QLabel("Card preview"))
-        preview_box.addWidget(self._preview_pane, 1)  # fills the column height
-        bottom_layout.addLayout(preview_box, 1)
-        bottom_layout.addWidget(self._chart_view, 4)
-        splitter.addWidget(bottom)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
+        body = QSplitter(Qt.Horizontal)
+        body.addWidget(grid_box)
+        body.addWidget(self._build_dossier())
+        body.setStretchFactor(0, 3)
+        body.setStretchFactor(1, 1)
+        body.setChildrenCollapsible(False)
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
         layout.addLayout(filter_bar)
-        layout.addWidget(splitter)
+        layout.addWidget(self._build_summary())
+        layout.addWidget(body, 1)
+
+        # Recompute the filter-scoped summary whenever the visible set changes.
+        for sig in (
+            self._search.textChanged,
+            self._intent.currentTextChanged,
+            self._sold.currentTextChanged,
+            self._graded.currentTextChanged,
+        ):
+            sig.connect(lambda *_: self._update_summary())
+        self._in_stock.toggled.connect(lambda *_: self._update_summary())
+        self._review_only.toggled.connect(lambda *_: self._update_summary())
 
         self.refresh()
 
     def refresh(self) -> None:
         self._review_delegate.disarm()
+        self._thumb_cache.clear()  # image map is about to be re-warmed
         rows = self._service.inventory_rows()
         self._model.set_rows(rows)
         # Size columns only on first load — re-sizing on every edit is slow and
@@ -440,8 +461,8 @@ class InventoryView(QWidget):
             self._columns_sized = True
         self._empty.setVisible(not rows)
         self._table.setVisible(bool(rows))
-        self._links.setVisible(bool(rows))
         self._prefetch_previews(rows)
+        self._update_summary()
         self._on_selection()
 
     def _col(self, header: str) -> int:
@@ -452,18 +473,23 @@ class InventoryView(QWidget):
         )
 
     def _apply_column_widths(self) -> None:
-        """Widen the Holo / Edition / Intent drop-down columns so their editors
-        have room; Notes (last column) stretches to absorb the leftover width."""
+        """Give the chip/badge and link columns room; the Card (Name) column
+        stretches to absorb whatever's left."""
         for header, width in (
-            ("Holo", 70), ("Edition", 110), ("Intent", 110), ("Trend", 70),
+            ("Cond/Grade", 88),
+            ("Intent", 84),
+            ("Trend", 52),
+            ("Acquired", 88),
+            ("Purchase Price", 96),
+            ("Current Market", 104),
+            ("Unrealized G/L", 100),
+            ("Sold For", 82),
+            ("TCGplayer", 90),
+            ("eBay", 74),
         ):
             self._table.setColumnWidth(self._col(header), width)
-        # Halve the Unrealized G/L column (its freed width flows to the
-        # stretching Notes column); "Sold For" matches that half-width.
-        unrealized_col = self._col("Unrealized G/L")
-        half = max(40, self._table.columnWidth(unrealized_col) // 2)
-        self._table.setColumnWidth(unrealized_col, half)
-        self._table.setColumnWidth(self._col("Sold For"), half)
+        # Keep the Card (Name) column from collapsing under the stretch.
+        self._table.horizontalHeader().setMinimumSectionSize(44)
 
     def _db_file(self) -> str | None:
         """The backing SQLite file, or None for an in-memory DB (tests)."""
@@ -497,6 +523,9 @@ class InventoryView(QWidget):
         self._row_history = worker.history
         self._row_trends = worker.trends
         self._model.set_trends(worker.trends)
+        self._thumb_cache.clear()  # rebuild thumbs from the freshly-warmed images
+        self._table.viewport().update()  # repaint Card cells with their art
+        self._update_dossier(self._selected_row())  # fill the dossier art now
 
     @staticmethod
     def _history_since() -> str | None:
@@ -513,6 +542,7 @@ class InventoryView(QWidget):
     def _on_selection(self, *_args) -> None:
         row = self._selected_row()
         self._review_delegate.note_selected_item(row.item.id if row else None)
+        self._update_dossier(row)
         self._request_chart(row)
 
     def _request_chart(self, row: InventoryRow | None) -> None:
@@ -555,7 +585,9 @@ class InventoryView(QWidget):
         self._chart_view.setChart(chart)
 
     def _open_link(self, proxy_index: QModelIndex) -> None:
-        """Open a card's TCGplayer/eBay listing (from the links-panel buttons)."""
+        """Open a card's TCGplayer/eBay listing when its link cell is clicked."""
+        if proxy_index.column() not in (TCGPLAYER_COL, EBAY_COL):
+            return
         url = proxy_index.data(LINK_URL_ROLE)
         if url:
             QDesktopServices.openUrl(QUrl(url))
@@ -585,17 +617,21 @@ class InventoryView(QWidget):
     def _open_detail(self, proxy_index: QModelIndex) -> None:
         source_index = self._proxy.mapToSource(proxy_index)
         row = self._model.row_at(source_index.row())
-        # Inline-editable cells edit in place; only the read-only columns open
-        # the full item editor dialog.
-        if self._model.flags(source_index) & Qt.ItemIsEditable:
+        # The Card (Name) cell and any read-only column open the full item
+        # editor; the other inline-editable cells edit in place.
+        name_col = self._col("Name")
+        editable = bool(self._model.flags(source_index) & Qt.ItemIsEditable)
+        if editable and source_index.column() != name_col:
             return
         ItemDetailDialog(self._conn, row.item.id, parent=self).exec()
         self.refresh()  # reflect any edits made in the detail/editor
 
     def _edit_on_click(self, proxy_index: QModelIndex) -> None:
-        """Open the cell's editor on a single click (except the Current Market
-        cell, whose single click drives the review ✕/↻ button)."""
-        if proxy_index.column() == MARKET_CURRENT_COL:
+        """Open the cell's editor on a single click. Skipped for: the Current
+        Market cell (its click drives the review ✕/↻ button), the link columns
+        (they open the listing), and the Card cell (it edits via the dialog)."""
+        col = proxy_index.column()
+        if col in (MARKET_CURRENT_COL, TCGPLAYER_COL, EBAY_COL, self._col("Name")):
             return
         if self._model.flags(self._proxy.mapToSource(proxy_index)) & Qt.ItemIsEditable:
             self._table.edit(proxy_index)
@@ -722,6 +758,239 @@ class InventoryView(QWidget):
         ItemRepository(self._conn).update(item)
         self._conn.commit()
         self.refresh()
+
+    # -- summary strip ----------------------------------------------------
+
+    @staticmethod
+    def _mono(size: float, bold: bool = False) -> QFont:
+        f = QFont(theme.mono_family())
+        f.setPointSizeF(size)
+        f.setBold(bold)
+        return f
+
+    def _build_summary(self) -> QWidget:
+        """A filter-scoped totals strip: On hand · Unique · Cost · Market ·
+        Unrealized, reflecting whatever the filter bar currently shows."""
+        t = theme.active()
+        self._sum: dict[str, QLabel] = {}
+        strip = QWidget()
+        row = QHBoxLayout(strip)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        tiles = [
+            ("onhand", "On hand", False),
+            ("unique", "Unique cards", False),
+            ("cost", "Cost basis", False),
+            ("market", "Market value", True),
+            ("unrealized", "Unrealized", False),
+        ]
+        for key, label, hero in tiles:
+            tile = QFrame()
+            tile.setObjectName("sumtile")
+            tv = QVBoxLayout(tile)
+            tv.setContentsMargins(13, 7, 15, 8)
+            tv.setSpacing(1)
+            cap = QLabel(label.upper())
+            cap.setStyleSheet(
+                f"color:{t.ink3};font-size:10px;font-weight:700;"
+                "letter-spacing:.6px;background:transparent;border:none;"
+            )
+            val = QLabel("—")
+            val.setFont(self._mono(15, bold=True))
+            val.setStyleSheet(f"color:{t.ink};background:transparent;border:none;")
+            tv.addWidget(cap)
+            tv.addWidget(val)
+            rail = f"border-left:3px solid {t.accent};" if hero else ""
+            tile.setStyleSheet(
+                f"QFrame#sumtile{{background:{t.surface};border:1px solid "
+                f"{t.line};border-radius:11px;{rail}}}"
+            )
+            self._sum[key] = val
+            row.addWidget(tile)
+        row.addStretch(1)
+        return strip
+
+    def _update_summary(self) -> None:
+        """Recompute the strip over the rows the proxy currently accepts."""
+        if not hasattr(self, "_sum"):
+            return
+        on_hand = cost = market = 0
+        unique: set[int] = set()
+        for i in range(self._proxy.rowCount()):
+            src = self._proxy.mapToSource(self._proxy.index(i, 0))
+            row = self._model.row_at(src.row())
+            unique.add(row.item.id)
+            held = row.on_hand if row.in_stock else 0
+            if held <= 0:
+                continue
+            on_hand += held
+            cost += held * row.purchase_price_cents
+            if row.current_price_cents is not None:
+                market += held * row.current_price_cents
+        unreal = market - cost
+        t = theme.active()
+        self._sum["onhand"].setText(f"{on_hand:,}")
+        self._sum["unique"].setText(f"{len(unique):,}")
+        self._sum["cost"].setText(money(cost))
+        self._sum["market"].setText(money(market))
+        gl = self._sum["unrealized"]
+        gl.setText(f"{'+' if unreal >= 0 else '−'}{money(abs(unreal))}")
+        gl.setStyleSheet(
+            f"color:{t.pos if unreal >= 0 else t.neg};"
+            "background:transparent;border:none;"
+        )
+
+    # -- card dossier -----------------------------------------------------
+
+    _FACTS = [
+        ("sku", "SKU"),
+        ("acquired", "Acquired"),
+        ("cost", "Cost / unit"),
+        ("market", "Market / unit"),
+        ("unrealized", "Unrealized / unit"),
+        ("sold", "Sold for"),
+    ]
+
+    def _build_dossier(self) -> QWidget:
+        t = theme.active()
+        panel = QFrame()
+        panel.setObjectName("dossier")
+        panel.setStyleSheet(
+            f"QFrame#dossier{{background:{t.surface};border:1px solid {t.line};"
+            "border-radius:12px;}"
+        )
+        panel.setMinimumWidth(288)
+        panel.setMaximumWidth(430)
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(14, 12, 14, 12)
+        v.setSpacing(9)
+
+        cap = QLabel("SELECTED CARD")
+        cap.setStyleSheet(
+            f"color:{t.ink3};font-size:10px;font-weight:700;letter-spacing:2px;"
+        )
+        v.addWidget(cap)
+
+        self._dossier_name = QLabel("—")
+        self._dossier_name.setStyleSheet(
+            f"color:{t.ink};font-size:15px;font-weight:700;"
+        )
+        self._dossier_name.setWordWrap(True)
+        v.addWidget(self._dossier_name)
+
+        self._dossier_sub = QLabel("")
+        self._dossier_sub.setStyleSheet(f"color:{t.ink3};font-size:11px;")
+        self._dossier_sub.setWordWrap(True)
+        v.addWidget(self._dossier_sub)
+
+        # Fixed art region (the pane's own policy is Ignored/Ignored, so reserve
+        # its height explicitly or the layout collapses it).
+        self._preview_pane.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self._preview_pane.setFixedHeight(230)
+        v.addWidget(self._preview_pane, 0, Qt.AlignHCenter)
+
+        facts = QGridLayout()
+        facts.setContentsMargins(0, 2, 0, 2)
+        facts.setHorizontalSpacing(10)
+        facts.setVerticalSpacing(5)
+        self._fact_vals: dict[str, QLabel] = {}
+        for i, (key, label) in enumerate(self._FACTS):
+            k = QLabel(label)
+            k.setStyleSheet(f"color:{t.ink3};font-size:11px;")
+            val = QLabel("—")
+            val.setFont(self._mono(11.5))
+            val.setStyleSheet(f"color:{t.ink2};")
+            val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            facts.addWidget(k, i, 0)
+            facts.addWidget(val, i, 1)
+            self._fact_vals[key] = val
+        facts.setColumnStretch(0, 1)
+        v.addLayout(facts)
+
+        v.addWidget(self._chart_view, 1)
+        return panel
+
+    def _update_dossier(self, row: InventoryRow | None) -> None:
+        if not hasattr(self, "_fact_vals"):
+            return
+        t = theme.active()
+        if row is None:
+            self._dossier_name.setText("—")
+            self._dossier_sub.setText("Select a card to see its details.")
+            self._preview_pane.show_card(None, None)
+            for val in self._fact_vals.values():
+                val.setText("—")
+                val.setStyleSheet(f"color:{t.ink2};")
+            return
+        self._dossier_name.setText(row.item.name)
+        self._dossier_sub.setText(subline_for(row))
+        # Only show art the background prefetch has already cached to disk —
+        # never let a selection kick off its own network fetch (that would leak a
+        # worker thread and isn't needed: the prefetch warms the same file).
+        res = self._row_image.get(row.lot_id)
+        if res and cardimages.cache_path(res[0]).exists():
+            self._preview_pane.show_card(*res)
+
+        self._fact_vals["sku"].setText(row.sku or "—")
+        self._fact_vals["acquired"].setText(row.acquired_at or "—")
+        self._fact_vals["cost"].setText(money(row.purchase_price_cents))
+        cur = row.current_price_cents
+        self._fact_vals["market"].setText(money(cur) if cur is not None else "—")
+        unreal = row.unrealized_cents
+        gl = self._fact_vals["unrealized"]
+        if unreal is None:
+            gl.setText("—")
+            gl.setStyleSheet(f"color:{t.ink2};")
+        else:
+            gl.setText(f"{'+' if unreal >= 0 else '−'}{money(abs(unreal))}")
+            gl.setStyleSheet(f"color:{t.pos if unreal >= 0 else t.neg};")
+        sold = self._fact_vals["sold"]
+        if row.sold_price_cents is not None:
+            sold.setText(money(row.sold_price_cents))
+            sold.setStyleSheet(f"color:{t.ink2};")
+        else:
+            sold.setText("—")
+            sold.setStyleSheet(f"color:{t.ink3};")
+
+    # -- row thumbnails ---------------------------------------------------
+
+    def _thumb_pixmap(self, lot_id: int) -> QPixmap | None:
+        """A small rounded thumbnail for the Card cell, cached per lot. Returns
+        None until the background prefetch has warmed this lot's image."""
+        if lot_id in self._thumb_cache:
+            return self._thumb_cache[lot_id]
+        pm: QPixmap | None = None
+        res = self._row_image.get(lot_id)
+        if res:
+            path = cardimages.cache_path(res[0])
+            if path.exists():
+                src = QPixmap(str(path))
+                if not src.isNull():
+                    pm = self._round_thumb(src)
+        self._thumb_cache[lot_id] = pm
+        return pm
+
+    @staticmethod
+    def _round_thumb(src: QPixmap, w: int = 26, h: int = 36) -> QPixmap:
+        """Centre-crop ``src`` to a rounded w×h thumbnail (device-pixel aware)."""
+        ratio = 2
+        tw, th = w * ratio, h * ratio
+        scaled = src.scaled(
+            tw, th, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+        )
+        out = QPixmap(tw, th)
+        out.fill(Qt.transparent)
+        painter = QPainter(out)
+        painter.setRenderHint(QPainter.Antialiasing)
+        clip = QPainterPath()
+        clip.addRoundedRect(0, 0, tw, th, 8, 8)
+        painter.setClipPath(clip)
+        x = (tw - scaled.width()) // 2
+        y = (th - scaled.height()) // 2
+        painter.drawPixmap(x, y, scaled)
+        painter.end()
+        out.setDevicePixelRatio(ratio)
+        return out
 
 
 def _to_msecs(iso: str) -> float:

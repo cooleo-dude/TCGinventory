@@ -11,15 +11,42 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QBrush, QColor, QFont
 
 from tcginventory.domain.enums import Condition, Edition, HoloPattern, Language
 from tcginventory.domain.models import Item
 from tcginventory.services.ebay import sold_search_url
 from tcginventory.services.inventory import InventoryRow
+from tcginventory.services.review import without_review_note
 from tcginventory.services.trends import Trend
 from tcginventory.ui import theme
 from tcginventory.ui.formatting import money
+
+_HOLO_LABEL = {"H": "Holo", "RH": "Reverse Holo"}
+
+
+def subline_for(row: InventoryRow) -> str:
+    """The Card cell's secondary line: set · number · lang · holo · edition · notes.
+
+    Only the parts that exist show — no holo (``NH``) / no edition (``N/A``) are
+    omitted, and the "Manual price change detected" review marker is stripped from
+    notes (so "Stamped Manual price change detected" reads as "Stamped")."""
+    item = row.item
+    parts: list[str] = []
+    if item.set_name:
+        parts.append(item.set_name)
+    if item.card_number:
+        parts.append(item.card_number)
+    if item.language and item.language.value != "EN":
+        parts.append(item.language.value)
+    if item.holo_pattern and item.holo_pattern.value != "NH":
+        parts.append(_HOLO_LABEL.get(item.holo_pattern.value, item.holo_pattern.value))
+    if item.edition and item.edition.value != "N/A":
+        parts.append(item.edition.value)
+    note = (without_review_note(item.notes or "") or "").strip()
+    if note:
+        parts.append(note)
+    return " · ".join(parts)
 
 
 def _pos() -> QColor:
@@ -253,6 +280,14 @@ ITEM_ID_ROLE = Qt.UserRole + 1
 REVIEW_ROLE = Qt.UserRole + 2
 LOT_ID_ROLE = Qt.UserRole + 3
 LINK_URL_ROLE = Qt.UserRole + 4  # the URL a link-button column should open
+INVROW_ROLE = Qt.UserRole + 5  # the whole InventoryRow (for composite-cell delegates)
+SKU_COL = 0  # the SKU column (rendered in mono)
+
+
+def _mono_font() -> QFont:
+    return QFont(theme.mono_family())
+
+
 # Review-cell highlight — a subtle amber wash (the theme's "warn" at low alpha,
 # so light text stays legible and it works in light + dark). Shared with
 # ReviewPriceDelegate so both stay in sync.
@@ -316,6 +351,10 @@ class InventoryTableModel(QAbstractTableModel):
             return None
         row = self._rows[index.row()]
         col = _COLUMNS[index.column()]
+        if role == INVROW_ROLE:
+            return row
+        if role == Qt.FontRole and (col.numeric or index.column() == SKU_COL):
+            return _mono_font()  # tabular figures for SKU / money / qty columns
         if index.column() == TREND_COL:
             return self._trend_data(row, role)
         if col.link is not None:  # link-button column (TCGplayer / eBay)

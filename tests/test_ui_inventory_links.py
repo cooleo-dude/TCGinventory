@@ -56,7 +56,9 @@ def _view(app, conn):
     return InventoryView(conn)
 
 
-def test_link_columns_hidden_in_grid_shown_in_panel(app):
+def test_link_columns_shown_inline_in_grid(app):
+    # The redesigned Inventory grid surfaces the TCGplayer / eBay link buttons
+    # inline (the separate links panel was removed).
     from tcginventory.ui.models.inventory_model import EBAY_COL, TCGPLAYER_COL
 
     conn = connect(":memory:")
@@ -64,15 +66,9 @@ def test_link_columns_hidden_in_grid_shown_in_panel(app):
     _seed(conn)
     view = _view(app, conn)
 
-    # Hidden in the main grid…
-    assert view._table.isColumnHidden(TCGPLAYER_COL)
-    assert view._table.isColumnHidden(EBAY_COL)
-    # …and the only columns shown in the links panel.
-    assert not view._links.isColumnHidden(TCGPLAYER_COL)
-    assert not view._links.isColumnHidden(EBAY_COL)
-    for c in range(view._model.columnCount()):
-        if c not in (TCGPLAYER_COL, EBAY_COL):
-            assert view._links.isColumnHidden(c)
+    assert not view._table.isColumnHidden(TCGPLAYER_COL)
+    assert not view._table.isColumnHidden(EBAY_COL)
+    assert not hasattr(view, "_links")  # the companion panel is gone
     view.deleteLater()
 
 
