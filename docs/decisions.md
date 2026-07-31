@@ -4,6 +4,24 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-31 — M-V3: condition assessment from card backs (heuristic + scaffold)
+
+- Condition grades on the NM/LP/MP/HP/DMG scale from the **back** (identity uses
+  fronts). `services/condition.py` `assess_condition` returns grade + whitening
+  fraction + confidence. **Usable-now heuristic:** counts near-white **and
+  low-saturation** pixels in the border band — the low-saturation gate is the key
+  trick so the card's own bright **yellow** border isn't scored as edge fraying.
+  Weak but real; the trained `OnnxConditionModel` (5-class) supersedes it when
+  `condition_model.onnx` is present (bundled via `models/*.onnx` like DINOv2).
+- **Corpus built in the Recognition window:** a "Card backs (condition)" checkbox
+  tags saved images `side='back'`; "Assess condition" grades each box; a
+  Condition column persists onto the region. `export_condition_crops` (backed by
+  `condition_regions`, which filters `side='back'` + a condition) +
+  `training/train_condition.py` (offline, dev-only torch → ONNX) train it later;
+  torch never enters the app.
+- **Same usable-now + scaffold pattern** as the detector/identifier: heuristic
+  works today, the model is a drop-in `.onnx` when a corpus exists.
+
 ### 2026-07-31 — Part 2 feedback: confirmed autofill writes back to the corpus
 
 - Closes the learning loop: `services/corpus.py` `ingest_labeled_scene` stores a

@@ -155,7 +155,16 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   crop exemplar per identified card), and the dialog's Name field autocompletes
   so **corrections re-pick a real card_id** (disagreements captured as exemplars,
   not lost). So every autofilled purchase/auction also trains the models.
-- **M-V3** — condition assessment (uses card **backs**; identity uses **fronts**).
+- **M-V3** — condition assessment (card **backs**) ✅ **done (heuristic +
+  scaffold):** `services/condition.py` `assess_condition(back)` grades on the
+  NM/LP/MP/HP/DMG scale. The usable-now **heuristic** counts near-white,
+  low-saturation border pixels (so the yellow card border isn't read as wear);
+  an `OnnxConditionModel` supersedes it when `condition_model.onnx` is present
+  (bundled like DINOv2). The Recognition window's **"Card backs (condition)"**
+  mode tags images `side='back'`, an **"Assess condition"** action grades each
+  box, and a Condition column is saved onto the region — building the corpus.
+  `export_condition_crops` + `training/train_condition.py` (offline, dev-only)
+  train the classifier once graded backs exist.
 - **M-Market** — liquidity / markup analytics (ledger + price history; no vision).
 
 ## Superseded
