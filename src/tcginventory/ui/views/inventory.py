@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime
 from types import SimpleNamespace
 
+from PySide6.QtCharts import (
+    QAreaSeries,
+    QChart,
+    QDateTimeAxis,
+    QLineSeries,
+    QValueAxis,
+)
 from PySide6.QtCore import (
+    QEvent,
+    QMargins,
     QModelIndex,
-    QPointF,
     QSortFilterProxyModel,
     Qt,
     QThread,
+    QTimer,
     QUrl,
     Signal,
 )
@@ -20,6 +29,7 @@ from PySide6.QtGui import (
     QColor,
     QDesktopServices,
     QFont,
+    QGradient,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -67,7 +77,8 @@ from tcginventory.services.review import with_review_note, without_review_note
 from tcginventory.services.transactions import TransactionService
 from tcginventory.services.trends import TrendService
 from tcginventory.ui import theme
-from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
+from tcginventory.ui.card_preview import CardImagePane
+from tcginventory.ui.charts import RangedChartView
 from tcginventory.ui.formatting import money
 from tcginventory.ui.models.inventory_model import (
     EBAY_COL,
@@ -170,101 +181,6 @@ class _PreviewPrefetchWorker(QThread):
             pass  # best-effort warming; never break the UI
         self.images, self.history, self.trends = images, history, trends
         self.resolved.emit()
-
-
-class _PricePlot(QWidget):
-    """A minimal Ember-styled price sparkline for the dossier: an accent market
-    line over an area-fill gradient, a dashed cost reference line, and an
-    emphasized endpoint dot. No axis/legend chrome — the dossier paints the
-    title + legend around it (matches the approved mock)."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._prices: list[float] = []  # chronological market prices (USD)
-        self._cost: float | None = None
-        self._empty = "Select a card to see its price history."
-        self.setMinimumHeight(132)
-
-    def set_series(
-        self, prices: list[float], cost: float | None, empty: str | None = None
-    ) -> None:
-        self._prices = [p for p in prices if p is not None]
-        self._cost = cost
-        if empty is not None:
-            self._empty = empty
-        self.update()
-
-    def paintEvent(self, _event) -> None:
-        t = theme.active()
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        w, h = self.width(), self.height()
-
-        if len(self._prices) < 2:
-            p.setPen(QColor(t.ink3))
-            p.drawText(self.rect(), int(Qt.AlignCenter), self._empty)
-            p.end()
-            return
-
-        pad_l, pad_r, pad_t, pad_b = 6, 8, 10, 12
-        plot_w = max(1, w - pad_l - pad_r)
-        plot_h = max(1, h - pad_t - pad_b)
-        base_y = pad_t + plot_h
-
-        prices = self._prices
-        vals = list(prices) + ([self._cost] if self._cost is not None else [])
-        lo, hi = min(vals), max(vals)
-        span = (hi - lo) or 1.0
-        headroom = span * 0.14
-        lo -= headroom
-        hi += headroom
-        span = (hi - lo) or 1.0
-
-        def px(i: int) -> float:
-            return pad_l + plot_w * (i / (len(prices) - 1))
-
-        def py(v: float) -> float:
-            return pad_t + plot_h * (1 - (v - lo) / span)
-
-        pts = [QPointF(px(i), py(v)) for i, v in enumerate(prices)]
-
-        # Area fill under the line (accent → transparent).
-        area = QPainterPath()
-        area.moveTo(pts[0].x(), base_y)
-        for pt in pts:
-            area.lineTo(pt)
-        area.lineTo(pts[-1].x(), base_y)
-        area.closeSubpath()
-        grad = QLinearGradient(0, pad_t, 0, base_y)
-        top = QColor(t.accent)
-        top.setAlpha(64)
-        bot = QColor(t.accent)
-        bot.setAlpha(0)
-        grad.setColorAt(0.0, top)
-        grad.setColorAt(1.0, bot)
-        p.fillPath(area, QBrush(grad))
-
-        # Dashed cost reference line.
-        if self._cost is not None:
-            cy = py(self._cost)
-            pen = QPen(QColor(t.ink3), 1.3)
-            pen.setDashPattern([4, 4])
-            p.setPen(pen)
-            p.drawLine(QPointF(pad_l, cy), QPointF(pad_l + plot_w, cy))
-
-        # Market line.
-        line = QPainterPath()
-        line.moveTo(pts[0])
-        for pt in pts[1:]:
-            line.lineTo(pt)
-        p.setPen(QPen(QColor(t.accent), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.drawPath(line)
-
-        # Emphasized endpoint dot.
-        p.setBrush(QColor(t.accent))
-        p.setPen(Qt.NoPen)
-        p.drawEllipse(pts[-1], 3.5, 3.5)
-        p.end()
 
 
 class _InventoryFilterProxy(QSortFilterProxyModel):
@@ -416,14 +332,15 @@ class InventoryView(QWidget):
         self._table.doubleClicked.connect(self._open_detail)
         self._table.clicked.connect(self._edit_on_click)
         self._table.selectionModel().selectionChanged.connect(self._on_selection)
-        # Hover a row to preview the card image in the pane by the chart
-        # (lazily fetched + cached).
+        # Hover a row to show that card in the dossier (art + details + chart).
+        # On leaving the rows, the dossier falls back to the selected card, or —
+        # if none is selected — the most-recently-hovered card (see
+        # _restore_display / eventFilter). The image is lazily fetched + cached.
         self._preview_pane = CardImagePane()
+        self._last_hovered_row: InventoryRow | None = None
         self._table.setMouseTracking(True)
         self._table.entered.connect(self._on_row_hover)
-        install_hover_preview(
-            self._table.viewport(), lambda: None, self._preview_pane
-        )  # clear on leave
+        self._table.viewport().installEventFilter(self)  # detect pointer leave
         # Right-click a row → mark/unmark as stolen (missing).
         self._table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_row_menu)
@@ -489,9 +406,20 @@ class InventoryView(QWidget):
         self._empty.setAlignment(Qt.AlignCenter)
         self._empty.setVisible(False)
 
-        # Custom price sparkline (last ~3 months) for the selected card — cheap
-        # to repaint, so it updates synchronously on hover/selection.
-        self._price_plot = _PricePlot()
+        # Price-history chart with the shared hover-readout + range selector
+        # (same behaviour as the Dashboard). The selected window persists across
+        # cards because the RangedChartView keeps its range between setChart
+        # calls. Rebuilding a QChart is heavy, so coalesce rapid hover changes.
+        self._chart_view = RangedChartView(default_days=90)  # 3 Months default
+        self._chart_view.setMinimumHeight(190)
+        self._pending_chart_row: InventoryRow | None = None
+        self._chart_timer = QTimer(self)
+        self._chart_timer.setSingleShot(True)
+        self._chart_timer.setInterval(110)
+        self._chart_timer.timeout.connect(
+            lambda: self._set_history_chart(self._pending_chart_row)
+        )
+        self._show_chart_message("Select a card to see its price history.")
 
         # -- body: the grid (left) beside a card "dossier" (right).
         grid_box = QWidget()
@@ -607,7 +535,8 @@ class InventoryView(QWidget):
         self._model.set_trends(worker.trends)
         self._thumb_cache.clear()  # rebuild thumbs from the freshly-warmed images
         self._table.viewport().update()  # repaint Card cells with their art
-        self._update_dossier(self._selected_row())  # fill the dossier art now
+        # Now that art + history are warmed, refill whatever the dossier shows.
+        self._display_card(self._current_display_row())
 
     @staticmethod
     def _history_since() -> str | None:
@@ -621,19 +550,51 @@ class InventoryView(QWidget):
         source = self._proxy.mapToSource(indexes[0])
         return self._model.row_at(source.row())
 
+    # -- dossier display routing (platform-wide hover convention) ----------
+
+    def _current_display_row(self) -> InventoryRow | None:
+        """What the dossier should show when the pointer isn't over a row: the
+        selected card, or — if none is selected — the last-hovered card."""
+        return self._selected_row() or self._last_hovered_row
+
+    def _display_card(
+        self, row: InventoryRow | None, allow_fetch: bool = False
+    ) -> None:
+        """Show ``row`` in the dossier: details/art now, chart debounced."""
+        self._update_dossier(row, allow_fetch=allow_fetch)
+        self._request_chart(row)
+
+    def _restore_display(self) -> None:
+        """Pointer left the rows → fall back to selected, else last-hovered."""
+        self._display_card(self._current_display_row())
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt override)
+        if obj is self._table.viewport() and event.type() == QEvent.Type.Leave:
+            self._restore_display()
+        return super().eventFilter(obj, event)
+
     def _on_selection(self, *_args) -> None:
         row = self._selected_row()
         self._review_delegate.note_selected_item(row.item.id if row else None)
-        self._update_dossier(row)
-        self._update_plot(row)
+        self._display_card(row)
 
-    def _update_plot(self, row: InventoryRow | None) -> None:
-        """Feed the dossier sparkline with the selected card's last-3-months
-        market prices and its cost reference line."""
+    def _on_row_hover(self, proxy_index: QModelIndex) -> None:
+        row = self._model.row_at(self._proxy.mapToSource(proxy_index).row())
         if row is None:
-            self._price_plot.set_series(
-                [], None, empty="Select a card to see its price history."
-            )
+            return
+        self._last_hovered_row = row
+        self._display_card(row, allow_fetch=True)
+
+    # -- price-history chart ----------------------------------------------
+
+    def _request_chart(self, row: InventoryRow | None) -> None:
+        """Debounce chart rebuilds (coalesces rapid hover/selection changes)."""
+        self._pending_chart_row = row
+        self._chart_timer.start()
+
+    def _set_history_chart(self, row: InventoryRow | None) -> None:
+        if row is None:
+            self._show_chart_message("Select a card to see its price history.")
             return
         # Prefer the pre-fetched history; fall back to a live query only if the
         # background prefetch hasn't reached this item yet.
@@ -642,33 +603,15 @@ class InventoryView(QWidget):
             history = self._service.prices.history_for_item(
                 row.item.id, since=self._history_since()
             )
-        cutoff = (date.today() - timedelta(days=90)).isoformat()
-        prices = [
-            s.price_cents / 100.0
-            for s in (history or [])
-            if (s.as_of or "")[:10] >= cutoff
-        ]
-        self._price_plot.set_series(
-            prices,
-            row.purchase_price_cents / 100.0,
-            empty="No price history yet — use File ▸ Refresh prices.",
-        )
+        self._chart_view.setChart(_history_chart(row, history))
 
-    def _on_row_hover(self, proxy_index: QModelIndex) -> None:
-        row = self._model.row_at(self._proxy.mapToSource(proxy_index).row())
-        if row is None:
-            return
-        # Card art (kept as the most-recently-viewed once the pointer leaves).
-        # Prefer the pre-resolved map; fall back to a live lookup only if the
-        # background prefetch hasn't reached this row yet.
-        res = self._row_image.get(row.lot_id)
-        if res is None:
-            res = CardCatalogRepository(self._conn).image_for(
-                row.item.name, row.item.set_name, row.item.card_number
-            )
-        self._preview_pane.show_card(*(res if res else (None, None)))
-        # Price sparkline for the hovered row (also persists on leave).
-        self._update_plot(row)
+    def _show_chart_message(self, text: str) -> None:
+        chart = QChart()
+        chart.legend().hide()
+        chart.setBackgroundVisible(False)
+        chart.setTitle(text)
+        chart.setTitleBrush(QColor(theme.active().ink3))
+        self._chart_view.setChart(chart)
 
     def _open_link(self, proxy_index: QModelIndex) -> None:
         """Open a card's TCGplayer/eBay listing when its link cell is clicked."""
@@ -1003,40 +946,28 @@ class InventoryView(QWidget):
         facts.setColumnStretch(1, 1)
         v.addLayout(facts)
 
-        # Sparkline section: divider + title/legend + the plot.
-        chart_box = QVBoxLayout()
-        chart_box.setContentsMargins(0, 6, 0, 0)
-        chart_box.setSpacing(6)
+        # Price-history section: divider + heading + the ranged hover-chart.
         divider = QFrame()
         divider.setFixedHeight(1)
         divider.setStyleSheet(f"background:{t.line};")
-        chart_box.addWidget(divider)
-        head = QHBoxLayout()
-        title = QLabel("Market price · 3M")
-        title.setStyleSheet(f"color:{t.ink2};font-size:11px;font-weight:600;")
-        legend = QLabel(
-            f"<span style='color:{t.accent};font-weight:900'>—</span>"
-            f"<span style='color:{t.ink3}'> Market &nbsp;&nbsp;</span>"
-            f"<span style='color:{t.ink3};font-weight:900'>--</span>"
-            f"<span style='color:{t.ink3}'> Cost</span>"
+        v.addWidget(divider)
+        title = QLabel("MARKET PRICE")
+        title.setStyleSheet(
+            f"color:{t.ink3};font-size:10px;font-weight:700;letter-spacing:1.2px;"
         )
-        legend.setStyleSheet("font-size:10px;")
-        head.addWidget(title)
-        head.addStretch(1)
-        head.addWidget(legend)
-        chart_box.addLayout(head)
-        chart_box.addWidget(self._price_plot)
-        v.addLayout(chart_box)
+        v.addWidget(title)
+        v.addWidget(self._chart_view)
         return panel
 
-    def _update_dossier(self, row: InventoryRow | None) -> None:
+    def _update_dossier(
+        self, row: InventoryRow | None, allow_fetch: bool = False
+    ) -> None:
         if not hasattr(self, "_fact_vals"):
             return
         t = theme.active()
         if row is None:
             self._dossier_name.setText("—")
             self._dossier_sub.setText("Select a card to see its details.")
-            self._preview_pane.show_card(None, None)
             for key, val in self._fact_vals.items():
                 val.setText("—")
                 val.setStyleSheet(f"color:{t.ink3};")
@@ -1044,11 +975,11 @@ class InventoryView(QWidget):
             return
         self._dossier_name.setText(row.item.name)
         self._dossier_sub.setText(subline_for(row))
-        # Only show art the background prefetch has already cached to disk —
-        # never let a selection kick off its own network fetch (that would leak a
-        # worker thread and isn't needed: the prefetch warms the same file).
+        # On hover (allow_fetch) show the art, fetching if the prefetch hasn't
+        # cached it yet; on selection/leave (allow_fetch=False) only show art
+        # already on disk, so a non-hover update never spawns a fetch thread.
         res = self._row_image.get(row.lot_id)
-        if res and cardimages.cache_path(res[0]).exists():
+        if res and (allow_fetch or cardimages.cache_path(res[0]).exists()):
             self._preview_pane.show_card(*res)
 
         def set_val(key: str, text: str, color: str) -> None:
@@ -1120,3 +1051,100 @@ class InventoryView(QWidget):
         painter.end()
         out.setDevicePixelRatio(ratio)
         return out
+
+
+def _to_msecs(iso: str) -> float:
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        dt = datetime.fromisoformat(iso[:10])
+    return dt.timestamp() * 1000.0
+
+
+def _history_chart(row: InventoryRow, snapshots: list) -> QChart:
+    """A themed Ember price-history chart for the dossier: an accent market line
+    over an area-fill gradient, plus a dashed cost reference line. Rendered by
+    the shared HoverChartView, so it carries the cursor readout + range bar. The
+    RangedChartView windows the visible range (persisted across cards)."""
+    t = theme.active()
+    chart = QChart()
+    chart.setBackgroundVisible(False)
+    chart.setMargins(QMargins(0, 0, 0, 0))
+    if not snapshots:
+        chart.legend().hide()
+        chart.setTitle("No price history yet — use File ▸ Refresh prices.")
+        chart.setTitleBrush(QColor(t.ink3))
+        return chart
+
+    xs = [_to_msecs(s.as_of) for s in snapshots]
+    ys = [s.price_cents / 100.0 for s in snapshots]
+
+    # Market line (accent) — tracked by the hover readout.
+    market = QLineSeries()
+    market.setName("Market")
+    for x, y in zip(xs, ys, strict=False):
+        market.append(x, y)
+    market.setPen(QPen(QColor(t.accent), 2.2))
+
+    # Area fill under the market line: a duplicate (pen-less) line drives a
+    # gradient-filled QAreaSeries, so the visible accent line isn't drawn twice.
+    fill_line = QLineSeries()
+    for x, y in zip(xs, ys, strict=False):
+        fill_line.append(x, y)
+    area = QAreaSeries(fill_line)
+    # QAreaSeries does NOT own its upper series; parent it to the chart so it
+    # isn't garbage-collected out from under the (dangling) C++ pointer.
+    fill_line.setParent(chart)
+    grad = QLinearGradient(0, 0, 0, 1)
+    grad.setCoordinateMode(QGradient.CoordinateMode.ObjectBoundingMode)
+    top = QColor(t.accent)
+    top.setAlpha(70)
+    bot = QColor(t.accent)
+    bot.setAlpha(0)
+    grad.setColorAt(0.0, top)
+    grad.setColorAt(1.0, bot)
+    area.setBrush(QBrush(grad))
+    area.setPen(Qt.NoPen)
+
+    # Dashed cost reference across the full span.
+    cost = QLineSeries()
+    cost.setName("Cost")
+    cost_pen = QPen(QColor(t.ink3), 1.3)
+    cost_pen.setStyle(Qt.DashLine)
+    cost.setPen(cost_pen)
+    cost.append(min(xs), row.purchase_price_cents / 100.0)
+    cost.append(max(xs), row.purchase_price_cents / 100.0)
+
+    chart.addSeries(area)
+    chart.addSeries(market)
+    chart.addSeries(cost)
+
+    labels = QFont(theme.mono_family())
+    labels.setPointSizeF(8.5)
+    axis_x = QDateTimeAxis()
+    axis_x.setFormat("MMM d")
+    axis_x.setTickCount(4)
+    axis_x.setLabelsFont(labels)
+    axis_x.setLabelsColor(QColor(t.ink3))
+    axis_x.setGridLineColor(QColor(t.line))
+    axis_x.setLinePenColor(QColor(t.line))
+    chart.addAxis(axis_x, Qt.AlignBottom)
+    axis_y = QValueAxis()
+    axis_y.setLabelFormat("$%.0f")
+    axis_y.setTickCount(4)
+    axis_y.setLabelsFont(labels)
+    axis_y.setLabelsColor(QColor(t.ink3))
+    axis_y.setGridLineColor(QColor(t.line))
+    axis_y.setLinePenColor(QColor(t.line))
+    chart.addAxis(axis_y, Qt.AlignLeft)
+    for series in (area, market, cost):
+        series.attachAxis(axis_x)
+        series.attachAxis(axis_y)
+
+    legend = chart.legend()
+    legend.setVisible(True)
+    legend.setAlignment(Qt.AlignTop)
+    legend.setLabelColor(QColor(t.ink3))
+    legend.setFont(labels)
+    legend.markers(area)[0].setVisible(False)  # hide the fill from the legend
+    return chart
