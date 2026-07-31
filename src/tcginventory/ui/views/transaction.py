@@ -21,12 +21,14 @@ from PySide6.QtGui import QKeySequence, QShortcut, QStandardItem, QStandardItemM
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
+    QApplication,
     QCheckBox,
     QComboBox,
     QCompleter,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -76,6 +78,7 @@ from tcginventory.services.transactions import (
 )
 from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
 from tcginventory.ui.formatting import money, percent
+from tcginventory.ui.views._autofill_dialog import AutofillDialog
 
 _GIVE_HEADERS = ["Item", "Qty", ""]
 _GIVE_WIDTHS = [280, 55, 30]
@@ -541,6 +544,7 @@ class TransactionView(QWidget):
         self._receive_rows: list[_ReceiveRow] = []
         self._price_workers: list[_PriceLookupWorker] = []
         self._edit_id: int | None = None
+        self._inference_pipeline = None  # lazily built (image -> [Detection])
         # Hovering any card in this window shows its image here, not at the
         # cursor (parked in the reserved lower-left region).
         self._preview_pane = CardImagePane()
@@ -670,7 +674,15 @@ class TransactionView(QWidget):
         cash_row.addWidget(self._cash_in)
         cash_row.addStretch(1)
 
+        self._autofill_btn = QPushButton("Autofill from photo…")
+        self._autofill_btn.setToolTip(
+            "Detect and identify the cards in one or more scene photos, then add "
+            "them as receive rows to confirm."
+        )
+        self._autofill_btn.clicked.connect(self._autofill_from_photo)
+
         head = QHBoxLayout()
+        head.addWidget(self._autofill_btn)
         head.addWidget(self._catalog_hint)
         head.addStretch(1)
         head.addWidget(self._auto_detect_cb)  # top-right of the receive panel
@@ -804,6 +816,70 @@ class TransactionView(QWidget):
         row = self._add_receive_row()
         row.set_card(card)
         self._update_summary()
+
+    # -- image inference autofill (spec 06, Part 2) -------------------------
+
+    def _ensure_pipeline(self):
+        if self._inference_pipeline is None:
+            from tcginventory.services.inference import build_pipeline
+
+            self._inference_pipeline = build_pipeline(self._conn)
+        return self._inference_pipeline
+
+    def _autofill_from_photo(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Choose card scene photo(s)",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)",
+        )
+        if not paths:
+            return
+        try:
+            pipeline = self._ensure_pipeline()
+        except Exception as exc:  # model/deps unavailable
+            QMessageBox.warning(self, "Autofill unavailable", str(exc))
+            return
+        added = 0
+        for path in paths:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                detections = pipeline(path)
+            finally:
+                QApplication.restoreOverrideCursor()
+            if not detections:
+                QMessageBox.information(
+                    self, "No cards found", f"No cards detected in {path}."
+                )
+                continue
+            dialog = AutofillDialog(path, detections, self)
+            if dialog.exec() != QDialog.Accepted:
+                continue
+            for accepted in dialog.result_cards():
+                self._apply_accepted_receive(accepted)
+                added += 1
+        if added:
+            self._update_summary()
+
+    def _apply_accepted_receive(self, accepted) -> None:
+        row = self._add_receive_row()
+        card = (
+            CardCatalogRepository(self._conn).get(accepted.card_id)
+            if accepted.card_id
+            else None
+        )
+        if card is not None:
+            row.apply_catalog_card(card)
+            self._request_price(row, card)  # fill Market from tcgcsv, off-thread
+        else:
+            row.name.setText(accepted.name)
+            if accepted.set_name:
+                row.set.setText(accepted.set_name)
+            if accepted.card_number:
+                row.number.setText(accepted.card_number)
+        row.qty.setValue(accepted.quantity)
+        if accepted.review:
+            row.review.setChecked(True)
 
     # -- request / summary --------------------------------------------------
 

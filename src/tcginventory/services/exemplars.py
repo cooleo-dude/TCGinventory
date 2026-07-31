@@ -22,17 +22,22 @@ from tcginventory.data.vision import VisionRepository
 Box = tuple[float, float, float, float]  # normalised (x, y, w, h) in 0..1
 
 
-def crop_region(image_path: str | Path, box: Box) -> Image.Image:
-    """Crop a normalised ``(x, y, w, h)`` region out of the full-resolution image."""
+def crop_box(img: Image.Image, box: Box) -> Image.Image:
+    """Crop a normalised ``(x, y, w, h)`` region out of an already-open image."""
     x, y, w, h = box
-    with Image.open(image_path) as im:
-        img = im.convert("RGB")  # forces a load, so it survives the file close
     width, height = img.size
     left = max(0, min(int(round(x * width)), width - 1))
     top = max(0, min(int(round(y * height)), height - 1))
     right = max(left + 1, min(int(round((x + w) * width)), width))
     bottom = max(top + 1, min(int(round((y + h) * height)), height))
     return img.crop((left, top, right, bottom))
+
+
+def crop_region(image_path: str | Path, box: Box) -> Image.Image:
+    """Crop a normalised ``(x, y, w, h)`` region out of the full-resolution image."""
+    with Image.open(image_path) as im:
+        img = im.convert("RGB")  # forces a load, so it survives the file close
+    return crop_box(img, box)
 
 
 def index_regions(
