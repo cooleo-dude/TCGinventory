@@ -35,11 +35,11 @@ from tcginventory.data.repositories import PriceSnapshotRepository
 from tcginventory.services import importexport
 from tcginventory.ui.assets import app_icon
 from tcginventory.ui.views.auctions import AuctionsView
+from tcginventory.ui.views.calendar import CalendarView
 from tcginventory.ui.views.dashboard import DashboardView
 from tcginventory.ui.views.history import HistoryView
 from tcginventory.ui.views.inventory import InventoryView
 from tcginventory.ui.views.market import PriceLookupView
-from tcginventory.ui.views.calendar import CalendarView
 from tcginventory.ui.views.recognition import RecognitionView
 from tcginventory.ui.views.transaction import TransactionView
 

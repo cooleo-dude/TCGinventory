@@ -22,6 +22,7 @@ from PySide6.QtGui import QCursor, QPixmap, QResizeEvent
 from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 
 from tcginventory.services import cardimages
+from tcginventory.ui import theme
 
 _PREVIEW_WIDTH = 240  # px; small-image PNGs are ~245px wide natively
 
@@ -43,8 +44,9 @@ class CardImagePreview(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._label = QLabel(None, Qt.WindowType.ToolTip)
+        _t = theme.active()
         self._label.setStyleSheet(
-            "background:#1d2021; border:1px solid #928374; padding:3px;"
+            f"background:{_t.surface}; border:1px solid {_t.line2}; padding:3px;"
         )
         self._label.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         # Never capture the pointer — otherwise sliding toward the image would
@@ -133,9 +135,7 @@ class CardImagePane(QLabel):
         self._current: str | None = None
         self._pixmap: QPixmap | None = None
         self._workers: list[_FetchWorker] = []
-        self.setAlignment(
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop
-        )
+        self.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         self.setMinimumSize(110, 155)
         # Take whatever space the layout gives (don't let the pixmap's size hint
         # drive/inflate the layout) — the image is scaled to fit that space.
@@ -143,11 +143,12 @@ class CardImagePane(QLabel):
         self.set_border()
         self.setText(self._PLACEHOLDER)
 
-    def set_border(self, color: str = "#504945", width: int = 1) -> None:
+    def set_border(self, color: str | None = None, width: int = 1) -> None:
         """Recolour the frame — used to tint a thumbnail to match its graph line."""
+        t = theme.active()
         self.setStyleSheet(
-            f"border:{width}px solid {color}; border-radius:4px; "
-            "background:#1d2021; color:#a89984;"
+            f"border:{width}px solid {color or t.line2}; border-radius:4px; "
+            f"background:{t.surface}; color:{t.ink3};"
         )
 
     def show_card(self, card_id: str | None, url: str | None) -> None:

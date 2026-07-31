@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from tcginventory.data.repositories import CardCatalogRepository
+from tcginventory.ui import theme
 from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.charts import RangedChartView
 from tcginventory.ui.formatting import money
@@ -38,11 +39,8 @@ _CARD_ID_ROLE = Qt.UserRole + 1
 _DAY_MS = 86_400_000
 _ARROW_W = 22
 # Distinct line/border colours cycled by tag order; preview uses a neutral tone.
-_PALETTE = [
-    "#cc241d", "#458588", "#98971a", "#d79921",
-    "#b16286", "#689d6a", "#d65d0e", "#8ec07c",
-]
-_PREVIEW_COLOR = "#a89984"
+_PALETTE = list(theme.DARK.series)  # warm, theme-consistent categorical order
+_PREVIEW_COLOR = theme.DARK.ink3
 
 
 def _msecs(day: str) -> float:
@@ -182,7 +180,7 @@ class PriceLookupView(QWidget):
             empty_hint="Hover a card to preview it; tag cards to gather them here."
         )
         self._current = QLabel("Hover a card for its image; click for its graph.")
-        self._current.setStyleSheet("color: #689d6a; font-weight: 600;")
+        self._current.setStyleSheet(f"color: {theme.active().pos}; font-weight: 600;")
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)

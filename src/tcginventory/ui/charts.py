@@ -62,7 +62,9 @@ class HoverChartView(QChartView):
             return
         marker = QScatterSeries()
         marker.setMarkerSize(11.0)
-        marker.setBorderColor(QColor("#ffffff"))
+        from tcginventory.ui import theme
+
+        marker.setBorderColor(QColor(theme.active().surface))
         chart.addSeries(marker)
         for axis in self._lines[0].attachedAxes():
             marker.attachAxis(axis)
@@ -130,9 +132,7 @@ class HoverChartView(QChartView):
         text = f"${y:,.2f}"
         if self._x_is_datetime:
             try:
-                when = datetime.fromtimestamp(
-                    x / 1000.0, tz=timezone.utc
-                ).astimezone()
+                when = datetime.fromtimestamp(x / 1000.0, tz=timezone.utc).astimezone()
                 text = f"{when.strftime('%b %d, %Y')}: {text}"
             except (ValueError, OSError, OverflowError):
                 pass

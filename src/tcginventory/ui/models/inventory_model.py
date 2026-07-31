@@ -18,11 +18,22 @@ from tcginventory.domain.models import Item
 from tcginventory.services.ebay import sold_search_url
 from tcginventory.services.inventory import InventoryRow
 from tcginventory.services.trends import Trend
+from tcginventory.ui import theme
 from tcginventory.ui.formatting import money
 
-_GREEN = QColor("#2e7d32")
-_RED = QColor("#c62828")
-_GREY = QColor("#928374")  # flat / unknown trend
+
+def _pos() -> QColor:
+    return QColor(theme.active().pos)
+
+
+def _neg() -> QColor:
+    return QColor(theme.active().neg)
+
+
+def _grey() -> QColor:
+    return QColor(theme.active().ink3)  # flat / unknown trend
+
+
 _ROOT = QModelIndex()  # module-level singleton for default parent args
 
 _ARROW_UP = "▲"  # ▲
@@ -41,8 +52,8 @@ def _trend_text(trend: Trend | None) -> str:
 
 def _trend_color(trend: Trend | None) -> QColor:
     if trend is None or trend.direction in ("none", "flat"):
-        return _GREY
-    return _GREEN if trend.direction == "up" else _RED
+        return _grey()
+    return _pos() if trend.direction == "up" else _neg()
 
 
 def _trend_sort(trend: Trend | None) -> float:
@@ -116,38 +127,57 @@ class _Column:
 _COLUMNS: list[_Column] = [
     _Column("SKU", lambda r: r.sku, lambda r: r.sku),
     _Column(
-        "Name", lambda r: r.item.name, lambda r: r.item.name.lower(),
-        field="name", editor="text",
+        "Name",
+        lambda r: r.item.name,
+        lambda r: r.item.name.lower(),
+        field="name",
+        editor="text",
     ),
     _Column(
         "Set",
         lambda r: r.item.set_name or "",
         lambda r: (r.item.set_name or "").lower(),
-        field="set_name", editor="text",
+        field="set_name",
+        editor="text",
     ),
     _Column(
-        "#", lambda r: r.item.card_number or "", lambda r: r.item.card_number or "",
-        field="card_number", editor="text",
+        "#",
+        lambda r: r.item.card_number or "",
+        lambda r: r.item.card_number or "",
+        field="card_number",
+        editor="text",
     ),
     _Column(
-        "Lang", lambda r: r.item.language.value, lambda r: r.item.language.value,
-        field="language", editor="combo", enum=Language,
+        "Lang",
+        lambda r: r.item.language.value,
+        lambda r: r.item.language.value,
+        field="language",
+        editor="combo",
+        enum=Language,
     ),
     _Column(
-        "Cond/Grade", lambda r: _cond_grade(r.item), lambda r: _cond_grade(r.item),
-        field="condition", editor="combo", enum=Condition,
+        "Cond/Grade",
+        lambda r: _cond_grade(r.item),
+        lambda r: _cond_grade(r.item),
+        field="condition",
+        editor="combo",
+        enum=Condition,
     ),
     _Column(
         "Holo",
         lambda r: r.item.holo_pattern.value if r.item.holo_pattern else "",
         lambda r: r.item.holo_pattern.value if r.item.holo_pattern else "",
-        field="holo_pattern", editor="combo", enum=HoloPattern,
+        field="holo_pattern",
+        editor="combo",
+        enum=HoloPattern,
     ),
     _Column(
         "Edition",
         lambda r: r.item.edition.value if r.item.edition else "",
         lambda r: r.item.edition.value if r.item.edition else "",
-        field="edition", editor="combo", enum=Edition,
+        field="edition",
+        editor="combo",
+        enum=Edition,
     ),
     _Column("Intent", lambda r: r.intent, lambda r: r.intent),
     _Column("Acquired", lambda r: r.acquired_at, lambda r: r.acquired_at),
@@ -175,15 +205,21 @@ _COLUMNS: list[_Column] = [
         "Notes",
         lambda r: r.item.notes or "",
         lambda r: (r.item.notes or "").lower(),
-        field="notes", editor="text",
+        field="notes",
+        editor="text",
     ),
     # Link buttons — surfaced in the Inventory links panel, hidden in the grid.
     _Column(
-        "TCGplayer", lambda r: "", lambda r: 1 if r.item.tcgplayer_url else 0,
+        "TCGplayer",
+        lambda r: "",
+        lambda r: 1 if r.item.tcgplayer_url else 0,
         link="tcgplayer",
     ),
     _Column(
-        "eBay", lambda r: "", lambda r: 1 if r.item.ebay_url else 0, link="ebay",
+        "eBay",
+        lambda r: "",
+        lambda r: 1 if r.item.ebay_url else 0,
+        link="ebay",
     ),
 ]
 
@@ -217,9 +253,11 @@ ITEM_ID_ROLE = Qt.UserRole + 1
 REVIEW_ROLE = Qt.UserRole + 2
 LOT_ID_ROLE = Qt.UserRole + 3
 LINK_URL_ROLE = Qt.UserRole + 4  # the URL a link-button column should open
-# Review-cell highlight — gruvbox "neutral yellow" (#d79921), muted vs the old
-# near-white amber. Shared with ReviewPriceDelegate so both stay in sync.
-REVIEW_BG = QColor("#d79921")
+# Review-cell highlight — a subtle amber wash (the theme's "warn" at low alpha,
+# so light text stays legible and it works in light + dark). Shared with
+# ReviewPriceDelegate so both stay in sync.
+REVIEW_BG = QColor(theme.DARK.warn)
+REVIEW_BG.setAlpha(55)
 
 
 class InventoryTableModel(QAbstractTableModel):
@@ -301,7 +339,7 @@ class InventoryTableModel(QAbstractTableModel):
         if role == Qt.ForegroundRole and col.pl:
             value = col.sort_key(row)
             if isinstance(value, int) and value != 0:
-                return QBrush(_GREEN if value > 0 else _RED)
+                return QBrush(_pos() if value > 0 else _neg())
         if role == Qt.ToolTipRole:
             if index.column() == NOTES_COL and row.item.notes:
                 return row.item.notes

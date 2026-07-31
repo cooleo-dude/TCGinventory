@@ -38,8 +38,9 @@ from PySide6.QtWidgets import (
 )
 
 from tcginventory.data.repositories import CardCatalogRepository
+from tcginventory.ui import theme
 
-_BOX_PEN = QColor("#d3869b")
+_BOX_PEN = QColor(theme.DARK.accent)
 _CARD_ID_ROLE = Qt.UserRole + 1
 
 

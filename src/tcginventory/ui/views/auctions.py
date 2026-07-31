@@ -88,6 +88,7 @@ from tcginventory.services import auctions as auction_math
 from tcginventory.services.ebay import search_url
 from tcginventory.services.inference import write_back as inference_write_back
 from tcginventory.services.transactions import IncomingCard
+from tcginventory.ui import theme
 from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.card_preview import install_hover_preview
 from tcginventory.ui.formatting import money, percent
@@ -118,7 +119,9 @@ def _auction_card_to_incoming(ac: AuctionCard) -> IncomingCard:
         condition=(
             None
             if ac.is_graded
-            else Condition(ac.condition) if ac.condition else Condition.NM
+            else Condition(ac.condition)
+            if ac.condition
+            else Condition.NM
         ),
         holo_pattern=HoloPattern(ac.holo_pattern) if ac.holo_pattern else None,
         edition=Edition(ac.edition) if ac.edition else None,
@@ -182,7 +185,7 @@ _FIRST_BUTTON_COL = _TIME_LEFT_COL + 1
 _ID_ROLE = Qt.UserRole + 1
 _ENDS_ROLE = Qt.UserRole + 2  # ISO end datetime stored on the "Time left" cell
 _UNSET = object()  # sentinel: history not supplied -> open the default DB
-_THUMB_BORDER = "#504945"  # neutral thumbnail frame (no chart-line colours here)
+_THUMB_BORDER = theme.DARK.line2  # neutral thumbnail frame
 
 
 def _is_ended(ends_at: str | None, now: datetime) -> bool:
@@ -368,8 +371,14 @@ class _AuctionCardRow:
 
     def widgets(self) -> list[QWidget]:
         return [
-            self.name, self.set, self.number, self.condition, self.market,
-            self.qty, self.tcg_btn, self.ebay_btn,
+            self.name,
+            self.set,
+            self.number,
+            self.condition,
+            self.market,
+            self.qty,
+            self.tcg_btn,
+            self.ebay_btn,
         ]
 
     def _on_market_changed(self, *_args) -> None:
@@ -612,7 +621,7 @@ class AuctionsView(QWidget):
         self._empty = QLabel(
             "No watched auctions yet — add cards below and Save to track one."
         )
-        self._empty.setStyleSheet("color: #928374;")
+        self._empty.setStyleSheet(f"color: {theme.active().ink3};")
         top = QHBoxLayout()
         top.addStretch(1)
         top.addWidget(self._show_archived)
@@ -728,9 +737,7 @@ class AuctionsView(QWidget):
 
         archive = QPushButton("Unarchive" if auction.archived else "Archive")
         archive.setToolTip("Save this auction for later (hidden from the watchlist)")
-        archive.clicked.connect(
-            lambda _=False, a=auction: self._toggle_archived(a)
-        )
+        archive.clicked.connect(lambda _=False, a=auction: self._toggle_archived(a))
         self._watch.setCellWidget(r, _FIRST_BUTTON_COL + 3, archive)
 
         remove = QPushButton("✕")
@@ -799,7 +806,10 @@ class AuctionsView(QWidget):
         for card in live:
             category = 85 if card.language == "JP" else 3
             worker = _LivePriceWorker(
-                card.set_name, card.number, card.name, category,
+                card.set_name,
+                card.number,
+                card.name,
+                category,
                 set_code=getattr(card, "set_code", None),
             )
             worker.done.connect(
@@ -847,7 +857,9 @@ class AuctionsView(QWidget):
     def _build_editor(self) -> QGroupBox:
         box = QGroupBox("Auction details")
         self._banner = QLabel("New auction")
-        self._banner.setStyleSheet("color: #b26a00; font-weight: 600;")
+        self._banner.setStyleSheet(
+            f"color: {theme.active().accent_ink}; font-weight: 600;"
+        )
 
         self._title = QLineEdit()
         self._url = QLineEdit()
@@ -903,7 +915,7 @@ class AuctionsView(QWidget):
             lambda on: config.set_pref("auction_auto_detect", on)
         )
         self._catalog_hint = QLabel("")
-        self._catalog_hint.setStyleSheet("color: #b26a00;")
+        self._catalog_hint.setStyleSheet(f"color: {theme.active().warn};")
         self._autofill_btn = QPushButton("Autofill from photo…")
         self._autofill_btn.setToolTip(
             "Detect and identify the cards in one or more scene photos, then add "
@@ -1118,7 +1130,10 @@ class AuctionsView(QWidget):
             return
         category = 85 if getattr(card, "language", "EN") == "JP" else 3
         worker = _LivePriceWorker(
-            card.set_name, card.number, card.name, category,
+            card.set_name,
+            card.number,
+            card.name,
+            category,
             set_code=getattr(card, "set_code", None),
         )
         worker.done.connect(

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from tcginventory.ui import theme
 from tcginventory.ui.card_preview import CardImagePane
 
 
@@ -130,7 +131,7 @@ class CardGallery(QWidget):
         if not entries:
             hint = QLabel(self._empty_hint)
             hint.setWordWrap(True)
-            hint.setStyleSheet("color:#a89984;")
+            hint.setStyleSheet(f"color:{theme.active().ink3};")
             self._gallery.addWidget(hint)
         else:
             for card_id, url, color in entries:
@@ -141,12 +142,12 @@ class CardGallery(QWidget):
         frame.setFixedSize(self._THUMB)
         frame.setStyleSheet(
             f"QFrame {{ border: 3px solid {color}; border-radius: 6px; "
-            "background: #1d2021; }"
+            f"background: {theme.active().surface}; }}"
         )
         inner = QVBoxLayout(frame)
         inner.setContentsMargins(4, 4, 4, 4)
         pane = CardImagePane()
-        pane.set_border("#1d2021", width=0)  # the frame provides the coloured edge
+        pane.set_border(width=0)  # the frame provides the coloured edge
         pane.show_card(card_id, url)
         inner.addWidget(pane)
         return frame

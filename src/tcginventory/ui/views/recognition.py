@@ -54,12 +54,15 @@ from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
 from tcginventory.domain.enums import Condition
 from tcginventory.services import vision as vision_svc
+from tcginventory.ui import theme
 
 _IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
 _MODES = ["Transaction (I Give / They Give)", "Listing (one lot)"]
-_BOX_PEN = QColor("#d79921")
-_PROPOSAL_PEN = QColor("#83a598")  # classic-CV proposals (teal)
-_YOLO_PEN = QColor("#d3869b")  # trained-detector proposals (mauve)
+_BOX_PEN = QColor(theme.DARK.accent)  # confirmed box — the theme accent
+_BOX_FILL = QColor(theme.DARK.accent)
+_BOX_FILL.setAlpha(40)
+_PROPOSAL_PEN = QColor("#83a598")  # classic-CV proposals (teal — distinct)
+_YOLO_PEN = QColor("#d3869b")  # trained-detector proposals (mauve — distinct)
 # Cosine below this gets a ⚠ in the suggestion list (advisory; frozen DINOv2 on
 # photo-vs-catalog-render is a weak baseline until the M-V2 fine-tune).
 _LOW_CONFIDENCE = 0.6
@@ -484,7 +487,7 @@ class RecognitionView(QWidget):
     def _add_box_item(self, box: _Box) -> None:
         item = QGraphicsRectItem(box.rect)
         item.setPen(QPen(_BOX_PEN, 0))
-        item.setBrush(QBrush(QColor(215, 153, 33, 40)))
+        item.setBrush(QBrush(_BOX_FILL))
         item.setFlag(item.GraphicsItemFlag.ItemIsMovable, True)
         item.setFlag(item.GraphicsItemFlag.ItemIsSelectable, True)
         item.setData(0, box.number)
@@ -710,9 +713,7 @@ class RecognitionView(QWidget):
         self._sync_scene_to_model()
         session = self._sessions[self._current]
         if not session.boxes:
-            QMessageBox.information(
-                self, "No boxes", "Draw a box around a card first."
-            )
+            QMessageBox.information(self, "No boxes", "Draw a box around a card first.")
             return
         try:
             recognizer = self._ensure_recognizer()
@@ -765,9 +766,7 @@ class RecognitionView(QWidget):
         self._sync_scene_to_model()
         session = self._sessions[self._current]
         if not session.boxes:
-            QMessageBox.information(
-                self, "No boxes", "Draw a box around a card first."
-            )
+            QMessageBox.information(self, "No boxes", "Draw a box around a card first.")
             return
         assessor = self._ensure_assessor()
         QApplication.setOverrideCursor(Qt.WaitCursor)

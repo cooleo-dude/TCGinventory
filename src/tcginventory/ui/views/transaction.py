@@ -77,6 +77,7 @@ from tcginventory.services.transactions import (
     TransactionRequest,
     TransactionService,
 )
+from tcginventory.ui import theme
 from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
@@ -84,13 +85,48 @@ from tcginventory.ui.views._autofill_dialog import AutofillDialog
 _GIVE_HEADERS = ["Item", "Qty", ""]
 _GIVE_WIDTHS = [280, 55, 30]
 _RECV_HEADERS = [
-    "Name", "Category", "Set", "#", "Language", "Graded", "Condition",
-    "Holo", "Edition", "Grading Co.", "Grade", "Cert #", "Market", "Qty",
-    "Intent", "Review", "TCGplayer", "eBay", "Notes", "",
+    "Name",
+    "Category",
+    "Set",
+    "#",
+    "Language",
+    "Graded",
+    "Condition",
+    "Holo",
+    "Edition",
+    "Grading Co.",
+    "Grade",
+    "Cert #",
+    "Market",
+    "Qty",
+    "Intent",
+    "Review",
+    "TCGplayer",
+    "eBay",
+    "Notes",
+    "",
 ]
 _RECV_WIDTHS = [
-    150, 85, 100, 55, 65, 55, 80, 55, 90, 90, 55, 85, 85, 45, 85, 55, 120,
-    100, 130, 30,
+    150,
+    85,
+    100,
+    55,
+    65,
+    55,
+    80,
+    55,
+    90,
+    90,
+    55,
+    85,
+    85,
+    45,
+    85,
+    55,
+    120,
+    100,
+    130,
+    30,
 ]
 
 
@@ -385,19 +421,32 @@ class _ReceiveRow:
 
     def widgets(self) -> list[QWidget]:
         return [
-            self.name, self.category, self.set, self.number, self.language,
-            self.graded, self.condition, self.holo, self.edition, self.company,
-            self.grade, self.cert, self.market, self.qty, self.intent,
-            self.review, self.tcgplayer, self.ebay, self.notes,
+            self.name,
+            self.category,
+            self.set,
+            self.number,
+            self.language,
+            self.graded,
+            self.condition,
+            self.holo,
+            self.edition,
+            self.company,
+            self.grade,
+            self.cert,
+            self.market,
+            self.qty,
+            self.intent,
+            self.review,
+            self.tcgplayer,
+            self.ebay,
+            self.notes,
         ]
 
     def _maybe_flag_review(self) -> None:
         """Sync review to condition (ungraded): a worse-than-NM condition marks
         the card for review; switching back to NM clears it."""
         if not self.graded.isChecked():
-            self.review.setChecked(
-                self.condition.currentData() != Condition.NM.value
-            )
+            self.review.setChecked(self.condition.currentData() != Condition.NM.value)
 
     def _toggle_graded(self, graded: bool) -> None:
         # Condition greys out when graded; grade fields enable (Spec 02).
@@ -555,7 +604,9 @@ class TransactionView(QWidget):
         self._badge.setToolTip("Type is inferred from which sides carry cards")
         self._badge.setAccessibleName("Inferred transaction type")
         self._edit_banner = QLabel("")
-        self._edit_banner.setStyleSheet("color: #b26a00; font-weight: 600;")
+        self._edit_banner.setStyleSheet(
+            f"color: {theme.active().accent_ink}; font-weight: 600;"
+        )
 
         self._date = QLineEdit(QDate.currentDate().toString("yyyy-MM-dd"))
         self._counterparty = QLineEdit()
@@ -666,7 +717,7 @@ class TransactionView(QWidget):
         self._auto_detect_cb.toggled.connect(self._on_auto_detect_toggled)
         # Hint when Auto Detect is on but the catalog hasn't been pulled yet.
         self._catalog_hint = QLabel("")
-        self._catalog_hint.setStyleSheet("color: #b26a00;")
+        self._catalog_hint.setStyleSheet(f"color: {theme.active().warn};")
 
         self._cash_in = money_spin()
         self._cash_in.valueChanged.connect(self._update_summary)
@@ -786,7 +837,10 @@ class TransactionView(QWidget):
         # Japanese cards price against tcgcsv category 85, English against 3.
         category = 85 if getattr(card, "language", "EN") == "JP" else 3
         worker = _PriceLookupWorker(
-            card.set_name, card.number, card.name, category=category,
+            card.set_name,
+            card.number,
+            card.name,
+            category=category,
             set_code=getattr(card, "set_code", None),
         )
         worker.done.connect(
@@ -922,12 +976,11 @@ class TransactionView(QWidget):
         ]
         if not preview.feasible:
             parts.append(
-                "<span style='color:#c62828'>⚠ oversell — reduce quantity</span>"
+                f"<span style='color:{theme.active().neg}'>"
+                "⚠ oversell — reduce quantity</span>"
             )
         self._summary.setText(" &nbsp;·&nbsp; ".join(parts))
-        self._submit.setEnabled(
-            preview.inferred_type is not None and preview.feasible
-        )
+        self._submit.setEnabled(preview.inferred_type is not None and preview.feasible)
 
     # -- submit / edit ------------------------------------------------------
 

@@ -55,9 +55,11 @@ def test_inventory_trend_column_renders_arrows(app, seeded_conn):
     model.set_trends({
         item_id: Trend("up", 12.0, 40.0, 3, 30, 30),
     })
+    from tcginventory.ui import theme
+
     idx = model.index(0, TREND_COL)
     assert model.data(idx, Qt.DisplayRole) == "▲▲▲"
-    assert model.data(idx, Qt.ForegroundRole).color() == QColor("#2e7d32")
+    assert model.data(idx, Qt.ForegroundRole).color() == QColor(theme.active().pos)
     assert model.data(idx, Qt.UserRole) == 40.0  # sorts by signed %
     # An item with no computed trend shows the neutral placeholder.
     other = model.index(1, TREND_COL)

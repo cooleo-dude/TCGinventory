@@ -9,11 +9,22 @@ from PySide6.QtGui import QBrush, QColor
 
 from tcginventory.domain.enums import TransactionStatus
 from tcginventory.domain.models import Transaction
+from tcginventory.ui import theme
 from tcginventory.ui.formatting import money
 
-_GREEN = QColor("#2e7d32")
-_RED = QColor("#c62828")
-_MUTED = QColor("#9e9e9e")
+
+def _pos() -> QColor:
+    return QColor(theme.active().pos)
+
+
+def _neg() -> QColor:
+    return QColor(theme.active().neg)
+
+
+def _muted() -> QColor:
+    return QColor(theme.active().ink3)
+
+
 _ROOT = QModelIndex()  # module-level singleton for default parent args
 
 _HEADERS = ["Date", "Type", "Counterparty", "Cash", "Margin", "Status", "Items"]
@@ -74,11 +85,11 @@ class HistoryTableModel(QAbstractTableModel):
             return int(Qt.AlignRight | Qt.AlignVCenter)
         if role == Qt.ForegroundRole:
             if voided:
-                return QBrush(_MUTED)
+                return QBrush(_muted())
             if col == 3 and txn.cash_delta_cents != 0:
-                return QBrush(_GREEN if txn.cash_delta_cents > 0 else _RED)
+                return QBrush(_pos() if txn.cash_delta_cents > 0 else _neg())
             if col == 4 and row.proceeds_cents and row.margin_cents != 0:
-                return QBrush(_GREEN if row.margin_cents > 0 else _RED)
+                return QBrush(_pos() if row.margin_cents > 0 else _neg())
         return None
 
     @staticmethod
