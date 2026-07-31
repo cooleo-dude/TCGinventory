@@ -314,6 +314,19 @@ class VisionRepository:
             "SELECT * FROM region WHERE image_id = ? ORDER BY number", (image_id,)
         ).fetchall()
 
+    def list_images(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT id, path, width, height FROM image ORDER BY id"
+        ).fetchall()
+
+    def images_with_regions(self) -> list[sqlite3.Row]:
+        """Images that carry at least one drawn region (detector training set)."""
+        return self.conn.execute(
+            "SELECT i.id, i.path, i.width, i.height FROM image i "
+            "WHERE EXISTS (SELECT 1 FROM region r WHERE r.image_id = i.id) "
+            "ORDER BY i.id"
+        ).fetchall()
+
     def capture_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM capture").fetchone()[0]
 

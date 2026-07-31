@@ -80,6 +80,36 @@ def test_labeled_card_ids_are_distinct_and_skip_unlabeled(repo):
     assert repo.labeled_card_ids() == ["cel-4", "cel-5"]
 
 
+def test_export_yolo_dataset_writes_images_labels_and_yaml(repo, tmp_path):
+    from PIL import Image
+
+    from tcginventory.services.detector_dataset import export_yolo_dataset
+
+    for i in range(2):
+        p = tmp_path / f"img{i}.png"
+        Image.new("RGB", (100, 60), "white").save(p)
+        cap = repo.add_capture()
+        image_id = repo.add_image(cap, f"sha{i}", str(p), width=100, height=60)
+        repo.add_region(image_id, 1, (0.1, 0.1, 0.2, 0.3), None, CardLabel(card_id="a"))
+    # An image with no regions is excluded from the training set.
+    cap = repo.add_capture()
+    repo.add_image(cap, "shaX", str(tmp_path / "img0.png"), width=100, height=60)
+
+    out = tmp_path / "yolo"
+    summary = export_yolo_dataset(repo, out, val_frac=0.5, seed=0)
+
+    assert summary.images == 2
+    assert summary.train == 1 and summary.val == 1
+    assert summary.boxes == 2
+    assert (out / "data.yaml").exists()
+    labels = list((out / "labels").rglob("*.txt"))
+    images = list((out / "images").rglob("*.png"))
+    assert len(labels) == 2 and len(images) == 2
+    parts = labels[0].read_text().strip().split()
+    assert parts[0] == "0" and len(parts) == 5  # class + centre-form box
+    assert abs(float(parts[1]) - 0.2) < 1e-6  # cx = 0.1 + 0.2/2
+
+
 # ---------------------------------------------------------------------------
 # Recognition window (offscreen)
 # ---------------------------------------------------------------------------
@@ -262,17 +292,17 @@ def test_cv_proposals_overlay_then_accept_into_boxes(app, _quiet, tmp_path):
     view.add_image_paths([str(scene)])
 
     view._cv_toggle.setChecked(True)  # emits toggled → detect + overlay
-    assert len(view._proposals) == 2
+    assert len(view._proposals["cv"]) == 2
     assert view._accept_btn.isEnabled()
 
     view._cv_toggle.setChecked(False)  # toggling off discards overlays
-    assert view._proposals == []
+    assert view._proposals["cv"] == []
     assert not view._accept_btn.isEnabled()
 
     view._cv_toggle.setChecked(True)
     view._accept_proposals()  # promote all proposals to numbered boxes
     assert len(view._sessions[0].boxes) == 2
-    assert view._proposals == []
+    assert view._proposals["cv"] == []
     assert not view._accept_btn.isEnabled()
     view.deleteLater()
 
