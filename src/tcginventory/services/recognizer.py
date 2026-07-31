@@ -39,6 +39,7 @@ except Exception:  # pragma: no cover - onnxruntime missing (e.g. minimal env)
     _ort = None
 
 MODEL_FILENAME = "dinov2_small.onnx"
+FINETUNED_FILENAME = "identifier_finetuned.onnx"
 
 
 @contextmanager
@@ -54,18 +55,24 @@ def _open_image(src) -> Iterator[Image.Image]:
             img.close()
 
 
-def model_path() -> Path | None:
-    """Locate the DINOv2 ONNX model: the bundled package copy first (dev tree or
-    PyInstaller bundle), then a user-dropped file under the data dir. ``None`` if
-    neither exists."""
+def _resolve_model(filename: str) -> Path | None:
+    """Find ``filename``: the bundled package copy first (dev tree or PyInstaller
+    bundle), then a user-dropped file under the data dir."""
     try:
-        bundled = Path(str(resources.files("tcginventory") / "models" / MODEL_FILENAME))
+        res = resources.files("tcginventory") / "models" / filename
+        bundled = Path(str(res))
         if bundled.is_file():
             return bundled
     except Exception:  # pragma: no cover - resource lookup edge cases
         pass
-    fallback = config.data_dir() / "vision" / "models" / MODEL_FILENAME
+    fallback = config.data_dir() / "vision" / "models" / filename
     return fallback if fallback.is_file() else None
+
+
+def model_path() -> Path | None:
+    """Locate the identifier ONNX model. A **fine-tuned** model (M-V2) supersedes
+    the frozen base DINOv2 when present; ``None`` if neither exists."""
+    return _resolve_model(FINETUNED_FILENAME) or _resolve_model(MODEL_FILENAME)
 
 
 class PixelEmbedder:
@@ -162,21 +169,49 @@ class Recognizer:
     def model_version(self) -> str:
         return self._embedder.version
 
+    @property
+    def embedder(self):
+        return self._embedder
+
     def suggest(self, image, candidates, top: int = 5) -> list[Suggestion]:
         """Top ``top`` candidate card_ids ranked by similarity to the query.
 
         ``image`` is a file path or an already-loaded PIL image (e.g. a crop of a
         larger scene), so callers need not spill crops to disk.
+
+        Each card is scored by its **best** matching vector: any accumulated crop
+        **exemplars** for that card (same visual domain as the query — accurate
+        and improving with ingestion), falling back to the catalog reference
+        render only for cards not yet labeled.
         """
         query = self._embedder.embed(image)
+        exemplars = self._exemplars_by_card(set(candidates))
         scored: list[Suggestion] = []
         for card_id in candidates:
-            ref = self._reference_vector(card_id)
-            if ref is None or ref.shape != query.shape:
-                continue
-            scored.append(Suggestion(card_id, float(np.dot(query, ref))))
+            vectors = exemplars.get(card_id)
+            if not vectors:
+                ref = self._reference_vector(card_id)
+                vectors = [ref] if ref is not None else []
+            best: float | None = None
+            for vec in vectors:
+                if vec.shape == query.shape:
+                    score = float(np.dot(query, vec))
+                    if best is None or score > best:
+                        best = score
+            if best is not None:
+                scored.append(Suggestion(card_id, best))
         scored.sort(key=lambda s: s.score, reverse=True)
         return scored[:top]
+
+    def _exemplars_by_card(self, candidates: set[str]) -> dict[str, list[np.ndarray]]:
+        version = self._embedder.version
+        out: dict[str, list[np.ndarray]] = {}
+        for card_id, blob in self._repo.region_vectors(version):
+            if card_id in candidates:
+                out.setdefault(card_id, []).append(
+                    np.frombuffer(blob, dtype=np.float32)
+                )
+        return out
 
     def _reference_vector(self, card_id: str) -> np.ndarray | None:
         version = self._embedder.version

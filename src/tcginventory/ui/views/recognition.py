@@ -703,6 +703,7 @@ class RecognitionView(QWidget):
         repo = self._vision_repo or VisionRepository(open_vision())
         source = "transaction" if self._is_transaction() else "listing"
         capture_id = repo.add_capture(source=source)
+        entries = []  # (region_id, card_id, image_path, box) for labeled regions
         for session in sessions:
             dest, sha = vision_svc.store_file(session.path, self._vision_dir)
             pixmap = session.pixmap
@@ -723,13 +724,36 @@ class RecognitionView(QWidget):
                     rect.width() / pw,
                     rect.height() / ph,
                 )
-                repo.add_region(
+                region_id = repo.add_region(
                     image_id, box.number, norm, self._side_for(box, session), box.card
                 )
+                if box.card and box.card.card_id:
+                    entries.append((region_id, box.card.card_id, str(dest), norm))
+        indexed = self._index_exemplars(repo, entries)
         self._clear()
-        QMessageBox.information(
-            self, "Saved", f"Saved {len(sessions)} image(s) of annotations."
-        )
+        msg = f"Saved {len(sessions)} image(s) of annotations."
+        if indexed:
+            msg += f"\nIndexed {indexed} card crop(s) — the matcher just got smarter."
+        QMessageBox.information(self, "Saved", msg)
+
+    def _index_exemplars(self, repo, entries) -> int:
+        """Embed the just-saved labeled crops into the exemplar store (best-effort
+        — a matcher/model failure must never block saving the annotations)."""
+        if not entries:
+            return 0
+        try:
+            from tcginventory.services import exemplars
+
+            embedder = self._ensure_recognizer().embedder
+        except Exception:
+            return 0
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            return exemplars.index_regions(repo, embedder, entries)
+        except Exception:
+            return 0
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def _clear(self) -> None:
         self._sessions.clear()

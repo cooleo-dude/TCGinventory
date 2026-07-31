@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tcginventory.data.vision import VisionRepository, open_vision
+from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
 from tcginventory.services.recognizer import (
     PixelEmbedder,
     Recognizer,
@@ -93,6 +93,29 @@ def test_suggest_skips_candidates_without_a_reference(repo, tmp_path):
     rec = Recognizer(repo, embedder=PixelEmbedder(32), reference_image=refs.get)
     out = rec.suggest(_pattern_png(tmp_path / "q.png", 4), ["A", "B"])
     assert [s.card_id for s in out] == ["A"]
+
+
+def test_suggest_uses_crop_exemplars_over_catalog_reference(repo, tmp_path):
+    emb = PixelEmbedder(32)
+    # Card B has a crop exemplar identical to the query; card A only has a
+    # catalog reference. B should win on its exemplar even though A has a ref.
+    cap = repo.add_capture()
+    img = repo.add_image(cap, "sha", "/x.png", width=64, height=64)
+    region_id = repo.add_region(img, 1, (0, 0, 1, 1), None, CardLabel(card_id="B"))
+    vec_b = emb.embed(_pattern_png(tmp_path / "b.png", 2))
+    repo.put_region_embedding(
+        region_id,
+        emb.version,
+        "B",
+        int(vec_b.shape[0]),
+        vec_b.astype("float32").tobytes(),
+    )
+    refs = {"A": _pattern_png(tmp_path / "a.png", 1)}  # A: catalog reference only
+    rec = Recognizer(repo, embedder=emb, reference_image=refs.get)
+
+    out = rec.suggest(_pattern_png(tmp_path / "q.png", 2), ["A", "B"], top=2)
+    assert out[0].card_id == "B"
+    assert out[0].score == pytest.approx(1.0, abs=1e-4)  # identical to the exemplar
 
 
 @pytest.mark.skipif(

@@ -141,6 +141,13 @@ def _png(path, w=200, h=100):
     return str(path)
 
 
+def _pixel_recognizer(vrepo):
+    """A fast, dependency-free matcher so UI tests don't load the ONNX model."""
+    from tcginventory.services.recognizer import PixelEmbedder, Recognizer
+
+    return Recognizer(vrepo, embedder=PixelEmbedder(32))
+
+
 def test_recognition_window_saves_boxes_as_regions(app, _quiet, tmp_path):
     from PySide6.QtCore import QRectF
 
@@ -151,7 +158,12 @@ def test_recognition_window_saves_boxes_as_regions(app, _quiet, tmp_path):
     conn = connect(":memory:")
     migrate(conn)
     vrepo = VisionRepository(open_vision(":memory:"))
-    view = RecognitionView(conn, vision_repo=vrepo, vision_dir=tmp_path)
+    view = RecognitionView(
+        conn,
+        vision_repo=vrepo,
+        vision_dir=tmp_path,
+        recognizer=_pixel_recognizer(vrepo),
+    )
     view._mode.setCurrentIndex(0)  # Transaction (I Give / They Give)
 
     view.add_image_paths([_png(tmp_path / "scene.png", 200, 100)])
@@ -184,7 +196,12 @@ def test_recognition_listing_mode_has_no_side(app, _quiet, tmp_path):
     conn = connect(":memory:")
     migrate(conn)
     vrepo = VisionRepository(open_vision(":memory:"))
-    view = RecognitionView(conn, vision_repo=vrepo, vision_dir=tmp_path)
+    view = RecognitionView(
+        conn,
+        vision_repo=vrepo,
+        vision_dir=tmp_path,
+        recognizer=_pixel_recognizer(vrepo),
+    )
     view._mode.setCurrentIndex(1)  # Listing (one lot)
 
     view.add_image_paths([_png(tmp_path / "lot.png")])
@@ -208,12 +225,20 @@ def _catalog_conn():
     CardCatalogRepository(conn).replace_all(
         [
             CatalogCard(
-                card_id="cel-4", name="Charizard", set_id="cel",
-                set_name="Celebrations", number="4", printed_total=25,
+                card_id="cel-4",
+                name="Charizard",
+                set_id="cel",
+                set_name="Celebrations",
+                number="4",
+                printed_total=25,
             ),
             CatalogCard(
-                card_id="cel-5", name="Blastoise", set_id="cel",
-                set_name="Celebrations", number="5", printed_total=25,
+                card_id="cel-5",
+                name="Blastoise",
+                set_id="cel",
+                set_name="Celebrations",
+                number="5",
+                printed_total=25,
             ),
         ],
         "2026-01-01",
@@ -268,6 +293,43 @@ def test_suggestions_populate_and_picking_labels_the_box(app, _quiet, tmp_path):
     assert box.card.card_id == "cel-5"
     assert view._name_fields[box.number].text() == "Blastoise"
     view.deleteLater()
+
+
+def test_save_indexes_labeled_crops_as_exemplars(app, _quiet, tmp_path):
+    import numpy as np
+    from PIL import Image
+    from PySide6.QtCore import QRectF
+
+    from tcginventory.data.db import connect
+    from tcginventory.data.migrator import migrate
+    from tcginventory.ui.views.recognition import RecognitionView
+
+    scene = tmp_path / "scene.png"
+    arr = np.random.default_rng(0).integers(0, 256, (100, 200, 3), dtype=np.uint8)
+    Image.fromarray(arr, "RGB").save(scene)
+
+    conn = connect(":memory:")
+    migrate(conn)
+    vrepo = VisionRepository(open_vision(":memory:"))
+    view = RecognitionView(
+        conn,
+        vision_repo=vrepo,
+        vision_dir=tmp_path,
+        recognizer=_pixel_recognizer(vrepo),
+    )
+    view._mode.setCurrentIndex(1)  # listing
+    view.add_image_paths([str(scene)])
+    left = view._add_box(QRectF(5, 5, 90, 90))
+    left.card = CardLabel(card_id="L", name="Left")
+    right = view._add_box(QRectF(105, 5, 90, 90))
+    right.card = CardLabel(card_id="R", name="Right")
+    view._add_box(QRectF(150, 50, 20, 20))  # unlabeled → not indexed
+    view._save()
+
+    assert vrepo.region_count() == 3
+    assert vrepo.region_embedding_count() == 2  # only the two labeled crops
+    cards = sorted(card_id for card_id, _ in vrepo.region_vectors("pixel-32"))
+    assert cards == ["L", "R"]
 
 
 def test_cv_proposals_overlay_then_accept_into_boxes(app, _quiet, tmp_path):

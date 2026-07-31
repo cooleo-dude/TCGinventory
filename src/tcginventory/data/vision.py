@@ -92,6 +92,17 @@ CREATE TABLE IF NOT EXISTS card_embedding (
     created_at    TEXT    NOT NULL,
     PRIMARY KEY (card_id, model_version)
 );
+CREATE TABLE IF NOT EXISTS region_embedding (
+    region_id     INTEGER NOT NULL REFERENCES region(id) ON DELETE CASCADE,
+    model_version TEXT    NOT NULL,      -- embedder identity; changing it re-embeds
+    card_id       TEXT    NOT NULL,      -- the region's label (denormalised)
+    dim           INTEGER NOT NULL,
+    vector        BLOB    NOT NULL,      -- float32 bytes, L2-normalised crop embedding
+    created_at    TEXT    NOT NULL,
+    PRIMARY KEY (region_id, model_version)
+);
+CREATE INDEX IF NOT EXISTS idx_region_embedding_card
+    ON region_embedding(model_version, card_id);
 """
 
 
@@ -308,6 +319,60 @@ class VisionRepository:
 
     def embedding_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM card_embedding").fetchone()[0]
+
+    # -- per-crop exemplar embeddings (the metric-learning corpus) -----------
+
+    def put_region_embedding(
+        self,
+        region_id: int,
+        model_version: str,
+        card_id: str,
+        dim: int,
+        vector: bytes,
+        now: str | None = None,
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO region_embedding (region_id, model_version, card_id, "
+                "dim, vector, created_at) VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(region_id, model_version) DO UPDATE SET "
+                "card_id = excluded.card_id, dim = excluded.dim, "
+                "vector = excluded.vector",
+                (region_id, model_version, card_id, dim, vector, now or _now()),
+            )
+
+    def has_region_embedding(self, region_id: int, model_version: str) -> bool:
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM region_embedding WHERE region_id = ? AND "
+                "model_version = ?",
+                (region_id, model_version),
+            ).fetchone()
+            is not None
+        )
+
+    def region_embedding_count(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM region_embedding"
+        ).fetchone()[0]
+
+    def region_vectors(self, model_version: str) -> list[tuple[str, bytes]]:
+        """All exemplar (card_id, vector-bytes) pairs for a model version."""
+        rows = self.conn.execute(
+            "SELECT card_id, vector FROM region_embedding WHERE model_version = ?",
+            (model_version,),
+        ).fetchall()
+        return [(r["card_id"], bytes(r["vector"])) for r in rows]
+
+    def labeled_regions(self) -> list[sqlite3.Row]:
+        """Regions carrying a catalog id, joined with their image path/size —
+        the (crop, identity) pairs the identifier trains and indexes on."""
+        return self.conn.execute(
+            "SELECT r.id AS region_id, r.card_id, r.x, r.y, r.w, r.h, "
+            "i.path AS image_path, i.width, i.height "
+            "FROM region r JOIN image i ON i.id = r.image_id "
+            "WHERE r.card_id IS NOT NULL ORDER BY r.id"
+        ).fetchall()
 
     def regions_for_image(self, image_id: int) -> list[sqlite3.Row]:
         return self.conn.execute(
