@@ -12,7 +12,7 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtCore import QSize, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -53,6 +53,17 @@ NAV_ITEMS = [
     "eBay Auctions",
     "Recognition",
 ]
+# Lucide icon per nav destination (see ui/icons.py).
+NAV_ICONS = {
+    "Dashboard": "layout-dashboard",
+    "Transaction": "arrow-left-right",
+    "Inventory": "package",
+    "History": "scroll-text",
+    "Card Shows": "calendar-days",
+    "Price Lookup": "search",
+    "eBay Auctions": "gavel",
+    "Recognition": "scan-line",
+}
 _TRANSACTION_INDEX = 1
 _REFRESH_STALE_HOURS = 12  # startup auto-refresh only if older than this
 
@@ -223,6 +234,8 @@ class MainWindow(QMainWindow):
         self._nav.addItems(NAV_ITEMS)
         self._nav.setMinimumWidth(168)
         self._nav.setMaximumWidth(200)
+        self._nav.setIconSize(QSize(18, 18))
+        self._paint_nav_icons(0)
         self._nav.currentRowChanged.connect(self._on_nav_changed)
 
         splitter = QSplitter()
@@ -545,8 +558,19 @@ class MainWindow(QMainWindow):
         )
         QMessageBox.information(self, "Import complete", done)
 
+    def _paint_nav_icons(self, current: int) -> None:
+        """Tint each nav icon — accent for the active row, muted for the rest."""
+        from tcginventory.ui import icons, theme
+
+        t = theme.active()
+        for i in range(self._nav.count()):
+            name = NAV_ITEMS[i]
+            color = t.accent if i == current else t.ink2
+            self._nav.item(i).setIcon(icons.icon(NAV_ICONS[name], color, 18))
+
     def _on_nav_changed(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
+        self._paint_nav_icons(index)
         widget = self._stack.widget(index)
         refresh = getattr(widget, "refresh", None)
         if callable(refresh):

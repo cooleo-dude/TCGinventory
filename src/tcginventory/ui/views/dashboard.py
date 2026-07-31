@@ -27,7 +27,7 @@ from PySide6.QtCharts import (
     QLineSeries,
     QValueAxis,
 )
-from PySide6.QtCore import QDateTime, QObject, Qt, QThread, Signal
+from PySide6.QtCore import QDateTime, QObject, QSize, Qt, QThread, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -60,7 +61,7 @@ from tcginventory.services.reporting import (
     SellerRow,
     SeriesPoint,
 )
-from tcginventory.ui import theme
+from tcginventory.ui import icons, theme
 from tcginventory.ui.charts import RangedChartView
 from tcginventory.ui.formatting import money
 
@@ -68,6 +69,7 @@ from tcginventory.ui.formatting import money
 _RANGE_LABELS = {30: "1M", 90: "3M", 180: "6M", 270: "9M", 365: "1Y", None: "All time"}
 
 _INTENTS = ["All", "personal", "resale", "ripping"]
+_PAGE = 5  # movers rows shown per "Show 5 more" step
 
 # Chart series → token role.
 _SERIES_COLORS = {
@@ -252,21 +254,19 @@ class _ThumbFetchWorker(QThread):
 
 class _ImageLoader(QObject):
     """Resolves inventory identities to card art — cache first, network in the
-    background — and paints thumbnails in as they arrive. A generation counter
-    ignores results whose row widgets a later refresh has replaced."""
+    background — and paints thumbnails in as they arrive.
+
+    Self-driving: ``bind`` shows cached art immediately, else a placeholder and a
+    queued fetch. One worker runs at a time, draining the queue (so expanding a
+    movers list mid-session just adds to the queue). Results are applied to every
+    live thumbnail for that card; already-deleted row widgets are skipped."""
 
     def __init__(self, conn, parent=None) -> None:
         super().__init__(parent)
         self._catalog = CardCatalogRepository(conn)
-        self._gen = 0
         self._thumbs: dict[str, list[CardThumb]] = {}
-        self._pending: list[tuple[str, str]] = []
-        self._workers: list[_ThumbFetchWorker] = []
-
-    def begin(self) -> None:
-        self._gen += 1
-        self._thumbs = {}
-        self._pending = []
+        self._queue: dict[str, str] = {}  # card_id -> url awaiting fetch
+        self._worker: _ThumbFetchWorker | None = None
 
     def bind(
         self,
@@ -287,40 +287,37 @@ class _ImageLoader(QObject):
             return
         thumb.show_placeholder(fallback)
         self._thumbs.setdefault(card_id, []).append(thumb)
-        self._pending.append((card_id, url))
+        self._queue[card_id] = url
+        self._ensure_worker()
 
-    def start(self) -> None:
-        if not self._pending:
+    def _ensure_worker(self) -> None:
+        if (self._worker is not None and self._worker.isRunning()) or not self._queue:
             return
-        seen: set[str] = set()
-        jobs: list[tuple[str, str]] = []
-        for card_id, url in self._pending:
-            if card_id not in seen:
-                seen.add(card_id)
-                jobs.append((card_id, url))
-        self._pending = []
-        gen = self._gen
-        worker = _ThumbFetchWorker(jobs)
-        worker.loaded.connect(
-            lambda card_id, path, g=gen: self._on_loaded(card_id, path, g)
-        )
-        worker.finished.connect(lambda w=worker: self._drop_worker(w))
-        self._workers.append(worker)
-        worker.start()
+        jobs = list(self._queue.items())
+        self._queue = {}
+        self._worker = _ThumbFetchWorker(jobs)
+        self._worker.loaded.connect(self._on_loaded)
+        self._worker.finished.connect(self._on_worker_done)
+        self._worker.start()
 
-    def _drop_worker(self, worker: _ThumbFetchWorker) -> None:
-        if worker in self._workers:
-            self._workers.remove(worker)
-        worker.deleteLater()
+    def _on_worker_done(self) -> None:
+        worker, self._worker = self._worker, None
+        if worker is not None:
+            worker.deleteLater()
+        self._ensure_worker()  # anything queued while it ran
 
-    def _on_loaded(self, card_id: str, path: str, gen: int) -> None:
-        if gen != self._gen:
-            return  # a newer refresh replaced these thumbnails
+    def _on_loaded(self, card_id: str, path: str) -> None:
+        live: list[CardThumb] = []
         for thumb in self._thumbs.get(card_id, []):
             try:
                 thumb.show_image(path)
+                live.append(thumb)  # keep only widgets that are still alive
             except RuntimeError:
-                pass  # the row widget is already gone
+                pass
+        if live:
+            self._thumbs[card_id] = live
+        else:
+            self._thumbs.pop(card_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -509,6 +506,10 @@ class MoversColumn(QFrame):
         super().__init__()
         self._images = images
         self.setObjectName("movers")
+        self._items: list = []
+        self._mode = "gain"  # gain | loss | seller
+        self._label = ""  # window label (sellers empty-state)
+        self._visible = _PAGE
         self._outer = QVBoxLayout(self)
         self._outer.setContentsMargins(16, 13, 16, 12)
         self._outer.setSpacing(2)
@@ -527,6 +528,10 @@ class MoversColumn(QFrame):
         self._rows.setContentsMargins(0, 4, 0, 0)
         self._rows.setSpacing(0)
         self._outer.addLayout(self._rows)
+        self._footer = QHBoxLayout()
+        self._footer.setContentsMargins(0, 6, 0, 0)
+        self._footer.setSpacing(12)
+        self._outer.addLayout(self._footer)
         self._outer.addStretch(1)
         self._restyle()
 
@@ -601,45 +606,106 @@ class MoversColumn(QFrame):
         self._rows.addWidget(row)
 
     def set_movers(self, rows: list[MoverRow], gain: bool) -> None:
-        self._restyle()
-        self._clear()
-        if not rows:
-            self._empty("No gainers in this range." if gain else "No losers here.")
-            return
-        for i, m in enumerate(rows):
-            sub = " · ".join(x for x in (m.set_name, m.card_number) if x) or "—"
-            pct = f" ({m.change_pct:+.0f}%)" if m.change_pct is not None else ""
-            arrow = "▲ " if m.change_cents >= 0 else "▼ "
-            self._row(
-                m.name,
-                m.set_name,
-                m.card_number,
-                sub,
-                money(m.price_cents),
-                f"{arrow}{money(abs(m.change_cents))}{pct}",
-                _tone(m.change_cents),
-                first=(i == 0),
-            )
+        self._items = rows
+        self._mode = "gain" if gain else "loss"
+        self._render()
 
     def set_sellers(self, rows: list[SellerRow], window_label: str) -> None:
+        self._items = rows
+        self._mode = "seller"
+        self._label = window_label
+        self._render()
+
+    @staticmethod
+    def _format(item, mode: str):
+        """(name, set, number, sub, right-top, right-bottom, tone) for one item."""
+        sub = " · ".join(x for x in (item.set_name, item.card_number) if x) or "—"
+        if mode == "seller":
+            plural = "s" if item.sales != 1 else ""
+            return (
+                item.name, item.set_name, item.card_number, sub,
+                f"{item.units} sold",
+                f"{money(item.revenue_cents)} · {item.sales} sale{plural}",
+                None,
+            )
+        pct = f" ({item.change_pct:+.0f}%)" if item.change_pct is not None else ""
+        arrow = "▲ " if item.change_cents >= 0 else "▼ "
+        return (
+            item.name, item.set_name, item.card_number, sub,
+            money(item.price_cents),
+            f"{arrow}{money(abs(item.change_cents))}{pct}",
+            _tone(item.change_cents),
+        )
+
+    def _empty_text(self) -> str:
+        if self._mode == "seller":
+            return f"No sales in {self._label.lower()}."
+        if self._mode == "gain":
+            return "No gainers in this range."
+        return "No losers here."
+
+    def _render(self) -> None:
         self._restyle()
         self._clear()
-        if not rows:
-            self._empty(f"No sales in {window_label.lower()}.")
+        self._clear_footer()
+        if not self._items:
+            self._empty(self._empty_text())
             return
-        for i, s in enumerate(rows):
-            sub = " · ".join(x for x in (s.set_name, s.card_number) if x) or "—"
-            plural = "s" if s.sales != 1 else ""
-            self._row(
-                s.name,
-                s.set_name,
-                s.card_number,
-                sub,
-                f"{s.units} sold",
-                f"{money(s.revenue_cents)} · {s.sales} sale{plural}",
-                None,
-                first=(i == 0),
+        for i, item in enumerate(self._items[: self._visible]):
+            fields = self._format(item, self._mode)
+            self._row(*fields, first=(i == 0))
+        self._render_footer()
+
+    def _render_footer(self) -> None:
+        remaining = len(self._items) - self._visible
+        added = False
+        if remaining > 0:
+            self._footer.addWidget(
+                self._foot_button(
+                    f"Show {min(_PAGE, remaining)} more",
+                    "chevron-down",
+                    theme.active().accent2,
+                    self._expand,
+                )
             )
+            added = True
+        if self._visible > _PAGE:
+            self._footer.addWidget(
+                self._foot_button(
+                    "Collapse", "chevron-up", theme.active().ink3, self._collapse
+                )
+            )
+            added = True
+        if added:
+            self._footer.addStretch(1)
+
+    def _foot_button(self, text, icon_name, color, slot) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setIcon(icons.icon(icon_name, color, 14))
+        btn.setIconSize(QSize(14, 14))
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet(
+            f"QPushButton{{border:none;background:transparent;color:{color};"
+            "font-size:11px;font-weight:700;padding:2px 4px;}"
+            f"QPushButton:hover{{color:{theme.active().ink};}}"
+        )
+        btn.clicked.connect(slot)
+        return btn
+
+    def _clear_footer(self) -> None:
+        while self._footer.count():
+            item = self._footer.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+    def _expand(self) -> None:
+        self._visible += _PAGE
+        self._render()
+
+    def _collapse(self) -> None:
+        self._visible = _PAGE
+        self._render()
 
 
 class UpcomingShowsBox(QFrame):
@@ -934,13 +1000,18 @@ class DashboardView(QWidget):
             t.accent2,
         )
 
-        # highlights: price-movement movers + sellers + upcoming shows (windowed)
-        self._images.begin()
-        self._gainers.set_movers(rpt.top_gainers(intent, since=cutoff), gain=True)
-        self._losers.set_movers(rpt.top_losers(intent, since=cutoff), gain=False)
-        self._sellers.set_sellers(rpt.top_sellers(window_days=days), label)
+        # highlights: price-movement movers + sellers + upcoming shows (windowed).
+        # Fetch the full lists (limit=None) so the columns can expand on demand.
+        self._gainers.set_movers(
+            rpt.top_gainers(intent, limit=None, since=cutoff), gain=True
+        )
+        self._losers.set_movers(
+            rpt.top_losers(intent, limit=None, since=cutoff), gain=False
+        )
+        self._sellers.set_sellers(
+            rpt.top_sellers(window_days=days, limit=None), label
+        )
         self._shows_box.set_shows(self._shows_service.upcoming(limit=5))
-        self._images.start()
 
         # chart
         self._chart_view.setChart(

@@ -263,25 +263,31 @@ class ReportingService:
         return baseline
 
     def top_gainers(
-        self, intent: Intent | None = None, limit: int = 5, since: str | None = None
+        self,
+        intent: Intent | None = None,
+        limit: int | None = 5,
+        since: str | None = None,
     ) -> list[MoverRow]:
         """Held cards whose market price rose the most over the window."""
         rows = [m for m in self._price_movers(intent, since) if m.change_cents > 0]
         rows.sort(key=lambda m: m.change_cents, reverse=True)
-        return rows[:limit]
+        return rows[:limit]  # limit None → all
 
     def top_losers(
-        self, intent: Intent | None = None, limit: int = 5, since: str | None = None
+        self,
+        intent: Intent | None = None,
+        limit: int | None = 5,
+        since: str | None = None,
     ) -> list[MoverRow]:
         """Held cards whose market price fell the most over the window."""
         rows = [m for m in self._price_movers(intent, since) if m.change_cents < 0]
         rows.sort(key=lambda m: m.change_cents)
-        return rows[:limit]
+        return rows[:limit]  # limit None → all
 
     def top_sellers(
         self,
         window_days: int | None = 90,
-        limit: int = 5,
+        limit: int | None = 5,
         as_of: str | None = None,
     ) -> list[SellerRow]:
         """Cards that sold the most units within the trailing window.
@@ -300,7 +306,7 @@ class ReportingService:
                 ref_dt = datetime.fromisoformat(ref[:10])
             time_clause = "AND t.occurred_at >= ? "
             params.append((ref_dt - timedelta(days=window_days)).isoformat())
-        params.append(limit)
+        params.append(limit if limit is not None else -1)  # SQLite LIMIT -1 = all
         # Aggregate over lot_consumption so we can gate on the *sold lot's* intent
         # (a business view: exclude personal/ripping stock and review items).
         rows = self.conn.execute(

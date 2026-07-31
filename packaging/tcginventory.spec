@@ -30,6 +30,11 @@ datas += [
     (font, "tcginventory/ui/assets/fonts")
     for font in glob.glob(os.path.join(assets, "fonts", "*.ttf"))
 ]
+# Bundled Lucide SVG icons (recoloured to the theme at runtime via QtSvg).
+datas += [
+    (svg, "tcginventory/ui/assets/icons")
+    for svg in glob.glob(os.path.join(assets, "icons", "*.svg"))
+]
 # DINOv2 identifier weights (LFS in the repo, ~88 MB) — bundled so the frozen
 # app is fully offline and self-contained.
 datas += [
@@ -46,6 +51,7 @@ a = Analysis(
     # dependency chain explicitly to guarantee they're bundled.
     hiddenimports=[
         "PySide6.QtCharts",
+        "PySide6.QtSvg",
         "httpx",
         "httpcore",
         "h11",
