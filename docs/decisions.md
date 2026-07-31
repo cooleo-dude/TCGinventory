@@ -4,6 +4,27 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-31 — Part 2: image inference autofill in Transaction & Auction
+
+- `services/inference.py` ties the detector + identity matcher together:
+  `run_inference(image) -> [Detection]` (box + top-guess CardLabel + cosine +
+  confident flag + alternatives), `build_pipeline(conn)` picks the trained YOLO
+  detector when present (else classic-CV), the exemplar matcher, and a catalog
+  label resolver. Degrades gracefully: **detect-only** on an empty corpus
+  (boxes with no identity, review-flagged), identification sharpens as the
+  corpus grows.
+- **Shared review dialog** (`_autofill_dialog.AutofillDialog`): the scene with
+  numbered boxes beside an editable table (name/set/number, confidence %, ⚠ low,
+  include + qty). Returns `AcceptedCard`s — keeps the guessed `card_id` only when
+  accepted **unedited**; flags low-confidence / edited / unidentified for review.
+- Both entry windows get an **"Autofill from photo…"** button that runs the
+  pipeline and adds confirmed rows, **reusing** each window's `apply_catalog_card`
+  + `_request_price` (so identified cards get their TCGplayer price). The pipeline
+  is lazily built (loads the ONNX models) and injectable for headless tests.
+- **Scoped read-path first:** unidentified boxes are named in the dialog before
+  they become rows (name-less rows are dropped). Writing confirmed entries back
+  into the corpus (capture + regions + exemplars) is the next increment.
+
 ### 2026-07-31 — M-V2: crop-exemplar retrieval makes identification usable on ingest
 
 - **The insight:** the matcher's weakness was comparing a photo **crop** against

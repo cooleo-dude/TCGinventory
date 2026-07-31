@@ -142,8 +142,15 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   `model_path()` auto-prefers and bundles like DINOv2). torch never enters the
   app; the exemplar path already delivers the "flow of data improves it" without
   it.
-- **Inference** — Part 2 autofill in Transaction/Auction with thresholds +
-  missed-detection flags.
+- **Inference** — Part 2 autofill in Transaction/Auction ✅ **done (read
+  path):** `services/inference.py` (`run_inference` / `build_pipeline`) detects
+  boxes (YOLO if trained, else classic-CV) and identifies each crop against the
+  exemplar corpus, returning per-card confidence + a confident flag. An
+  **"Autofill from photo…"** button in both windows opens `AutofillDialog`
+  (scene + numbered boxes + editable guesses, ⚠ low-confidence, per-row
+  include/qty) and adds the confirmed cards as rows (reusing `apply_catalog_card`
+  + `_request_price`). Detect-only with an empty corpus; sharpens as it grows.
+  **Remaining:** corrections flowing back into the training corpus.
 - **M-V3** — condition assessment (uses card **backs**; identity uses **fronts**).
 - **M-Market** — liquidity / markup analytics (ledger + price history; no vision).
 
