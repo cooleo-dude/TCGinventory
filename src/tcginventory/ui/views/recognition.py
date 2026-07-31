@@ -57,6 +57,7 @@ from tcginventory.services import vision as vision_svc
 _IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
 _MODES = ["Transaction (I Give / They Give)", "Listing (one lot)"]
 _BOX_PEN = QColor("#d79921")
+_PROPOSAL_PEN = QColor("#83a598")  # detector proposals (distinct from drawn boxes)
 # Cosine below this gets a ⚠ in the suggestion list (advisory; frozen DINOv2 on
 # photo-vs-catalog-render is a weak baseline until the M-V2 fine-tune).
 _LOW_CONFIDENCE = 0.6
@@ -247,6 +248,7 @@ class RecognitionView(QWidget):
         self._items: dict[int, QGraphicsRectItem] = {}  # number -> item (current)
         self._name_fields: dict[int, _NameField] = {}
         self._suggest_boxes: dict[int, _SuggestBox] = {}
+        self._proposals: list[QGraphicsRectItem] = []  # classic-CV overlays
         self._divider = None  # QGraphicsLineItem for the current image
 
         # -- toolbar
@@ -266,12 +268,27 @@ class RecognitionView(QWidget):
             "labeled (identity matcher)"
         )
         self._suggest_btn.clicked.connect(self._run_suggestions)
-        # Auto-proposal toggles — wired to the detectors in a later increment.
+        # Auto-proposal toggles. Classic CV works today (no training); YOLO waits
+        # on a trained detector (M-V1.5 Phase B).
         self._cv_toggle = QCheckBox("Classic-CV boxes")
+        self._cv_toggle.setToolTip(
+            "Auto-detect card boxes on a blank background (no training). Accept the "
+            "ones you want into numbered boxes."
+        )
+        self._cv_toggle.toggled.connect(self._on_cv_toggle)
+        self._accept_btn = QPushButton("Accept proposals")
+        self._accept_btn.setToolTip(
+            "Turn the detector's proposed boxes (selected, or all) into numbered "
+            "boxes you can label"
+        )
+        self._accept_btn.clicked.connect(self._accept_proposals)
+        self._accept_btn.setEnabled(False)
         self._yolo_toggle = QCheckBox("YOLO boxes")
-        for toggle in (self._cv_toggle, self._yolo_toggle):
-            toggle.setEnabled(False)
-            toggle.setToolTip("Auto box proposals — coming with the detector")
+        self._yolo_toggle.setEnabled(False)
+        self._yolo_toggle.setToolTip(
+            "Trained card detector — available once a model is trained on your "
+            "labeled boxes"
+        )
         save_btn = QPushButton("Save annotations")
         save_btn.clicked.connect(self._save)
         toolbar = QHBoxLayout()
@@ -282,6 +299,7 @@ class RecognitionView(QWidget):
         toolbar.addWidget(del_btn)
         toolbar.addWidget(self._suggest_btn)
         toolbar.addWidget(self._cv_toggle)
+        toolbar.addWidget(self._accept_btn)
         toolbar.addWidget(self._yolo_toggle)
         toolbar.addStretch(1)
         toolbar.addWidget(save_btn)
@@ -366,6 +384,7 @@ class RecognitionView(QWidget):
         self._view.setVisible(True)
         self._scene.clear()
         self._items.clear()
+        self._proposals.clear()  # scene.clear() already dropped the items
         self._divider = None
         self._scene.addPixmap(session.pixmap)
         self._scene.setSceneRect(QRectF(session.pixmap.rect()))
@@ -375,6 +394,8 @@ class RecognitionView(QWidget):
             self._add_divider(session)
         self._view.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
         self._refresh_panel()
+        if self._cv_toggle.isChecked():
+            self._show_cv_proposals()
 
     def _add_divider(self, session: _Session) -> None:
         w = session.pixmap.width()
@@ -425,6 +446,55 @@ class RecognitionView(QWidget):
             self._items.pop(number, None)
             self._scene.removeItem(item)
         self._refresh_panel()
+
+    # -- classic-CV box proposals -------------------------------------------
+
+    def _on_cv_toggle(self, on: bool) -> None:
+        if on:
+            self._show_cv_proposals()
+        else:
+            self._clear_proposals()
+
+    def _show_cv_proposals(self) -> None:
+        """Overlay the classic-CV detector's boxes for the current image."""
+        from tcginventory.services.detector import propose_card_boxes
+
+        self._clear_proposals()
+        if not (0 <= self._current < len(self._sessions)):
+            return
+        session = self._sessions[self._current]
+        pw = max(1, session.pixmap.width())
+        ph = max(1, session.pixmap.height())
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            norm_boxes = propose_card_boxes(session.path)
+        finally:
+            QApplication.restoreOverrideCursor()
+        pen = QPen(_PROPOSAL_PEN, 0, Qt.DashLine)
+        for nx, ny, nw, nh in norm_boxes:
+            rect = QRectF(nx * pw, ny * ph, nw * pw, nh * ph)
+            item = self._scene.addRect(rect, pen, QBrush(QColor(131, 165, 152, 30)))
+            item.setFlag(item.GraphicsItemFlag.ItemIsSelectable, True)
+            self._proposals.append(item)
+        self._accept_btn.setEnabled(bool(self._proposals))
+
+    def _clear_proposals(self) -> None:
+        for item in self._proposals:
+            self._scene.removeItem(item)
+        self._proposals.clear()
+        self._accept_btn.setEnabled(False)
+
+    def _accept_proposals(self) -> None:
+        """Promote proposals (selected, or all if none selected) into real boxes."""
+        if not self._proposals:
+            return
+        selected = [it for it in self._proposals if it.isSelected()]
+        targets = selected or list(self._proposals)
+        for item in targets:
+            self._add_box(item.rect())
+            self._scene.removeItem(item)
+            self._proposals.remove(item)
+        self._accept_btn.setEnabled(bool(self._proposals))
 
     def _sync_scene_to_model(self) -> None:
         """Pull moved box geometry + the divider back into the session model."""
@@ -623,10 +693,12 @@ class RecognitionView(QWidget):
         self._items.clear()
         self._name_fields.clear()
         self._suggest_boxes.clear()
+        self._proposals.clear()
         self._divider = None
         self._strip.clear()
         self._scene.clear()
         self._panel.setRowCount(0)
+        self._accept_btn.setEnabled(False)
         self._view.setVisible(False)
         self._empty.setVisible(True)
 

@@ -240,6 +240,43 @@ def test_suggestions_populate_and_picking_labels_the_box(app, _quiet, tmp_path):
     view.deleteLater()
 
 
+def test_cv_proposals_overlay_then_accept_into_boxes(app, _quiet, tmp_path):
+    from PIL import Image, ImageDraw
+
+    from tcginventory.data.db import connect
+    from tcginventory.data.migrator import migrate
+    from tcginventory.ui.views.recognition import RecognitionView
+
+    scene = tmp_path / "scene.png"
+    img = Image.new("L", (240, 160), color=255)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([20, 20, 80, 130], fill=0)  # two dark cards with a gap between
+    draw.rectangle([150, 20, 210, 130], fill=0)
+    img.save(scene)
+
+    conn = connect(":memory:")
+    migrate(conn)
+    vrepo = VisionRepository(open_vision(":memory:"))
+    view = RecognitionView(conn, vision_repo=vrepo, vision_dir=tmp_path)
+    view._mode.setCurrentIndex(1)  # listing
+    view.add_image_paths([str(scene)])
+
+    view._cv_toggle.setChecked(True)  # emits toggled → detect + overlay
+    assert len(view._proposals) == 2
+    assert view._accept_btn.isEnabled()
+
+    view._cv_toggle.setChecked(False)  # toggling off discards overlays
+    assert view._proposals == []
+    assert not view._accept_btn.isEnabled()
+
+    view._cv_toggle.setChecked(True)
+    view._accept_proposals()  # promote all proposals to numbered boxes
+    assert len(view._sessions[0].boxes) == 2
+    assert view._proposals == []
+    assert not view._accept_btn.isEnabled()
+    view.deleteLater()
+
+
 def test_suggestions_notify_when_no_labeled_corpus(app, monkeypatch, tmp_path):
     from PySide6.QtCore import QRectF
     from PySide6.QtWidgets import QMessageBox
