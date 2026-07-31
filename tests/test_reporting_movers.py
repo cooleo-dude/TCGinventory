@@ -75,6 +75,21 @@ def test_price_movers_skip_cards_without_baseline(conn):
     assert rpt.top_gainers() == []  # can't measure movement → excluded
 
 
+def test_windowed_movers_fall_back_to_earliest_snapshot(conn):
+    # A window whose start predates all recorded history must still populate:
+    # baseline falls back to the card's earliest snapshot (regression — windows
+    # other than All Time were coming up empty on short price histories).
+    svc = TransactionService(conn)
+    rpt = ReportingService(conn)
+    a = buy(svc, "Ledian", 1000, 1000, "2026-07-25").lots[0].item_id
+    _snapshot(conn, a, 1600, "2026-07-25T00:00:00")  # only recent history
+    _price(conn, a, 1800)  # current
+
+    gainers = rpt.top_gainers(since="2026-05-01T00:00:00")  # window starts earlier
+    assert [g.item_id for g in gainers] == [a]
+    assert gainers[0].change_cents == 200  # 1800 − earliest 1600
+
+
 def test_realized_and_net_cash_respect_since(conn):
     svc = TransactionService(conn)
     rpt = ReportingService(conn)

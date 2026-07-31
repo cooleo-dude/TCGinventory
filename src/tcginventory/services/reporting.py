@@ -229,28 +229,38 @@ class ReportingService:
             )
         return out
 
+    def _earliest_prices(self) -> dict[int, int]:
+        """Each item's earliest recorded market-price snapshot."""
+        rows = self.conn.execute(
+            "SELECT ps.item_id AS item_id, ps.price_cents AS price "
+            "FROM price_snapshot ps JOIN ("
+            "  SELECT item_id, MIN(as_of) AS m FROM price_snapshot GROUP BY item_id"
+            ") t ON t.item_id = ps.item_id AND t.m = ps.as_of"
+        ).fetchall()
+        return {r["item_id"]: r["price"] for r in rows}
+
     def _baseline_prices(self, since: str | None) -> dict[int, int]:
         """Per-item baseline market price for the window.
 
-        ``since`` set → the latest snapshot on/before it (the window-start price).
-        ``since`` None (All Time) → each item's earliest recorded snapshot."""
-        if since is not None:
-            rows = self.conn.execute(
-                "SELECT ps.item_id AS item_id, ps.price_cents AS price "
-                "FROM price_snapshot ps JOIN ("
-                "  SELECT item_id, MAX(as_of) AS m FROM price_snapshot "
-                "  WHERE as_of <= ? GROUP BY item_id"
-                ") t ON t.item_id = ps.item_id AND t.m = ps.as_of",
-                (since,),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT ps.item_id AS item_id, ps.price_cents AS price "
-                "FROM price_snapshot ps JOIN ("
-                "  SELECT item_id, MIN(as_of) AS m FROM price_snapshot GROUP BY item_id"
-                ") t ON t.item_id = ps.item_id AND t.m = ps.as_of"
-            ).fetchall()
-        return {r["item_id"]: r["price"] for r in rows}
+        ``since`` None (All Time) → each item's earliest recorded snapshot.
+        ``since`` set → the latest snapshot on/before it (the window-start price);
+        for items with **no** snapshot that far back, fall back to their earliest
+        snapshot so a card that started being tracked mid-window still shows its
+        movement (otherwise a short price history would leave the movers empty)."""
+        if since is None:
+            return self._earliest_prices()
+        rows = self.conn.execute(
+            "SELECT ps.item_id AS item_id, ps.price_cents AS price "
+            "FROM price_snapshot ps JOIN ("
+            "  SELECT item_id, MAX(as_of) AS m FROM price_snapshot "
+            "  WHERE as_of <= ? GROUP BY item_id"
+            ") t ON t.item_id = ps.item_id AND t.m = ps.as_of",
+            (since,),
+        ).fetchall()
+        baseline = {r["item_id"]: r["price"] for r in rows}
+        for item_id, price in self._earliest_prices().items():
+            baseline.setdefault(item_id, price)
+        return baseline
 
     def top_gainers(
         self, intent: Intent | None = None, limit: int = 5, since: str | None = None
