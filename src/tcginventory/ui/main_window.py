@@ -40,6 +40,7 @@ from tcginventory.ui.views.dashboard import DashboardView
 from tcginventory.ui.views.history import HistoryView
 from tcginventory.ui.views.inventory import InventoryView
 from tcginventory.ui.views.market import PriceLookupView
+from tcginventory.ui.views.market_signal import MarketView
 from tcginventory.ui.views.recognition import RecognitionView
 from tcginventory.ui.views.transaction import TransactionView
 
@@ -52,6 +53,7 @@ NAV_ITEMS = [
     "Price Lookup",
     "eBay Auctions",
     "Recognition",
+    "Market",
 ]
 # Lucide icon per nav destination (see ui/icons.py).
 NAV_ICONS = {
@@ -63,6 +65,7 @@ NAV_ICONS = {
     "Price Lookup": "search",
     "eBay Auctions": "gavel",
     "Recognition": "scan-line",
+    "Market": "trending-up",
 }
 _TRANSACTION_INDEX = 1
 _REFRESH_STALE_HOURS = 12  # startup auto-refresh only if older than this
@@ -212,6 +215,7 @@ class MainWindow(QMainWindow):
 
         self._calendar = CalendarView(conn)
         self._recognition = RecognitionView(conn)
+        self._market = MarketView(conn)
         self._stack = QStackedWidget()
         self._stack.addWidget(self._dashboard)  # 0 Dashboard
         self._stack.addWidget(self._transaction)  # 1 Transaction
@@ -221,6 +225,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._price_lookup)  # 5 Price Lookup
         self._stack.addWidget(self._auctions)  # 6 eBay Auctions
         self._stack.addWidget(self._recognition)  # 7 Recognition
+        self._stack.addWidget(self._market)  # 8 Market
 
         # Keep read views current as the ledger changes.
         self._transaction.posted.connect(self._on_ledger_changed)
