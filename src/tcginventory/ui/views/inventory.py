@@ -3,30 +3,27 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime
+from datetime import date, timedelta
 from types import SimpleNamespace
 
-from PySide6.QtCharts import (
-    QChart,
-    QDateTimeAxis,
-    QLineSeries,
-    QValueAxis,
-)
 from PySide6.QtCore import (
-    QDateTime,
     QModelIndex,
+    QPointF,
     QSortFilterProxyModel,
     Qt,
     QThread,
-    QTimer,
     QUrl,
     Signal,
 )
 from PySide6.QtGui import (
+    QBrush,
+    QColor,
     QDesktopServices,
     QFont,
+    QLinearGradient,
     QPainter,
     QPainterPath,
+    QPen,
     QPixmap,
 )
 from PySide6.QtWidgets import (
@@ -63,7 +60,6 @@ from tcginventory.domain.enums import (
     Intent,
     Language,
 )
-from tcginventory.domain.models import PriceSnapshot
 from tcginventory.services import cardimages
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inventory import InventoryRow, InventoryService
@@ -72,7 +68,6 @@ from tcginventory.services.transactions import TransactionService
 from tcginventory.services.trends import TrendService
 from tcginventory.ui import theme
 from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
-from tcginventory.ui.charts import RangedChartView
 from tcginventory.ui.formatting import money
 from tcginventory.ui.models.inventory_model import (
     EBAY_COL,
@@ -175,6 +170,101 @@ class _PreviewPrefetchWorker(QThread):
             pass  # best-effort warming; never break the UI
         self.images, self.history, self.trends = images, history, trends
         self.resolved.emit()
+
+
+class _PricePlot(QWidget):
+    """A minimal Ember-styled price sparkline for the dossier: an accent market
+    line over an area-fill gradient, a dashed cost reference line, and an
+    emphasized endpoint dot. No axis/legend chrome — the dossier paints the
+    title + legend around it (matches the approved mock)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._prices: list[float] = []  # chronological market prices (USD)
+        self._cost: float | None = None
+        self._empty = "Select a card to see its price history."
+        self.setMinimumHeight(132)
+
+    def set_series(
+        self, prices: list[float], cost: float | None, empty: str | None = None
+    ) -> None:
+        self._prices = [p for p in prices if p is not None]
+        self._cost = cost
+        if empty is not None:
+            self._empty = empty
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        t = theme.active()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+
+        if len(self._prices) < 2:
+            p.setPen(QColor(t.ink3))
+            p.drawText(self.rect(), int(Qt.AlignCenter), self._empty)
+            p.end()
+            return
+
+        pad_l, pad_r, pad_t, pad_b = 6, 8, 10, 12
+        plot_w = max(1, w - pad_l - pad_r)
+        plot_h = max(1, h - pad_t - pad_b)
+        base_y = pad_t + plot_h
+
+        prices = self._prices
+        vals = list(prices) + ([self._cost] if self._cost is not None else [])
+        lo, hi = min(vals), max(vals)
+        span = (hi - lo) or 1.0
+        headroom = span * 0.14
+        lo -= headroom
+        hi += headroom
+        span = (hi - lo) or 1.0
+
+        def px(i: int) -> float:
+            return pad_l + plot_w * (i / (len(prices) - 1))
+
+        def py(v: float) -> float:
+            return pad_t + plot_h * (1 - (v - lo) / span)
+
+        pts = [QPointF(px(i), py(v)) for i, v in enumerate(prices)]
+
+        # Area fill under the line (accent → transparent).
+        area = QPainterPath()
+        area.moveTo(pts[0].x(), base_y)
+        for pt in pts:
+            area.lineTo(pt)
+        area.lineTo(pts[-1].x(), base_y)
+        area.closeSubpath()
+        grad = QLinearGradient(0, pad_t, 0, base_y)
+        top = QColor(t.accent)
+        top.setAlpha(64)
+        bot = QColor(t.accent)
+        bot.setAlpha(0)
+        grad.setColorAt(0.0, top)
+        grad.setColorAt(1.0, bot)
+        p.fillPath(area, QBrush(grad))
+
+        # Dashed cost reference line.
+        if self._cost is not None:
+            cy = py(self._cost)
+            pen = QPen(QColor(t.ink3), 1.3)
+            pen.setDashPattern([4, 4])
+            p.setPen(pen)
+            p.drawLine(QPointF(pad_l, cy), QPointF(pad_l + plot_w, cy))
+
+        # Market line.
+        line = QPainterPath()
+        line.moveTo(pts[0])
+        for pt in pts[1:]:
+            line.lineTo(pt)
+        p.setPen(QPen(QColor(t.accent), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawPath(line)
+
+        # Emphasized endpoint dot.
+        p.setBrush(QColor(t.accent))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(pts[-1], 3.5, 3.5)
+        p.end()
 
 
 class _InventoryFilterProxy(QSortFilterProxyModel):
@@ -399,20 +489,9 @@ class InventoryView(QWidget):
         self._empty.setAlignment(Qt.AlignCenter)
         self._empty.setVisible(False)
 
-        # -- price-history chart (last ~3 months) for the selected card.
-        # Rebuilding a QChart is heavy, so coalesce rapid hover/selection changes
-        # and build it just after the pointer settles — this also keeps single-
-        # click cell editing snappy (the click isn't blocked by a chart rebuild).
-        self._chart_view = RangedChartView(default_days=90)  # 3 Months by default
-        self._chart_view.setMinimumHeight(180)
-        self._pending_chart_row: InventoryRow | None = None
-        self._chart_timer = QTimer(self)
-        self._chart_timer.setSingleShot(True)
-        self._chart_timer.setInterval(120)
-        self._chart_timer.timeout.connect(
-            lambda: self._set_history_chart(self._pending_chart_row)
-        )
-        self._show_chart_message("Select a card to see its price history.")
+        # Custom price sparkline (last ~3 months) for the selected card — cheap
+        # to repaint, so it updates synchronously on hover/selection.
+        self._price_plot = _PricePlot()
 
         # -- body: the grid (left) beside a card "dossier" (right).
         grid_box = QWidget()
@@ -425,9 +504,13 @@ class InventoryView(QWidget):
         body = QSplitter(Qt.Horizontal)
         body.addWidget(grid_box)
         body.addWidget(self._build_dossier())
-        body.setStretchFactor(0, 3)
+        # The grid keeps a stable width (so the Card column stays modest, not
+        # ballooning); extra window width flows to the dossier so the card
+        # preview grows into it.
+        body.setStretchFactor(0, 2)
         body.setStretchFactor(1, 1)
         body.setChildrenCollapsible(False)
+        body.setSizes([980, 500])
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -473,22 +556,21 @@ class InventoryView(QWidget):
         )
 
     def _apply_column_widths(self) -> None:
-        """Give the chip/badge and link columns room; the Card (Name) column
-        stretches to absorb whatever's left."""
+        """Keep the finance/chip/link columns lean so the stretching Card (Name)
+        column stays modest — the freed horizontal space goes to the dossier."""
         for header, width in (
-            ("Cond/Grade", 88),
-            ("Intent", 84),
-            ("Trend", 52),
-            ("Acquired", 88),
-            ("Purchase Price", 96),
+            ("Cond/Grade", 78),
+            ("Intent", 78),
+            ("Trend", 46),
+            ("Acquired", 82),
+            ("Purchase Price", 90),
             ("Current Market", 104),
-            ("Unrealized G/L", 100),
-            ("Sold For", 82),
-            ("TCGplayer", 90),
-            ("eBay", 74),
+            ("Unrealized G/L", 104),
+            ("Sold For", 78),
+            ("TCGplayer", 74),
+            ("eBay", 62),
         ):
             self._table.setColumnWidth(self._col(header), width)
-        # Keep the Card (Name) column from collapsing under the stretch.
         self._table.horizontalHeader().setMinimumSectionSize(44)
 
     def _db_file(self) -> str | None:
@@ -543,16 +625,15 @@ class InventoryView(QWidget):
         row = self._selected_row()
         self._review_delegate.note_selected_item(row.item.id if row else None)
         self._update_dossier(row)
-        self._request_chart(row)
+        self._update_plot(row)
 
-    def _request_chart(self, row: InventoryRow | None) -> None:
-        """Debounce chart rebuilds (coalesces rapid hover/selection changes)."""
-        self._pending_chart_row = row
-        self._chart_timer.start()
-
-    def _set_history_chart(self, row: InventoryRow | None) -> None:
+    def _update_plot(self, row: InventoryRow | None) -> None:
+        """Feed the dossier sparkline with the selected card's last-3-months
+        market prices and its cost reference line."""
         if row is None:
-            self._show_chart_message("Select a card to see its price history.")
+            self._price_plot.set_series(
+                [], None, empty="Select a card to see its price history."
+            )
             return
         # Prefer the pre-fetched history; fall back to a live query only if the
         # background prefetch hasn't reached this item yet.
@@ -561,7 +642,17 @@ class InventoryView(QWidget):
             history = self._service.prices.history_for_item(
                 row.item.id, since=self._history_since()
             )
-        self._chart_view.setChart(_history_chart(row, history))
+        cutoff = (date.today() - timedelta(days=90)).isoformat()
+        prices = [
+            s.price_cents / 100.0
+            for s in (history or [])
+            if (s.as_of or "")[:10] >= cutoff
+        ]
+        self._price_plot.set_series(
+            prices,
+            row.purchase_price_cents / 100.0,
+            empty="No price history yet — use File ▸ Refresh prices.",
+        )
 
     def _on_row_hover(self, proxy_index: QModelIndex) -> None:
         row = self._model.row_at(self._proxy.mapToSource(proxy_index).row())
@@ -576,13 +667,8 @@ class InventoryView(QWidget):
                 row.item.name, row.item.set_name, row.item.card_number
             )
         self._preview_pane.show_card(*(res if res else (None, None)))
-        # Price-history graph for the hovered row (also persists on leave).
-        self._request_chart(row)
-
-    def _show_chart_message(self, text: str) -> None:
-        chart = QChart()
-        chart.setTitle(text)
-        self._chart_view.setChart(chart)
+        # Price sparkline for the hovered row (also persists on leave).
+        self._update_plot(row)
 
     def _open_link(self, proxy_index: QModelIndex) -> None:
         """Open a card's TCGplayer/eBay listing when its link cell is clicked."""
@@ -842,12 +928,14 @@ class InventoryView(QWidget):
 
     # -- card dossier -----------------------------------------------------
 
+    # (key, label). "return" and "sold" are conditionally coloured / shown.
     _FACTS = [
         ("sku", "SKU"),
         ("acquired", "Acquired"),
-        ("cost", "Cost / unit"),
-        ("market", "Market / unit"),
-        ("unrealized", "Unrealized / unit"),
+        ("cost", "Cost basis"),
+        ("market", "Market"),
+        ("unrealized", "Unrealized"),
+        ("return", "Return"),
         ("sold", "Sold for"),
     ]
 
@@ -857,13 +945,12 @@ class InventoryView(QWidget):
         panel.setObjectName("dossier")
         panel.setStyleSheet(
             f"QFrame#dossier{{background:{t.surface};border:1px solid {t.line};"
-            "border-radius:12px;}"
+            "border-radius:14px;}"
         )
-        panel.setMinimumWidth(288)
-        panel.setMaximumWidth(430)
+        panel.setMinimumWidth(360)
         v = QVBoxLayout(panel)
-        v.setContentsMargins(14, 12, 14, 12)
-        v.setSpacing(9)
+        v.setContentsMargins(16, 14, 16, 14)
+        v.setSpacing(10)
 
         cap = QLabel("SELECTED CARD")
         cap.setStyleSheet(
@@ -871,43 +958,75 @@ class InventoryView(QWidget):
         )
         v.addWidget(cap)
 
+        # Large card art — expands to fill the freed dossier width/height. The
+        # pane's own policy is Ignored/Ignored, so drive its vertical size here.
+        self._preview_pane.set_border(t.line2)
+        self._preview_pane._MAX_W = 520  # let art scale up in the wider dossier
+        self._preview_pane.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self._preview_pane.setMinimumHeight(240)
+        v.addWidget(self._preview_pane, 1)
+
         self._dossier_name = QLabel("—")
         self._dossier_name.setStyleSheet(
-            f"color:{t.ink};font-size:15px;font-weight:700;"
+            f"color:{t.ink};font-size:16px;font-weight:700;"
         )
         self._dossier_name.setWordWrap(True)
         v.addWidget(self._dossier_name)
 
         self._dossier_sub = QLabel("")
-        self._dossier_sub.setStyleSheet(f"color:{t.ink3};font-size:11px;")
+        self._dossier_sub.setFont(self._mono(10.5))
+        self._dossier_sub.setStyleSheet(f"color:{t.ink3};")
         self._dossier_sub.setWordWrap(True)
         v.addWidget(self._dossier_sub)
 
-        # Fixed art region (the pane's own policy is Ignored/Ignored, so reserve
-        # its height explicitly or the layout collapses it).
-        self._preview_pane.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        self._preview_pane.setFixedHeight(230)
-        v.addWidget(self._preview_pane, 0, Qt.AlignHCenter)
-
+        # Facts — a 2-column grid of key-over-value blocks.
         facts = QGridLayout()
-        facts.setContentsMargins(0, 2, 0, 2)
-        facts.setHorizontalSpacing(10)
-        facts.setVerticalSpacing(5)
+        facts.setContentsMargins(0, 4, 0, 2)
+        facts.setHorizontalSpacing(16)
+        facts.setVerticalSpacing(10)
         self._fact_vals: dict[str, QLabel] = {}
         for i, (key, label) in enumerate(self._FACTS):
-            k = QLabel(label)
-            k.setStyleSheet(f"color:{t.ink3};font-size:11px;")
+            cell = QVBoxLayout()
+            cell.setSpacing(1)
+            k = QLabel(label.upper())
+            k.setStyleSheet(
+                f"color:{t.ink3};font-size:10px;font-weight:700;letter-spacing:.4px;"
+            )
             val = QLabel("—")
-            val.setFont(self._mono(11.5))
-            val.setStyleSheet(f"color:{t.ink2};")
-            val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            facts.addWidget(k, i, 0)
-            facts.addWidget(val, i, 1)
+            val.setFont(self._mono(13, bold=True))
+            val.setStyleSheet(f"color:{t.ink};")
+            cell.addWidget(k)
+            cell.addWidget(val)
+            facts.addLayout(cell, i // 2, i % 2)
             self._fact_vals[key] = val
         facts.setColumnStretch(0, 1)
+        facts.setColumnStretch(1, 1)
         v.addLayout(facts)
 
-        v.addWidget(self._chart_view, 1)
+        # Sparkline section: divider + title/legend + the plot.
+        chart_box = QVBoxLayout()
+        chart_box.setContentsMargins(0, 6, 0, 0)
+        chart_box.setSpacing(6)
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet(f"background:{t.line};")
+        chart_box.addWidget(divider)
+        head = QHBoxLayout()
+        title = QLabel("Market price · 3M")
+        title.setStyleSheet(f"color:{t.ink2};font-size:11px;font-weight:600;")
+        legend = QLabel(
+            f"<span style='color:{t.accent};font-weight:900'>—</span>"
+            f"<span style='color:{t.ink3}'> Market &nbsp;&nbsp;</span>"
+            f"<span style='color:{t.ink3};font-weight:900'>--</span>"
+            f"<span style='color:{t.ink3}'> Cost</span>"
+        )
+        legend.setStyleSheet("font-size:10px;")
+        head.addWidget(title)
+        head.addStretch(1)
+        head.addWidget(legend)
+        chart_box.addLayout(head)
+        chart_box.addWidget(self._price_plot)
+        v.addLayout(chart_box)
         return panel
 
     def _update_dossier(self, row: InventoryRow | None) -> None:
@@ -918,9 +1037,10 @@ class InventoryView(QWidget):
             self._dossier_name.setText("—")
             self._dossier_sub.setText("Select a card to see its details.")
             self._preview_pane.show_card(None, None)
-            for val in self._fact_vals.values():
+            for key, val in self._fact_vals.items():
                 val.setText("—")
-                val.setStyleSheet(f"color:{t.ink2};")
+                val.setStyleSheet(f"color:{t.ink3};")
+                val.setVisible(key != "sold")  # Sold-for hidden until relevant
             return
         self._dossier_name.setText(row.item.name)
         self._dossier_sub.setText(subline_for(row))
@@ -931,26 +1051,35 @@ class InventoryView(QWidget):
         if res and cardimages.cache_path(res[0]).exists():
             self._preview_pane.show_card(*res)
 
-        self._fact_vals["sku"].setText(row.sku or "—")
-        self._fact_vals["acquired"].setText(row.acquired_at or "—")
-        self._fact_vals["cost"].setText(money(row.purchase_price_cents))
+        def set_val(key: str, text: str, color: str) -> None:
+            val = self._fact_vals[key]
+            val.setText(text)
+            val.setStyleSheet(f"color:{color};")
+            val.setVisible(True)
+
+        set_val("sku", row.sku or "—", t.ink2)
+        set_val("acquired", row.acquired_at or "—", t.ink2)
+        set_val("cost", money(row.purchase_price_cents), t.ink)
         cur = row.current_price_cents
-        self._fact_vals["market"].setText(money(cur) if cur is not None else "—")
+        set_val("market", money(cur) if cur is not None else "—", t.ink)
+
         unreal = row.unrealized_cents
-        gl = self._fact_vals["unrealized"]
         if unreal is None:
-            gl.setText("—")
-            gl.setStyleSheet(f"color:{t.ink2};")
+            set_val("unrealized", "—", t.ink3)
+            set_val("return", "—", t.ink3)
         else:
-            gl.setText(f"{'+' if unreal >= 0 else '−'}{money(abs(unreal))}")
-            gl.setStyleSheet(f"color:{t.pos if unreal >= 0 else t.neg};")
-        sold = self._fact_vals["sold"]
+            sign = "+" if unreal >= 0 else "−"
+            color = t.pos if unreal >= 0 else t.neg
+            set_val("unrealized", f"{sign}{money(abs(unreal))}", color)
+            cost = row.purchase_price_cents
+            pct = (unreal / cost * 100) if cost else 0.0
+            set_val("return", f"{pct:+.0f}%", color)
+
+        # Sold-for only appears once some of the lot has actually sold.
         if row.sold_price_cents is not None:
-            sold.setText(money(row.sold_price_cents))
-            sold.setStyleSheet(f"color:{t.ink2};")
+            set_val("sold", money(row.sold_price_cents), t.ink2)
         else:
-            sold.setText("—")
-            sold.setStyleSheet(f"color:{t.ink3};")
+            self._fact_vals["sold"].setVisible(False)
 
     # -- row thumbnails ---------------------------------------------------
 
@@ -991,65 +1120,3 @@ class InventoryView(QWidget):
         painter.end()
         out.setDevicePixelRatio(ratio)
         return out
-
-
-def _to_msecs(iso: str) -> float:
-    try:
-        dt = datetime.fromisoformat(iso)
-    except ValueError:
-        dt = datetime.fromisoformat(iso[:10])
-    return dt.timestamp() * 1000.0
-
-
-def _history_chart(row: InventoryRow, snapshots: list[PriceSnapshot]) -> QChart:
-    chart = QChart()
-    name = row.item.name
-    if not snapshots:
-        chart.setTitle(f"{name} — no price history yet (use File ▸ Refresh prices)")
-        return chart
-    chart.setTitle(f"{name} — market price")
-
-    price = QLineSeries()
-    price.setName("Market price")
-    xs = []
-    for snap in snapshots:
-        x = _to_msecs(snap.as_of)
-        xs.append(x)
-        price.append(x, snap.price_cents / 100.0)
-    chart.addSeries(price)
-
-    # Flat per-unit reference lines across the same date span.
-    x0, x1 = min(xs), max(xs)
-    flat_values = [
-        ("Cost", row.purchase_price_cents / 100.0),
-        ("Market at ToP", row.market_at_purchase_cents / 100.0),
-    ]
-    flat_series = []
-    for label, value in flat_values:
-        line = QLineSeries()
-        line.setName(label)
-        line.append(x0, value)
-        line.append(x1, value)
-        chart.addSeries(line)
-        flat_series.append(line)
-
-    axis_x = QDateTimeAxis()
-    axis_x.setFormat("MMM d")
-    axis_x.setTitleText("Date")
-    chart.addAxis(axis_x, Qt.AlignBottom)
-    axis_y = QValueAxis()
-    axis_y.setTitleText("USD")
-    chart.addAxis(axis_y, Qt.AlignLeft)
-    for series in (price, *flat_series):
-        series.attachAxis(axis_x)
-        series.attachAxis(axis_y)
-
-    ys = [s.price_cents / 100.0 for s in snapshots] + [v for _, v in flat_values]
-    axis_x.setRange(
-        QDateTime.fromMSecsSinceEpoch(int(min(xs))),
-        QDateTime.fromMSecsSinceEpoch(int(max(xs))),
-    )
-    low, high = min(ys), max(ys)
-    pad = max(1.0, (high - low) * 0.1)
-    axis_y.setRange(low - pad, high + pad)
-    return chart

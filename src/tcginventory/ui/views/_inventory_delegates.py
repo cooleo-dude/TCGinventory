@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QRect, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath
-from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
+from PySide6.QtWidgets import QStyle, QStyledItemDelegate
 
 from tcginventory.ui import theme
 from tcginventory.ui.models.inventory_model import INVROW_ROLE, subline_for
@@ -20,14 +20,16 @@ _THUMB_W, _THUMB_H = 26, 36
 _ROW_H = 46
 
 
-def _row_bg(painter: QPainter, option, t) -> None:
+def _row_bg(painter: QPainter, option, t, row: int) -> None:
     """Fill the standard row background (base / zebra / hover / selection) so a
-    custom-painted cell matches the plainly-painted columns beside it."""
-    alt = bool(option.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
+    custom-painted cell matches the plainly-painted columns beside it. ``row`` is
+    the view row index — the view alternates on the same parity, so deriving the
+    zebra from it keeps custom cells aligned with the native ones."""
+    alt = row % 2 == 1
     painter.fillRect(option.rect, QColor(t.zebra if alt else t.surface))
     if option.state & QStyle.State_Selected:
         wash = QColor(t.accent)
-        wash.setAlpha(34)
+        wash.setAlpha(38)  # ≈ accent_soft (0.15) — matches native cell selection
         painter.fillRect(option.rect, wash)
         painter.fillRect(
             QRect(option.rect.left(), option.rect.top(), 2, option.rect.height()),
@@ -75,7 +77,7 @@ class CardCellDelegate(QStyledItemDelegate):
         t = theme.active()
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
-        _row_bg(painter, option, t)
+        _row_bg(painter, option, t, index.row())
         row = index.data(INVROW_ROLE)
         r = option.rect
 
@@ -155,7 +157,7 @@ class BadgeDelegate(ComboDelegate):
         t = theme.active()
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
-        _row_bg(painter, option, t)
+        _row_bg(painter, option, t, index.row())
         text = index.data(Qt.DisplayRole) or ""
         if text:
             row = index.data(INVROW_ROLE)
@@ -184,7 +186,7 @@ class IntentChipDelegate(IntentDelegate):
         t = theme.active()
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
-        _row_bg(painter, option, t)
+        _row_bg(painter, option, t, index.row())
         val = index.data(Qt.DisplayRole) or ""
         if val:
             color = {
