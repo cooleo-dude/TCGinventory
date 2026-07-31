@@ -40,6 +40,7 @@ from tcginventory.ui.views.history import HistoryView
 from tcginventory.ui.views.inventory import InventoryView
 from tcginventory.ui.views.market import PriceLookupView
 from tcginventory.ui.views.recognition import RecognitionView
+from tcginventory.ui.views.shows import ShowsView
 from tcginventory.ui.views.transaction import TransactionView
 
 NAV_ITEMS = [
@@ -47,6 +48,7 @@ NAV_ITEMS = [
     "Transaction",
     "Inventory",
     "History",
+    "Card Shows",
     "Price Lookup",
     "eBay Auctions",
     "Recognition",
@@ -197,15 +199,17 @@ class MainWindow(QMainWindow):
             conn, auctions_conn=open_auctions(None if self._db_file else ":memory:")
         )
 
+        self._shows = ShowsView(conn)
+        self._recognition = RecognitionView(conn)
         self._stack = QStackedWidget()
         self._stack.addWidget(self._dashboard)  # 0 Dashboard
         self._stack.addWidget(self._transaction)  # 1 Transaction
         self._stack.addWidget(self._inventory)  # 2 Inventory
         self._stack.addWidget(self._history)  # 3 History
-        self._recognition = RecognitionView(conn)
-        self._stack.addWidget(self._price_lookup)  # 4 Price Lookup
-        self._stack.addWidget(self._auctions)  # 5 eBay Auctions
-        self._stack.addWidget(self._recognition)  # 6 Recognition
+        self._stack.addWidget(self._shows)  # 4 Card Shows
+        self._stack.addWidget(self._price_lookup)  # 5 Price Lookup
+        self._stack.addWidget(self._auctions)  # 6 eBay Auctions
+        self._stack.addWidget(self._recognition)  # 7 Recognition
 
         # Keep read views current as the ledger changes.
         self._transaction.posted.connect(self._on_ledger_changed)
@@ -215,8 +219,10 @@ class MainWindow(QMainWindow):
         self._auctions.export_to_transaction.connect(self._export_from_auction)
 
         self._nav = QListWidget()
+        self._nav.setObjectName("nav")
         self._nav.addItems(NAV_ITEMS)
-        self._nav.setMaximumWidth(180)
+        self._nav.setMinimumWidth(168)
+        self._nav.setMaximumWidth(200)
         self._nav.currentRowChanged.connect(self._on_nav_changed)
 
         splitter = QSplitter()

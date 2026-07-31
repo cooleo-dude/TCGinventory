@@ -208,7 +208,7 @@ class RangeSelector(QWidget):
         for label, days in _RANGES:
             button = QPushButton(label)
             button.setCheckable(True)
-            button.setFixedWidth(64)
+            button.setFixedWidth(76)
             button.clicked.connect(lambda _=False, d=days: self._select(d))
             self._group.addButton(button)
             layout.addWidget(button)
@@ -229,8 +229,11 @@ class RangedChartView(QWidget):
 
     Drop-in for the plain chart view: ``setChart`` / ``chart`` behave the same,
     and the selected range is (re)applied automatically whenever a chart is set
-    or the range changes.
+    or the range changes. ``range_changed`` lets a host (e.g. the Dashboard) use
+    the selector as a shared time filter for its other displays.
     """
+
+    range_changed = Signal(object)  # int days | None (All Time)
 
     def __init__(self, default_days: int | None = None, parent=None) -> None:
         super().__init__(parent)
@@ -249,5 +252,10 @@ class RangedChartView(QWidget):
     def chart(self) -> QChart | None:
         return self._view.chart()
 
+    def days(self) -> int | None:
+        """The currently-selected window in days (None = All Time)."""
+        return self._range.days()
+
     def _on_range_changed(self, days: int | None) -> None:
         apply_date_range(self._view.chart(), days)
+        self.range_changed.emit(days)

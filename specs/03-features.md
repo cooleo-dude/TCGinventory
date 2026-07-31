@@ -75,6 +75,15 @@ maintained afterward.
 | F-VW-8 | Dashboard charts filterable by intent (all / personal / resale / ripping). | SHOULD |
 | F-VW-9 | **Every** card/inventory attribute is filterable **and** sortable in the Inventory view (incl. sold status, intent, value ranges). | MUST |
 | F-VW-10 | **Ripping** lots are valued at $0 (shown as an unrealized loss = cost basis), stay visible in inventory, and are never offered as sellable. | MUST |
+| F-VW-11 | Dashboard **Highlights**: Top Gainers / Top Losers (by unrealized $), Top Sellers (units sold, trailing 90 days) and Upcoming Shows (attending/walking only). Movers reflect a **resale** business view. | SHOULD |
+
+> **Movers — current exclusions (V1).** The Top Gainers / Losers / Sellers
+> windows currently **exclude graded slabs and items marked for review**, in
+> addition to personal and ripping lots. A graded card's value and a reviewed
+> item's value aren't tracked consistently yet (user-maintained, with no reliable
+> automatic feed), so they can't be ranked by market movement. Ways to include
+> them (e.g. a graded-price source, or ranking reviewed items by their maintained
+> value) will be explored in a future iteration.
 
 ## Search & filter
 

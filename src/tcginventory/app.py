@@ -167,9 +167,11 @@ def main() -> int:
 
     from tcginventory.ui.assets import app_icon
     from tcginventory.ui.main_window import MainWindow
+    from tcginventory.ui.theme import apply_theme
 
     app = QApplication(sys.argv)
     app.setApplicationName(config.APP_NAME)
+    apply_theme(app)  # Neon Slate: Fusion + IBM Plex + palette/QSS
     app.setWindowIcon(app_icon())
     window = MainWindow(conn)
     window.show()

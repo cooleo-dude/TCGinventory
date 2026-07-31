@@ -24,6 +24,12 @@ datas += [
     (os.path.join(assets, "icon.png"), "tcginventory/ui/assets"),
     (icon_ico, "tcginventory/ui/assets"),
 ]
+# Bundled UI fonts (IBM Plex Sans/Mono) — the Neon Slate theme registers these
+# at startup; ship them so the frozen app looks identical without system installs.
+datas += [
+    (font, "tcginventory/ui/assets/fonts")
+    for font in glob.glob(os.path.join(assets, "fonts", "*.ttf"))
+]
 # DINOv2 identifier weights (LFS in the repo, ~88 MB) — bundled so the frozen
 # app is fully offline and self-contained.
 datas += [
