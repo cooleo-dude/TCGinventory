@@ -4,6 +4,22 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-31 — Part 2 feedback: confirmed autofill writes back to the corpus
+
+- Closes the learning loop: `services/corpus.py` `ingest_labeled_scene` stores a
+  confirmed scene as a capture + a region per box (**detector** data) + a crop
+  exemplar per identified box (**identifier** data). `inference.build_pipeline`
+  now returns a `Pipeline` object exposing `repo` + `recognizer`, and
+  `inference.write_back` feeds accepted cards back — **best-effort** (never
+  disrupts the entry; no-op when the pipeline has no repo, e.g. a test fake).
+- **Corrections are captured, not lost:** the `AutofillDialog` Name field
+  autocompletes from the catalog, so re-picking a card on a disagreement yields a
+  real `card_id` → a new exemplar for the *correct* card (the highest-value
+  label). Free-typed text stays unidentified (region only). `resolved_id` keeps
+  the id from an accepted-unedited guess or a re-pick.
+- Every autofilled purchase/auction now also trains the models; the Recognition
+  window remains the dedicated bulk-annotation path.
+
 ### 2026-07-31 — Part 2: image inference autofill in Transaction & Auction
 
 - `services/inference.py` ties the detector + identity matcher together:

@@ -150,7 +150,11 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   (scene + numbered boxes + editable guesses, ⚠ low-confidence, per-row
   include/qty) and adds the confirmed cards as rows (reusing `apply_catalog_card`
   + `_request_price`). Detect-only with an empty corpus; sharpens as it grows.
-  **Remaining:** corrections flowing back into the training corpus.
+  **Feedback loop closed:** confirmed cards flow back into the corpus
+  (`services/corpus.py` `ingest_labeled_scene` → capture + region per box +
+  crop exemplar per identified card), and the dialog's Name field autocompletes
+  so **corrections re-pick a real card_id** (disagreements captured as exemplars,
+  not lost). So every autofilled purchase/auction also trains the models.
 - **M-V3** — condition assessment (uses card **backs**; identity uses **fronts**).
 - **M-Market** — liquidity / markup analytics (ledger + price history; no vision).
 
