@@ -511,7 +511,7 @@ class HistoryView(QWidget):
         self._table = QTableView()
         self._table.setModel(self._proxy)
         self._table.setSortingEnabled(True)
-        self._table.sortByColumn(0, Qt.AscendingOrder)
+        self._table.sortByColumn(0, Qt.DescendingOrder)  # newest first (today → back)
         self._table.setItemDelegate(_PillDelegate(self._table))
         self._table.setItemDelegateForColumn(CARDS_COL, _ThumbDelegate(self._table))
         self._table.verticalHeader().setDefaultSectionSize(40)  # room for thumbnails
