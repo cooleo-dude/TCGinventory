@@ -111,6 +111,9 @@ def test_history_view_populates_and_details(app, seeded_conn):
     from tcginventory.ui.views.history import HistoryView
 
     view = HistoryView(seeded_conn)
+    view.resize(900, 600)
+    view.show()  # force a render so the pill delegate paints
+    app.processEvents()
     assert view._model.rowCount() >= 6
     # Selecting a row populates the bottom item table (SKU, name, price, …).
     view._table.selectRow(0)
@@ -118,7 +121,52 @@ def test_history_view_populates_and_details(app, seeded_conn):
     assert view._detail_table.rowCount() > 0
     assert view._detail_table.columnCount() == 8
     assert "Select a transaction" not in view._detail_header.text()  # filled in
+    view.close()
     view.deleteLater()
+
+
+def test_history_search_matches_card_or_counterparty(app):
+    from conftest import incoming
+    from tcginventory.services.transactions import (
+        TransactionRequest,
+        TransactionService,
+    )
+    from tcginventory.ui.views.history import HistoryView
+
+    conn = connect(":memory:")
+    migrate(conn)
+    svc = TransactionService(conn)
+    svc.post(
+        TransactionRequest(
+            occurred_at="2026-01-01",
+            cash_out_cents=1000,
+            incoming=[incoming("Charizard ex", 1000)],
+            counterparty="eBay",
+        )
+    )
+    svc.post(
+        TransactionRequest(
+            occurred_at="2026-01-02",
+            cash_out_cents=500,
+            incoming=[incoming("Blastoise", 500)],
+            counterparty="Card Cavern",
+        )
+    )
+
+    view = HistoryView(conn)
+    assert view._proxy.rowCount() == 2
+    view._search.setText("chari")  # matches a card name
+    assert view._proxy.rowCount() == 1
+    view._search.setText("cavern")  # matches a counterparty
+    assert view._proxy.rowCount() == 1
+    view._search.setText("zzzz")  # matches nothing → the "no match" empty state
+    assert view._proxy.rowCount() == 0
+    assert view._stack.currentWidget() is view._no_match
+    view._search.clear()
+    assert view._proxy.rowCount() == 2
+    assert view._stack.currentWidget() is view._table
+    view.deleteLater()
+    conn.close()
 
 
 def test_dashboard_builds_charts(app, seeded_conn):

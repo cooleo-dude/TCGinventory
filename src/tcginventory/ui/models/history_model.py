@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QBrush, QColor, QFont
 
 from tcginventory.domain.enums import TransactionStatus
 from tcginventory.domain.models import Transaction
@@ -83,6 +83,8 @@ class HistoryTableModel(QAbstractTableModel):
             return row.items_label + "\n\n(click to view the full list)"
         if role == Qt.TextAlignmentRole and col in (3, 4):
             return int(Qt.AlignRight | Qt.AlignVCenter)
+        if role == Qt.FontRole and col in (0, 3, 4):  # date + money → mono, aligned
+            return QFont(theme.mono_family())
         if role == Qt.ForegroundRole:
             if voided:
                 return QBrush(_muted())

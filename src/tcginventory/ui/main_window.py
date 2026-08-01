@@ -258,6 +258,9 @@ class MainWindow(QMainWindow):
         self._history.changed.connect(self._on_ledger_changed)
         self._inventory.changed.connect(self._on_ledger_changed)
         self._history.edit_requested.connect(self._start_edit)
+        self._history.new_transaction_requested.connect(
+            lambda: self._nav.setCurrentRow(_TRANSACTION_INDEX)
+        )
         self._auctions.export_to_transaction.connect(self._export_from_auction)
 
         self._nav = QListWidget()
