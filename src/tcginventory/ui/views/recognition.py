@@ -13,6 +13,7 @@ from. Auto box-proposals (classic-CV / YOLO) toggle in here later.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass, field
 
@@ -268,6 +269,7 @@ class RecognitionView(QWidget):
         vision_repo=None,
         vision_dir=None,
         recognizer=None,
+        prewarm: bool = False,
     ) -> None:
         super().__init__()
         self._conn = conn
@@ -401,6 +403,19 @@ class RecognitionView(QWidget):
         layout.addWidget(canvas_split, 1)
         self._empty.setVisible(True)
         self._view.setVisible(False)
+
+        # Warm the (heavy) identity model on a background thread so the first
+        # Suggest / Transaction-autofill doesn't freeze on the model load. Uses a
+        # process-wide shared embedder, so both windows benefit. Off by default,
+        # and skipped under pytest, so headless tests don't load the model.
+        if prewarm and "PYTEST_CURRENT_TEST" not in os.environ:
+            import threading
+
+            from tcginventory.services import recognizer as _recognizer
+
+            threading.Thread(
+                target=_recognizer.prewarm, name="tcgi-vision-prewarm", daemon=True
+            ).start()
 
     # -- mode ---------------------------------------------------------------
 

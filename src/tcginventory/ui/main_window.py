@@ -214,7 +214,7 @@ class MainWindow(QMainWindow):
         )
 
         self._calendar = CalendarView(conn)
-        self._recognition = RecognitionView(conn)
+        self._recognition = RecognitionView(conn, prewarm=True)
         self._market = MarketView(conn)
         self._stack = QStackedWidget()
         self._stack.addWidget(self._dashboard)  # 0 Dashboard

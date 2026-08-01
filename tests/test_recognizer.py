@@ -95,6 +95,25 @@ def test_suggest_skips_candidates_without_a_reference(repo, tmp_path):
     assert [s.card_id for s in out] == ["A"]
 
 
+def test_prewarm_caches_the_shared_embedder(monkeypatch):
+    import tcginventory.services.recognizer as rec
+
+    monkeypatch.setattr(rec, "_shared_embedder", None)
+    calls = {"n": 0}
+    sentinel = object()
+
+    def fake_build():
+        calls["n"] += 1
+        return sentinel
+
+    monkeypatch.setattr(rec, "build_embedder", fake_build)
+
+    rec.prewarm()  # loads once (as a bg thread would)
+    assert calls["n"] == 1
+    assert rec.get_shared_embedder() is sentinel  # reused, not rebuilt
+    assert calls["n"] == 1
+
+
 def test_suggest_caches_exemplar_index_across_boxes(repo, tmp_path):
     emb = PixelEmbedder(32)
     cap = repo.add_capture()

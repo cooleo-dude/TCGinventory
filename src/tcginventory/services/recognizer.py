@@ -21,6 +21,7 @@ Qt-free. Vectors are L2-normalised, so a dot product is the cosine similarity.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -145,6 +146,30 @@ def build_embedder():
     return PixelEmbedder()
 
 
+_shared_embedder = None
+_shared_embedder_lock = threading.Lock()
+
+
+def get_shared_embedder():
+    """The process-wide embedder, built once and reused across recognizers.
+
+    The ONNX session is loaded lazily and cached; it is thread-safe to run from
+    the main thread after loading (unlike a SQLite connection), so ``prewarm``
+    may load it on a background thread."""
+    global _shared_embedder
+    with _shared_embedder_lock:
+        if _shared_embedder is None:
+            _shared_embedder = build_embedder()
+        return _shared_embedder
+
+
+def prewarm() -> None:
+    """Load the shared embedder now — call on a background thread when a vision
+    window opens so the first suggestion/autofill doesn't pay the model-load
+    freeze. A no-op once loaded."""
+    get_shared_embedder()
+
+
 @dataclass(frozen=True)
 class Suggestion:
     card_id: str
@@ -161,7 +186,7 @@ class Recognizer:
         reference_image: Callable[[str], str | Path | None] | None = None,
     ) -> None:
         self._repo = repo
-        self._embedder = embedder or build_embedder()
+        self._embedder = embedder or get_shared_embedder()
         # card_id -> reference image path (defaults set by the caller/UI).
         self._reference_image = reference_image
         # Parsed exemplar index, cached across a scene's boxes; rebuilt when the
