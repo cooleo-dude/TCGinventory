@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from tcginventory.data.db import connect
 from tcginventory.data.repositories import (
     CardCatalogRepository,
     ItemRepository,
@@ -275,23 +276,42 @@ def _rounded(x: float, y: float, w: float, h: float, r: float) -> QPainterPath:
     return path
 
 
-class _ImageWarmer(QThread):
-    """Fetches card thumbnails off the UI thread from pre-resolved (id, url)
-    pairs (no DB access), pinging the view to repaint as they arrive."""
+class _ThumbResolver(QThread):
+    """Resolves card art entirely off the UI thread: opens its own connection to
+    the DB file, maps each (name, set, number) to a catalog card + image URL,
+    caches the bytes, and emits the resolved ids per row as it goes. Keeping the
+    catalog lookups off the main thread is what keeps History's refresh instant.
+    """
 
-    progress = Signal()
+    resolved = Signal(int, int, list)  # (generation, source_row, [card_id|None])
 
-    def __init__(self, jobs: list, parent=None) -> None:
+    def __init__(self, db_file: str, generation: int, jobs: list, parent=None) -> None:
         super().__init__(parent)
-        self._jobs = jobs
+        self._db_file = db_file
+        self._generation = generation
+        self._jobs = jobs  # list[(source_row, [(name, set, number), ...])]
 
     def run(self) -> None:
-        for card_id, url in self._jobs:
-            if self.isInterruptionRequested():
-                return
-            if not cardimages.is_cached(card_id):
-                if cardimages.ensure_cached(card_id, url):
-                    self.progress.emit()
+        conn = connect(self._db_file)
+        try:
+            catalog = CardCatalogRepository(conn)
+            for source_row, idents in self._jobs:
+                if self.isInterruptionRequested():
+                    return
+                ids: list[str | None] = []
+                for name, set_name, number in idents:
+                    resolved = catalog.image_for(name, set_name, number)
+                    if resolved:
+                        card_id, url = resolved
+                        ids.append(card_id)
+                        if url and not cardimages.is_cached(card_id):
+                            cardimages.ensure_cached(card_id, url)
+                    else:
+                        ids.append(None)
+                if any(ids):
+                    self.resolved.emit(self._generation, source_row, ids)
+        finally:
+            conn.close()
 
 
 class _HistoryFilterProxy(QSortFilterProxyModel):
@@ -461,7 +481,9 @@ class HistoryView(QWidget):
         self._reporting = ReportingService(conn)
         self._service = TransactionService(conn)
         self._catalog = CardCatalogRepository(conn)
-        self._warmer: _ImageWarmer | None = None
+        self._db_file = self._resolve_db_file(conn)
+        self._resolver: _ThumbResolver | None = None
+        self._thumb_gen = 0  # bumps each refresh so stale resolver emits are ignored
 
         self._model = HistoryTableModel()
         self._proxy = _HistoryFilterProxy()
@@ -515,6 +537,10 @@ class HistoryView(QWidget):
         self._table.setItemDelegate(_PillDelegate(self._table))
         self._table.setItemDelegateForColumn(CARDS_COL, _ThumbDelegate(self._table))
         self._table.verticalHeader().setDefaultSectionSize(40)  # room for thumbnails
+        # Size columns from a small sample of rows, not all of them — resizing to
+        # contents over the whole log (with the pill/thumbnail delegates' size
+        # hints) is what made refresh slow; 25 rows is ample for these widths.
+        self._table.horizontalHeader().setResizeContentsPrecision(25)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -654,40 +680,33 @@ class HistoryView(QWidget):
         self._search.clear()
 
     def refresh(self) -> None:
-        jobs: list[tuple[str, str]] = []
+        # Build the rows with only cheap data (card *count* for the thumbnail
+        # count); the actual card-art resolution + fetch happens off-thread.
+        jobs: list[tuple[int, list]] = []
         rows: list[HistoryRow] = []
-        for txn in self._txns.list_all():
+        for source_row, txn in enumerate(self._txns.list_all()):
             items = self._txn_items(txn.id)
-            thumb_ids: list[str | None] = []
-            for item in items[:3]:  # up to three thumbnails per row
-                resolved = self._catalog.image_for(
-                    item.name, item.set_name, item.card_number
-                )
-                if resolved:
-                    card_id, url = resolved
-                    thumb_ids.append(card_id)
-                    if url and not cardimages.is_cached(card_id):
-                        jobs.append((card_id, url))
-                else:
-                    thumb_ids.append(None)
             labels = [f"{it.name} {it.card_number or ''}".strip() for it in items]
+            idents = [(it.name, it.set_name, it.card_number) for it in items[:3]]
             rows.append(
                 HistoryRow(
                     transaction=txn,
                     margin_cents=self._reporting.transaction_margin_cents(txn.id),
                     proceeds_cents=self._reporting.transaction_proceeds_cents(txn.id),
                     items_label=", ".join(labels),
-                    thumb_ids=thumb_ids,
+                    thumb_ids=[None] * len(idents),  # filled in by the resolver
                     card_count=len(items),
                 )
             )
+            if idents:
+                jobs.append((source_row, idents))
         self._model.set_rows(rows)
         self._table.resizeColumnsToContents()
         self._table.horizontalHeader().setStretchLastSection(True)
         self._clear_detail()
         self._update_stats()
         self._update_state()
-        self._start_warmer(jobs)
+        self._start_resolver(jobs)
 
     def _txn_items(self, transaction_id: int) -> list[Item]:
         items = []
@@ -697,23 +716,52 @@ class HistoryView(QWidget):
                 items.append(item)
         return items
 
-    def _start_warmer(self, jobs: list[tuple[str, str]]) -> None:
-        self._stop_warmer()
+    @staticmethod
+    def _resolve_db_file(conn: sqlite3.Connection) -> str | None:
+        """Path of the main DB file, or None for an in-memory DB (tests)."""
+        try:
+            row = conn.execute("PRAGMA database_list").fetchone()
+        except sqlite3.Error:
+            return None
+        path = row[2] if row else ""  # (seq, name, file); '' for :memory:
+        return path or None
+
+    def _start_resolver(self, jobs: list) -> None:
+        self._stop_resolver()
+        self._thumb_gen += 1
         if not jobs:
             return
-        self._warmer = _ImageWarmer(jobs, self)
-        self._warmer.progress.connect(self._on_thumb_ready)
-        self._warmer.start()
+        if self._db_file is None:
+            # In-memory DB (tests) can't be reopened on another thread; resolve
+            # inline — the catalog is empty there, so it's cheap and offline.
+            self._resolve_inline(jobs)
+            return
+        self._resolver = _ThumbResolver(self._db_file, self._thumb_gen, jobs)
+        self._resolver.resolved.connect(self._on_thumbs_resolved)
+        self._resolver.start()
 
-    def _stop_warmer(self) -> None:
-        if self._warmer is not None and self._warmer.isRunning():
-            self._warmer.requestInterruption()
-            self._warmer.quit()
-            self._warmer.wait(2000)
-        self._warmer = None
+    def _resolve_inline(self, jobs: list) -> None:
+        for source_row, idents in jobs:
+            ids = [
+                (r[0] if (r := self._catalog.image_for(n, s, num)) else None)
+                for n, s, num in idents
+            ]
+            if any(ids):
+                self._on_thumbs_resolved(self._thumb_gen, source_row, ids)
 
-    def _on_thumb_ready(self) -> None:
-        self._table.viewport().update()
+    def _stop_resolver(self) -> None:
+        # Ask the old resolver to exit at its next row boundary; don't block the
+        # UI waiting for it (a mid-flight fetch would stall). Stale emits are
+        # ignored via the generation guard.
+        if self._resolver is not None and self._resolver.isRunning():
+            self._resolver.requestInterruption()
+
+    def _on_thumbs_resolved(self, generation: int, source_row: int, ids: list) -> None:
+        if generation != self._thumb_gen:
+            return  # a newer refresh superseded this resolver
+        if 0 <= source_row < self._model.rowCount():
+            self._model.row_at(source_row).thumb_ids[:] = ids
+            self._table.viewport().update()
 
     def _update_state(self) -> None:
         """Show the table, or an empty state (no transactions / no matches)."""
