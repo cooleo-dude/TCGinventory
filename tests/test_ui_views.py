@@ -212,3 +212,35 @@ def test_main_window_hosts_views(app, seeded_conn):
         app.processEvents()
     window.close()
     window.deleteLater()
+
+
+def test_nav_refresh_is_gated_until_data_changes(app, seeded_conn):
+    """Switching to an unchanged screen must not re-run its refresh; a data
+    mutation invalidates the views so the next visit refreshes once."""
+    from tcginventory.ui.main_window import MainWindow
+
+    window = MainWindow(seeded_conn)
+    inv_index = 2  # Inventory
+    view = window._stack.widget(inv_index)
+    calls = {"n": 0}
+    original = view.refresh
+
+    def counting() -> None:
+        calls["n"] += 1
+        original()
+
+    view.refresh = counting
+
+    window._on_nav_changed(inv_index)  # first visit → refreshes
+    assert calls["n"] == 1
+    window._on_nav_changed(0)  # away…
+    window._on_nav_changed(inv_index)  # …and back, nothing changed → cached
+    assert calls["n"] == 1
+
+    window._on_nav_changed(0)  # sit on another view
+    window._on_ledger_changed()  # a mutation invalidates all views
+    window._on_nav_changed(inv_index)  # revisit → refreshes exactly once more
+    assert calls["n"] == 2
+
+    window.close()
+    window.deleteLater()

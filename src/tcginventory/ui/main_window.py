@@ -253,6 +253,14 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._recognition)  # 7 Recognition
         self._stack.addWidget(self._market)  # 8 Market
 
+        # Refresh-on-demand: every view is pre-built and refreshed once on first
+        # visit; a screen only re-refreshes when the data behind it has actually
+        # changed. `_data_version` bumps on every mutation source (ledger edits,
+        # imports, background price/catalog sweeps); each view records the version
+        # it last refreshed at, so bouncing between unchanged screens is instant.
+        self._data_version = 0
+        self._view_versions: dict[int, int] = {}
+
         # Keep read views current as the ledger changes.
         self._transaction.posted.connect(self._on_ledger_changed)
         self._history.changed.connect(self._on_ledger_changed)
@@ -440,6 +448,7 @@ class MainWindow(QMainWindow):
                 self, "Card database", "Update failed:\n" + "\n".join(summary.errors)
             )
         else:
+            self._invalidate_views()  # catalog changed → catalog-derived views stale
             msg = f"Loaded {summary.cards:,} cards from {summary.sets} sets."
             if summary.errors:
                 msg += f"\n({len(summary.errors)} set(s) skipped)"
@@ -474,6 +483,7 @@ class MainWindow(QMainWindow):
                 f"{summary.sets} sets ({summary.snapshots:,} changes recorded).",
                 8000,
             )
+            self._invalidate_views()  # prices changed → price/holdings views stale
 
     def _build_auto_update_action(self) -> None:
         from tcginventory import scheduling
@@ -634,16 +644,33 @@ class MainWindow(QMainWindow):
     def _on_nav_changed(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
         self._paint_nav_icons(index)
+        # Only pay the refresh cost when this view is stale (never shown, or the
+        # data changed since it was last shown). Unchanged screens re-show instantly.
+        if self._view_versions.get(index) != self._data_version:
+            widget = self._stack.widget(index)
+            refresh = getattr(widget, "refresh", None)
+            if callable(refresh):
+                refresh()
+            self._view_versions[index] = self._data_version
+        self._update_status()
+
+    def _refresh_current(self) -> None:
+        """Refresh only the visible view (so it updates live) and mark it fresh;
+        other views pick up the change lazily on their next visit."""
+        index = self._stack.currentIndex()
         widget = self._stack.widget(index)
         refresh = getattr(widget, "refresh", None)
         if callable(refresh):
             refresh()
-        self._update_status()
+        self._view_versions[index] = self._data_version
+
+    def _invalidate_views(self) -> None:
+        """Mark all views stale after a data mutation and refresh the visible one."""
+        self._data_version += 1
+        self._refresh_current()
 
     def _on_ledger_changed(self) -> None:
-        self._dashboard.refresh()
-        self._inventory.refresh()
-        self._history.refresh()
+        self._invalidate_views()
         self._update_status()
 
     def _start_edit(self, transaction_id: int) -> None:
