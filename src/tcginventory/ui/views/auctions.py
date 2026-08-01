@@ -26,10 +26,7 @@ from PySide6.QtCore import (
     QDateTime,
     QEvent,
     QModelIndex,
-    QPoint,
-    QRect,
     QRectF,
-    QSize,
     Qt,
     QThread,
     QTimer,
@@ -65,7 +62,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLayout,
     QLineEdit,
     QMessageBox,
     QPushButton,
@@ -525,67 +521,6 @@ class _AuctionCardRow:
         )
 
 
-class _FlowLayout(QLayout):
-    """Left-to-right layout that wraps its items onto new rows (a card grid)."""
-
-    def __init__(self, parent=None, spacing=14) -> None:
-        super().__init__(parent)
-        self._items: list = []
-        self.setSpacing(spacing)
-        self.setContentsMargins(0, 0, 0, 0)
-
-    def addItem(self, item) -> None:  # noqa: N802 (Qt override)
-        self._items.append(item)
-
-    def count(self) -> int:
-        return len(self._items)
-
-    def itemAt(self, i):  # noqa: N802
-        return self._items[i] if 0 <= i < len(self._items) else None
-
-    def takeAt(self, i):  # noqa: N802
-        return self._items.pop(i) if 0 <= i < len(self._items) else None
-
-    def expandingDirections(self):  # noqa: N802
-        return Qt.Orientation(0)
-
-    def hasHeightForWidth(self) -> bool:  # noqa: N802
-        return True
-
-    def heightForWidth(self, width) -> int:  # noqa: N802
-        return self._do_layout(QRect(0, 0, width, 0), True)
-
-    def setGeometry(self, rect) -> None:  # noqa: N802
-        super().setGeometry(rect)
-        self._do_layout(rect, False)
-
-    def sizeHint(self) -> QSize:  # noqa: N802
-        return self.minimumSize()
-
-    def minimumSize(self) -> QSize:  # noqa: N802
-        size = QSize()
-        for item in self._items:
-            size = size.expandedTo(item.minimumSize())
-        return size
-
-    def _do_layout(self, rect: QRect, test_only: bool) -> int:
-        x, y = rect.x(), rect.y()
-        line_h = 0
-        sp = self.spacing()
-        for item in self._items:
-            hint = item.sizeHint()
-            w, h = hint.width(), hint.height()
-            if x + w > rect.right() and line_h > 0:
-                x = rect.x()
-                y += line_h + sp
-                line_h = 0
-            if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), hint))
-            x += w + sp
-            line_h = max(line_h, h)
-        return y + line_h - rect.y()
-
-
 class _ThumbStack(QWidget):
     """A small overlapping stack of card thumbnails (+ an "×N" overflow chip)."""
 
@@ -1005,7 +940,9 @@ class AuctionsView(QWidget):
         self._edit_id: int | None = None
         self._inference_pipeline = None  # lazily built (image -> [Detection])
         self._ended_ids: set[int] = set()  # which auctions were ended last refresh
-        self._cards: list[_AuctionCard] = []  # visible auction cards, in order
+        self._cards: list[_AuctionCard] = []  # all auction cards, in order
+        self._page = 0  # current watchlist page (one row of cards per page)
+        self._shown_key: tuple | None = None  # (page, per_page, count) rendered
         self._hover_card_id: int | None = None
         # Multi-card display (same widget/logic as the Price Lookup window):
         # shows every card in the auction, or a single focused card on hover.
@@ -1164,7 +1101,7 @@ class AuctionsView(QWidget):
         self._seg_arch.setChecked(archived)
         self._seg_watch.setChecked(not archived)
 
-    # -- watchlist (card grid) ---------------------------------------------
+    # -- watchlist (single row of cards + pager) ---------------------------
 
     def _build_watchlist(self) -> QWidget:
         t = theme.active()
@@ -1174,25 +1111,29 @@ class AuctionsView(QWidget):
         self._empty.setStyleSheet(f"color:{t.ink3};padding:26px 4px;")
         self._empty.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
 
-        self._grid_container = QWidget()
-        self._grid = _FlowLayout(self._grid_container, spacing=14)
+        # A single non-wrapping row of cards; overflow goes to further pages.
+        self._row_host = QWidget()
+        self._row = QHBoxLayout(self._row_host)
+        self._row.setContentsMargins(0, 0, 0, 0)
+        self._row.setSpacing(14)
 
-        inner = QWidget()
-        iv = QVBoxLayout(inner)
-        iv.setContentsMargins(2, 2, 2, 2)
-        iv.setSpacing(0)
-        iv.addWidget(self._empty)
-        iv.addWidget(self._grid_container)
-        iv.addStretch(1)
+        self._pager_host = QWidget()
+        self._pager = QHBoxLayout(self._pager_host)
+        self._pager.setContentsMargins(0, 4, 0, 2)
+        self._pager.setSpacing(6)
+        self._pager_host.setVisible(False)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setWidget(inner)
-        scroll.viewport().installEventFilter(self)  # leave -> revert gallery
-        self._scroll = scroll
-        return scroll
+        wrap = QWidget()
+        wl = QVBoxLayout(wrap)
+        wl.setContentsMargins(2, 2, 2, 2)
+        wl.setSpacing(6)
+        wl.addWidget(self._empty)
+        wl.addWidget(self._row_host)
+        wl.addStretch(1)
+        wl.addWidget(self._pager_host)
+        wrap.installEventFilter(self)  # leave -> revert gallery
+        self._watch_widget = wrap
+        return wrap
 
     def refresh(self) -> None:
         """Reload + re-sort the watchlist (soonest-ending first, ended last)."""
@@ -1205,32 +1146,125 @@ class AuctionsView(QWidget):
             else "No watched auctions yet — add cards below and Save to track one."
         )
         auctions.sort(key=lambda a: self._sort_key(a, now))
-        while self._grid.count():
-            item = self._grid.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
+        self._clear_row()
+        for card in self._cards:
+            card.setParent(None)
+            card.deleteLater()
         self._cards = []
         self._hover_card_id = None
+        self._page = 0
         for auction in auctions:
             self._add_auction_card(auction)
         self._empty.setVisible(not auctions)
-        self._grid_container.setVisible(bool(auctions))
+        self._row_host.setVisible(bool(auctions))
         self._ended_ids = {a.id for a in auctions if _is_ended(a.ends_at, now)}
         self._update_tiles(now)
+        self._shown_key = None  # force a re-render of the visible page
+        self._render_page()
         QTimer.singleShot(0, self._fit_split_to_cards)
 
     def _add_auction_card(self, auction: Auction) -> None:
-        card = _AuctionCard(self, auction)
-        self._grid.addWidget(card)
-        self._cards.append(card)
+        # Built for every auction (so the tick can update all countdowns), but
+        # only the current page's cards are placed in the visible row.
+        self._cards.append(_AuctionCard(self, auction))
 
-    # -- split sizing (watchlist hugs the last card row) --------------------
+    # -- pagination --------------------------------------------------------
+
+    def _clear_row(self) -> None:
+        while self._row.count():
+            item = self._row.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)  # detached, kept alive by self._cards
+
+    def _cards_per_page(self) -> int:
+        width = self._row_host.width()
+        if width <= 1:
+            width = self._watch_widget.width() - 4
+        if width <= 1:
+            return max(1, len(self._cards)) or 1
+        card_w, gap = 432, 14
+        return max(1, (width + gap) // (card_w + gap))
+
+    def _render_page(self) -> None:
+        """Show only the current page's cards in the single row + build pager."""
+        per = self._cards_per_page()
+        n = len(self._cards)
+        pages = max(1, (n + per - 1) // per)
+        self._page = max(0, min(self._page, pages - 1))
+        key = (self._page, per, n)
+        if key == self._shown_key:
+            return
+        self._shown_key = key
+        self._clear_row()
+        start = self._page * per
+        for card in self._cards[start : start + per]:
+            self._row.addWidget(card)
+        self._row.addStretch(1)  # left-align the row
+        self._build_pager(pages)
+
+    def _goto(self, page: int) -> None:
+        self._page = page
+        self._shown_key = None
+        self._render_page()
+
+    def _build_pager(self, pages: int) -> None:
+        t = theme.active()
+        while self._pager.count():
+            item = self._pager.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._pager_host.setVisible(pages > 1)
+        if pages <= 1:
+            return
+        self._pager.addStretch(1)
+        prev = self._pager_arrow("‹", self._page > 0)
+        prev.clicked.connect(lambda: self._goto(self._page - 1))
+        self._pager.addWidget(prev)
+        for i in range(pages):
+            on = i == self._page
+            dot = QPushButton(str(i + 1))
+            dot.setCursor(Qt.PointingHandCursor)
+            dot.setFixedSize(26, 26)
+            dot.setStyleSheet(
+                f"QPushButton{{border:1px solid {t.accent if on else t.line2};"
+                f"border-radius:7px;background:"
+                f"{t.accent_soft if on else 'transparent'};"
+                f"color:{t.accent_ink if on else t.ink2};font-size:11px;"
+                f"font-weight:700;}}"
+                f"QPushButton:hover{{border-color:{t.accent};}}"
+            )
+            dot.clicked.connect(lambda _=False, p=i: self._goto(p))
+            self._pager.addWidget(dot)
+        nxt = self._pager_arrow("›", self._page < pages - 1)
+        nxt.clicked.connect(lambda: self._goto(self._page + 1))
+        self._pager.addWidget(nxt)
+        self._pager.addStretch(1)
+
+    def _pager_arrow(self, glyph: str, enabled: bool) -> QPushButton:
+        t = theme.active()
+        b = QPushButton(glyph)
+        b.setFixedSize(28, 26)
+        b.setEnabled(enabled)
+        b.setCursor(Qt.PointingHandCursor)
+        b.setStyleSheet(
+            f"QPushButton{{border:none;background:transparent;color:{t.ink2};"
+            f"font-size:17px;font-weight:700;}}"
+            f"QPushButton:hover{{color:{t.accent_ink};}}"
+            f"QPushButton:disabled{{color:{t.ink3};}}"
+        )
+        return b
+
+    # -- split sizing (watchlist hugs the single card row) -----------------
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         super().resizeEvent(event)
-        QTimer.singleShot(0, self._fit_split_to_cards)
+        QTimer.singleShot(0, self._on_view_resized)
+
+    def _on_view_resized(self) -> None:
+        self._render_page()  # width change may alter cards-per-page
+        self._fit_split_to_cards()
 
     def _on_splitter_moved(self, *_args) -> None:
         # A user drag (not our own setSizes) pins the split — stop auto-fitting.
@@ -1238,15 +1272,18 @@ class AuctionsView(QWidget):
             self._split_user_set = True
 
     def _fit_split_to_cards(self) -> None:
-        """Size the top pane so it ends at the bottom of the last card row; the
-        composer takes the rest. No-op once the user has dragged the splitter."""
-        if self._split_user_set or not self._cards:
+        """Size the top pane so it ends just below the single card row + pager;
+        the composer takes the rest. No-op once the user drags the splitter."""
+        if self._split_user_set:
             return
-        width = self._scroll.viewport().width() - 4
         total = self._body.height()
-        if width <= 1 or total <= 0:
+        if total <= 0:
             return
-        needed = self._grid.heightForWidth(width) + 8
+        card_h = self._cards[0].sizeHint().height() if self._cards else 200
+        pager_h = (
+            self._pager_host.sizeHint().height() if self._pager_host.isVisible() else 0
+        )
+        needed = card_h + pager_h + 22
         top = max(200, min(needed, total - 240))  # keep the composer usable
         self._fitting = True
         self._body.setSizes([top, total - top])
@@ -1300,7 +1337,7 @@ class AuctionsView(QWidget):
 
     def eventFilter(self, obj, event) -> bool:
         # Leaving the watchlist reverts the gallery to the editor's own cards.
-        if obj is self._scroll.viewport() and event.type() == QEvent.Leave:
+        if obj is getattr(self, "_watch_widget", None) and event.type() == QEvent.Leave:
             self._hover_card_id = None
             self._refresh_gallery()
         return super().eventFilter(obj, event)
