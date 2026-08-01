@@ -1025,7 +1025,13 @@ class AuctionsView(QWidget):
         body.setStretchFactor(0, 3)
         body.setStretchFactor(1, 2)
         body.setChildrenCollapsible(False)
-        body.setSizes([520, 380])  # give the card grid room (composer scrolls)
+        body.setSizes([520, 380])  # first guess; refined to hug the card grid
+        # The default split hugs the bottom of the last auction-card row (the
+        # composer takes the rest), but stops auto-fitting once the user drags.
+        self._body = body
+        self._split_user_set = False
+        self._fitting = False
+        body.splitterMoved.connect(self._on_splitter_moved)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -1213,11 +1219,38 @@ class AuctionsView(QWidget):
         self._grid_container.setVisible(bool(auctions))
         self._ended_ids = {a.id for a in auctions if _is_ended(a.ends_at, now)}
         self._update_tiles(now)
+        QTimer.singleShot(0, self._fit_split_to_cards)
 
     def _add_auction_card(self, auction: Auction) -> None:
         card = _AuctionCard(self, auction)
         self._grid.addWidget(card)
         self._cards.append(card)
+
+    # -- split sizing (watchlist hugs the last card row) --------------------
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._fit_split_to_cards)
+
+    def _on_splitter_moved(self, *_args) -> None:
+        # A user drag (not our own setSizes) pins the split — stop auto-fitting.
+        if not self._fitting:
+            self._split_user_set = True
+
+    def _fit_split_to_cards(self) -> None:
+        """Size the top pane so it ends at the bottom of the last card row; the
+        composer takes the rest. No-op once the user has dragged the splitter."""
+        if self._split_user_set or not self._cards:
+            return
+        width = self._scroll.viewport().width() - 4
+        total = self._body.height()
+        if width <= 1 or total <= 0:
+            return
+        needed = self._grid.heightForWidth(width) + 8
+        top = max(200, min(needed, total - 240))  # keep the composer usable
+        self._fitting = True
+        self._body.setSizes([top, total - top])
+        self._fitting = False
 
     def _update_tiles(self, now: datetime) -> None:
         active = self._repo.list_all(archived=False)
