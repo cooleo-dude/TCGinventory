@@ -4,6 +4,27 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-07-31 — Cleanup pass: reconcile spec 02 / CLAUDE.md with the code
+
+A spec-conformance audit found the money core sound (Qt-free layers, integer
+cents, unified posting, FIFO, $0 ripping/missing all hold) but `specs/02-data-model.md`
+had drifted from later ADRs. Reconciled the docs (no code change) so the spec
+matches reality:
+- **Item identity now includes `holo_pattern` + `edition`** (migration `0011`) —
+  a reverse-holo / 1st-edition copy is a distinct item. Added to the identity-key
+  prose + `item` schema block.
+- **`lot.sku` is non-unique, per-acquisition-line** (shared across the split
+  lots of one line) — the UNIQUE index was dropped in `0016`. Fixed the schema
+  block + SKU note.
+- **Deal value of cards given out = current `item.market_value_cents`**, not a
+  typed "agreed value" (ADR 2026-07-13). Annotated the cost formula + invariant 6.
+- **Hard-delete carve-out:** the "never hard-deleted" rule now names the
+  sanctioned `delete_inventory_entry` exception (ADR 2026-07-11) in both spec 02
+  and CLAUDE.md.
+- Invariant 6 now also states the **outgoing** reconciliation (`Σ out
+  unit_price×qty == net_consideration_out`), made exact by the multi-qty
+  disposal fix in the same cleanup pass.
+
 ### 2026-07-31 — M-Market: liquidity / markup / volatility analytics (completes spec 06)
 
 - `services/market_signal.py` adds a "monetary significance" layer over the

@@ -11,9 +11,11 @@ transaction history at all times.
   condition/grade, or a specific sealed product. "Charizard VMAX #074 Champion's
   Path, PSA 10" is one item; the same card raw NM is a different item. Items are
   **auto match-or-create**: during acquisition the app matches an existing item
-  by its **identity key** (name + set + card number + language + condition +
-  grade + grading company/number when graded) or creates a new one — there is no
-  separate "add to catalog" step. Item-level attributes (TCGplayer/eBay links,
+  by its **identity key** (name + set + card number + language + condition + holo
+  pattern + edition + grade + grading company/number when graded) or creates a
+  new one — there is no separate "add to catalog" step. (Holo pattern and edition
+  were added to the identity key + schema in migration `0011` — a reverse-holo or
+  1st-edition copy is a distinct item.) Item-level attributes (TCGplayer/eBay links,
   current market value) live here; per-acquisition data lives on the lot.
 - **Lot (acquisition lot)** — a batch of units of one item that entered the
   inventory via one acquisition event, at one unit cost. Cost basis lives on the
@@ -78,9 +80,15 @@ consideration** you paid for them — the value you gave up, minus any cash you
 got back:
 
 ```
-net_consideration_in = cash_out + Σ(agreed value of cards given out) − cash_in
+net_consideration_in = cash_out + Σ(current market value of cards given out) − cash_in
 cost_basis(incoming card) = net_consideration_in × (market_value(card) / Σ market_values of incoming cards)
 ```
+
+> **Note (ADR 2026-07-13):** the value of cards *given out* is their **current
+> `item.market_value_cents`** (× qty), not a separately-typed "agreed value" —
+> the per-card agreed-value field was dropped; the deal derives it from the
+> ledger. "Agreed value" wording below is retained historically; read it as
+> current market value.
 
 A **pure purchase** is the corner case where `cards out = 0` and `cash_in = 0`,
 so `net_consideration_in = total_purchase_price` and this reduces exactly to the
@@ -225,6 +233,8 @@ CREATE TABLE item (
     language           TEXT    NOT NULL DEFAULT 'EN', -- enum: EN|JP|CN|KO|FR|DE|IT|ES|PT|TH|ID|RU (added in 0002)
     category           TEXT    NOT NULL,       -- enum: single | sealed | accessory | other
     condition          TEXT,                   -- enum: NM | LP | MP | HP | DMG | sealed; NULL when graded
+    holo_pattern       TEXT,                   -- enum foiling; part of identity (added in 0011)
+    edition            TEXT,                   -- enum edition (1st/unlimited/…); part of identity (added in 0011)
     is_graded          INTEGER NOT NULL DEFAULT 0,  -- graded cards are identified by grade, not condition
     grading_company    TEXT,                   -- enum: PSA | BGS | CGC | SGC | null
     grade              TEXT,                   -- "10", "9.5"
@@ -259,14 +269,16 @@ CREATE TABLE lot (
     created_at          TEXT    NOT NULL
 );
 CREATE INDEX idx_lot_item_open ON lot(item_id, remaining_qty);
-CREATE UNIQUE INDEX idx_lot_sku ON lot(sku) WHERE sku IS NOT NULL;
+CREATE INDEX idx_lot_sku ON lot(sku) WHERE sku IS NOT NULL;  -- non-unique (see note; 0016)
 
 -- SKUs identify an acquired copy for quick lookup while selling/trading. Format:
 --   {NAME3}-{SET}-{NUMBER}-{COND|GRADE}-{LANG}-{NNNN}   e.g. CHA-CPA-074-NM-EN-0001
 -- The NNNN sequence counts prior copies of the same identity, so a NM copy
 -- sequences independently from an LP copy. Auto-generated on acquisition (see
--- services/sku.py); SKUs are per-lot, not per-item. (Migrated from the old
--- manual item.sku in 0003.)
+-- services/sku.py); one SKU per acquisition line, **shared across the split
+-- lots** of that line (an indivisible multi-qty purchase splits into two lots).
+-- The index is therefore **non-unique** — the original UNIQUE index was dropped
+-- in 0016 to allow shared SKUs. (Migrated from the old manual item.sku in 0003.)
 
 -- An inventory/value-affecting event
 CREATE TABLE "transaction" (
@@ -366,7 +378,12 @@ Reduces to the familiar cases:
   (`in` or `out`) with optional basis; used sparingly and always noted.
 
 ### Void / Edit (correcting a misentry)
-Transactions are **never hard-deleted**.
+Transactions are **never hard-deleted** — with one sanctioned exception:
+`TransactionService.delete_inventory_entry` (ADR 2026-07-11) hard-deletes a
+mistaken **inventory entry** (an unsold acquisition lot and, if it empties, its
+line/transaction) rather than soft-voiding, writing an `audit_log` `delete` with
+a before-snapshot. This is the only path that removes rows; all normal
+corrections use soft-void below.
 - **Void:** atomically reverses *all* of a transaction's effects — restores
   `remaining_qty` on lots it consumed, deletes lots it created (only valid if
   those lots are still fully intact/unsold; otherwise the dependent transaction
@@ -395,9 +412,12 @@ Transactions are **never hard-deleted**.
 5. Deleting/editing a posted transaction reverses its lot effects atomically
    (edit = reverse + re-post inside one transaction).
 6. For any transaction, `Σ (incoming lot.unit_cost_cents × quantity)` ==
-   `net_consideration_in` (`cash_out + Σ agreed value of cards out − cash_in`),
-   with the rounding residual absorbed on the largest-value incoming line. For a
-   pure purchase this is just the total price paid.
+   `net_consideration_in` (`cash_out + Σ current market value of cards out −
+   cash_in`), with the rounding residual absorbed on the largest-value incoming
+   line. For a pure purchase this is just the total price paid. The **outgoing**
+   side reconciles symmetrically: `Σ (out line.unit_price_cents × quantity) ==
+   net_consideration_out`, with any indivisible-per-unit residual absorbed by
+   splitting the out line (mirrors the incoming two-lot split).
 7. Every lot has a non-null `intent` (`personal`, `resale`, or `ripping`) and a
    non-null `acquired_market_value_cents`.
 8. `ripping` lots are never consumed by a disposal (they cannot appear on an

@@ -84,7 +84,9 @@ offline; no external price feeds in V1.
 - **Intent** is per-lot: `personal | resale | ripping`. Ripping lots are valued
   at **$0** (shown as a loss = cost basis), never sold.
 - **Transactions are never hard-deleted** — soft-void + append-only `audit_log`;
-  edit = void + re-post atomically.
+  edit = void + re-post atomically. (One sanctioned exception:
+  `delete_inventory_entry` hard-deletes a *mistaken inventory entry* — an unsold
+  lot + its now-empty line/txn — writing an audit `delete`; ADR 2026-07-11.)
 - Enforce the invariants in [`specs/02-data-model.md`](specs/02-data-model.md#invariants-must-always-hold).
 
 ## Dev environment
