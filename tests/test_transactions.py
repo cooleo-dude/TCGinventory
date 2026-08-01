@@ -13,6 +13,7 @@ from tcginventory.data.repositories import (
 )
 from tcginventory.domain.enums import (
     AuditAction,
+    Direction,
     Intent,
     TransactionStatus,
     TransactionType,
@@ -328,3 +329,76 @@ def test_audit_log_records_create_and_void(svc, conn):
     actions = [e.action for e in entries]
     assert AuditAction.CREATE in actions
     assert AuditAction.VOID in actions
+
+
+def _item_id(conn, name):
+    return conn.execute("SELECT id FROM item WHERE name = ?", (name,)).fetchone()[0]
+
+
+def _out_lines(result):
+    return [ln for ln in result.lines if ln.direction is Direction.OUT]
+
+
+def _consumed(conn, line_id):
+    return conn.execute(
+        "SELECT COALESCE(SUM(quantity), 0) FROM lot_consumption "
+        "WHERE transaction_line_id = ?",
+        (line_id,),
+    ).fetchone()[0]
+
+
+def test_multiqty_indivisible_sale_records_exact_proceeds(svc, conn):
+    # 3 units @ 100 cost; sell all 3 for 1000 (1000 % 3 != 0) → proceeds must not
+    # lose the odd cent, and the split reconciles exactly (invariants 2/4/6).
+    buy(svc, "Charizard", 300, 100, "2026-01-01", quantity=3)
+    item_id = _item_id(conn, "Charizard")
+    req = TransactionRequest(
+        occurred_at="2026-02-01",
+        outgoing=[OutgoingCard(item_id=item_id, quantity=3)],
+        cash_in_cents=1000,
+    )
+    preview = svc.preview(req)
+    result = svc.post(req)
+
+    out = _out_lines(result)
+    assert len(out) == 2  # split because 1000 % 3 != 0
+    proceeds = sum(ln.unit_price_cents * ln.quantity for ln in out)
+    realized = sum(ln.realized_pl_cents for ln in out)
+    assert proceeds == 1000  # exact — not 999
+    assert realized == 1000 - 300  # exact realized P/L
+    assert realized == result.realized_pl_cents == preview.realized_pl_cents
+    # Invariant 2: each out line's consumption sums to its own quantity.
+    for ln in out:
+        assert _consumed(conn, ln.id) == ln.quantity
+
+
+def test_multiqty_divisible_sale_is_a_single_line(svc, conn):
+    buy(svc, "Blastoise", 300, 100, "2026-01-01", quantity=3)
+    item_id = _item_id(conn, "Blastoise")
+    result = sell(svc, item_id, 3, 900, "2026-02-01")  # 900 % 3 == 0 → no split
+    out = _out_lines(result)
+    assert len(out) == 1
+    assert out[0].unit_price_cents == 300 and out[0].quantity == 3
+
+
+def test_multiqty_indivisible_trade_away_reconciles_exactly(svc, conn):
+    # Give 3 of A (mv 200 each) for 1 of B; net_consideration_out = mv(B) = 500,
+    # split across the 3 outgoing units (500 % 3 != 0).
+    buy(svc, "A", 300, 200, "2026-01-01", quantity=3)
+    a_id = _item_id(conn, "A")
+    req = TransactionRequest(
+        occurred_at="2026-02-01",
+        outgoing=[OutgoingCard(item_id=a_id, quantity=3)],
+        incoming=[incoming("B", 500, quantity=1)],
+    )
+    preview = svc.preview(req)
+    result = svc.post(req)
+
+    out = _out_lines(result)
+    assert len(out) == 2
+    assert sum(ln.unit_price_cents * ln.quantity for ln in out) == 500  # exact
+    realized = sum(ln.realized_pl_cents for ln in out)
+    assert realized == 500 - 300  # proceeds − FIFO cost
+    assert realized == result.realized_pl_cents == preview.realized_pl_cents
+    for ln in out:
+        assert _consumed(conn, ln.id) == ln.quantity

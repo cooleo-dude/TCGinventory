@@ -561,32 +561,46 @@ class TransactionService:
         # Outgoing side: FIFO draw-down; proceeds come from the deal (cash you
         # received + market value of cards you got − cash you paid), split across
         # the cards given by their market weight. unit_price = per-unit proceeds.
-        out_infos: list[tuple[TransactionLine, int, int, int]] = []
+        # Compute the exact per-card proceeds shares first (weights = current
+        # market value × qty; no lines needed yet).
+        out_weights = []
         for out in request.outgoing:
-            line = self.lines.add(
-                TransactionLine(
-                    transaction_id=txn.id,
-                    item_id=out.item_id,
-                    direction=Direction.OUT,
-                    quantity=out.quantity,
-                    unit_price_cents=0,
-                    notes=out.notes,
-                )
-            )
-            consumed_cost = self._consume_fifo(out.item_id, out.quantity, line.id)
             item = self.items.get(out.item_id)
             mv = (item.market_value_cents or 0) if item else 0
-            out_infos.append((line, out.quantity, consumed_cost, mv * out.quantity))
-            lines.append(line)
-
+            out_weights.append((out, mv * out.quantity))
         shares = _allocate_amount(
-            deal.net_consideration_out, [w for *_, w in out_infos]
+            deal.net_consideration_out, [w for _, w in out_weights]
         )
-        for (line, qty, cost, _), share in zip(out_infos, shares, strict=True):
-            line.unit_price_cents = share // qty if qty else 0
-            line.realized_pl_cents = line.unit_price_cents * qty - cost
-            self.lines.update(line)
-            total_realized += line.realized_pl_cents
+
+        # When a card's proceeds share doesn't divide evenly by its quantity,
+        # split it into two lines — (qty − r) @ floor and r @ floor+1 — so the
+        # recorded proceeds and realized P/L are exact (Σ unit_price×qty == share),
+        # mirroring the incoming two-lot split (invariant 6). qty-1 and divisible
+        # lines are unchanged. FIFO draw-down splits across the two lines in order.
+        for (out, _), share in zip(out_weights, shares, strict=True):
+            qty = out.quantity
+            remainder = share % qty if qty else 0
+            if qty <= 1 or remainder == 0:
+                splits = [(qty, share // qty if qty else 0)]
+            else:
+                floor = share // qty
+                splits = [(qty - remainder, floor), (remainder, floor + 1)]
+            for sub_qty, unit_price in splits:
+                line = self.lines.add(
+                    TransactionLine(
+                        transaction_id=txn.id,
+                        item_id=out.item_id,
+                        direction=Direction.OUT,
+                        quantity=sub_qty,
+                        unit_price_cents=unit_price,
+                        notes=out.notes,
+                    )
+                )
+                cost = self._consume_fifo(out.item_id, sub_qty, line.id)
+                line.realized_pl_cents = unit_price * sub_qty - cost
+                self.lines.update(line)
+                lines.append(line)
+                total_realized += line.realized_pl_cents
 
         net_consideration_in = deal.net_consideration_in
 
