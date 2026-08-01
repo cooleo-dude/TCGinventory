@@ -24,6 +24,11 @@ datas += [
     (os.path.join(assets, "icon.png"), "tcginventory/ui/assets"),
     (icon_ico, "tcginventory/ui/assets"),
 ]
+# Bundled animated GIFs (e.g. the Scrafty nav mascot).
+datas += [
+    (gif, "tcginventory/ui/assets")
+    for gif in glob.glob(os.path.join(assets, "*.gif"))
+]
 # Bundled UI fonts (IBM Plex Sans/Mono) — the Neon Slate theme registers these
 # at startup; ship them so the frozen app looks identical without system installs.
 datas += [

@@ -13,3 +13,8 @@ def app_icon() -> QIcon:
     pixmap = QPixmap()
     pixmap.loadFromData(data)
     return QIcon(pixmap)
+
+
+def scrafty_movie_path() -> str:
+    """Filesystem path to the bundled Scrafty animation (for a ``QMovie``)."""
+    return str(resources.files("tcginventory.ui") / "assets" / "Scrafty.gif")

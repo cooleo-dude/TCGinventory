@@ -34,7 +34,13 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "tcginventory.data" = ["migrations/*.sql"]
-"tcginventory.ui" = ["assets/*.png", "assets/*.ico"]
+"tcginventory.ui" = [
+    "assets/*.png",
+    "assets/*.ico",
+    "assets/*.gif",
+    "assets/fonts/*.ttf",
+    "assets/icons/*.svg",
+]
 "tcginventory" = ["models/*.onnx"]
 
 [tool.pytest.ini_options]

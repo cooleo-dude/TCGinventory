@@ -28,3 +28,18 @@ def test_main_window_constructs():
     window.close()
     del window
     app.processEvents()
+
+
+def test_nav_shows_animated_scrafty_mascot():
+    from PySide6.QtWidgets import QApplication
+
+    from tcginventory.ui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    assert window._scrafty.movie() is window._scrafty_movie
+    assert window._scrafty_movie.isValid()  # the bundled gif loaded
+    assert window._scrafty_movie.frameCount() > 1  # animated
+    window.close()
+    del window
+    app.processEvents()

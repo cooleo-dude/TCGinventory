@@ -12,7 +12,8 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import QSize, QThread, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QMovie
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStatusBar,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -33,7 +35,7 @@ from tcginventory.data.db import connect
 from tcginventory.data.migrator import migrate
 from tcginventory.data.repositories import PriceSnapshotRepository
 from tcginventory.services import importexport
-from tcginventory.ui.assets import app_icon
+from tcginventory.ui.assets import app_icon, scrafty_movie_path
 from tcginventory.ui.views.auctions import AuctionsView
 from tcginventory.ui.views.calendar import CalendarView
 from tcginventory.ui.views.dashboard import DashboardView
@@ -243,8 +245,32 @@ class MainWindow(QMainWindow):
         self._paint_nav_icons(0)
         self._nav.currentRowChanged.connect(self._on_nav_changed)
 
+        # Nav panel: the nav list, with the Scrafty mascot pinned to the bottom-
+        # left corner, animating at all times. Scale it to the nav width (its
+        # native frames are far larger) keeping aspect ratio.
+        self._scrafty = QLabel()
+        self._scrafty.setObjectName("scrafty")
+        self._scrafty.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+        self._scrafty_movie = QMovie(scrafty_movie_path())
+        self._scrafty_movie.jumpToFrame(0)
+        native = self._scrafty_movie.currentPixmap().size()
+        if native.width() > 0:
+            target_w = 150
+            self._scrafty_movie.setScaledSize(
+                QSize(target_w, round(target_w * native.height() / native.width()))
+            )
+        self._scrafty.setMovie(self._scrafty_movie)
+        self._scrafty_movie.start()
+
+        nav_panel = QWidget()
+        nav_col = QVBoxLayout(nav_panel)
+        nav_col.setContentsMargins(0, 0, 0, 0)
+        nav_col.setSpacing(0)
+        nav_col.addWidget(self._nav, 1)
+        nav_col.addWidget(self._scrafty, 0, Qt.AlignLeft | Qt.AlignBottom)
+
         splitter = QSplitter()
-        splitter.addWidget(self._nav)
+        splitter.addWidget(nav_panel)
         splitter.addWidget(self._stack)
         splitter.setStretchFactor(1, 1)
 
