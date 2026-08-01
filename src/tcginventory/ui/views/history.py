@@ -469,6 +469,23 @@ class HistoryView(QWidget):
 
         title = QLabel("History")
         title.setObjectName("pageTitle")
+        self._subtitle = QLabel("")
+        self._subtitle.setStyleSheet(f"color:{theme.active().ink3}; font-size:12px;")
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        header.addWidget(title)
+        header.addWidget(self._subtitle)
+        header.addStretch(1)
+
+        # KPI strip — a summary read before the detail (dashboard tile language).
+        self._stat_count_tile, self._stat_count = self._stat_tile("Transactions")
+        self._stat_cash_tile, self._stat_cash = self._stat_tile("Net cash")
+        self._stat_pl_tile, self._stat_pl = self._stat_tile("Realized P/L")
+        stats = QHBoxLayout()
+        stats.setSpacing(12)
+        for tile in (self._stat_count_tile, self._stat_cash_tile, self._stat_pl_tile):
+            stats.addWidget(tile)
+        stats.addStretch(1)
 
         self._type = QComboBox()
         self._type.addItems(_TYPES)
@@ -529,12 +546,15 @@ class HistoryView(QWidget):
         self._stack.addWidget(self._empty)  # 1
         self._stack.addWidget(self._no_match)  # 2
 
-        # Bottom pane: transaction summary + a table of its cards.
+        # Bottom pane: a summary band (accent rail) + a table of its cards.
         self._detail_header = QLabel("Select a transaction to see its items.")
         self._detail_header.setTextFormat(Qt.RichText)
-        self._detail_header.setStyleSheet(
-            f"padding:8px 4px; color:{theme.active().ink3};"
-        )
+        self._detail_header.setStyleSheet("border:none; background:transparent;")
+        self._detail_band = QFrame()
+        band_layout = QHBoxLayout(self._detail_band)
+        band_layout.setContentsMargins(14, 9, 14, 9)
+        band_layout.addWidget(self._detail_header)
+        band_layout.addStretch(1)
         self._detail_table = QTableWidget(0, len(_DETAIL_HEADERS))
         self._detail_table.setHorizontalHeaderLabels(_DETAIL_HEADERS)
         self._detail_table.verticalHeader().setVisible(False)
@@ -546,7 +566,8 @@ class HistoryView(QWidget):
         detail_box = QWidget()
         detail_layout = QVBoxLayout(detail_box)
         detail_layout.setContentsMargins(0, 0, 0, 0)
-        detail_layout.addWidget(self._detail_header)
+        detail_layout.setSpacing(8)
+        detail_layout.addWidget(self._detail_band)
         detail_layout.addWidget(self._detail_table)
 
         splitter = QSplitter(Qt.Vertical)
@@ -556,11 +577,67 @@ class HistoryView(QWidget):
         splitter.setStretchFactor(1, 1)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(title)
+        layout.setSpacing(12)
+        layout.addLayout(header)
+        layout.addLayout(stats)
         layout.addLayout(filter_bar)
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)
 
         self.refresh()
+
+    # -- KPI strip ----------------------------------------------------------
+
+    def _stat_tile(self, caption: str) -> tuple[QFrame, QLabel]:
+        """A dashboard-style summary tile; returns (frame, value_label)."""
+        t = theme.active()
+        tile = QFrame()
+        tile.setStyleSheet(
+            f"QFrame {{ background:{t.surface2}; border:1px solid {t.line};"
+            " border-radius:12px; }"
+        )
+        lay = QVBoxLayout(tile)
+        lay.setContentsMargins(16, 10, 20, 11)
+        lay.setSpacing(3)
+        cap = QLabel(caption.upper())
+        cap.setStyleSheet(
+            f"color:{t.ink3}; font-size:10px; font-weight:700;"
+            " letter-spacing:1px; border:none; background:transparent;"
+        )
+        value = QLabel("—")
+        value.setFont(QFont(theme.mono_family()))
+        value.setStyleSheet(
+            f"color:{t.ink}; font-size:20px; font-weight:700;"
+            " border:none; background:transparent;"
+        )
+        lay.addWidget(cap)
+        lay.addWidget(value)
+        return tile, value
+
+    @staticmethod
+    def _set_stat(label: QLabel, text: str, color: str) -> None:
+        label.setStyleSheet(
+            f"color:{color}; font-size:20px; font-weight:700;"
+            " border:none; background:transparent;"
+        )
+        label.setText(text)
+
+    def _update_stats(self) -> None:
+        t = theme.active()
+        self._set_stat(self._stat_count, str(self._model.rowCount()), t.ink)
+        net = self._reporting.net_cash_cents()
+        self._set_stat(self._stat_cash, money(net), _money_tone(net))
+        pl = self._reporting.realized_pl_cents()
+        self._set_stat(self._stat_pl, money(pl), _money_tone(pl))
+
+    def _update_subtitle(self) -> None:
+        total = self._model.rowCount()
+        shown = self._proxy.rowCount()
+        if total == 0:
+            self._subtitle.setText("")
+        elif shown == total:
+            self._subtitle.setText(f"{total} transaction{'s' if total != 1 else ''}")
+        else:
+            self._subtitle.setText(f"{shown} of {total} shown")
 
     # -- filters ------------------------------------------------------------
 
@@ -608,6 +685,7 @@ class HistoryView(QWidget):
         self._table.resizeColumnsToContents()
         self._table.horizontalHeader().setStretchLastSection(True)
         self._clear_detail()
+        self._update_stats()
         self._update_state()
         self._start_warmer(jobs)
 
@@ -639,6 +717,7 @@ class HistoryView(QWidget):
 
     def _update_state(self) -> None:
         """Show the table, or an empty state (no transactions / no matches)."""
+        self._update_subtitle()
         if self._model.rowCount() == 0:
             self._stack.setCurrentWidget(self._empty)
         elif self._proxy.rowCount() == 0:
@@ -715,7 +794,13 @@ class HistoryView(QWidget):
 
     def _clear_detail(self) -> None:
         t = theme.active()
-        self._detail_header.setStyleSheet(f"padding:8px 4px; color:{t.ink3};")
+        self._detail_band.setStyleSheet(
+            f"QFrame {{ background:{t.surface}; border:1px solid {t.line};"
+            " border-radius:10px; }"
+        )
+        self._detail_header.setStyleSheet(
+            f"color:{t.ink3}; border:none; background:transparent;"
+        )
         self._detail_header.setText("Select a transaction to see its items.")
         self._detail_table.setRowCount(0)
 
@@ -753,7 +838,14 @@ class HistoryView(QWidget):
                 )
             )
         sep = f'  <span style="color:{t.line2}">·</span>  '
-        self._detail_header.setStyleSheet(f"padding:8px 4px; color:{t.ink2};")
+        rail = _type_color(txn.type.value)
+        self._detail_band.setStyleSheet(
+            f"QFrame {{ background:{t.surface2}; border:1px solid {t.line};"
+            f" border-left:3px solid {rail}; border-radius:10px; }}"
+        )
+        self._detail_header.setStyleSheet(
+            f"color:{t.ink2}; border:none; background:transparent;"
+        )
         self._detail_header.setText(sep.join(parts))
 
         cells = self._detail_rows(txn.id)
