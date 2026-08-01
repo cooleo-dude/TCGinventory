@@ -471,14 +471,15 @@ class ReportingService:
         Ripping/missing lots count as $0.
         """
         recorded = self._recorded_collection_points(intent)
-        reconstructed = self._reconstruct_collection_series(intent)
-        if recorded:
-            first = recorded[0].at
-            reconstructed = [p for p in reconstructed if p.at < first]
+        # Only reconstruct the prefix *before* recording began — points on/after
+        # the first recorded figure are authoritative and would be discarded, so
+        # there's no point sampling all the post-recording poll dates.
+        before = recorded[0].at if recorded else None
+        reconstructed = self._reconstruct_collection_series(intent, before=before)
         return reconstructed + recorded
 
     def _reconstruct_collection_series(
-        self, intent: Intent | None = None
+        self, intent: Intent | None = None, before: str | None = None
     ) -> list[SeriesPoint]:
         items: dict[int, tuple[bool, int]] = {}  # id -> (review, market_value)
         for r in self.conn.execute(
@@ -530,6 +531,8 @@ class ReportingService:
                 "SELECT DISTINCT as_of FROM price_snapshot"
             ).fetchall()
         )
+        if before is not None:  # recorded figures cover on/after `before`
+            dates = {d for d in dates if d < before}
 
         out: list[SeriesPoint] = []
         for d in sorted(dates):
@@ -547,9 +550,13 @@ class ReportingService:
                 if held > 0:
                     total += held * effective(lot["item_id"], d)
             out.append(SeriesPoint(at=d, value_cents=total))
-        # Anchor the endpoint to the tile (same computation), so the two never
-        # disagree at "now".
-        out.append(
-            SeriesPoint(at=now_iso(), value_cents=self.collection_value_cents(intent))
-        )
+        # Anchor the endpoint to the tile (same computation) so the two never
+        # disagree at "now" — only when we're building the whole series (no
+        # recorded figures follow to own the endpoint).
+        if before is None:
+            out.append(
+                SeriesPoint(
+                    at=now_iso(), value_cents=self.collection_value_cents(intent)
+                )
+            )
         return out

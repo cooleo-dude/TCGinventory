@@ -164,6 +164,10 @@ class Recognizer:
         self._embedder = embedder or build_embedder()
         # card_id -> reference image path (defaults set by the caller/UI).
         self._reference_image = reference_image
+        # Parsed exemplar index, cached across a scene's boxes; rebuilt when the
+        # model version or the exemplar count changes (e.g. after a save).
+        self._exemplar_index: dict[str, list[np.ndarray]] | None = None
+        self._exemplar_key: tuple[str, int] | None = None
 
     @property
     def model_version(self) -> str:
@@ -204,14 +208,24 @@ class Recognizer:
         return scored[:top]
 
     def _exemplars_by_card(self, candidates: set[str]) -> dict[str, list[np.ndarray]]:
+        index = self._exemplar_index_for_version()
+        return {cid: index[cid] for cid in candidates if cid in index}
+
+    def _exemplar_index_for_version(self) -> dict[str, list[np.ndarray]]:
+        """All exemplar vectors for the current model version, parsed once and
+        cached until the version or exemplar count changes (so a scene's boxes
+        don't each reload + re-parse the whole table)."""
         version = self._embedder.version
-        out: dict[str, list[np.ndarray]] = {}
-        for card_id, blob in self._repo.region_vectors(version):
-            if card_id in candidates:
-                out.setdefault(card_id, []).append(
+        key = (version, self._repo.region_embedding_count())
+        if self._exemplar_index is None or self._exemplar_key != key:
+            index: dict[str, list[np.ndarray]] = {}
+            for card_id, blob in self._repo.region_vectors(version):
+                index.setdefault(card_id, []).append(
                     np.frombuffer(blob, dtype=np.float32)
                 )
-        return out
+            self._exemplar_index = index
+            self._exemplar_key = key
+        return self._exemplar_index
 
     def _reference_vector(self, card_id: str) -> np.ndarray | None:
         version = self._embedder.version

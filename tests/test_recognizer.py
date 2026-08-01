@@ -95,6 +95,39 @@ def test_suggest_skips_candidates_without_a_reference(repo, tmp_path):
     assert [s.card_id for s in out] == ["A"]
 
 
+def test_suggest_caches_exemplar_index_across_boxes(repo, tmp_path):
+    emb = PixelEmbedder(32)
+    cap = repo.add_capture()
+    img = repo.add_image(cap, "sha", "/x.png", width=64, height=64)
+    rid = repo.add_region(img, 1, (0, 0, 1, 1), None, CardLabel(card_id="A"))
+    vec = emb.embed(_pattern_png(tmp_path / "a.png", 2))
+    repo.put_region_embedding(
+        rid, emb.version, "A", int(vec.shape[0]), vec.astype("float32").tobytes()
+    )
+
+    calls = {"n": 0}
+    original = repo.region_vectors
+
+    def counting(version):
+        calls["n"] += 1
+        return original(version)
+
+    repo.region_vectors = counting
+    rec = Recognizer(repo, embedder=emb)
+
+    rec.suggest(_pattern_png(tmp_path / "q1.png", 2), ["A"])
+    rec.suggest(_pattern_png(tmp_path / "q2.png", 2), ["A"])
+    assert calls["n"] == 1  # exemplar table parsed once, not once per box
+
+    # Growing the corpus (count changes) invalidates the cache.
+    rid2 = repo.add_region(img, 2, (0, 0, 1, 1), None, CardLabel(card_id="A"))
+    repo.put_region_embedding(
+        rid2, emb.version, "A", int(vec.shape[0]), vec.astype("float32").tobytes()
+    )
+    rec.suggest(_pattern_png(tmp_path / "q3.png", 2), ["A"])
+    assert calls["n"] == 2  # rebuilt after the exemplar corpus grew
+
+
 def test_suggest_uses_crop_exemplars_over_catalog_reference(repo, tmp_path):
     emb = PixelEmbedder(32)
     # Card B has a crop exemplar identical to the query; card A only has a
