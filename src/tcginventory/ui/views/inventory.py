@@ -570,12 +570,12 @@ class InventoryView(QWidget):
         body = QSplitter(Qt.Horizontal)
         body.addWidget(grid_box)
         body.addWidget(self._build_dossier())
-        # The grid stays at its content width; all extra window width flows to
-        # the dossier (stretchFactor 0 vs 1), so the card preview + graph grow.
-        body.setStretchFactor(0, 0)
+        # Even 50/50 split between the grid (left) and the dossier (right); both
+        # grow equally with the window.
+        body.setStretchFactor(0, 1)
         body.setStretchFactor(1, 1)
         body.setChildrenCollapsible(False)
-        body.setSizes([912, 588])  # grid fits its columns; rest → dossier
+        body.setSizes([1000, 1000])
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
