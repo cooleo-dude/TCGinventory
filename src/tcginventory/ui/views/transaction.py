@@ -2,16 +2,16 @@
 
 A **"You vs Them" face-off**: everything you put on the table (cards you give +
 cash you pay) on the left, everything the counterparty puts up (their cards +
-cash they pay) on the right, split by a central VS. The inferred type
-(purchase / sale / trade) shows as a colour-coded badge up top.
+cash they pay) on the right. The running totals (You give / They give / Net cash
+/ Est. margin) sit top-left, and the inferred type (purchase / sale / trade)
+shows as a colour-coded badge up top.
 
 Cards are entered as stacked **card rows** — a ＋ adds one, a per-row ✕ removes
 it. A give row searches your on-hand stock; a receive row carries the full card
 field set with the essentials inline (name, set, #, condition, market, qty,
 intent) and the rest behind a per-row expander; its Name field autocompletes
-from the local card catalog and auto-fills set/number. A sticky **receipt bar**
-shows the running totals + Submit; type is inferred live and Submit is blocked
-until valid.
+from the local card catalog and auto-fills set/number. Type is inferred live and
+Submit (bottom-right) is blocked until valid.
 
 Also supports **edit mode**: pre-loaded from an existing transaction, Submit
 performs an atomic void + re-post via :meth:`TransactionService.edit`.
@@ -86,7 +86,7 @@ from tcginventory.services.transactions import (
     TransactionService,
 )
 from tcginventory.ui import icons, theme
-from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
+from tcginventory.ui.card_preview import install_hover_preview
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
 
@@ -746,8 +746,8 @@ class TransactionView(QWidget):
         self._price_workers: list[_PriceLookupWorker] = []
         self._edit_id: int | None = None
         self._inference_pipeline = None  # lazily built (image -> [Detection])
-        # Hovering any card in this window shows its image in the receipt bar.
-        self._preview_pane = CardImagePane()
+        # Hovering a card shows its image in a floating popup (no docked pane).
+        self._sink = None
 
         self._date = QLineEdit(QDate.currentDate().toString("yyyy-MM-dd"))
         self._date.setFixedWidth(130)
@@ -774,9 +774,8 @@ class TransactionView(QWidget):
         )
 
         board = QHBoxLayout()
-        board.setSpacing(0)
+        board.setSpacing(16)
         board.addWidget(self._build_you_side(), 1)
-        board.addWidget(self._build_gutter())
         board.addWidget(self._build_them_side(), 1)
         board_w = QWidget()
         board_w.setLayout(board)
@@ -792,7 +791,7 @@ class TransactionView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 0)
         layout.setSpacing(10)
-        layout.addWidget(self._build_badge_bar())
+        layout.addLayout(self._build_top_bar())
         layout.addLayout(self._build_hdr_fields())
         layout.addWidget(scroll, 1)
         layout.addWidget(self._build_receipt())
@@ -800,9 +799,60 @@ class TransactionView(QWidget):
         self._update_catalog_hint()
         self._update_summary()
 
-    # -- header (badge + inline fields) ------------------------------------
+    # -- top bar (totals top-left + centred type badge) --------------------
 
-    def _build_badge_bar(self) -> QWidget:
+    def _build_top_bar(self) -> QHBoxLayout:
+        bar = QHBoxLayout()
+        bar.addWidget(self._build_stats(), 0, Qt.AlignTop)
+        bar.addStretch(1)
+        badge_col = QVBoxLayout()
+        badge_col.setSpacing(4)
+        badge_col.addWidget(self._build_badge(), 0, Qt.AlignHCenter)
+        badge_col.addWidget(self._edit_banner)
+        bar.addLayout(badge_col)
+        bar.addStretch(1)
+        return bar
+
+    def _build_stats(self) -> QWidget:
+        t = theme.active()
+        box = QFrame()
+        box.setObjectName("stats")
+        box.setStyleSheet(
+            f"QFrame#stats{{background:{t.surface};border:1px solid {t.line};"
+            f"border-radius:12px;}}"
+        )
+        h = QHBoxLayout(box)
+        h.setContentsMargins(15, 9, 15, 9)
+        h.setSpacing(18)
+        self._r_stats: dict[str, QLabel] = {}
+        for i, (key, label) in enumerate(
+            (
+                ("yougive", "You give"),
+                ("theygive", "They give"),
+                ("net", "Net cash"),
+                ("margin", "Est. margin"),
+            )
+        ):
+            if i:
+                sep = QFrame()
+                sep.setFixedWidth(1)
+                sep.setStyleSheet(f"background:{t.line};")
+                h.addWidget(sep)
+            block = QVBoxLayout()
+            block.setSpacing(1)
+            k = QLabel(label.upper())
+            k.setStyleSheet(
+                f"color:{t.ink3};font-size:9px;font-weight:700;letter-spacing:.4px;"
+            )
+            val = QLabel("—")
+            val.setFont(_mono_font(15, bold=True))
+            block.addWidget(k)
+            block.addWidget(val)
+            self._r_stats[key] = val
+            h.addLayout(block)
+        return box
+
+    def _build_badge(self) -> QWidget:
         t = theme.active()
         self._badge_frame = QFrame()
         self._badge_frame.setObjectName("typebadge")
@@ -819,27 +869,16 @@ class TransactionView(QWidget):
         self._badge.setStyleSheet("background:transparent;border:none;")
         bl.addWidget(cap)
         bl.addWidget(self._badge)
-        wrap = QWidget()
-        wl = QVBoxLayout(wrap)
-        wl.setContentsMargins(0, 0, 0, 0)
-        wl.setSpacing(4)
-        row = QHBoxLayout()
-        row.addStretch(1)
-        row.addWidget(self._badge_frame)
-        row.addStretch(1)
-        wl.addLayout(row)
-        wl.addWidget(self._edit_banner)
-        return wrap
+        return self._badge_frame
 
     def _build_hdr_fields(self) -> QHBoxLayout:
         row = QHBoxLayout()
+        row.setSpacing(16)
         you = QHBoxLayout()
         you.setSpacing(14)
         you.addLayout(_inline_field("Date", self._date))
-        ref = _inline_field("Reference", self._reference)
-        you.addLayout(ref, 1)
+        you.addLayout(_inline_field("Reference", self._reference), 1)
         row.addLayout(you, 1)
-        row.addSpacing(56)  # aligns with the centre gutter
         them = QHBoxLayout()
         them.addLayout(_inline_field("Counterparty", self._counterparty), 1)
         row.addLayout(them, 1)
@@ -933,23 +972,12 @@ class TransactionView(QWidget):
         body.setContentsMargins(15, 14, 15, 15)
         body.setSpacing(9)
         body.addWidget(_cash_block("Cash you pay", self._cash_out, t.pos))
+        body.addWidget(_add_button("Add a card you're giving", self._add_give_row))
         self._give_list = QVBoxLayout()
         self._give_list.setSpacing(8)
         self._give_list.setContentsMargins(0, 0, 0, 0)
         body.addLayout(self._give_list)
-        self._give_empty = QLabel(
-            "You're not giving any cards — a purchase is just cash.\n"
-            "Add a card here to make it a trade."
-        )
-        self._give_empty.setAlignment(Qt.AlignCenter)
-        self._give_empty.setWordWrap(True)
-        self._give_empty.setStyleSheet(
-            f"color:{t.ink3};font-size:11.5px;border:1px dashed {t.line};"
-            "border-radius:10px;padding:14px 8px;"
-        )
-        body.addWidget(self._give_empty)
         body.addStretch(1)
-        body.addWidget(_add_button("Add a card you're giving", self._add_give_row))
         v.addLayout(body)
         return panel
 
@@ -968,8 +996,8 @@ class TransactionView(QWidget):
         body = QVBoxLayout()
         body.setContentsMargins(15, 14, 15, 15)
         body.setSpacing(9)
-        body.addWidget(_cash_block("Cash they pay you", self._cash_in, t.accent))
 
+        # Autofill / auto-detect at the very top of the box.
         self._auto_detect_cb = QCheckBox("Auto-detect")
         self._auto_detect_cb.setToolTip(
             "As you type a card (name, set, and/or number), search the local "
@@ -997,32 +1025,15 @@ class TransactionView(QWidget):
         tool.addWidget(self._auto_detect_cb)
         body.addLayout(tool)
 
+        body.addWidget(_cash_block("Cash they pay you", self._cash_in, t.accent))
+        body.addWidget(_add_button("Add a card they're giving", self._add_receive_row))
         self._recv_list = QVBoxLayout()
         self._recv_list.setSpacing(8)
         self._recv_list.setContentsMargins(0, 0, 0, 0)
         body.addLayout(self._recv_list)
         body.addStretch(1)
-        body.addWidget(_add_button("Add a card they're giving", self._add_receive_row))
         v.addLayout(body)
         return panel
-
-    def _build_gutter(self) -> QWidget:
-        t = theme.active()
-        g = QWidget()
-        g.setFixedWidth(56)
-        gl = QVBoxLayout(g)
-        gl.setContentsMargins(0, 0, 0, 0)
-        gl.addStretch(1)
-        vs = QLabel("VS")
-        vs.setFixedSize(42, 42)
-        vs.setAlignment(Qt.AlignCenter)
-        vs.setStyleSheet(
-            f"background:{t.surface};border:1px solid {t.line2};border-radius:21px;"
-            f"color:{t.accent_ink};font-weight:900;font-size:12px;"
-        )
-        gl.addWidget(vs, 0, Qt.AlignHCenter)
-        gl.addStretch(1)
-        return g
 
     def _build_receipt(self) -> QWidget:
         t = theme.active()
@@ -1034,30 +1045,6 @@ class TransactionView(QWidget):
         h = QHBoxLayout(bar)
         h.setContentsMargins(14, 9, 14, 9)
         h.setSpacing(18)
-        self._preview_pane.setMinimumSize(0, 0)
-        self._preview_pane.setFixedSize(58, 81)
-        self._preview_pane._MAX_W = 58
-        self._preview_pane.setText("")  # no placeholder text in the tiny slot
-        h.addWidget(self._preview_pane)
-        self._r_stats: dict[str, QLabel] = {}
-        for key, label in (
-            ("yougive", "You give"),
-            ("theygive", "They give"),
-            ("net", "Net cash"),
-            ("margin", "Est. margin"),
-        ):
-            block = QVBoxLayout()
-            block.setSpacing(1)
-            k = QLabel(label.upper())
-            k.setStyleSheet(
-                f"color:{t.ink3};font-size:9px;font-weight:700;letter-spacing:.4px;"
-            )
-            val = QLabel("—")
-            val.setFont(_mono_font(15, bold=True))
-            block.addWidget(k)
-            block.addWidget(val)
-            self._r_stats[key] = val
-            h.addLayout(block)
         h.addStretch(1)
         self._warn = QLabel("")
         self._warn.setStyleSheet(f"color:{t.neg};font-size:12px;font-weight:600;")
@@ -1110,8 +1097,6 @@ class TransactionView(QWidget):
             if card is not None:
                 card.setParent(None)
                 card.deleteLater()
-        if kind == "out":
-            self._give_empty.setVisible(not self._give_rows)
         self._update_summary()
 
     def _add_give_row(self) -> _GiveRow | None:
@@ -1121,13 +1106,10 @@ class TransactionView(QWidget):
                 self, "Nothing to give", "No sellable cards on hand."
             )
             return None
-        row = _GiveRow(
-            self._conn, sellable, self._update_summary, sink=self._preview_pane
-        )
+        row = _GiveRow(self._conn, sellable, self._update_summary, sink=self._sink)
         row._card_widget = row.widget(lambda r=row: self._remove_row("out", r))
         self._give_list.addWidget(row._card_widget)
         self._give_rows.append(row)
-        self._give_empty.setVisible(False)
         self._update_summary()
         return row
 
@@ -1137,7 +1119,7 @@ class TransactionView(QWidget):
             lambda: self._auto_detect_cb.isChecked(),
             self._update_summary,
             on_pick=self._request_price,
-            sink=self._preview_pane,
+            sink=self._sink,
         )
         row._card_widget = row.widget(lambda r=row: self._remove_row("in", r))
         self._recv_list.addWidget(row._card_widget)
@@ -1438,7 +1420,6 @@ class TransactionView(QWidget):
                 card.deleteLater()
         self._give_rows.clear()
         self._receive_rows.clear()
-        self._give_empty.setVisible(True)
         self._cash_in.setValue(0.0)
         self._cash_out.setValue(0.0)
         self._counterparty.clear()
