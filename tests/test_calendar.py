@@ -85,6 +85,38 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
+def _agenda_texts(view) -> list[str]:
+    from PySide6.QtWidgets import QLabel
+
+    return [w.text() for w in view._agenda_body.findChildren(QLabel)]
+
+
+def test_agenda_lists_only_marked_shows_and_entries(app, conn, tmp_path, monkeypatch):
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from tcginventory.ui.views.calendar import CalendarView
+
+    repo = CardShowRepository(conn)
+    repo.upsert(CardShow(source_id=1, name="Marked Show", state="NJ",
+                         starts_on="2026-08-10", fetched_at="t"))
+    repo.upsert(CardShow(source_id=2, name="Unmarked Show", state="NJ",
+                         starts_on="2026-08-11", fetched_at="t"))
+    conn.execute("INSERT INTO card_show_status(source_id,status) VALUES(1,'walking')")
+    CalendarEntryRepository(conn).add(
+        _vac(title="Personal Note", start="2026-08-12", end="2026-08-12")
+    )
+    conn.commit()
+
+    view = CalendarView(conn)
+    view._year, view._month, view._states = 2026, 8, ["NJ"]
+    view.reload()
+
+    texts = _agenda_texts(view)
+    assert any("Marked Show" in x for x in texts)  # attending/walking → shown
+    assert any("Personal Note" in x for x in texts)  # personal entry → shown
+    assert not any("Unmarked Show" in x for x in texts)  # scraped, unmarked → hidden
+    view.deleteLater()
+
+
 def test_calendar_view_flags_a_conflict(app, conn, tmp_path, monkeypatch):
     monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
     from tcginventory.ui.views.calendar import CalendarView

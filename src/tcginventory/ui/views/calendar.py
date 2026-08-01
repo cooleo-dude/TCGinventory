@@ -689,7 +689,11 @@ class CalendarView(QWidget):
     def _render_agenda(self, shows, entries, conflict_ids: set[int]) -> None:
         self._clear_agenda()
         t = theme.active()
-        events = [("show", s.starts_on, s.start_time or "", s) for s in shows]
+        # The agenda lists only shows you've marked (attending/walking) plus your
+        # personal entries — not every scraped show in the area (those still show
+        # as bars on the month grid).
+        marked = [s for s in shows if s.status in ("attending", "walking")]
+        events = [("show", s.starts_on, s.start_time or "", s) for s in marked]
         events += [("entry", e.starts_on, "", e) for e in entries]
         events.sort(key=lambda x: (x[1], x[2]))
         if not events:
