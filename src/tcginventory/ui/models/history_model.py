@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QBrush, QColor, QFont
@@ -27,10 +27,23 @@ def _muted() -> QColor:
 
 _ROOT = QModelIndex()  # module-level singleton for default parent args
 
-_HEADERS = ["Date", "Type", "Counterparty", "Cash", "Margin", "Status", "Items"]
+_HEADERS = [
+    "Date",
+    "Type",
+    "Counterparty",
+    "Cash",
+    "Margin",
+    "Status",
+    "Cards",
+    "Items",
+]
 
-# Column index of the clickable item-list field (the view opens the full list).
+# Column of the card-art thumbnail stack, and of the clickable item-list field.
+CARDS_COL = _HEADERS.index("Cards")
 ITEMS_COL = _HEADERS.index("Items")
+
+# Role the thumbnail delegate reads: (thumb_card_ids, total_card_count).
+CARDS_ROLE = Qt.UserRole + 1
 
 
 @dataclass(frozen=True)
@@ -39,6 +52,8 @@ class HistoryRow:
     margin_cents: int
     proceeds_cents: int  # 0 for pure purchases → no margin shown
     items_label: str = ""  # "Articuno 161/159, Charizard 004/102" (elided in grid)
+    thumb_ids: list[str | None] = field(default_factory=list)  # first ≤3 card ids
+    card_count: int = 0  # total distinct cards in the transaction (for "+N")
 
 
 class HistoryTableModel(QAbstractTableModel):
@@ -79,6 +94,10 @@ class HistoryTableModel(QAbstractTableModel):
             return self._display(row, txn, col)
         if role == Qt.UserRole:
             return self._sort_key(row, txn, col)
+        if role == CARDS_ROLE and col == CARDS_COL:
+            return (row.thumb_ids, row.card_count)
+        if role == Qt.ToolTipRole and col == CARDS_COL and row.items_label:
+            return row.items_label
         if role == Qt.ToolTipRole and col == ITEMS_COL and row.items_label:
             return row.items_label + "\n\n(click to view the full list)"
         if role == Qt.TextAlignmentRole and col in (3, 4):
@@ -110,7 +129,7 @@ class HistoryTableModel(QAbstractTableModel):
             return txn.status.value
         if col == ITEMS_COL:
             return row.items_label
-        return ""
+        return ""  # CARDS_COL is painted by a delegate, no display text
 
     @staticmethod
     def _sort_key(row: HistoryRow, txn: Transaction, col: int) -> object:
@@ -121,5 +140,6 @@ class HistoryTableModel(QAbstractTableModel):
             3: txn.cash_delta_cents,
             4: row.margin_cents,
             5: txn.status.value,
+            CARDS_COL: row.card_count,
             ITEMS_COL: row.items_label.lower(),
         }[col]

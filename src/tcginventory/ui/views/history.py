@@ -15,9 +15,19 @@ from PySide6.QtCore import (
     QSize,
     QSortFilterProxyModel,
     Qt,
+    QThread,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -42,6 +52,7 @@ from PySide6.QtWidgets import (
 )
 
 from tcginventory.data.repositories import (
+    CardCatalogRepository,
     ItemRepository,
     LotConsumptionRepository,
     LotRepository,
@@ -50,12 +61,18 @@ from tcginventory.data.repositories import (
 )
 from tcginventory.domain.enums import Direction, TransactionStatus
 from tcginventory.domain.models import Item
+from tcginventory.services import cardimages
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.reporting import ReportingService
 from tcginventory.services.transactions import TransactionService
 from tcginventory.ui import icons, theme
 from tcginventory.ui.formatting import money, percent
-from tcginventory.ui.models.history_model import HistoryRow, HistoryTableModel
+from tcginventory.ui.models.history_model import (
+    CARDS_COL,
+    CARDS_ROLE,
+    HistoryRow,
+    HistoryTableModel,
+)
 
 _TYPES = ["All", "purchase", "sale", "trade", "adjustment"]
 _TYPE_COL, _STATUS_COL = 1, 5
@@ -170,6 +187,111 @@ class _PillDelegate(QStyledItemDelegate):
             label,
         )
         painter.restore()
+
+
+class _ThumbDelegate(QStyledItemDelegate):
+    """Paints an overlapping stack of up to 3 card thumbnails + a "+N" overflow
+    chip in the Cards column — the same preview the auctions watchlist uses."""
+
+    _W, _H, _STEP = 24, 32, 16
+
+    def sizeHint(self, option, index) -> QSize:
+        count = (index.data(CARDS_ROLE) or ([], 0))[1]
+        slots = max(1, min(3, count)) + (1 if count > 3 else 0)
+        return QSize(16 + self._W + (slots - 1) * self._STEP, self._H + 8)
+
+    def paint(self, painter, option, index) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
+
+        thumb_ids, count = index.data(CARDS_ROLE) or ([], 0)
+        if count <= 0:
+            return
+        t = theme.active()
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        x = option.rect.left() + 8
+        y = option.rect.center().y() - self._H / 2
+        for i in range(min(3, count)):
+            self._card(painter, x, y, self._pixmap(thumb_ids, i), t)
+            x += self._STEP
+        if count > 3:
+            self._overflow(painter, x, y, f"+{count - 3}", opt.font, t)
+        painter.restore()
+
+    @staticmethod
+    def _pixmap(thumb_ids: list, i: int):
+        cid = thumb_ids[i] if i < len(thumb_ids) else None
+        if not cid:
+            return None
+        path = cardimages.cache_path(cid)
+        if not path.exists():
+            return None
+        src = QPixmap(str(path))
+        return None if src.isNull() else src
+
+    def _card(self, painter, x, y, pm, t) -> None:
+        painter.fillPath(
+            _rounded(x - 1, y - 1, self._W + 2, self._H + 2, 5), QColor(t.surface)
+        )
+        face = _rounded(x, y, self._W, self._H, 4)
+        if pm is not None:
+            painter.save()
+            painter.setClipPath(face)
+            scaled = pm.scaled(
+                self._W, self._H, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+            )
+            painter.drawPixmap(int(x), int(y), scaled)
+            painter.restore()
+        else:
+            grad = QLinearGradient(x, y, x, y + self._H)
+            grad.setColorAt(0, QColor("#4a2f1c"))
+            grad.setColorAt(1, QColor("#241a12"))
+            painter.fillPath(face, QBrush(grad))
+
+    def _overflow(self, painter, x, y, text, base_font, t) -> None:
+        painter.fillPath(
+            _rounded(x - 1, y - 1, self._W + 2, self._H + 2, 5), QColor(t.surface)
+        )
+        painter.fillPath(_rounded(x, y, self._W, self._H, 4), QColor(t.surface2))
+        f = QFont(base_font)
+        f.setBold(True)
+        f.setPointSizeF(8.5)
+        painter.setFont(f)
+        painter.setPen(QColor(t.ink3))
+        painter.drawText(
+            QRectF(x, y, self._W, self._H), int(Qt.AlignCenter), text
+        )
+
+
+def _rounded(x: float, y: float, w: float, h: float, r: float) -> QPainterPath:
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(x, y, w, h), r, r)
+    return path
+
+
+class _ImageWarmer(QThread):
+    """Fetches card thumbnails off the UI thread from pre-resolved (id, url)
+    pairs (no DB access), pinging the view to repaint as they arrive."""
+
+    progress = Signal()
+
+    def __init__(self, jobs: list, parent=None) -> None:
+        super().__init__(parent)
+        self._jobs = jobs
+
+    def run(self) -> None:
+        for card_id, url in self._jobs:
+            if self.isInterruptionRequested():
+                return
+            if not cardimages.is_cached(card_id):
+                if cardimages.ensure_cached(card_id, url):
+                    self.progress.emit()
 
 
 class _HistoryFilterProxy(QSortFilterProxyModel):
@@ -338,6 +460,8 @@ class HistoryView(QWidget):
         self._items = ItemRepository(conn)
         self._reporting = ReportingService(conn)
         self._service = TransactionService(conn)
+        self._catalog = CardCatalogRepository(conn)
+        self._warmer: _ImageWarmer | None = None
 
         self._model = HistoryTableModel()
         self._proxy = _HistoryFilterProxy()
@@ -372,6 +496,8 @@ class HistoryView(QWidget):
         self._table.setSortingEnabled(True)
         self._table.sortByColumn(0, Qt.AscendingOrder)
         self._table.setItemDelegate(_PillDelegate(self._table))
+        self._table.setItemDelegateForColumn(CARDS_COL, _ThumbDelegate(self._table))
+        self._table.verticalHeader().setDefaultSectionSize(40)  # room for thumbnails
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -451,20 +577,65 @@ class HistoryView(QWidget):
         self._search.clear()
 
     def refresh(self) -> None:
-        rows = [
-            HistoryRow(
-                transaction=txn,
-                margin_cents=self._reporting.transaction_margin_cents(txn.id),
-                proceeds_cents=self._reporting.transaction_proceeds_cents(txn.id),
-                items_label=", ".join(self._item_labels(txn.id)),
+        jobs: list[tuple[str, str]] = []
+        rows: list[HistoryRow] = []
+        for txn in self._txns.list_all():
+            items = self._txn_items(txn.id)
+            thumb_ids: list[str | None] = []
+            for item in items[:3]:  # up to three thumbnails per row
+                resolved = self._catalog.image_for(
+                    item.name, item.set_name, item.card_number
+                )
+                if resolved:
+                    card_id, url = resolved
+                    thumb_ids.append(card_id)
+                    if url and not cardimages.is_cached(card_id):
+                        jobs.append((card_id, url))
+                else:
+                    thumb_ids.append(None)
+            labels = [f"{it.name} {it.card_number or ''}".strip() for it in items]
+            rows.append(
+                HistoryRow(
+                    transaction=txn,
+                    margin_cents=self._reporting.transaction_margin_cents(txn.id),
+                    proceeds_cents=self._reporting.transaction_proceeds_cents(txn.id),
+                    items_label=", ".join(labels),
+                    thumb_ids=thumb_ids,
+                    card_count=len(items),
+                )
             )
-            for txn in self._txns.list_all()
-        ]
         self._model.set_rows(rows)
         self._table.resizeColumnsToContents()
         self._table.horizontalHeader().setStretchLastSection(True)
         self._clear_detail()
         self._update_state()
+        self._start_warmer(jobs)
+
+    def _txn_items(self, transaction_id: int) -> list[Item]:
+        items = []
+        for line in self._lines.list_for_transaction(transaction_id):
+            item = self._items.get(line.item_id)
+            if item is not None:
+                items.append(item)
+        return items
+
+    def _start_warmer(self, jobs: list[tuple[str, str]]) -> None:
+        self._stop_warmer()
+        if not jobs:
+            return
+        self._warmer = _ImageWarmer(jobs, self)
+        self._warmer.progress.connect(self._on_thumb_ready)
+        self._warmer.start()
+
+    def _stop_warmer(self) -> None:
+        if self._warmer is not None and self._warmer.isRunning():
+            self._warmer.requestInterruption()
+            self._warmer.quit()
+            self._warmer.wait(2000)
+        self._warmer = None
+
+    def _on_thumb_ready(self) -> None:
+        self._table.viewport().update()
 
     def _update_state(self) -> None:
         """Show the table, or an empty state (no transactions / no matches)."""
