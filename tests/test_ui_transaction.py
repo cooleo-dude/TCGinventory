@@ -77,9 +77,14 @@ def test_autofill_radiant_collection_number(app, conn):
 
     cards = [
         CatalogCard(
-            card_id=f"bw11-RC{i}", name=("Servine" if i == 2 else f"C{i}"),
-            set_id="bw11", set_name="Legendary Treasures", set_code="LTR",
-            number=f"RC{i}", printed_total=113, language="EN",
+            card_id=f"bw11-RC{i}",
+            name=("Servine" if i == 2 else f"C{i}"),
+            set_id="bw11",
+            set_name="Legendary Treasures",
+            set_code="LTR",
+            number=f"RC{i}",
+            printed_total=113,
+            language="EN",
         )
         for i in range(1, 26)  # RC1..RC25
     ]
@@ -92,24 +97,17 @@ def test_autofill_radiant_collection_number(app, conn):
     assert row.number.text() == "RC2/RC25"
 
 
-def test_add_button_is_the_bottom_table_row(app, conn):
-    from PySide6.QtWidgets import QPushButton
-
+def test_add_receive_row_appends_a_card_widget(app, conn):
     from tcginventory.ui.views.transaction import TransactionView
 
     view = TransactionView(conn)
-
-    def add_is_last(table) -> bool:
-        w = table.cellWidget(table.rowCount() - 1, 0)
-        return isinstance(w, QPushButton) and w.text() == "＋"
-
-    # Empty table: just the trailing ＋ add-row.
-    assert view._in_table.rowCount() == 1
-    assert add_is_last(view._in_table)
-    # After adding a card, the ＋ stays directly below the last data row.
-    view._add_receive_row()
-    assert view._in_table.rowCount() == 2
-    assert add_is_last(view._in_table)
+    assert view._receive_rows == []
+    assert view._recv_list.count() == 0
+    row = view._add_receive_row()
+    assert view._receive_rows == [row]
+    assert view._recv_list.count() == 1  # the row's card widget in the list
+    assert view._recv_list.itemAt(0).widget() is row._card_widget
+    view.deleteLater()
     view.deleteLater()
 
 
@@ -375,7 +373,7 @@ def test_removing_a_middle_receive_row_does_not_crash(app, conn):
     # Remove the first (not the last) row — used to delete surviving widgets.
     view._remove_row("in", r0)
     assert len(view._receive_rows) == 2
-    assert view._in_table.rowCount() == 3  # 2 data rows + the trailing ＋ add-row
+    assert view._recv_list.count() == 2  # two card widgets remain in the list
     # Surviving rows' widgets are still live and correct.
     assert view._receive_rows[-1].name.text() == "third"
     # Deleting again still works.
@@ -392,8 +390,12 @@ def test_receive_row_autofills_set_and_number_from_catalog(app, conn):
     CardCatalogRepository(conn).replace_all(
         [
             CatalogCard(
-                card_id="sv9-163", name="Iono's Kilowattrel", set_id="sv9",
-                set_name="Journey Together", set_code="JTG", number="163",
+                card_id="sv9-163",
+                name="Iono's Kilowattrel",
+                set_id="sv9",
+                set_name="Journey Together",
+                set_code="JTG",
+                number="163",
             )
         ],
         "2026-07-13T00:00:00Z",

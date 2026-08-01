@@ -1,11 +1,16 @@
 """Unified Transaction screen — the write UI (F-TX-*, F-PU/SA/TR-*).
 
-One bidirectional screen records every purchase, sale, and trade: cards/cash you
-give on the left, cards/cash you receive on the right. Cards are entered
-**inline** — a ＋ adds an editable row, a per-row ✕ removes it; the receive
-side's Name field autocompletes from the local card catalog and auto-fills
-set/number. Columns are drag-resizable. Type is inferred live; a card's *value*
-is derived from the whole deal (no per-card agreed value). Submit is blocked
+A **"You vs Them" face-off**: everything you put on the table (cards you give +
+cash you pay) on the left, everything the counterparty puts up (their cards +
+cash they pay) on the right, split by a central VS. The inferred type
+(purchase / sale / trade) shows as a colour-coded badge up top.
+
+Cards are entered as stacked **card rows** — a ＋ adds one, a per-row ✕ removes
+it. A give row searches your on-hand stock; a receive row carries the full card
+field set with the essentials inline (name, set, #, condition, market, qty,
+intent) and the rest behind a per-row expander; its Name field autocompletes
+from the local card catalog and auto-fills set/number. A sticky **receipt bar**
+shows the running totals + Submit; type is inferred live and Submit is blocked
 until valid.
 
 Also supports **edit mode**: pre-loaded from an existing transaction, Submit
@@ -17,9 +22,14 @@ from __future__ import annotations
 import sqlite3
 
 from PySide6.QtCore import QDate, QModelIndex, Qt, QThread, Signal
-from PySide6.QtGui import QKeySequence, QShortcut, QStandardItem, QStandardItemModel
+from PySide6.QtGui import (
+    QFont,
+    QKeySequence,
+    QShortcut,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QAbstractSpinBox,
     QApplication,
     QCheckBox,
@@ -29,19 +39,17 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
-    QGroupBox,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
-    QSplitter,
     QStyledItemDelegate,
-    QTableWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -77,57 +85,85 @@ from tcginventory.services.transactions import (
     TransactionRequest,
     TransactionService,
 )
-from tcginventory.ui import theme
+from tcginventory.ui import icons, theme
 from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
 
-_GIVE_HEADERS = ["Item", "Qty", ""]
-_GIVE_WIDTHS = [280, 55, 30]
-_RECV_HEADERS = [
-    "Name",
-    "Category",
-    "Set",
-    "#",
-    "Language",
-    "Graded",
-    "Condition",
-    "Holo",
-    "Edition",
-    "Grading Co.",
-    "Grade",
-    "Cert #",
-    "Market",
-    "Qty",
-    "Intent",
-    "Review",
-    "TCGplayer",
-    "eBay",
-    "Notes",
-    "",
-]
-_RECV_WIDTHS = [
-    150,
-    85,
-    100,
-    55,
-    65,
-    55,
-    80,
-    55,
-    90,
-    90,
-    55,
-    85,
-    85,
-    45,
-    85,
-    55,
-    120,
-    100,
-    130,
-    30,
-]
+
+def _mono_font(size: float, bold: bool = False) -> QFont:
+    f = QFont(theme.mono_family())
+    f.setPointSizeF(size)
+    f.setBold(bold)
+    return f
+
+
+def _icon_button(glyph: str, tip: str, danger: bool = False) -> QPushButton:
+    """A borderless square glyph button (expand chevron / remove ✕)."""
+    t = theme.active()
+    b = QPushButton(glyph)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setToolTip(tip)
+    b.setFixedSize(26, 26)
+    hover = t.neg if danger else t.ink
+    b.setStyleSheet(
+        f"QPushButton{{border:none;background:transparent;color:{t.ink3};"
+        f"font-size:14px;border-radius:7px;}}"
+        f"QPushButton:hover{{background:{t.surface};color:{hover};}}"
+    )
+    return b
+
+
+def _inline_field(label: str, widget: QWidget) -> QHBoxLayout:
+    """A label beside its input (used above each side)."""
+    t = theme.active()
+    row = QHBoxLayout()
+    row.setSpacing(8)
+    lab = QLabel(label.upper())
+    lab.setStyleSheet(
+        f"color:{t.ink3};font-size:10px;font-weight:700;letter-spacing:.4px;"
+    )
+    row.addWidget(lab)
+    row.addWidget(widget, 1)
+    return row
+
+
+def _cash_block(label: str, spin: QDoubleSpinBox, rail: str) -> QWidget:
+    """An emphasised cash field (label left, big mono amount right)."""
+    t = theme.active()
+    box = QFrame()
+    box.setObjectName("cash")
+    box.setStyleSheet(
+        f"QFrame#cash{{background:{t.zebra};border:1px solid {t.line};"
+        f"border-left:3px solid {rail};border-radius:11px;}}"
+    )
+    h = QHBoxLayout(box)
+    h.setContentsMargins(13, 8, 11, 8)
+    cl = QLabel(label)
+    cl.setStyleSheet(f"color:{t.ink2};font-size:11.5px;font-weight:600;")
+    h.addWidget(cl)
+    h.addStretch(1)
+    spin.setFont(_mono_font(17, bold=True))
+    spin.setStyleSheet("border:none;background:transparent;")
+    spin.setAlignment(Qt.AlignRight)
+    spin.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+    h.addWidget(spin)
+    return box
+
+
+def _add_button(text: str, slot) -> QPushButton:
+    """A full-width dashed 'add a card' button."""
+    t = theme.active()
+    b = QPushButton("  " + text)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setIcon(icons.icon("plus", t.ink3, 15))
+    b.setStyleSheet(
+        f"QPushButton{{border:1px dashed {t.line2};border-radius:9px;"
+        f"color:{t.ink3};padding:9px;font-size:12px;font-weight:600;}}"
+        f"QPushButton:hover{{border-color:{t.accent};color:{t.accent_ink};}}"
+    )
+    b.clicked.connect(slot)
+    return b
 
 
 def money_spin() -> QDoubleSpinBox:
@@ -332,6 +368,29 @@ class _GiveRow:
         if self._chosen_id is None:
             return None
         return OutgoingCard(item_id=self._chosen_id, quantity=self.qty.value())
+
+    def widget(self, on_delete) -> QWidget:
+        """A styled give card-row: search field + quantity + remove."""
+        t = theme.active()
+        card = QFrame()
+        card.setObjectName("giverow")
+        card.setStyleSheet(
+            f"QFrame#giverow{{background:{t.surface2};border:1px solid {t.line};"
+            f"border-radius:10px;}}"
+        )
+        h = QHBoxLayout(card)
+        h.setContentsMargins(11, 7, 9, 7)
+        h.setSpacing(9)
+        h.addWidget(self.name, 1)
+        qlbl = QLabel("Qty")
+        qlbl.setStyleSheet(f"color:{t.ink3};font-size:11px;")
+        h.addWidget(qlbl)
+        self.qty.setFixedWidth(56)
+        h.addWidget(self.qty)
+        remove = _icon_button("✕", "Remove this card", danger=True)
+        remove.clicked.connect(lambda: on_delete())
+        h.addWidget(remove)
+        return card
 
 
 class _MatchDelegate(QStyledItemDelegate):
@@ -579,6 +638,98 @@ class _ReceiveRow:
             review=self.review.isChecked(),
         )
 
+    def widget(self, on_delete) -> QWidget:
+        """A card-row: essentials inline, advanced fields behind an expander."""
+        t = theme.active()
+        card = QFrame()
+        card.setObjectName("rc")
+        card.setStyleSheet(
+            f"QFrame#rc{{background:{t.surface2};border:1px solid {t.line};"
+            f"border-radius:11px;}}"
+        )
+        v = QVBoxLayout(card)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        # -- main line: name, set, #, condition, market, qty, intent
+        self.name.setPlaceholderText("Card name…")
+        self.name.setMinimumWidth(150)
+        self.set.setPlaceholderText("Set")
+        self.set.setFixedWidth(96)
+        self.number.setPlaceholderText("#")
+        self.number.setFixedWidth(48)
+        self.condition.setFixedWidth(66)
+        self.market.setFixedWidth(86)
+        self.qty.setFixedWidth(44)
+        self.intent.setFixedWidth(82)
+        main = QHBoxLayout()
+        main.setContentsMargins(11, 8, 9, 8)
+        main.setSpacing(8)
+        main.addWidget(self.name, 1)
+        main.addWidget(self.set)
+        main.addWidget(self.number)
+        main.addWidget(self.condition)
+        main.addWidget(self.market)
+        main.addWidget(self.qty)
+        main.addWidget(self.intent)
+        self._chev = _icon_button("", "Show / hide the extra fields")
+        self._chev.setIcon(icons.icon("chevron-down", t.ink3, 16))
+        self._chev.clicked.connect(self._toggle_adv)
+        main.addWidget(self._chev)
+        remove = _icon_button("✕", "Remove this card", danger=True)
+        remove.clicked.connect(lambda: on_delete())
+        main.addWidget(remove)
+        main_w = QWidget()
+        main_w.setLayout(main)
+        v.addWidget(main_w)
+
+        # -- expander: the rest of the card fields
+        self._adv = QFrame()
+        self._adv.setObjectName("adv")
+        self._adv.setStyleSheet(
+            f"QFrame#adv{{background:{t.zebra};border:none;border-top:1px solid "
+            f"{t.line};}}"
+        )
+        g = QGridLayout(self._adv)
+        g.setContentsMargins(12, 11, 12, 12)
+        g.setHorizontalSpacing(11)
+        g.setVerticalSpacing(9)
+
+        def cell(label: str, w: QWidget, r: int, c: int, span: int = 1) -> None:
+            box = QVBoxLayout()
+            box.setSpacing(3)
+            lab = QLabel(label.upper())
+            lab.setStyleSheet(
+                f"color:{t.ink3};font-size:9px;font-weight:700;letter-spacing:.4px;"
+            )
+            box.addWidget(lab)
+            box.addWidget(w)
+            g.addLayout(box, r, c, 1, span)
+
+        cell("Category", self.category, 0, 0)
+        cell("Language", self.language, 0, 1)
+        cell("Holo", self.holo, 0, 2)
+        cell("Edition", self.edition, 0, 3)
+        cell("Grading co.", self.company, 1, 0)
+        cell("Grade", self.grade, 1, 1)
+        cell("Cert #", self.cert, 1, 2)
+        self.graded.setText("Graded slab")
+        g.addWidget(self.graded, 1, 3, Qt.AlignBottom)
+        cell("TCGplayer URL", self.tcgplayer, 2, 0, 2)
+        cell("eBay URL", self.ebay, 2, 2, 2)
+        cell("Notes", self.notes, 3, 0, 3)
+        self.review.setText("Mark for review")
+        g.addWidget(self.review, 3, 3, Qt.AlignBottom)
+        self._adv.setVisible(False)
+        v.addWidget(self._adv)
+        return card
+
+    def _toggle_adv(self) -> None:
+        show = not self._adv.isVisible()
+        self._adv.setVisible(show)
+        name = "chevron-up" if show else "chevron-down"
+        self._chev.setIcon(icons.icon(name, theme.active().ink3, 16))
+
 
 class TransactionView(QWidget):
     posted = Signal()
@@ -595,118 +746,231 @@ class TransactionView(QWidget):
         self._price_workers: list[_PriceLookupWorker] = []
         self._edit_id: int | None = None
         self._inference_pipeline = None  # lazily built (image -> [Detection])
-        # Hovering any card in this window shows its image here, not at the
-        # cursor (parked in the reserved lower-left region).
+        # Hovering any card in this window shows its image in the receipt bar.
         self._preview_pane = CardImagePane()
 
+        self._date = QLineEdit(QDate.currentDate().toString("yyyy-MM-dd"))
+        self._date.setFixedWidth(130)
+        self._counterparty = QLineEdit()
+        self._counterparty.setPlaceholderText("Who you dealt with")
+        self._counterparty.textChanged.connect(self._on_counterparty_changed)
+        self._reference = QLineEdit()
+        self._reference.setPlaceholderText("Optional note / invoice #")
+        self._cash_out = money_spin()
+        self._cash_out.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self._cash_out.valueChanged.connect(self._update_summary)
+        self._cash_in = money_spin()
+        self._cash_in.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self._cash_in.valueChanged.connect(self._update_summary)
+
+        # -- centred type badge + edit banner
         self._badge = QLabel("—")
-        self._badge.setStyleSheet("font-size: 16px; font-weight: 700;")
         self._badge.setToolTip("Type is inferred from which sides carry cards")
         self._badge.setAccessibleName("Inferred transaction type")
         self._edit_banner = QLabel("")
+        self._edit_banner.setAlignment(Qt.AlignCenter)
         self._edit_banner.setStyleSheet(
-            f"color: {theme.active().accent_ink}; font-weight: 600;"
+            f"color:{theme.active().accent_ink};font-weight:600;font-size:12px;"
         )
 
-        self._date = QLineEdit(QDate.currentDate().toString("yyyy-MM-dd"))
-        self._counterparty = QLineEdit()
-        self._reference = QLineEdit()
-        header = QFormLayout()
-        header.addRow("Date (YYYY-MM-DD):", self._date)
-        header.addRow("Counterparty:", self._counterparty)
-        header.addRow("Reference:", self._reference)
+        board = QHBoxLayout()
+        board.setSpacing(0)
+        board.addWidget(self._build_you_side(), 1)
+        board.addWidget(self._build_gutter())
+        board.addWidget(self._build_them_side(), 1)
+        board_w = QWidget()
+        board_w.setLayout(board)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(board_w)
 
-        top = QHBoxLayout()
-        top.addLayout(header, 1)
-        badge_box = QVBoxLayout()
-        badge_box.addWidget(QLabel("This will record:"))
-        badge_box.addWidget(self._badge)
-        badge_box.addWidget(self._edit_banner)
-        top.addLayout(badge_box)
-
-        # Give is narrow (2 fields) vs the wider receive side.
-        sides_widget = QWidget()
-        sides = QHBoxLayout(sides_widget)
-        sides.setContentsMargins(0, 0, 0, 0)
-        sides.addWidget(self._build_give_side(), 1)
-        sides.addWidget(self._build_receive_side(), 4)
-
-        self._summary = QLabel("")
-        self._summary.setTextFormat(Qt.RichText)
-        self._submit = QPushButton("Submit")
-        self._submit.setToolTip("Post this transaction (Ctrl+S)")
-        self._submit.clicked.connect(self.submit)
         self._save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self._save_shortcut.activated.connect(self._submit_via_shortcut)
-        clear_btn = QPushButton("Clear")
-        clear_btn.clicked.connect(self.clear)
-        footer = QHBoxLayout()
-        footer.addWidget(self._summary, 1)
-        footer.addWidget(clear_btn)
-        footer.addWidget(self._submit)
-
-        # Lower area: card-image preview parked in the left corner; the rest is
-        # reserved for later.
-        lower_widget = QWidget()
-        lower = QHBoxLayout(lower_widget)
-        lower.setContentsMargins(0, 0, 0, 0)
-        preview_box = QVBoxLayout()
-        preview_box.addWidget(QLabel("Card preview"))
-        preview_box.addWidget(self._preview_pane, 1)  # fills the reserved height
-        # Preview column mirrors the give:receive 1:4 split, so the card image
-        # is as wide as the "You give" panel (and shrinks with it).
-        lower.addLayout(preview_box, 1)
-        lower.addStretch(4)
-
-        # Drag the divider to grow the give/receive tables vertically (or the
-        # preview area).
-        body = QSplitter(Qt.Vertical)
-        body.addWidget(sides_widget)
-        body.addWidget(lower_widget)
-        body.setStretchFactor(0, 3)
-        body.setStretchFactor(1, 1)
-        body.setChildrenCollapsible(False)
 
         layout = QVBoxLayout(self)
-        layout.addLayout(top)
-        layout.addWidget(body, 1)
-        layout.addLayout(footer)
+        layout.setContentsMargins(14, 12, 14, 0)
+        layout.setSpacing(10)
+        layout.addWidget(self._build_badge_bar())
+        layout.addLayout(self._build_hdr_fields())
+        layout.addWidget(scroll, 1)
+        layout.addWidget(self._build_receipt())
 
+        self._update_catalog_hint()
         self._update_summary()
 
-    # -- side builders ------------------------------------------------------
+    # -- header (badge + inline fields) ------------------------------------
 
-    def _build_give_side(self) -> QGroupBox:
-        box = QGroupBox("You give (out)")
-        self._out_table = QTableWidget(0, len(_GIVE_HEADERS))
-        self._out_table.setHorizontalHeaderLabels(_GIVE_HEADERS)
-        _tidy(self._out_table, _GIVE_WIDTHS)
-        self._install_add_row(
-            self._out_table, self._add_give_row, "Add a card you're giving"
+    def _build_badge_bar(self) -> QWidget:
+        t = theme.active()
+        self._badge_frame = QFrame()
+        self._badge_frame.setObjectName("typebadge")
+        bl = QVBoxLayout(self._badge_frame)
+        bl.setContentsMargins(18, 7, 18, 7)
+        bl.setSpacing(2)
+        cap = QLabel("THIS RECORDS A")
+        cap.setAlignment(Qt.AlignCenter)
+        cap.setStyleSheet(
+            f"color:{t.ink3};font-size:9px;font-weight:700;letter-spacing:1px;"
+            "background:transparent;border:none;"
         )
+        self._badge.setAlignment(Qt.AlignCenter)
+        self._badge.setStyleSheet("background:transparent;border:none;")
+        bl.addWidget(cap)
+        bl.addWidget(self._badge)
+        wrap = QWidget()
+        wl = QVBoxLayout(wrap)
+        wl.setContentsMargins(0, 0, 0, 0)
+        wl.setSpacing(4)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(self._badge_frame)
+        row.addStretch(1)
+        wl.addLayout(row)
+        wl.addWidget(self._edit_banner)
+        return wrap
 
-        self._cash_out = money_spin()
-        self._cash_out.valueChanged.connect(self._update_summary)
-        cash_row = QHBoxLayout()
-        cash_row.addWidget(QLabel("Cash you pay:"))
-        cash_row.addWidget(self._cash_out)
-        cash_row.addStretch(1)
+    def _build_hdr_fields(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        you = QHBoxLayout()
+        you.setSpacing(14)
+        you.addLayout(_inline_field("Date", self._date))
+        ref = _inline_field("Reference", self._reference)
+        you.addLayout(ref, 1)
+        row.addLayout(you, 1)
+        row.addSpacing(56)  # aligns with the centre gutter
+        them = QHBoxLayout()
+        them.addLayout(_inline_field("Counterparty", self._counterparty), 1)
+        row.addLayout(them, 1)
+        return row
 
-        layout = QVBoxLayout(box)
-        layout.addWidget(self._out_table)
-        layout.addLayout(cash_row)
-        return box
+    # -- the two sides ------------------------------------------------------
 
-    def _build_receive_side(self) -> QGroupBox:
-        box = QGroupBox("You receive (in)")
-        self._in_table = QTableWidget(0, len(_RECV_HEADERS))
-        self._in_table.setHorizontalHeaderLabels(_RECV_HEADERS)
-        _tidy(self._in_table, _RECV_WIDTHS)
-        self._install_add_row(
-            self._in_table, self._add_receive_row, "Add a card you're receiving"
+    def _side_header(self, avatar: str, who: str, sub: str, cls: str) -> QWidget:
+        t = theme.active()
+        color = t.pos if cls == "you" else t.accent_ink
+        soft = "rgba(131,209,90,.16)" if cls == "you" else "rgba(245,133,46,.16)"
+        head = QFrame()
+        h = QHBoxLayout(head)
+        h.setContentsMargins(15, 12, 15, 12)
+        h.setSpacing(11)
+        av = QLabel(avatar)
+        av.setFixedSize(32, 32)
+        av.setAlignment(Qt.AlignCenter)
+        av.setStyleSheet(
+            f"background:{soft};color:{color};border-radius:9px;font-weight:800;"
+            "font-size:13px;"
         )
+        h.addWidget(av)
+        who_box = QVBoxLayout()
+        who_box.setSpacing(1)
+        who_lbl = QLabel(who)
+        who_lbl.setStyleSheet(f"color:{t.ink};font-size:15px;font-weight:800;")
+        sub_lbl = QLabel(sub)
+        sub_lbl.setStyleSheet(f"color:{t.ink3};font-size:11px;")
+        who_box.addWidget(who_lbl)
+        who_box.addWidget(sub_lbl)
+        h.addLayout(who_box)
+        h.addStretch(1)
+        put = QVBoxLayout()
+        put.setSpacing(1)
+        pk = QLabel(f"{'You' if cls == 'you' else 'They'} put up".upper())
+        pk.setAlignment(Qt.AlignRight)
+        pk.setStyleSheet(
+            f"color:{t.ink3};font-size:9px;font-weight:700;letter-spacing:.4px;"
+        )
+        total = QLabel("$0.00")
+        total.setFont(_mono_font(17, bold=True))
+        total.setAlignment(Qt.AlignRight)
+        put.addWidget(pk)
+        put.addWidget(total)
+        h.addLayout(put)
+        if cls == "you":
+            self._you_total = total
+        else:
+            self._them_sub = sub_lbl
+            self._them_total = total
+            self._margin_chip = self._make_margin_chip()
+            h.addWidget(self._margin_chip)
+        head.setStyleSheet(f"QFrame{{border-bottom:1px solid {t.line};}}")
+        return head
 
-        self._auto_detect_cb = QCheckBox("Auto Detect Card")
+    def _make_margin_chip(self) -> QFrame:
+        t = theme.active()
+        chip = QFrame()
+        cl = QVBoxLayout(chip)
+        cl.setContentsMargins(11, 5, 11, 5)
+        cl.setSpacing(1)
+        mk = QLabel("SALE MARGIN")
+        mk.setAlignment(Qt.AlignRight)
+        mk.setStyleSheet(
+            f"color:{t.ink3};font-size:8.5px;font-weight:700;letter-spacing:.4px;"
+            "background:transparent;border:none;"
+        )
+        self._margin_val = QLabel("—")
+        self._margin_val.setFont(_mono_font(13, bold=True))
+        self._margin_val.setAlignment(Qt.AlignRight)
+        self._margin_val.setStyleSheet("background:transparent;border:none;")
+        cl.addWidget(mk)
+        cl.addWidget(self._margin_val)
+        chip.setVisible(False)
+        return chip
+
+    def _build_you_side(self) -> QWidget:
+        t = theme.active()
+        panel = QFrame()
+        panel.setObjectName("sideyou")
+        panel.setStyleSheet(
+            f"QFrame#sideyou{{background:{t.surface};border:1px solid {t.line};"
+            f"border-top:3px solid {t.pos};border-radius:16px;}}"
+        )
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        v.addWidget(self._side_header("Y", "You", "what you put on the table", "you"))
+        body = QVBoxLayout()
+        body.setContentsMargins(15, 14, 15, 15)
+        body.setSpacing(9)
+        body.addWidget(_cash_block("Cash you pay", self._cash_out, t.pos))
+        self._give_list = QVBoxLayout()
+        self._give_list.setSpacing(8)
+        self._give_list.setContentsMargins(0, 0, 0, 0)
+        body.addLayout(self._give_list)
+        self._give_empty = QLabel(
+            "You're not giving any cards — a purchase is just cash.\n"
+            "Add a card here to make it a trade."
+        )
+        self._give_empty.setAlignment(Qt.AlignCenter)
+        self._give_empty.setWordWrap(True)
+        self._give_empty.setStyleSheet(
+            f"color:{t.ink3};font-size:11.5px;border:1px dashed {t.line};"
+            "border-radius:10px;padding:14px 8px;"
+        )
+        body.addWidget(self._give_empty)
+        body.addStretch(1)
+        body.addWidget(_add_button("Add a card you're giving", self._add_give_row))
+        v.addLayout(body)
+        return panel
+
+    def _build_them_side(self) -> QWidget:
+        t = theme.active()
+        panel = QFrame()
+        panel.setObjectName("sidethem")
+        panel.setStyleSheet(
+            f"QFrame#sidethem{{background:{t.surface};border:1px solid {t.line};"
+            f"border-top:3px solid {t.accent};border-radius:16px;}}"
+        )
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        v.addWidget(self._side_header("T", "Them", "the counterparty", "them"))
+        body = QVBoxLayout()
+        body.setContentsMargins(15, 14, 15, 15)
+        body.setSpacing(9)
+        body.addWidget(_cash_block("Cash they pay you", self._cash_in, t.accent))
+
+        self._auto_detect_cb = QCheckBox("Auto-detect")
         self._auto_detect_cb.setToolTip(
             "As you type a card (name, set, and/or number), search the local "
             "card database and pick a match to auto-fill its fields."
@@ -715,36 +979,113 @@ class TransactionView(QWidget):
             bool(config.get_pref("receive_auto_detect", True))
         )
         self._auto_detect_cb.toggled.connect(self._on_auto_detect_toggled)
-        # Hint when Auto Detect is on but the catalog hasn't been pulled yet.
         self._catalog_hint = QLabel("")
-        self._catalog_hint.setStyleSheet(f"color: {theme.active().warn};")
-
-        self._cash_in = money_spin()
-        self._cash_in.valueChanged.connect(self._update_summary)
-        cash_row = QHBoxLayout()
-        cash_row.addWidget(QLabel("Cash they pay:"))
-        cash_row.addWidget(self._cash_in)
-        cash_row.addStretch(1)
-
-        self._autofill_btn = QPushButton("Autofill from photo…")
-        self._autofill_btn.setToolTip(
-            "Detect and identify the cards in one or more scene photos, then add "
-            "them as receive rows to confirm."
+        self._catalog_hint.setStyleSheet(f"color:{t.warn};font-size:11px;")
+        self._autofill_btn = QPushButton("  Autofill from photo")
+        self._autofill_btn.setIcon(icons.icon("scan-line", t.ink2, 15))
+        self._autofill_btn.setCursor(Qt.PointingHandCursor)
+        self._autofill_btn.setStyleSheet(
+            f"QPushButton{{border:1px solid {t.line2};border-radius:9px;"
+            f"color:{t.ink2};padding:6px 11px;font-size:12px;font-weight:600;}}"
+            f"QPushButton:hover{{border-color:{t.accent};color:{t.accent_ink};}}"
         )
         self._autofill_btn.clicked.connect(self._autofill_from_photo)
+        tool = QHBoxLayout()
+        tool.addWidget(self._autofill_btn)
+        tool.addWidget(self._catalog_hint)
+        tool.addStretch(1)
+        tool.addWidget(self._auto_detect_cb)
+        body.addLayout(tool)
 
-        head = QHBoxLayout()
-        head.addWidget(self._autofill_btn)
-        head.addWidget(self._catalog_hint)
-        head.addStretch(1)
-        head.addWidget(self._auto_detect_cb)  # top-right of the receive panel
+        self._recv_list = QVBoxLayout()
+        self._recv_list.setSpacing(8)
+        self._recv_list.setContentsMargins(0, 0, 0, 0)
+        body.addLayout(self._recv_list)
+        body.addStretch(1)
+        body.addWidget(_add_button("Add a card they're giving", self._add_receive_row))
+        v.addLayout(body)
+        return panel
 
-        layout = QVBoxLayout(box)
-        layout.addLayout(head)
-        layout.addWidget(self._in_table)
-        layout.addLayout(cash_row)
-        self._update_catalog_hint()
-        return box
+    def _build_gutter(self) -> QWidget:
+        t = theme.active()
+        g = QWidget()
+        g.setFixedWidth(56)
+        gl = QVBoxLayout(g)
+        gl.setContentsMargins(0, 0, 0, 0)
+        gl.addStretch(1)
+        vs = QLabel("VS")
+        vs.setFixedSize(42, 42)
+        vs.setAlignment(Qt.AlignCenter)
+        vs.setStyleSheet(
+            f"background:{t.surface};border:1px solid {t.line2};border-radius:21px;"
+            f"color:{t.accent_ink};font-weight:900;font-size:12px;"
+        )
+        gl.addWidget(vs, 0, Qt.AlignHCenter)
+        gl.addStretch(1)
+        return g
+
+    def _build_receipt(self) -> QWidget:
+        t = theme.active()
+        bar = QFrame()
+        bar.setObjectName("receipt")
+        bar.setStyleSheet(
+            f"QFrame#receipt{{background:{t.surface};border-top:1px solid {t.line2};}}"
+        )
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(14, 9, 14, 9)
+        h.setSpacing(18)
+        self._preview_pane.setMinimumSize(0, 0)
+        self._preview_pane.setFixedSize(58, 81)
+        self._preview_pane._MAX_W = 58
+        self._preview_pane.setText("")  # no placeholder text in the tiny slot
+        h.addWidget(self._preview_pane)
+        self._r_stats: dict[str, QLabel] = {}
+        for key, label in (
+            ("yougive", "You give"),
+            ("theygive", "They give"),
+            ("net", "Net cash"),
+            ("margin", "Est. margin"),
+        ):
+            block = QVBoxLayout()
+            block.setSpacing(1)
+            k = QLabel(label.upper())
+            k.setStyleSheet(
+                f"color:{t.ink3};font-size:9px;font-weight:700;letter-spacing:.4px;"
+            )
+            val = QLabel("—")
+            val.setFont(_mono_font(15, bold=True))
+            block.addWidget(k)
+            block.addWidget(val)
+            self._r_stats[key] = val
+            h.addLayout(block)
+        h.addStretch(1)
+        self._warn = QLabel("")
+        self._warn.setStyleSheet(f"color:{t.neg};font-size:12px;font-weight:600;")
+        h.addWidget(self._warn)
+        clear_btn = QPushButton("Clear")
+        clear_btn.setCursor(Qt.PointingHandCursor)
+        clear_btn.setStyleSheet(
+            f"QPushButton{{border:1px solid {t.line2};border-radius:10px;"
+            f"color:{t.ink2};padding:9px 16px;font-size:13px;font-weight:700;}}"
+        )
+        clear_btn.clicked.connect(self.clear)
+        self._submit = QPushButton("Submit")
+        self._submit.setObjectName("submit")
+        self._submit.setCursor(Qt.PointingHandCursor)
+        self._submit.setToolTip("Post this transaction (Ctrl+S)")
+        self._submit.setStyleSheet(
+            f"QPushButton#submit{{background:{t.accent};color:#0e0f13;border:none;"
+            f"border-radius:10px;padding:9px 18px;font-size:13px;font-weight:800;}}"
+            f"QPushButton#submit:disabled{{background:{t.surface2};color:{t.ink3};}}"
+        )
+        self._submit.clicked.connect(self.submit)
+        h.addWidget(clear_btn)
+        h.addWidget(self._submit)
+        return bar
+
+    def _on_counterparty_changed(self, text: str) -> None:
+        if hasattr(self, "_them_sub"):
+            self._them_sub.setText(text.strip() or "the counterparty")
 
     def _on_auto_detect_toggled(self, on: bool) -> None:
         config.set_pref("receive_auto_detect", on)
@@ -759,41 +1100,18 @@ class TransactionView(QWidget):
         else:
             self._catalog_hint.setText("")
 
-    # -- add / remove (insert/remove rows — never a full-table rebuild, which
-    #    would destroy surviving rows' cell widgets on shrink) --------------
-
-    def _place_row(self, table, index, row, kind) -> None:
-        for col, widget in enumerate(row.widgets()):
-            table.setCellWidget(index, col, widget)
-        table.setCellWidget(
-            index, table.columnCount() - 1, self._delete_button(kind, row)
-        )
-
-    def _delete_button(self, kind: str, row) -> QPushButton:
-        btn = QPushButton("✕")
-        btn.setFixedWidth(28)
-        btn.setToolTip("Remove this card")
-        btn.clicked.connect(lambda _=False, r=row, k=kind: self._remove_row(k, r))
-        return btn
-
-    def _install_add_row(self, table, handler, tooltip: str) -> None:
-        """Put a ＋ button in a fresh bottom row so it sits directly under the
-        last card (and scrolls with the rows)."""
-        add = QPushButton("＋")
-        add.setFixedWidth(32)
-        add.setToolTip(tooltip)
-        add.clicked.connect(handler)
-        r = table.rowCount()
-        table.insertRow(r)
-        table.setCellWidget(r, 0, add)
+    # -- add / remove (card-row widgets in each side's list) ---------------
 
     def _remove_row(self, kind: str, row) -> None:
         rows = self._give_rows if kind == "out" else self._receive_rows
-        table = self._out_table if kind == "out" else self._in_table
         if row in rows:
-            index = rows.index(row)
             rows.remove(row)
-            table.removeRow(index)  # keeps other rows' widgets intact
+            card = getattr(row, "_card_widget", None)
+            if card is not None:
+                card.setParent(None)
+                card.deleteLater()
+        if kind == "out":
+            self._give_empty.setVisible(not self._give_rows)
         self._update_summary()
 
     def _add_give_row(self) -> _GiveRow | None:
@@ -806,10 +1124,10 @@ class TransactionView(QWidget):
         row = _GiveRow(
             self._conn, sellable, self._update_summary, sink=self._preview_pane
         )
-        index = len(self._give_rows)  # insert above the trailing ＋ add-row
-        self._out_table.insertRow(index)
-        self._place_row(self._out_table, index, row, "out")
+        row._card_widget = row.widget(lambda r=row: self._remove_row("out", r))
+        self._give_list.addWidget(row._card_widget)
         self._give_rows.append(row)
+        self._give_empty.setVisible(False)
         self._update_summary()
         return row
 
@@ -821,9 +1139,8 @@ class TransactionView(QWidget):
             on_pick=self._request_price,
             sink=self._preview_pane,
         )
-        index = len(self._receive_rows)  # insert above the trailing ＋ add-row
-        self._in_table.insertRow(index)
-        self._place_row(self._in_table, index, row, "in")
+        row._card_widget = row.widget(lambda r=row: self._remove_row("in", r))
+        self._recv_list.addWidget(row._card_widget)
         self._receive_rows.append(row)
         row.name.setFocus()
         self._update_summary()
@@ -955,32 +1272,77 @@ class TransactionView(QWidget):
             reference=self._reference.text().strip() or None,
         )
 
+    _BADGE_COLORS = {"purchase": "info", "sale": "pos", "trade": "accent"}
+
     def _update_summary(self, *_args) -> None:
+        t = theme.active()
         preview = self._service.preview(self.build_request())
-        self._badge.setText(
-            preview.inferred_type.value.upper() if preview.inferred_type else "—"
+        ttype = preview.inferred_type.value if preview.inferred_type else None
+        self._badge.setText((ttype or "—").upper())
+        self._badge.setStyleSheet(self._badge_text_style(ttype))
+        self._badge_frame.setStyleSheet(self._badge_frame_style(ttype))
+        self._submit.setText(f"Submit {ttype}" if ttype else "Submit")
+
+        # each party's contribution + the running receipt totals
+        self._you_total.setText(money(preview.consideration_given_cents))
+        self._them_total.setText(money(preview.value_received_cents))
+        self._r_stats["yougive"].setText(money(preview.consideration_given_cents))
+        self._r_stats["theygive"].setText(money(preview.value_received_cents))
+        net = preview.net_cash_cents
+        net_lbl = self._r_stats["net"]
+        net_lbl.setText(money(net))
+        net_lbl.setStyleSheet(
+            f"color:{t.pos if net > 0 else (t.neg if net < 0 else t.ink)};"
         )
-        margin_txt = (
-            f"{money(preview.realized_pl_cents)}" if preview.proceeds_cents else "—"
-        )
-        pct = (
-            percent(100.0 * preview.realized_pl_cents / preview.proceeds_cents)
-            if preview.proceeds_cents
-            else ""
-        )
-        parts = [
-            f"Consideration given: <b>{money(preview.consideration_given_cents)}</b>",
-            f"Value received: <b>{money(preview.value_received_cents)}</b>",
-            f"Net cash: <b>{money(preview.net_cash_cents)}</b>",
-            f"Est. margin: <b>{margin_txt}</b> {pct}",
-        ]
-        if not preview.feasible:
-            parts.append(
-                f"<span style='color:{theme.active().neg}'>"
-                "⚠ oversell — reduce quantity</span>"
+
+        # sale margin (proceeds − cost basis of cards given up)
+        if preview.proceeds_cents:
+            pl = preview.realized_pl_cents
+            pct = percent(100.0 * pl / preview.proceeds_cents)
+            colr = t.pos if pl >= 0 else t.neg
+            arrow = "▲ " if pl >= 0 else "▼ "
+            self._margin_val.setText(f"{arrow}{money(pl)} · {pct}")
+            self._margin_val.setStyleSheet(
+                f"color:{colr};background:transparent;border:none;"
             )
-        self._summary.setText(" &nbsp;·&nbsp; ".join(parts))
+            mbg = "rgba(131,209,90,.13)" if pl >= 0 else "rgba(255,106,90,.13)"
+            self._margin_chip.setStyleSheet(
+                f"QFrame{{background:{mbg};border:1px solid {colr};"
+                "border-radius:10px;}"
+            )
+            self._margin_chip.setVisible(True)
+            self._r_stats["margin"].setText(f"{money(pl)} {pct}")
+            self._r_stats["margin"].setStyleSheet(f"color:{colr};")
+        else:
+            self._margin_chip.setVisible(False)
+            self._r_stats["margin"].setText("—")
+            self._r_stats["margin"].setStyleSheet(f"color:{t.ink3};")
+
+        self._warn.setText("" if preview.feasible else "⚠ oversell — reduce quantity")
         self._submit.setEnabled(preview.inferred_type is not None and preview.feasible)
+
+    def _badge_text_style(self, ttype: str | None) -> str:
+        t = theme.active()
+        color = getattr(t, self._BADGE_COLORS.get(ttype or "", "ink3"), None) or t.ink3
+        return (
+            f"color:{color};font-size:19px;font-weight:800;letter-spacing:.5px;"
+            "background:transparent;border:none;"
+        )
+
+    def _badge_frame_style(self, ttype: str | None) -> str:
+        t = theme.active()
+        tone = self._BADGE_COLORS.get(ttype or "", None)
+        rgb = {"info": "91,147,168", "pos": "131,209,90", "accent": "245,133,46"}
+        if tone in rgb:
+            c = rgb[tone]
+            return (
+                f"QFrame#typebadge{{background:rgba({c},.12);"
+                f"border:1px solid rgba({c},.4);border-radius:11px;}}"
+            )
+        return (
+            f"QFrame#typebadge{{background:{t.surface};border:1px solid {t.line2};"
+            "border-radius:11px;}"
+        )
 
     # -- submit / edit ------------------------------------------------------
 
@@ -1069,17 +1431,14 @@ class TransactionView(QWidget):
         dialog.exec()
 
     def clear(self) -> None:
+        for row in (*self._give_rows, *self._receive_rows):
+            card = getattr(row, "_card_widget", None)
+            if card is not None:
+                card.setParent(None)
+                card.deleteLater()
         self._give_rows.clear()
         self._receive_rows.clear()
-        self._out_table.setRowCount(0)
-        self._in_table.setRowCount(0)
-        # setRowCount(0) removed the ＋ add-rows too — re-install them.
-        self._install_add_row(
-            self._out_table, self._add_give_row, "Add a card you're giving"
-        )
-        self._install_add_row(
-            self._in_table, self._add_receive_row, "Add a card you're receiving"
-        )
+        self._give_empty.setVisible(True)
         self._cash_in.setValue(0.0)
         self._cash_out.setValue(0.0)
         self._counterparty.clear()
@@ -1145,16 +1504,3 @@ class TransactionView(QWidget):
                     )
                 )
         return True
-
-
-def _tidy(table: QTableWidget, widths: list[int]) -> None:
-    table.verticalHeader().setVisible(False)
-    table.setSelectionBehavior(QAbstractItemView.SelectRows)
-    table.setSelectionMode(QAbstractItemView.SingleSelection)
-    table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-    header = table.horizontalHeader()
-    header.setStretchLastSection(False)
-    header.setSectionResizeMode(QHeaderView.Interactive)  # drag to resize
-    header.setMinimumSectionSize(22)
-    for col, width in enumerate(widths):
-        table.setColumnWidth(col, width)
