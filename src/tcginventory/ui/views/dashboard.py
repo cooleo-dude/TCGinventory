@@ -27,7 +27,16 @@ from PySide6.QtCharts import (
     QLineSeries,
     QValueAxis,
 )
-from PySide6.QtCore import QDateTime, QObject, QSize, Qt, QThread, Signal
+from PySide6.QtCore import (
+    QDateTime,
+    QObject,
+    QPoint,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -518,6 +527,8 @@ class _PagedBox(QFrame):
         self._dot_color = dot_color
         self._items: list = []
         self._visible = _PAGE
+        self._user_paged = False  # once the user pages, stop auto-fitting
+        self._row_h = 46  # per-row height estimate (refined after each render)
         self._outer = QVBoxLayout(self)
         self._outer.setContentsMargins(16, 13, 16, 12)
         self._outer.setSpacing(2)
@@ -550,8 +561,24 @@ class _PagedBox(QFrame):
 
     # -- shared machinery ---------------------------------------------------
     def set_items(self, items: list) -> None:
+        # Fresh data → drop any manual page state so the box re-fits its height.
+        self._user_paged = False
         self._items = items
         self._render()
+
+    def fit_to_height(self, avail_px: int) -> None:
+        """Default the number of visible rows to what fills ``avail_px`` (the
+        space down to the bottom of the screen) — never fewer than one page.
+        No-op once the user has manually expanded/collapsed the box."""
+        if self._user_paged or not self._items:
+            return
+        overhead = 80  # header + footer + margins
+        rows_px = max(0, avail_px - overhead)
+        fit = rows_px // max(1, self._row_h)
+        target = min(len(self._items), max(_PAGE, fit))
+        if target != self._visible:
+            self._visible = target
+            self._render()
 
     def _render(self) -> None:
         self._restyle()
@@ -563,6 +590,13 @@ class _PagedBox(QFrame):
         for i, item in enumerate(self._items[: self._visible]):
             self._render_item(item, first=(i == 0))
         self._render_footer()
+        # Refine the per-row height estimate from the actual rendered row.
+        first = self._rows.itemAt(0)
+        widget = first.widget() if first is not None else None
+        if widget is not None:
+            hint = widget.sizeHint().height()
+            if hint > 12:
+                self._row_h = hint
 
     def _restyle(self) -> None:
         t = theme.active()
@@ -630,10 +664,12 @@ class _PagedBox(QFrame):
         return btn
 
     def _expand(self) -> None:
+        self._user_paged = True
         self._visible += _PAGE
         self._render()
 
     def _collapse(self) -> None:
+        self._user_paged = True
         self._visible = _PAGE
         self._render()
 
@@ -901,12 +937,30 @@ class DashboardView(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(page)
+        self._scroll = scroll
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(scroll)
 
         self.refresh()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._fit_highlight_boxes)
+
+    def _fit_highlight_boxes(self) -> None:
+        """Let each highlights box default to filling the space down to the
+        viewport bottom (more entries when there's room, capped by item count)."""
+        vp = self._scroll.viewport()
+        if vp.height() <= 0:
+            return
+        top = self._gainers.mapTo(vp, QPoint(0, 0)).y()
+        avail = vp.height() - top - 6
+        if avail <= 0:
+            return
+        for box in (self._gainers, self._losers, self._sellers, self._shows_box):
+            box.fit_to_height(avail)
 
     def _selected_intent(self) -> Intent | None:
         text = self._intent.currentText()
@@ -1028,6 +1082,9 @@ class DashboardView(QWidget):
             )
         else:
             self._note.setText("")
+
+        # Default each highlights box to fill the space down to the screen bottom.
+        QTimer.singleShot(0, self._fit_highlight_boxes)
 
     def _build_chart(
         self,
