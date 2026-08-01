@@ -1,14 +1,12 @@
-"""Vision corpus: capture ingestion, region storage, and the Recognition window."""
+"""Vision corpus: region storage, exemplars, and the Recognition window."""
 
 from __future__ import annotations
 
-import hashlib
 import os
 
 import pytest
 
 from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
-from tcginventory.services import vision as vision_svc
 
 # ---------------------------------------------------------------------------
 # data + service layers (headless)
@@ -20,38 +18,6 @@ def repo():
     conn = open_vision(":memory:")
     yield VisionRepository(conn)
     conn.close()
-
-
-def test_ingest_capture_groups_photos_and_cards(repo, tmp_path):
-    photos = []
-    for i, content in enumerate((b"photo-one", b"photo-two")):
-        p = tmp_path / f"p{i}.png"
-        p.write_bytes(content)
-        photos.append(p)
-    store = tmp_path / "store"
-
-    capture_id = vision_svc.ingest_capture(
-        repo,
-        photos,
-        "transaction",
-        [CardLabel(card_id="cel-4"), CardLabel(card_id="cel-5")],
-        base_dir=store,
-    )
-    assert capture_id is not None
-    assert repo.capture_count() == 1
-    assert repo.image_count() == 2
-    assert repo.capture_card_count() == 2
-    for content in (b"photo-one", b"photo-two"):
-        sha = hashlib.sha256(content).hexdigest()
-        assert (store / "vision" / "images" / f"{sha}.png").exists()
-
-
-def test_ingest_capture_noop_without_photos_or_cards(repo, tmp_path):
-    p = tmp_path / "x.png"
-    p.write_bytes(b"x")
-    assert vision_svc.ingest_capture(repo, [], "transaction", [CardLabel()]) is None
-    assert vision_svc.ingest_capture(repo, [p], "transaction", []) is None
-    assert repo.capture_count() == 0
 
 
 def test_add_region_stores_box_and_label(repo):

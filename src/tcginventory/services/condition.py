@@ -180,14 +180,10 @@ def assess_condition(image, assessor=None) -> ConditionEstimate:
     return (assessor or build_condition_assessor()).assess(image)
 
 
-def _safe(name: str) -> str:
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in name) or "unknown"
-
-
 def export_condition_crops(repo, out_dir: str | Path) -> int:
     """Write condition-labeled back crops to ``out_dir/<condition>/<region>.png``
     (training set for the offline condition classifier). Returns the count."""
-    from tcginventory.services.exemplars import crop_region
+    from tcginventory.services.exemplars import _safe, crop_region
 
     out = Path(out_dir)
     written = 0

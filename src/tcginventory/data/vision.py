@@ -1,19 +1,19 @@
 """Vision training corpus — a **separate** SQLite file (``vision.db``).
 
-Foundation for the (future) card-recognition engine. The unit is a **capture**:
-one purchase/auction's worth of photos plus the set of cards they collectively
-document. A capture has:
+Foundation for the card-recognition engine. The unit is a **capture**: one
+annotation session's worth of photos. A capture has:
 
-* **images** — the one or more photos supplied for that entry (a photo is a
+* **images** — the one or more photos supplied for that session (a photo is a
   *scene* that may show several cards), stored as content-addressed files on
   disk under ``<data_dir>/vision/images/``;
-* **cards** — the identities/conditions the user assigned (the labels the engine
-  learns to recognise against its catalog).
+* **regions** — the drawn boxes on those images, each with box geometry +
+  the card identity/condition the user assigned (the localized ground-truth
+  labels the detector + identifier learn from). Their crop embeddings cache in
+  ``region_embedding``.
 
-Grouping by capture keeps the several photos of a single lot associated, without
-falsely asserting that every card appears in every photo. Kept out of the ledger
-DB (bulky, derived ML data) so its exports/backups stay small — mirrors
-``pricehistory.db`` / ``auctions.db``. Qt-free.
+Grouping by capture keeps the several photos of a session associated. Kept out of
+the ledger DB (bulky, derived ML data) so its exports/backups stay small —
+mirrors ``pricehistory.db`` / ``auctions.db``. Qt-free.
 """
 
 from __future__ import annotations
@@ -46,22 +46,6 @@ CREATE TABLE IF NOT EXISTS image (
     created_at TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_image_capture ON image(capture_id);
-CREATE TABLE IF NOT EXISTS capture_card (
-    id              INTEGER PRIMARY KEY,
-    capture_id      INTEGER NOT NULL REFERENCES capture(id) ON DELETE CASCADE,
-    card_id         TEXT,                 -- catalog id when the card was matched
-    name            TEXT,
-    set_name        TEXT,
-    card_number     TEXT,
-    language        TEXT,
-    condition       TEXT,
-    is_graded       INTEGER NOT NULL DEFAULT 0,
-    grade           TEXT,
-    grading_company TEXT,
-    created_at      TEXT    NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_capture_card_capture ON capture_card(capture_id);
-CREATE INDEX IF NOT EXISTS idx_capture_card_card ON capture_card(card_id);
 CREATE TABLE IF NOT EXISTS region (
     id              INTEGER PRIMARY KEY,
     image_id        INTEGER NOT NULL REFERENCES image(id) ON DELETE CASCADE,
@@ -136,12 +120,15 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
 
 
 def _reset_legacy(conn: sqlite3.Connection) -> None:
-    """Drop the pre-capture experimental schema (per-image labels) if present.
+    """Drop superseded experimental schema.
 
     The vision corpus is new/experimental and the ingestion flow is still being
-    shaped; a stale ``image`` table without ``capture_id`` is thrown away rather
-    than migrated.
+    shaped; stale tables are thrown away rather than migrated:
+    * a pre-capture ``image`` table without ``capture_id`` (per-image labels), and
+    * ``capture_card`` — the M-V0 image-level label table, superseded by
+      ``region`` (localized per-box labels).
     """
+    conn.execute("DROP TABLE IF EXISTS capture_card")
     has_image = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='image'"
     ).fetchone()
@@ -210,30 +197,6 @@ class VisionRepository:
                     pair_group,
                     width,
                     height,
-                    now or _now(),
-                ),
-            )
-        return int(cur.lastrowid)
-
-    def add_capture_card(
-        self, capture_id: int, card: CardLabel, now: str | None = None
-    ) -> int:
-        with self.conn:
-            cur = self.conn.execute(
-                "INSERT INTO capture_card (capture_id, card_id, name, set_name, "
-                "card_number, language, condition, is_graded, grade, "
-                "grading_company, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    capture_id,
-                    card.card_id,
-                    card.name,
-                    card.set_name,
-                    card.card_number,
-                    card.language,
-                    card.condition,
-                    1 if card.is_graded else 0,
-                    card.grade,
-                    card.grading_company,
                     now or _now(),
                 ),
             )
@@ -389,11 +352,6 @@ class VisionRepository:
             "SELECT * FROM region WHERE image_id = ? ORDER BY number", (image_id,)
         ).fetchall()
 
-    def list_images(self) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT id, path, width, height FROM image ORDER BY id"
-        ).fetchall()
-
     def images_with_regions(self) -> list[sqlite3.Row]:
         """Images that carry at least one drawn region (detector training set)."""
         return self.conn.execute(
@@ -407,12 +365,3 @@ class VisionRepository:
 
     def image_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM image").fetchone()[0]
-
-    def capture_card_count(self) -> int:
-        return self.conn.execute("SELECT COUNT(*) FROM capture_card").fetchone()[0]
-
-    def captures_with_card(self, card_id: str) -> int:
-        return self.conn.execute(
-            "SELECT COUNT(DISTINCT capture_id) FROM capture_card WHERE card_id = ?",
-            (card_id,),
-        ).fetchone()[0]
