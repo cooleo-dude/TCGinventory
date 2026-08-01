@@ -1070,6 +1070,7 @@ class InventoryView(QWidget):
         facts.setColumnStretch(0, 1)
         facts.setColumnStretch(1, 1)
         self._fact_vals: dict[str, QLabel] = {}
+        self._fact_keys: dict[str, QLabel] = {}  # the caption labels, per fact
 
         def make_cell(key: str, label: str, wrap: bool = False) -> QVBoxLayout:
             cell = QVBoxLayout()
@@ -1086,6 +1087,7 @@ class InventoryView(QWidget):
             cell.addWidget(k)
             cell.addWidget(val)
             self._fact_vals[key] = val
+            self._fact_keys[key] = k
             return cell
 
         sku_label = next(lbl for key, lbl in self._FACTS if key == "sku")
@@ -1129,10 +1131,10 @@ class InventoryView(QWidget):
             self._dossier_name.setText("—")
             self._dossier_sub.setText("Select a card to see its details.")
             self._dossier_art.set_pixmap(None)
-            for key, val in self._fact_vals.items():
+            for val in self._fact_vals.values():
                 val.setText("—")
                 val.setStyleSheet(f"color:{t.ink3};")
-                val.setVisible(key != "sold")  # Sold-for hidden until relevant
+            self._show_sold_fact(False)  # no Sold-for label until relevant
             return
         self._dossier_name.setText(row.item.name)
         self._dossier_sub.setText(subline_for(row))
@@ -1164,11 +1166,17 @@ class InventoryView(QWidget):
             pct = (unreal / cost * 100) if cost else 0.0
             set_val("return", f"{pct:+.0f}%", color)
 
-        # Sold-for only appears once some of the lot has actually sold.
+        # Sold-for (label + value) only appears once some of the lot has sold.
         if row.sold_price_cents is not None:
             set_val("sold", money(row.sold_price_cents), t.ink2)
+            self._show_sold_fact(True)
         else:
-            self._fact_vals["sold"].setVisible(False)
+            self._show_sold_fact(False)
+
+    def _show_sold_fact(self, show: bool) -> None:
+        """Show/hide the whole Sold-for fact — both its caption and its value."""
+        self._fact_keys["sold"].setVisible(show)
+        self._fact_vals["sold"].setVisible(show)
 
     # -- row thumbnails ---------------------------------------------------
 
