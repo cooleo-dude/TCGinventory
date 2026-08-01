@@ -1059,13 +1059,19 @@ class InventoryView(QWidget):
         self._dossier_sub.setStyleSheet(f"color:{t.ink3};")
         self._dossier_sub.setWordWrap(True)
 
-        # Facts — a 2-column grid of key-over-value blocks.
+        # Facts — a fixed 2-column grid of key-over-value blocks. SKU gets its
+        # own full-width row so a long SKU never widens a column and shifts the
+        # others; the remaining (short) values keep the two columns at an even,
+        # content-independent split.
         facts = QGridLayout()
         facts.setContentsMargins(0, 6, 0, 2)
         facts.setHorizontalSpacing(16)
         facts.setVerticalSpacing(11)
+        facts.setColumnStretch(0, 1)
+        facts.setColumnStretch(1, 1)
         self._fact_vals: dict[str, QLabel] = {}
-        for i, (key, label) in enumerate(self._FACTS):
+
+        def make_cell(key: str, label: str, wrap: bool = False) -> QVBoxLayout:
             cell = QVBoxLayout()
             cell.setSpacing(1)
             k = QLabel(label.upper())
@@ -1075,12 +1081,18 @@ class InventoryView(QWidget):
             val = QLabel("—")
             val.setFont(self._mono(13, bold=True))
             val.setStyleSheet(f"color:{t.ink};")
+            if wrap:
+                val.setWordWrap(True)
             cell.addWidget(k)
             cell.addWidget(val)
-            facts.addLayout(cell, i // 2, i % 2)
             self._fact_vals[key] = val
-        facts.setColumnStretch(0, 1)
-        facts.setColumnStretch(1, 1)
+            return cell
+
+        sku_label = next(lbl for key, lbl in self._FACTS if key == "sku")
+        facts.addLayout(make_cell("sku", sku_label, wrap=True), 0, 0, 1, 2)
+        rest = [(key, lbl) for key, lbl in self._FACTS if key != "sku"]
+        for i, (key, label) in enumerate(rest):
+            facts.addLayout(make_cell(key, label), 1 + i // 2, i % 2)
 
         details = QVBoxLayout()
         details.setSpacing(5)
