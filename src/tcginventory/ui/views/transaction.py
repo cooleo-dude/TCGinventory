@@ -90,6 +90,8 @@ from tcginventory.ui.card_preview import install_hover_preview
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
 
+_TOOLBAR_H = 34  # Them's autofill toolbar row; matched by a You-side spacer
+
 
 def _mono_font(size: float, bold: bool = False) -> QFont:
     f = QFont(theme.mono_family())
@@ -971,6 +973,11 @@ class TransactionView(QWidget):
         body = QVBoxLayout()
         body.setContentsMargins(15, 14, 15, 15)
         body.setSpacing(9)
+        # Blank slot matching the Them side's autofill toolbar, so the two cash
+        # blocks line up across the boxes.
+        spacer = QWidget()
+        spacer.setFixedHeight(_TOOLBAR_H)
+        body.addWidget(spacer)
         body.addWidget(_cash_block("Cash you pay", self._cash_out, t.pos))
         body.addWidget(_add_button("Add a card you're giving", self._add_give_row))
         self._give_list = QVBoxLayout()
@@ -1019,11 +1026,15 @@ class TransactionView(QWidget):
         )
         self._autofill_btn.clicked.connect(self._autofill_from_photo)
         tool = QHBoxLayout()
+        tool.setContentsMargins(0, 0, 0, 0)
         tool.addWidget(self._autofill_btn)
         tool.addWidget(self._catalog_hint)
         tool.addStretch(1)
         tool.addWidget(self._auto_detect_cb)
-        body.addLayout(tool)
+        tool_w = QWidget()
+        tool_w.setLayout(tool)
+        tool_w.setFixedHeight(_TOOLBAR_H)
+        body.addWidget(tool_w)
 
         body.addWidget(_cash_block("Cash they pay you", self._cash_in, t.accent))
         body.addWidget(_add_button("Add a card they're giving", self._add_receive_row))
