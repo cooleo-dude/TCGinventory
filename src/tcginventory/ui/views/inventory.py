@@ -17,6 +17,7 @@ from PySide6.QtCore import (
     QEvent,
     QMargins,
     QModelIndex,
+    QRectF,
     QSortFilterProxyModel,
     Qt,
     QThread,
@@ -38,8 +39,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
-    QComboBox,
+    QButtonGroup,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -76,8 +76,7 @@ from tcginventory.services.inventory import InventoryRow, InventoryService
 from tcginventory.services.review import with_review_note, without_review_note
 from tcginventory.services.transactions import TransactionService
 from tcginventory.services.trends import TrendService
-from tcginventory.ui import theme
-from tcginventory.ui.card_preview import CardImagePane
+from tcginventory.ui import icons, theme
 from tcginventory.ui.charts import RangedChartView
 from tcginventory.ui.formatting import money
 from tcginventory.ui.models.inventory_model import (
@@ -100,9 +99,119 @@ from tcginventory.ui.views._link_delegate import LinkButtonDelegate
 from tcginventory.ui.views._review_delegate import ReviewPriceDelegate
 from tcginventory.ui.views.item_detail import ItemDetailDialog
 
-_INTENTS = ["All", "personal", "resale", "ripping", "mixed"]
-_SOLD = ["All", "unsold", "partial", "sold"]
-_GRADED = ["All", "Singles", "Graded"]
+
+class _Segmented(QWidget):
+    """A pill-styled segmented control: a row of exclusive buttons. Emits the
+    selected *value* (not the label) via ``changed``."""
+
+    changed = Signal(str)
+
+    def __init__(self, options: list[tuple[str, str]], parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("segwrap")
+        t = theme.active()
+        self.setStyleSheet(
+            f"QWidget#segwrap{{background:{t.surface};border:1px solid {t.line2};"
+            f"border-radius:9px;}}"
+            f"QWidget#segwrap QPushButton{{background:transparent;border:none;"
+            f"color:{t.ink2};padding:5px 12px;border-radius:6px;font-weight:600;"
+            f"font-size:12px;}}"
+            f"QWidget#segwrap QPushButton:hover{{color:{t.ink};}}"
+            f"QWidget#segwrap QPushButton:checked{{background:{t.accent_soft};"
+            f"color:{t.accent_ink};}}"
+        )
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(3, 3, 3, 3)
+        lay.setSpacing(2)
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self._buttons: dict[str, QPushButton] = {}
+        for i, (label, value) in enumerate(options):
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, v=value: self.changed.emit(v))
+            self._group.addButton(b)
+            lay.addWidget(b)
+            self._buttons[value] = b
+            if i == 0:
+                b.setChecked(True)
+
+    def select(self, value: str) -> None:
+        """Programmatically choose ``value`` (checks it and emits ``changed``)."""
+        button = self._buttons.get(value)
+        if button is not None:
+            button.setChecked(True)
+            self.changed.emit(value)
+
+
+class _Chip(QPushButton):
+    """A rounded, checkable filter chip (accent-tinted when on)."""
+
+    def __init__(self, text: str, parent=None) -> None:
+        super().__init__(text, parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setObjectName("chip")
+        t = theme.active()
+        self.setStyleSheet(
+            f"QPushButton#chip{{background:{t.surface};border:1px solid {t.line2};"
+            f"border-radius:999px;color:{t.ink2};padding:5px 13px;font-weight:600;"
+            f"font-size:12px;}}"
+            f"QPushButton#chip:hover{{color:{t.ink};}}"
+            f"QPushButton#chip:checked{{background:{t.accent_soft};"
+            f"border-color:{t.accent};color:{t.accent_ink};}}"
+        )
+
+
+class _DossierArt(QWidget):
+    """The dossier's card preview: paints the card image at a **fixed card
+    aspect**, centred and filling the region — so every card reads at the same
+    size (no per-image height jumps) — with rounded corners and no frame/box."""
+
+    _RATIO = 342 / 245  # card height / width
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._pm: QPixmap | None = None
+        self.setMinimumHeight(280)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+
+    def set_pixmap(self, pm: QPixmap | None) -> None:
+        self._pm = pm if (pm is not None and not pm.isNull()) else None
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        t = theme.active()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        w, h = self.width(), self.height()
+        cw = min(w, h / self._RATIO)
+        ch = cw * self._RATIO
+        x = (w - cw) / 2
+        y = (h - ch) / 2
+        rect = QRectF(x, y, cw, ch)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 10, 10)
+        if self._pm is not None:
+            p.setClipPath(path)
+            scaled = self._pm.scaled(
+                int(round(cw)),
+                int(round(ch)),
+                Qt.KeepAspectRatioByExpanding,
+                Qt.SmoothTransformation,
+            )
+            sx = x + (cw - scaled.width()) / 2
+            sy = y + (ch - scaled.height()) / 2
+            p.drawPixmap(int(sx), int(sy), scaled)
+        else:
+            p.setPen(QColor(t.ink3))
+            font = QFont(self.font())
+            font.setPointSizeF(10.5)
+            p.setFont(font)
+            p.drawText(self.rect(), int(Qt.AlignCenter), "No preview")
+        p.end()
 
 
 class _PreviewPrefetchWorker(QThread):
@@ -268,43 +377,74 @@ class InventoryView(QWidget):
         self._proxy = _InventoryFilterProxy()
         self._proxy.setSourceModel(self._model)
 
-        # -- filter bar
+        # -- filter bar: search + segmented Intent/Sold/Type + toggle chips.
+        t = theme.active()
         self._search = QLineEdit()
-        self._search.setPlaceholderText("Search name / set / number…")
+        self._search.setPlaceholderText("Search name / set / number / SKU…")
+        self._search.addAction(
+            icons.icon("search", t.ink3, 16), QLineEdit.LeadingPosition
+        )
         self._search.textChanged.connect(self._proxy.set_text)
+        self._search.textChanged.connect(lambda *_: self._update_summary())
 
-        self._intent = QComboBox()
-        self._intent.addItems(_INTENTS)
-        self._intent.currentTextChanged.connect(self._proxy.set_intent)
+        self._intent = _Segmented(
+            [
+                ("All", "All"),
+                ("Personal", "personal"),
+                ("Resale", "resale"),
+                ("Ripping", "ripping"),
+            ]
+        )
+        self._intent.changed.connect(self._proxy.set_intent)
+        self._intent.changed.connect(lambda *_: self._update_summary())
 
-        self._sold = QComboBox()
-        self._sold.addItems(_SOLD)
-        self._sold.currentTextChanged.connect(self._proxy.set_sold)
+        self._sold = _Segmented(
+            [
+                ("All", "All"),
+                ("Unsold", "unsold"),
+                ("Partial", "partial"),
+                ("Sold", "sold"),
+            ]
+        )
+        self._sold.changed.connect(self._proxy.set_sold)
+        self._sold.changed.connect(lambda *_: self._update_summary())
 
-        self._graded = QComboBox()
-        self._graded.addItems(_GRADED)
-        self._graded.currentTextChanged.connect(self._proxy.set_graded)
+        self._graded = _Segmented(
+            [("All", "All"), ("Singles", "Singles"), ("Graded", "Graded")]
+        )
+        self._graded.changed.connect(self._proxy.set_graded)
+        self._graded.changed.connect(lambda *_: self._update_summary())
 
-        self._in_stock = QCheckBox("In stock only")
+        self._in_stock = _Chip("In stock")
         self._in_stock.toggled.connect(self._proxy.set_in_stock_only)
+        self._in_stock.toggled.connect(lambda *_: self._update_summary())
 
-        self._review_only = QCheckBox("Marked for review")
+        self._review_only = _Chip("◍ Review")
         self._review_only.setToolTip("Show only entries flagged for review")
         self._review_only.toggled.connect(self._proxy.set_review_only)
+        self._review_only.toggled.connect(lambda *_: self._update_summary())
 
         self._delete_btn = QPushButton("Delete entry…")
+        self._delete_btn.setObjectName("danger")
+        self._delete_btn.setCursor(Qt.PointingHandCursor)
+        self._delete_btn.setIcon(icons.icon("trash-2", t.neg, 15))
         self._delete_btn.setToolTip(
             "Permanently delete the selected entry (for correcting a mistake)"
+        )
+        self._delete_btn.setStyleSheet(
+            f"QPushButton#danger{{background:transparent;border:1px solid "
+            f"{t.line2};border-radius:9px;color:{t.neg};padding:6px 12px;"
+            f"font-weight:600;font-size:12px;}}"
+            f"QPushButton#danger:hover{{border-color:{t.neg};"
+            f"background:{t.surface2};}}"
         )
         self._delete_btn.clicked.connect(self._delete_selected_entry)
 
         filter_bar = QHBoxLayout()
+        filter_bar.setSpacing(8)
         filter_bar.addWidget(self._search, 1)
-        filter_bar.addWidget(QLabel("Intent:"))
         filter_bar.addWidget(self._intent)
-        filter_bar.addWidget(QLabel("Sold:"))
         filter_bar.addWidget(self._sold)
-        filter_bar.addWidget(QLabel("Type:"))
         filter_bar.addWidget(self._graded)
         filter_bar.addWidget(self._in_stock)
         filter_bar.addWidget(self._review_only)
@@ -335,8 +475,8 @@ class InventoryView(QWidget):
         # Hover a row to show that card in the dossier (art + details + chart).
         # On leaving the rows, the dossier falls back to the selected card, or —
         # if none is selected — the most-recently-hovered card (see
-        # _restore_display / eventFilter). The image is lazily fetched + cached.
-        self._preview_pane = CardImagePane()
+        # _restore_display / eventFilter). Art is shown from the prefetch cache.
+        self._dossier_art = _DossierArt()
         self._last_hovered_row: InventoryRow | None = None
         self._table.setMouseTracking(True)
         self._table.entered.connect(self._on_row_hover)
@@ -446,17 +586,6 @@ class InventoryView(QWidget):
         layout.addWidget(self._build_summary())
         layout.addWidget(body, 1)
 
-        # Recompute the filter-scoped summary whenever the visible set changes.
-        for sig in (
-            self._search.textChanged,
-            self._intent.currentTextChanged,
-            self._sold.currentTextChanged,
-            self._graded.currentTextChanged,
-        ):
-            sig.connect(lambda *_: self._update_summary())
-        self._in_stock.toggled.connect(lambda *_: self._update_summary())
-        self._review_only.toggled.connect(lambda *_: self._update_summary())
-
         self.refresh()
 
     def refresh(self) -> None:
@@ -557,11 +686,9 @@ class InventoryView(QWidget):
         selected card, or — if none is selected — the last-hovered card."""
         return self._selected_row() or self._last_hovered_row
 
-    def _display_card(
-        self, row: InventoryRow | None, allow_fetch: bool = False
-    ) -> None:
+    def _display_card(self, row: InventoryRow | None) -> None:
         """Show ``row`` in the dossier: details/art now, chart debounced."""
-        self._update_dossier(row, allow_fetch=allow_fetch)
+        self._update_dossier(row)
         self._request_chart(row)
 
     def _restore_display(self) -> None:
@@ -583,7 +710,7 @@ class InventoryView(QWidget):
         if row is None:
             return
         self._last_hovered_row = row
-        self._display_card(row, allow_fetch=True)
+        self._display_card(row)
 
     # -- price-history chart ----------------------------------------------
 
@@ -901,13 +1028,9 @@ class InventoryView(QWidget):
         )
         v.addWidget(cap)
 
-        # Large card art — expands to fill the freed dossier width/height. The
-        # pane's own policy is Ignored/Ignored, so drive its vertical size here.
-        self._preview_pane.set_border(t.line2)
-        self._preview_pane._MAX_W = 520  # let art scale up in the wider dossier
-        self._preview_pane.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
-        self._preview_pane.setMinimumHeight(240)
-        v.addWidget(self._preview_pane, 1)
+        # Large card art — fixed card aspect, filled, no frame (expands to fill
+        # the freed dossier height; every card renders at the same size).
+        v.addWidget(self._dossier_art, 1)
 
         self._dossier_name = QLabel("—")
         self._dossier_name.setStyleSheet(
@@ -959,15 +1082,14 @@ class InventoryView(QWidget):
         v.addWidget(self._chart_view)
         return panel
 
-    def _update_dossier(
-        self, row: InventoryRow | None, allow_fetch: bool = False
-    ) -> None:
+    def _update_dossier(self, row: InventoryRow | None) -> None:
         if not hasattr(self, "_fact_vals"):
             return
         t = theme.active()
         if row is None:
             self._dossier_name.setText("—")
             self._dossier_sub.setText("Select a card to see its details.")
+            self._dossier_art.set_pixmap(None)
             for key, val in self._fact_vals.items():
                 val.setText("—")
                 val.setStyleSheet(f"color:{t.ink3};")
@@ -975,12 +1097,9 @@ class InventoryView(QWidget):
             return
         self._dossier_name.setText(row.item.name)
         self._dossier_sub.setText(subline_for(row))
-        # On hover (allow_fetch) show the art, fetching if the prefetch hasn't
-        # cached it yet; on selection/leave (allow_fetch=False) only show art
-        # already on disk, so a non-hover update never spawns a fetch thread.
-        res = self._row_image.get(row.lot_id)
-        if res and (allow_fetch or cardimages.cache_path(res[0]).exists()):
-            self._preview_pane.show_card(*res)
+        # Show the card art from the prefetch cache (warmed on load) — no fetch
+        # thread is spawned here, and the art fills a fixed card-aspect region.
+        self._dossier_art.set_pixmap(self._art_pixmap(row.lot_id))
 
         def set_val(key: str, text: str, color: str) -> None:
             val = self._fact_vals[key]
@@ -1013,6 +1132,18 @@ class InventoryView(QWidget):
             self._fact_vals["sold"].setVisible(False)
 
     # -- row thumbnails ---------------------------------------------------
+
+    def _art_pixmap(self, lot_id: int) -> QPixmap | None:
+        """The full cached card image for the dossier art (None until the
+        background prefetch has warmed this lot's image to disk)."""
+        res = self._row_image.get(lot_id)
+        if not res:
+            return None
+        path = cardimages.cache_path(res[0])
+        if not path.exists():
+            return None
+        pm = QPixmap(str(path))
+        return None if pm.isNull() else pm
 
     def _thumb_pixmap(self, lot_id: int) -> QPixmap | None:
         """A small rounded thumbnail for the Card cell, cached per lot. Returns

@@ -163,11 +163,11 @@ def test_inventory_graded_filter(app, conn):
 
     view = InventoryView(conn)
     assert view._proxy.rowCount() == 2  # All
-    view._graded.setCurrentText("Graded")
+    view._graded.select("Graded")
     assert view._proxy.rowCount() == 1
-    view._graded.setCurrentText("Singles")
+    view._graded.select("Singles")
     assert view._proxy.rowCount() == 1
-    view._graded.setCurrentText("All")
+    view._graded.select("All")
     assert view._proxy.rowCount() == 2
     view.deleteLater()
 
