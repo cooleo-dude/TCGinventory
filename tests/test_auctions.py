@@ -171,11 +171,10 @@ def test_view_breakdown_updates_live(app):
     row.qty.setValue(2)
     view._shipping.setValue(5.0)  # tax stays at the 6% default
     view._update_breakdown()
-    text = view._breakdown.text()
-    assert "$40.00" in text  # card value 2 x $20
+    assert "$40.00" in view._bid_caption.text()  # card value 2 x $20
     # 100% max bid on $40 value, $5 ship, 6% tax = 3274 cents ($32.74):
     # (32.74 + 5) * 1.06 = 40.00.
-    assert "$32.74" in text
+    assert view._mini[100].text() == "$32.74"
     view.deleteLater()
 
 
@@ -189,7 +188,7 @@ def test_view_save_load_and_delete_roundtrip(app):
     view._shipping.setValue(5.0)
     view._save()
 
-    assert view._watch.rowCount() == 1
+    assert len(view._cards) == 1
     saved_id = view._edit_id
     assert saved_id is not None
 
@@ -212,7 +211,7 @@ def test_view_save_load_and_delete_roundtrip(app):
         view._delete(auction)
     finally:
         QMessageBox.question = orig
-    assert view._watch.rowCount() == 0
+    assert len(view._cards) == 0
     assert view._edit_id is None
     view.deleteLater()
 
@@ -244,9 +243,9 @@ def test_refresh_values_from_history(app, monkeypatch):
     vals = {c.name: c.market_value_cents for c in got.cards}
     assert vals["Charizard"] == 1_500  # repriced from history
     assert vals["Manual entry"] == 300  # no catalog match -> left unchanged
-    # No live fetch spawned (history had the price) and value cell reflects it.
+    # No live fetch spawned (history had the price) and the card reflects it.
     assert view._price_workers == []
-    assert view._watch.item(0, 2).text() == "$18.00"  # 1500 + 300
+    assert view._cards[0].value_text() == "$18.00"  # 1500 + 300
     view.deleteLater()
 
 
@@ -300,9 +299,7 @@ def test_price_result_populates_tcgplayer_button(app):
     row = view._add_card_row()
     row.name.setText("Charizard")
     # Simulate the live tcgcsv lookup returning (price_cents, product_url).
-    view._on_price_ready(
-        row, None, (1850, "https://www.tcgplayer.com/product/123")
-    )
+    view._on_price_ready(row, None, (1850, "https://www.tcgplayer.com/product/123"))
     assert row.tcg_btn.isEnabled()
     assert row.market.value() == 18.50  # live price applied
     assert row.to_card().tcgplayer_url == "https://www.tcgplayer.com/product/123"
@@ -397,8 +394,13 @@ def test_live_price_respects_manual_override(app):
 def test_row_minimal_roundtrip(app):
     view = _view(app)
     ac = AuctionCard(
-        name="Blastoise", set_name="Base", number="2/102", language="EN",
-        quantity=3, market_value_cents=4200, tcgplayer_url="http://t",
+        name="Blastoise",
+        set_name="Base",
+        number="2/102",
+        language="EN",
+        quantity=3,
+        market_value_cents=4200,
+        tcgplayer_url="http://t",
     )
     row = view._add_card_row()
     row.set_card(ac)
@@ -452,10 +454,15 @@ def test_main_window_export_populates_transaction(app):
     conn = connect(":memory:")
     migrate(conn)
     win = MainWindow(conn)
-    win._auctions._add_card_row().set_card(AuctionCard(
-        name="Charizard", set_name="Base", number="4/102",
-        quantity=2, market_value_cents=25000,
-    ))
+    win._auctions._add_card_row().set_card(
+        AuctionCard(
+            name="Charizard",
+            set_name="Base",
+            number="4/102",
+            quantity=2,
+            market_value_cents=25000,
+        )
+    )
     win._auctions._title.setText("Vintage lot")
     win._auctions._export_current()
 
@@ -474,11 +481,11 @@ def test_archive_toggle_and_filter(app):
     view = _view(app)
     view._add_card_row().set_card(AuctionCard(name="X", market_value_cents=100))
     view._save()
-    assert view._watch.rowCount() == 1
+    assert len(view._cards) == 1
     view._toggle_archived(view._repo.get(view._edit_id))
-    assert view._watch.rowCount() == 0  # archived → hidden from the active list
+    assert len(view._cards) == 0  # archived → hidden from the active list
     view._show_archived.setChecked(True)
-    assert view._watch.rowCount() == 1  # revealed under "Show archived"
+    assert len(view._cards) == 1  # revealed under the Archived segment
     view.deleteLater()
 
 
@@ -525,8 +532,6 @@ def test_ensure_columns_adds_ends_at_to_old_db():
 def test_editor_end_date_and_time_are_separate_fields(app):
     from PySide6.QtCore import QDate, QDateTime, QTime
 
-    from tcginventory.ui.views.auctions import _TIME_LEFT_COL
-
     view = _view(app)
     row = view._add_card_row()
     row.name.setText("Zard")
@@ -540,15 +545,13 @@ def test_editor_end_date_and_time_are_separate_fields(app):
     ends_at = view._repo.get(view._edit_id).ends_at
     assert ends_at == QDateTime(tomorrow, QTime(14, 30)).toString("yyyy-MM-ddTHH:mm:ss")
     view._on_tick()
-    text = view._watch.item(0, _TIME_LEFT_COL).text()
+    text = view._cards[0].countdown_text()
     assert text not in ("ENDED", "—")  # a running countdown
     assert view._countdown.text() not in ("ENDED", "—")  # editor label too
     view.deleteLater()
 
 
 def test_watchlist_shows_ended_for_past_auction(app):
-    from tcginventory.ui.views.auctions import _TIME_LEFT_COL
-
     view = _view(app)
     a = Auction(
         title="old",
@@ -558,7 +561,7 @@ def test_watchlist_shows_ended_for_past_auction(app):
     view._repo.save(a, now="2026-07-17T00:00:00+00:00")
     view.refresh()
     view._on_tick()
-    assert view._watch.item(0, _TIME_LEFT_COL).text() == "ENDED"
+    assert view._cards[0].countdown_text() == "ENDED"
     view.deleteLater()
 
 
@@ -597,7 +600,7 @@ def test_watchlist_active_first_then_no_end_then_ended(app):
             Auction(title=title, ends_at=ends, cards=[AuctionCard(name="x")])
         )
     view.refresh()
-    order = [view._watch.item(r, 0).text() for r in range(view._watch.rowCount())]
+    order = [c.title_text() for c in view._cards]
     assert order == ["soon", "late", "no-end", "ended"]
     view.deleteLater()
 
@@ -646,7 +649,7 @@ def test_hover_watchlist_shows_auction_cards(app):
     captured: dict = {}
     view._gallery.set_cards = lambda entries: captured.__setitem__("entries", entries)
     view._gallery.show_gallery = lambda: captured.__setitem__("shown", True)
-    view._on_watch_hover(0, 0)
+    view._on_card_hover(view._cards[0])
     assert captured.get("shown") is True
     assert [e[0] for e in captured["entries"]] == ["x"]
     view.deleteLater()

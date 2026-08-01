@@ -26,6 +26,10 @@ from PySide6.QtCore import (
     QDateTime,
     QEvent,
     QModelIndex,
+    QPoint,
+    QRect,
+    QRectF,
+    QSize,
     Qt,
     QThread,
     QTimer,
@@ -33,7 +37,14 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QBrush,
+    QColor,
     QDesktopServices,
+    QFont,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPixmap,
     QStandardItem,
     QStandardItemModel,
 )
@@ -41,6 +52,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QCompleter,
@@ -49,18 +61,20 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
-    QGroupBox,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLayout,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QStyledItemDelegate,
     QTableWidget,
-    QTableWidgetItem,
     QTimeEdit,
     QVBoxLayout,
     QWidget,
@@ -85,14 +99,17 @@ from tcginventory.domain.enums import (
 )
 from tcginventory.domain.models import Item
 from tcginventory.services import auctions as auction_math
+from tcginventory.services import cardimages
 from tcginventory.services.ebay import search_url
 from tcginventory.services.inference import write_back as inference_write_back
 from tcginventory.services.transactions import IncomingCard
-from tcginventory.ui import theme
+from tcginventory.ui import icons, theme
 from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.card_preview import install_hover_preview
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
+
+_RECOMMENDED_PCT = 80  # the "bid to here" rung highlighted on every ladder
 
 
 def _auction_card_to_incoming(ac: AuctionCard) -> IncomingCard:
@@ -161,29 +178,6 @@ def _select(combo: QComboBox, value: str | None) -> None:
 _CARD_HEADERS = ["Name", "Set", "#", "Cond", "Market", "Qty", "TCGplayer", "eBay", ""]
 _CARD_WIDTHS = [190, 140, 66, 64, 90, 46, 96, 66, 30]
 
-_WATCH_HEADERS = [
-    "Title",
-    "Cards",
-    "Value",
-    "70%",
-    "80%",
-    "90%",
-    "100%",
-    "Ship",
-    "Tax",
-    "Time left",
-    "",  # refresh
-    "Link",
-    "Export",
-    "Archive",
-    "",  # delete
-]
-_WATCH_WIDTHS = [220, 50, 90, 90, 90, 90, 90, 80, 60, 110, 34, 60, 84, 84, 30]
-_TIME_LEFT_COL = _WATCH_HEADERS.index("Time left")
-# refresh / link / export / archive / delete follow the countdown column.
-_FIRST_BUTTON_COL = _TIME_LEFT_COL + 1
-_ID_ROLE = Qt.UserRole + 1
-_ENDS_ROLE = Qt.UserRole + 2  # ISO end datetime stored on the "Time left" cell
 _UNSET = object()  # sentinel: history not supplied -> open the default DB
 _THUMB_BORDER = theme.DARK.line2  # neutral thumbnail frame
 
@@ -531,6 +525,462 @@ class _AuctionCardRow:
         )
 
 
+class _FlowLayout(QLayout):
+    """Left-to-right layout that wraps its items onto new rows (a card grid)."""
+
+    def __init__(self, parent=None, spacing=14) -> None:
+        super().__init__(parent)
+        self._items: list = []
+        self.setSpacing(spacing)
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item) -> None:  # noqa: N802 (Qt override)
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, i):  # noqa: N802
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):  # noqa: N802
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):  # noqa: N802
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width) -> int:  # noqa: N802
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        x, y = rect.x(), rect.y()
+        line_h = 0
+        sp = self.spacing()
+        for item in self._items:
+            hint = item.sizeHint()
+            w, h = hint.width(), hint.height()
+            if x + w > rect.right() and line_h > 0:
+                x = rect.x()
+                y += line_h + sp
+                line_h = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x += w + sp
+            line_h = max(line_h, h)
+        return y + line_h - rect.y()
+
+
+class _ThumbStack(QWidget):
+    """A small overlapping stack of card thumbnails (+ an "×N" overflow chip)."""
+
+    _W, _H, _STEP = 38, 53, 25
+
+    def __init__(self, card_ids: list[str], extra: str | None, parent=None) -> None:
+        super().__init__(parent)
+        self._pixmaps: list[QPixmap | None] = []
+        for cid in card_ids[:3]:
+            pm = None
+            if cid:
+                path = cardimages.cache_path(cid)
+                if path.exists():
+                    src = QPixmap(str(path))
+                    pm = None if src.isNull() else src
+            self._pixmaps.append(pm)
+        self._extra = extra
+        slots = max(1, len(self._pixmaps)) + (1 if extra else 0)
+        self.setFixedSize(self._W + (slots - 1) * self._STEP, self._H)
+
+    def paintEvent(self, _event) -> None:
+        t = theme.active()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        x = 0
+        slots = self._pixmaps or [None]
+        for pm in slots:
+            rect = QRectF(x, 0, self._W, self._H)
+            ring = QRectF(x - 1, -1, self._W + 2, self._H + 2)
+            ring_path = QPainterPath()
+            ring_path.addRoundedRect(ring, 6, 6)
+            p.fillPath(ring_path, QColor(t.surface))
+            path = QPainterPath()
+            path.addRoundedRect(rect, 5, 5)
+            if pm is not None:
+                p.save()
+                p.setClipPath(path)
+                scaled = pm.scaled(
+                    self._W,
+                    self._H,
+                    Qt.KeepAspectRatioByExpanding,
+                    Qt.SmoothTransformation,
+                )
+                p.drawPixmap(int(x), 0, scaled)
+                p.restore()
+            else:
+                grad = QLinearGradient(x, 0, x, self._H)
+                grad.setColorAt(0, QColor("#4a2f1c"))
+                grad.setColorAt(1, QColor("#241a12"))
+                p.fillPath(path, QBrush(grad))
+            x += self._STEP
+        if self._extra:
+            rect = QRectF(x, 0, self._W, self._H)
+            ring = QRectF(x - 1, -1, self._W + 2, self._H + 2)
+            rp = QPainterPath()
+            rp.addRoundedRect(ring, 6, 6)
+            p.fillPath(rp, QColor(t.surface))
+            path = QPainterPath()
+            path.addRoundedRect(rect, 5, 5)
+            p.fillPath(path, QColor(t.surface2))
+            p.setPen(QColor(t.ink3))
+            f = QFont(self.font())
+            f.setPointSizeF(9.5)
+            f.setBold(True)
+            p.setFont(f)
+            p.drawText(rect, int(Qt.AlignCenter), self._extra)
+        p.end()
+
+
+class _BidLadder(QWidget):
+    """The max-bid ladder: four rungs (70/80/90/100%) as labelled bars. The
+    recommended rung is accent, the 100% ceiling is brick-red."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._bids: dict[int, int] = {}
+        self.setFixedHeight(126)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def set_bids(self, bids: dict[int, int]) -> None:
+        self._bids = dict(bids)
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        t = theme.active()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        box = QRectF(0.5, 0.5, w - 1, h - 1)
+        path = QPainterPath()
+        path.addRoundedRect(box, 10, 10)
+        p.fillPath(path, QColor(t.zebra))
+        p.setPen(QColor(t.line))
+        p.drawPath(path)
+
+        pad = 12
+        small = QFont(self.font())
+        small.setPointSizeF(8.0)
+        small.setBold(True)
+        p.setFont(small)
+        p.setPen(QColor(t.ink3))
+        p.drawText(QRectF(pad, 8, w - 2 * pad, 14), int(Qt.AlignLeft), "MAX BID LADDER")
+        p.drawText(
+            QRectF(pad, 8, w - 2 * pad, 14),
+            int(Qt.AlignRight),
+            "all-in cost as % of value",
+        )
+
+        pcts = sorted(self._bids)
+        if not pcts:
+            p.end()
+            return
+        ceiling = max(1, self._bids.get(100, max(self._bids.values())))
+        top = 30
+        rung_h = (h - top - 8) / len(pcts)
+        track_x = pad + 40
+        track_r = w - pad - 82
+        mono = QFont(theme.mono_family())
+        for i, pct in enumerate(pcts):
+            bid = self._bids[pct]
+            cy = top + rung_h * i + rung_h / 2
+            is_rec = pct == _RECOMMENDED_PCT
+            is_ceil = pct == 100
+            if is_rec:
+                hl = QRectF(pad - 4, cy - rung_h / 2 + 1, w - 2 * pad + 8, rung_h - 2)
+                hp = QPainterPath()
+                hp.addRoundedRect(hl, 6, 6)
+                wash = QColor(t.accent)
+                wash.setAlpha(20)
+                p.fillPath(hp, wash)
+            # pct label
+            mono.setPointSizeF(9.0)
+            mono.setBold(is_rec)
+            p.setFont(mono)
+            p.setPen(QColor(t.accent_ink if is_rec else t.ink3))
+            p.drawText(
+                QRectF(pad, cy - 8, 36, 16),
+                int(Qt.AlignLeft | Qt.AlignVCenter),
+                f"{pct}%",
+            )
+            # track + fill
+            track = QRectF(track_x, cy - 4, track_r - track_x, 8)
+            tp = QPainterPath()
+            tp.addRoundedRect(track, 4, 4)
+            p.fillPath(tp, QColor(t.surface2))
+            frac = max(0.06, min(1.0, bid / ceiling))
+            fill = QRectF(track_x, cy - 4, (track_r - track_x) * frac, 8)
+            fp = QPainterPath()
+            fp.addRoundedRect(fill, 4, 4)
+            if is_ceil:
+                col = QColor(t.accent2)
+            elif is_rec:
+                col = QColor(t.accent)
+            else:
+                col = QColor(t.pos)
+            p.fillPath(fp, col)
+            # amount
+            mono.setPointSizeF(10.0)
+            mono.setBold(is_rec)
+            p.setFont(mono)
+            p.setPen(QColor(t.ink if is_rec else t.ink2))
+            p.drawText(
+                QRectF(track_r + 6, cy - 8, w - pad - track_r - 6, 16),
+                int(Qt.AlignRight | Qt.AlignVCenter),
+                money(bid),
+            )
+        p.end()
+
+
+class _AuctionCard(QFrame):
+    """One watched auction rendered as a card (thumbnails, countdown, value, and
+    the max-bid ladder), with inline actions. Clicking the body loads it into the
+    editor; hovering previews its cards in the gallery."""
+
+    def __init__(self, view: AuctionsView, auction: Auction) -> None:
+        super().__init__()
+        self._view = view
+        self._auction = auction
+        self.auction_id = auction.id
+        self.setObjectName("auc")
+        self.setFixedWidth(432)
+        self.setCursor(Qt.PointingHandCursor)
+        t = theme.active()
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(15, 14, 15, 12)
+        v.setSpacing(11)
+
+        # -- header: thumbnails · title/count · countdown
+        ids = [c.card_id for c in auction.cards]
+        n_cards = len(auction.cards)
+        total_qty = sum(c.quantity for c in auction.cards)
+        if n_cards == 1 and total_qty > 1:
+            extra = f"×{total_qty}"
+        elif n_cards > 3:
+            extra = f"+{n_cards - 3}"
+        else:
+            extra = None
+        arow = QHBoxLayout()
+        arow.setSpacing(12)
+        arow.addWidget(_ThumbStack(ids, extra), 0, Qt.AlignTop)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(3)
+        self._title_lbl = QLabel(auction.title or "(untitled)")
+        self._title_lbl.setWordWrap(True)
+        self._title_lbl.setStyleSheet(f"color:{t.ink};font-weight:700;font-size:14px;")
+        meta = QLabel(f"{total_qty} card{'s' if total_qty != 1 else ''}")
+        meta.setStyleSheet(f"color:{t.ink3};font-size:11.5px;")
+        title_box.addWidget(self._title_lbl)
+        title_box.addWidget(meta)
+        arow.addLayout(title_box, 1)
+
+        cd_box = QVBoxLayout()
+        cd_box.setSpacing(2)
+        self._clk_lbl = QLabel("—")
+        self._clk_lbl.setFont(_mono_font(15, bold=True))
+        self._clk_lbl.setAlignment(Qt.AlignRight)
+        self._cd_lbl = QLabel("")
+        self._cd_lbl.setStyleSheet(
+            f"color:{t.ink3};font-size:9.5px;font-weight:700;letter-spacing:.5px;"
+        )
+        self._cd_lbl.setAlignment(Qt.AlignRight)
+        cd_box.addWidget(self._clk_lbl)
+        cd_box.addWidget(self._cd_lbl)
+        arow.addLayout(cd_box, 0)
+        v.addLayout(arow)
+
+        # -- value row
+        val_row = QHBoxLayout()
+        vk = QLabel("CARD VALUE")
+        vk.setStyleSheet(
+            f"color:{t.ink3};font-size:10px;font-weight:700;letter-spacing:.5px;"
+        )
+        self._value_lbl = QLabel(money(auction.value_cents))
+        self._value_lbl.setFont(_mono_font(14, bold=True))
+        self._value_lbl.setStyleSheet(f"color:{t.ink};")
+        terms = QLabel(
+            f"ship {money(auction.shipping_cents)} · "
+            f"tax {percent(auction.tax_rate_bps / 100)}"
+        )
+        terms.setStyleSheet(f"color:{t.ink3};font-size:11px;")
+        val_row.addWidget(vk)
+        val_row.addSpacing(8)
+        val_row.addWidget(self._value_lbl)
+        val_row.addStretch(1)
+        val_row.addWidget(terms)
+        v.addLayout(val_row)
+
+        # -- bid ladder
+        ladder = _BidLadder()
+        ladder.set_bids(
+            auction_math.breakdown(
+                auction.value_cents, auction.shipping_cents, auction.tax_rate_bps
+            ).bids
+        )
+        v.addWidget(ladder)
+
+        # -- actions
+        acts = QHBoxLayout()
+        acts.setSpacing(7)
+        open_btn = self._link_button("Open ↗", primary=True)
+        open_btn.setEnabled(bool(auction.url))
+        open_btn.setToolTip(auction.url or "No link")
+        if auction.url:
+            open_btn.clicked.connect(
+                lambda _=False, u=auction.url: QDesktopServices.openUrl(QUrl(u))
+            )
+        export_btn = self._link_button("Export →")
+        export_btn.setToolTip("Send these cards to the Transaction window")
+        export_btn.clicked.connect(lambda _=False, a=auction: view._export_auction(a))
+        acts.addWidget(open_btn)
+        acts.addWidget(export_btn)
+        acts.addStretch(1)
+        refresh = self._icon_button("↻", "Refresh card values from current prices")
+        refresh.clicked.connect(lambda _=False, a=auction: view._refresh_values(a))
+        archive = self._link_button("Unarchive" if auction.archived else "Archive")
+        archive.setToolTip("Save this auction for later (hidden from the watchlist)")
+        archive.clicked.connect(lambda _=False, a=auction: view._toggle_archived(a))
+        delete = self._icon_button("✕", "Delete this auction", danger=True)
+        delete.clicked.connect(lambda _=False, a=auction: view._delete(a))
+        acts.addWidget(refresh)
+        acts.addWidget(archive)
+        acts.addWidget(delete)
+        top_line = QFrame()
+        top_line.setFixedHeight(1)
+        top_line.setStyleSheet(f"background:{t.line};")
+        v.addWidget(top_line)
+        v.addLayout(acts)
+
+        self.update_countdown(datetime.now())
+
+    # -- styled buttons ----------------------------------------------------
+
+    def _link_button(self, text: str, primary: bool = False) -> QPushButton:
+        t = theme.active()
+        b = QPushButton(text)
+        b.setCursor(Qt.PointingHandCursor)
+        b.setObjectName("lkp" if primary else "lk")
+        if primary:
+            b.setStyleSheet(
+                f"QPushButton#lkp{{background:{t.accent_soft};border:1px solid "
+                f"{t.accent};border-radius:8px;color:{t.accent_ink};padding:5px "
+                f"11px;font-size:11.5px;font-weight:600;}}"
+                f"QPushButton#lkp:disabled{{color:{t.ink3};border-color:{t.line2};"
+                f"background:transparent;}}"
+            )
+        else:
+            b.setStyleSheet(
+                f"QPushButton#lk{{background:transparent;border:1px solid "
+                f"{t.line2};border-radius:8px;color:{t.ink2};padding:5px 11px;"
+                f"font-size:11.5px;font-weight:600;}}"
+                f"QPushButton#lk:hover{{border-color:{t.accent};"
+                f"color:{t.accent_ink};}}"
+            )
+        return b
+
+    def _icon_button(self, glyph: str, tip: str, danger: bool = False) -> QPushButton:
+        t = theme.active()
+        b = QPushButton(glyph)
+        b.setCursor(Qt.PointingHandCursor)
+        b.setToolTip(tip)
+        b.setFixedSize(30, 30)
+        b.setObjectName("icd" if danger else "icb")
+        hover = t.neg if danger else t.ink
+        b.setStyleSheet(
+            f"QPushButton#{b.objectName()}{{background:transparent;border:none;"
+            f"border-radius:8px;color:{t.ink3};font-size:14px;}}"
+            f"QPushButton#{b.objectName()}:hover{{background:{t.surface2};"
+            f"color:{hover};}}"
+        )
+        return b
+
+    # -- test / update hooks -----------------------------------------------
+
+    def title_text(self) -> str:
+        return self._title_lbl.text()
+
+    def value_text(self) -> str:
+        return self._value_lbl.text()
+
+    def countdown_text(self) -> str:
+        return self._clk_lbl.text()
+
+    def update_countdown(self, now: datetime) -> None:
+        text = _countdown_text(self._auction.ends_at, now)
+        self._clk_lbl.setText(text)
+        t = theme.active()
+        ends = self._auction.ends_at
+        if not ends or text == "—":
+            urgency, lbl, colr = "ok", "no end time", t.ink3
+        elif text == "ENDED":
+            urgency, lbl, colr = "ended", "ended", t.ink3
+        else:
+            secs = 0
+            try:
+                secs = int((datetime.fromisoformat(ends) - now).total_seconds())
+            except ValueError:
+                secs = 10**9
+            if secs < 3600:
+                urgency, lbl, colr = "urgent", "ending now", t.neg
+            elif secs < 86_400:
+                urgency, lbl, colr = "soon", "ending soon", t.warn
+            else:
+                urgency, lbl, colr = "ok", "plenty of time", t.pos
+        self._clk_lbl.setStyleSheet(
+            f"color:{colr};" + ("font-size:13px;" if urgency == "ended" else "")
+        )
+        self._cd_lbl.setText(lbl.upper())
+        rail = {"urgent": t.neg, "soon": t.warn}.get(urgency, t.line2)
+        border = {"urgent": t.neg, "soon": t.warn}.get(urgency, t.line)
+        self.setStyleSheet(
+            f"QFrame#auc{{background:{t.surface};border:1px solid {border};"
+            f"border-left:3px solid {rail};border-radius:14px;}}"
+        )
+
+    # -- interaction -------------------------------------------------------
+
+    def enterEvent(self, _event) -> None:  # noqa: N802
+        self._view._on_card_hover(self)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton and self.auction_id is not None:
+            self._view._load_auction(self.auction_id)
+        super().mousePressEvent(event)
+
+
+def _mono_font(size: float, bold: bool = False) -> QFont:
+    f = QFont(theme.mono_family())
+    f.setPointSizeF(size)
+    f.setBold(bold)
+    return f
+
+
 class AuctionsView(QWidget):
     """The eBay Auctions screen (watchlist + max-bid editor)."""
 
@@ -555,7 +1005,8 @@ class AuctionsView(QWidget):
         self._edit_id: int | None = None
         self._inference_pipeline = None  # lazily built (image -> [Detection])
         self._ended_ids: set[int] = set()  # which auctions were ended last refresh
-        self._hover_watch_row: int | None = None
+        self._cards: list[_AuctionCard] = []  # visible auction cards, in order
+        self._hover_card_id: int | None = None
         # Multi-card display (same widget/logic as the Price Lookup window):
         # shows every card in the auction, or a single focused card on hover.
         self._gallery = CardGallery(
@@ -565,17 +1016,26 @@ class AuctionsView(QWidget):
 
         body = QSplitter(Qt.Vertical)
         body.addWidget(self._build_watchlist())
-        body.addWidget(self._build_editor())
-        body.setStretchFactor(0, 1)
+        editor_scroll = QScrollArea()
+        editor_scroll.setWidgetResizable(True)
+        editor_scroll.setFrameShape(QFrame.NoFrame)
+        editor_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        editor_scroll.setWidget(self._build_editor())
+        body.addWidget(editor_scroll)
+        body.setStretchFactor(0, 3)
         body.setStretchFactor(1, 2)
         body.setChildrenCollapsible(False)
+        body.setSizes([520, 380])  # give the card grid room (composer scrolls)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(body)
+        layout.setSpacing(10)
+        layout.addLayout(self._build_header())
+        layout.addLayout(self._build_toolbar())
+        layout.addWidget(body, 1)
 
-        # Once-a-second timer drives the live countdowns (editor label + the
-        # watchlist "Time left" column). Always running so a row flips to
-        # "ENDED" on its own, with no refresh/navigation needed.
+        # Once-a-second timer drives the live countdowns (editor label + each
+        # auction card). Always running so a card flips to "ENDED" on its own,
+        # with no refresh/navigation needed.
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(1000)
         self._tick_timer.timeout.connect(self._on_tick)
@@ -589,47 +1049,144 @@ class AuctionsView(QWidget):
         now = datetime.now()
         self._countdown.setText(_countdown_text(self._ends_iso(), now))
         ended: set[int] = set()
-        for r in range(self._watch.rowCount()):
-            item = self._watch.item(r, _TIME_LEFT_COL)
-            if item is None:
-                continue
-            ends_at = item.data(_ENDS_ROLE)
-            item.setText(_countdown_text(ends_at, now))
-            if _is_ended(ends_at, now):
-                title = self._watch.item(r, 0)
-                if title is not None:
-                    ended.add(title.data(_ID_ROLE))
+        for card in self._cards:
+            card.update_countdown(now)
+            if _is_ended(card._auction.ends_at, now) and card.auction_id is not None:
+                ended.add(card.auction_id)
         # An auction just crossed into "ENDED" → re-sort so it sinks to the
         # bottom (only rebuilds when the ended set actually changes).
         if ended != self._ended_ids:
             self.refresh()
 
-    # -- watchlist ----------------------------------------------------------
+    # -- header + toolbar ---------------------------------------------------
 
-    def _build_watchlist(self) -> QGroupBox:
-        box = QGroupBox("Watched auctions")
-        self._watch = QTableWidget(0, len(_WATCH_HEADERS))
-        self._watch.setHorizontalHeaderLabels(_WATCH_HEADERS)
-        _tidy(self._watch, _WATCH_WIDTHS)
-        self._watch.cellClicked.connect(self._on_watch_cell_clicked)
-        self._watch.setMouseTracking(True)  # hover a row -> preview its cards
-        self._watch.cellEntered.connect(self._on_watch_hover)
-        self._watch.viewport().installEventFilter(self)  # leave -> revert gallery
-        self._show_archived = QCheckBox("Show archived")
-        self._show_archived.setToolTip("Show saved (archived) auctions instead")
+    def _build_header(self) -> QHBoxLayout:
+        t = theme.active()
+        row = QHBoxLayout()
+        h1 = QLabel("Auctions")
+        h1.setStyleSheet(f"font-size:20px;font-weight:800;color:{t.ink};")
+        row.addWidget(h1)
+        row.addStretch(1)
+        self._tiles: dict[str, QLabel] = {}
+        for key, label, hero in (
+            ("watching", "Watching", False),
+            ("value", "Combined value", True),
+            ("soon", "Ending < 1h", False),
+            ("archived", "Archived", False),
+        ):
+            tile = QFrame()
+            tile.setObjectName("tile")
+            tl = QVBoxLayout(tile)
+            tl.setContentsMargins(13, 7, 15, 8)
+            tl.setSpacing(2)
+            cap = QLabel(label.upper())
+            cap.setStyleSheet(
+                f"color:{t.ink3};font-size:10px;font-weight:700;letter-spacing:.5px;"
+                "background:transparent;border:none;"
+            )
+            val = QLabel("—")
+            val.setFont(_mono_font(16, bold=True))
+            val.setStyleSheet(f"color:{t.ink};background:transparent;border:none;")
+            tl.addWidget(cap)
+            tl.addWidget(val)
+            rail = f"border-left:3px solid {t.accent};" if hero else ""
+            tile.setStyleSheet(
+                f"QFrame#tile{{background:{t.surface};border:1px solid {t.line};"
+                f"border-radius:11px;{rail}}}"
+            )
+            self._tiles[key] = val
+            row.addWidget(tile)
+        return row
+
+    def _build_toolbar(self) -> QHBoxLayout:
+        t = theme.active()
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        # Watching / Archived segmented control (backed by a hidden checkbox so
+        # the archive state stays a single source of truth).
+        self._show_archived = QCheckBox()
+        self._show_archived.setVisible(False)
+        self._show_archived.toggled.connect(lambda *_: self._sync_segment())
         self._show_archived.toggled.connect(lambda *_: self.refresh())
+        seg = QWidget()
+        seg.setObjectName("segwrap")
+        seg.setStyleSheet(
+            f"QWidget#segwrap{{background:{t.surface};border:1px solid {t.line2};"
+            f"border-radius:9px;}}"
+            f"QWidget#segwrap QPushButton{{background:transparent;border:none;"
+            f"color:{t.ink2};padding:5px 13px;border-radius:6px;font-weight:600;"
+            f"font-size:12px;}}"
+            f"QWidget#segwrap QPushButton:checked{{background:{t.accent_soft};"
+            f"color:{t.accent_ink};}}"
+        )
+        sl = QHBoxLayout(seg)
+        sl.setContentsMargins(3, 3, 3, 3)
+        sl.setSpacing(2)
+        self._seg_group = QButtonGroup(self)
+        self._seg_group.setExclusive(True)
+        self._seg_watch = QPushButton("Watching")
+        self._seg_arch = QPushButton("Archived")
+        for button, archived in ((self._seg_watch, False), (self._seg_arch, True)):
+            button.setCheckable(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(
+                lambda _=False, a=archived: self._show_archived.setChecked(a)
+            )
+            self._seg_group.addButton(button)
+            sl.addWidget(button)
+        self._seg_watch.setChecked(True)
+        row.addWidget(seg)
+        sort = QLabel("Sorted by ending soonest")
+        sort.setStyleSheet(f"color:{t.ink3};font-size:12px;")
+        row.addWidget(sort)
+        row.addStretch(1)
+        plan = QPushButton("  Plan a bid")
+        plan.setObjectName("plan")
+        plan.setCursor(Qt.PointingHandCursor)
+        plan.setIcon(icons.icon("plus", "#0e0f13", 16))
+        plan.setToolTip("Clear the editor to plan a new auction bid")
+        plan.setStyleSheet(
+            f"QPushButton#plan{{background:{t.accent};color:#0e0f13;border:none;"
+            f"border-radius:9px;padding:7px 14px;font-weight:700;font-size:12.5px;}}"
+        )
+        plan.clicked.connect(self._new)
+        row.addWidget(plan)
+        return row
+
+    def _sync_segment(self) -> None:
+        archived = self._show_archived.isChecked()
+        self._seg_arch.setChecked(archived)
+        self._seg_watch.setChecked(not archived)
+
+    # -- watchlist (card grid) ---------------------------------------------
+
+    def _build_watchlist(self) -> QWidget:
+        t = theme.active()
         self._empty = QLabel(
             "No watched auctions yet — add cards below and Save to track one."
         )
-        self._empty.setStyleSheet(f"color: {theme.active().ink3};")
-        top = QHBoxLayout()
-        top.addStretch(1)
-        top.addWidget(self._show_archived)
-        layout = QVBoxLayout(box)
-        layout.addLayout(top)
-        layout.addWidget(self._empty)
-        layout.addWidget(self._watch, 1)
-        return box
+        self._empty.setStyleSheet(f"color:{t.ink3};padding:26px 4px;")
+        self._empty.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+
+        self._grid_container = QWidget()
+        self._grid = _FlowLayout(self._grid_container, spacing=14)
+
+        inner = QWidget()
+        iv = QVBoxLayout(inner)
+        iv.setContentsMargins(2, 2, 2, 2)
+        iv.setSpacing(0)
+        iv.addWidget(self._empty)
+        iv.addWidget(self._grid_container)
+        iv.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+        scroll.viewport().installEventFilter(self)  # leave -> revert gallery
+        self._scroll = scroll
+        return scroll
 
     def refresh(self) -> None:
         """Reload + re-sort the watchlist (soonest-ending first, ended last)."""
@@ -642,12 +1199,43 @@ class AuctionsView(QWidget):
             else "No watched auctions yet — add cards below and Save to track one."
         )
         auctions.sort(key=lambda a: self._sort_key(a, now))
-        self._empty.setVisible(not auctions)
-        self._watch.setRowCount(0)
-        self._hover_watch_row = None
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._cards = []
+        self._hover_card_id = None
         for auction in auctions:
-            self._append_watch_row(auction)
+            self._add_auction_card(auction)
+        self._empty.setVisible(not auctions)
+        self._grid_container.setVisible(bool(auctions))
         self._ended_ids = {a.id for a in auctions if _is_ended(a.ends_at, now)}
+        self._update_tiles(now)
+
+    def _add_auction_card(self, auction: Auction) -> None:
+        card = _AuctionCard(self, auction)
+        self._grid.addWidget(card)
+        self._cards.append(card)
+
+    def _update_tiles(self, now: datetime) -> None:
+        active = self._repo.list_all(archived=False)
+        archived = self._repo.list_all(archived=True)
+        total = sum(a.value_cents for a in active)
+        soon = 0
+        for a in active:
+            if not a.ends_at or _is_ended(a.ends_at, now):
+                continue
+            try:
+                if (datetime.fromisoformat(a.ends_at) - now).total_seconds() < 3600:
+                    soon += 1
+            except ValueError:
+                continue
+        self._tiles["watching"].setText(str(len(active)))
+        self._tiles["value"].setText(money(total))
+        self._tiles["soon"].setText(str(soon))
+        self._tiles["archived"].setText(str(len(archived)))
 
     @staticmethod
     def _sort_key(auction: Auction, now: datetime) -> tuple[int, str]:
@@ -659,16 +1247,14 @@ class AuctionsView(QWidget):
             return (2, auction.ends_at)  # ended → bottom
         return (0, auction.ends_at)  # active → top, soonest first
 
-    def _on_watch_hover(self, row: int, _col: int) -> None:
+    def _on_card_hover(self, card: _AuctionCard) -> None:
         """Hovering a watched auction shows its cards in the gallery display."""
-        if row == self._hover_watch_row:
+        if card.auction_id == self._hover_card_id:
             return
-        self._hover_watch_row = row
-        title = self._watch.item(row, 0)
-        if title is None:
-            return
-        auction_id = title.data(_ID_ROLE)
-        auction = self._repo.get(int(auction_id)) if auction_id is not None else None
+        self._hover_card_id = card.auction_id
+        auction = (
+            self._repo.get(card.auction_id) if card.auction_id is not None else None
+        )
         if auction is None:
             return
         entries = [
@@ -681,81 +1267,10 @@ class AuctionsView(QWidget):
 
     def eventFilter(self, obj, event) -> bool:
         # Leaving the watchlist reverts the gallery to the editor's own cards.
-        if obj is self._watch.viewport() and event.type() == QEvent.Leave:
-            self._hover_watch_row = None
+        if obj is self._scroll.viewport() and event.type() == QEvent.Leave:
+            self._hover_card_id = None
             self._refresh_gallery()
         return super().eventFilter(obj, event)
-
-    def _append_watch_row(self, auction: Auction) -> None:
-        r = self._watch.rowCount()
-        self._watch.insertRow(r)
-        bd = auction_math.breakdown(
-            auction.value_cents, auction.shipping_cents, auction.tax_rate_bps
-        )
-
-        title = QTableWidgetItem(auction.title or "(untitled)")
-        title.setData(_ID_ROLE, auction.id)
-        cells = [
-            title,
-            QTableWidgetItem(str(sum(c.quantity for c in auction.cards))),
-            QTableWidgetItem(money(auction.value_cents)),
-            QTableWidgetItem(money(bd.bids[70])),
-            QTableWidgetItem(money(bd.bids[80])),
-            QTableWidgetItem(money(bd.bids[90])),
-            QTableWidgetItem(money(bd.bids[100])),
-            QTableWidgetItem(money(auction.shipping_cents)),
-            QTableWidgetItem(percent(auction.tax_rate_bps / 100)),
-        ]
-        for col, cell in enumerate(cells):
-            self._watch.setItem(r, col, cell)
-
-        # Live countdown cell — the end time rides on the item so the timer can
-        # recompute it in place each second (see _on_tick).
-        time_left = QTableWidgetItem(_countdown_text(auction.ends_at, datetime.now()))
-        time_left.setData(_ENDS_ROLE, auction.ends_at)
-        self._watch.setItem(r, _TIME_LEFT_COL, time_left)
-
-        refresh = QPushButton("↻")
-        refresh.setFixedWidth(30)
-        refresh.setToolTip("Refresh card values from current market prices")
-        refresh.clicked.connect(lambda _=False, a=auction: self._refresh_values(a))
-        self._watch.setCellWidget(r, _FIRST_BUTTON_COL, refresh)
-
-        link = QPushButton("Open ↗")
-        link.setEnabled(bool(auction.url))
-        link.setToolTip(auction.url or "No link")
-        if auction.url:
-            link.clicked.connect(
-                lambda _=False, u=auction.url: QDesktopServices.openUrl(QUrl(u))
-            )
-        self._watch.setCellWidget(r, _FIRST_BUTTON_COL + 1, link)
-
-        export = QPushButton("Export →")
-        export.setToolTip("Send these cards to the Transaction window as a purchase")
-        export.clicked.connect(lambda _=False, a=auction: self._export_auction(a))
-        self._watch.setCellWidget(r, _FIRST_BUTTON_COL + 2, export)
-
-        archive = QPushButton("Unarchive" if auction.archived else "Archive")
-        archive.setToolTip("Save this auction for later (hidden from the watchlist)")
-        archive.clicked.connect(lambda _=False, a=auction: self._toggle_archived(a))
-        self._watch.setCellWidget(r, _FIRST_BUTTON_COL + 3, archive)
-
-        remove = QPushButton("✕")
-        remove.setFixedWidth(28)
-        remove.setToolTip("Delete this auction")
-        remove.clicked.connect(lambda _=False, a=auction: self._delete(a))
-        self._watch.setCellWidget(r, _FIRST_BUTTON_COL + 4, remove)
-
-    def _on_watch_cell_clicked(self, row: int, col: int) -> None:
-        # The trailing refresh/link/delete columns are buttons; data cells load.
-        if col >= _FIRST_BUTTON_COL:
-            return
-        item = self._watch.item(row, 0)
-        if item is None:
-            return
-        auction_id = item.data(_ID_ROLE)
-        if auction_id is not None:
-            self._load_auction(int(auction_id))
 
     def _delete(self, auction: Auction) -> None:
         name = auction.title or "(untitled)"
@@ -854,12 +1369,44 @@ class AuctionsView(QWidget):
 
     # -- editor -------------------------------------------------------------
 
-    def _build_editor(self) -> QGroupBox:
-        box = QGroupBox("Auction details")
-        self._banner = QLabel("New auction")
-        self._banner.setStyleSheet(
-            f"color: {theme.active().accent_ink}; font-weight: 600;"
+    def _build_editor(self) -> QWidget:
+        t = theme.active()
+        box = QFrame()
+        box.setObjectName("composer")
+        box.setStyleSheet(
+            f"QFrame#composer{{background:{t.surface};border:1px solid {t.line};"
+            f"border-radius:14px;}}"
         )
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Header bar: "Plan a bid" + state badge.
+        header = QHBoxLayout()
+        header.setContentsMargins(16, 12, 16, 12)
+        h2 = QLabel("Plan a bid")
+        h2.setStyleSheet(f"font-size:14px;font-weight:700;color:{t.ink};")
+        self._banner = QLabel("New auction")
+        self._banner.setObjectName("badge")
+        self._banner.setStyleSheet(
+            f"QLabel#badge{{background:{t.accent_soft};color:{t.accent_ink};"
+            f"border-radius:6px;padding:3px 9px;font-size:10px;font-weight:800;}}"
+        )
+        hint = QLabel("Add the cards, set shipping & tax — the ladder updates live")
+        hint.setStyleSheet(f"color:{t.ink3};font-size:11.5px;")
+        header.addWidget(h2)
+        header.addWidget(self._banner)
+        header.addStretch(1)
+        header.addWidget(hint)
+        outer.addLayout(header)
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet(f"background:{t.line};")
+        outer.addWidget(divider)
+
+        body = QVBoxLayout()
+        body.setContentsMargins(16, 14, 16, 14)
+        body.setSpacing(12)
 
         self._title = QLineEdit()
         self._url = QLineEdit()
@@ -945,8 +1492,6 @@ class AuctionsView(QWidget):
         middle.addWidget(cards_widget, 1)
         middle.addWidget(preview_widget, 1)
 
-        self._breakdown = QLabel("")
-        self._breakdown.setTextFormat(Qt.RichText)
         new_btn = QPushButton("New")
         new_btn.setToolTip("Clear the editor for a fresh auction")
         new_btn.clicked.connect(self._new)
@@ -956,19 +1501,84 @@ class AuctionsView(QWidget):
         )
         export_btn.clicked.connect(self._export_current)
         self._save_btn = QPushButton("Save auction")
+        self._save_btn.setObjectName("primary")  # accent styling from the theme
         self._save_btn.clicked.connect(self._save)
         footer = QHBoxLayout()
-        footer.addWidget(self._breakdown, 1)
-        footer.addWidget(new_btn)
-        footer.addWidget(export_btn)
-        footer.addWidget(self._save_btn)
+        footer.setSpacing(10)
+        footer.addWidget(self._build_bid_readout(), 1)
+        footer.addWidget(new_btn, 0, Qt.AlignBottom)
+        footer.addWidget(export_btn, 0, Qt.AlignBottom)
+        footer.addWidget(self._save_btn, 0, Qt.AlignBottom)
 
-        layout = QVBoxLayout(box)
-        layout.addWidget(self._banner)
-        layout.addLayout(form)
-        layout.addLayout(middle, 1)
-        layout.addLayout(footer)
+        body.addLayout(form)
+        body.addLayout(middle, 1)
+        body.addLayout(footer)
+        outer.addLayout(body)
         self._update_catalog_hint()
+        self._update_breakdown()
+        return box
+
+    def _build_bid_readout(self) -> QWidget:
+        """The composer's live max-bid figure: the recommended bid big, plus a
+        compact four-rung reference strip."""
+        t = theme.active()
+        box = QFrame()
+        box.setObjectName("readout")
+        box.setStyleSheet(
+            f"QFrame#readout{{background:{t.zebra};border:1px solid {t.line2};"
+            f"border-radius:12px;}}"
+        )
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(14, 9, 14, 10)
+        lay.setSpacing(16)
+
+        left = QVBoxLayout()
+        left.setSpacing(1)
+        cap = QLabel(f"RECOMMENDED MAX BID · {_RECOMMENDED_PCT}%")
+        cap.setStyleSheet(
+            f"color:{t.ink3};font-size:10px;font-weight:700;letter-spacing:.5px;"
+        )
+        self._bid_amount = QLabel("$0.00")
+        self._bid_amount.setFont(_mono_font(24, bold=True))
+        self._bid_amount.setStyleSheet(f"color:{t.accent_ink};")
+        self._bid_caption = QLabel("")
+        self._bid_caption.setStyleSheet(f"color:{t.ink3};font-size:11px;")
+        left.addWidget(cap)
+        left.addWidget(self._bid_amount)
+        left.addWidget(self._bid_caption)
+        lay.addLayout(left)
+
+        rungs = QHBoxLayout()
+        rungs.setSpacing(6)
+        self._mini: dict[int, QLabel] = {}
+        for pct in auction_math.PERCENTAGES:
+            cell = QFrame()
+            on = pct == _RECOMMENDED_PCT
+            cell.setStyleSheet(
+                f"background:{'rgba(245,133,46,0.10)' if on else t.surface};"
+                f"border:1px solid {t.accent if on else t.line};border-radius:7px;"
+            )
+            cl = QVBoxLayout(cell)
+            cl.setContentsMargins(9, 5, 9, 5)
+            cl.setSpacing(1)
+            pk = QLabel(f"{pct}%")
+            pk.setAlignment(Qt.AlignCenter)
+            pk.setStyleSheet(
+                f"color:{t.ink3};font-size:9.5px;font-weight:700;border:none;"
+                "background:transparent;"
+            )
+            amt = QLabel("$0")
+            amt.setAlignment(Qt.AlignCenter)
+            amt.setFont(_mono_font(11, bold=on))
+            amt.setStyleSheet(
+                f"color:{t.accent_ink if on else t.ink2};border:none;"
+                "background:transparent;"
+            )
+            cl.addWidget(pk)
+            cl.addWidget(amt)
+            self._mini[pct] = amt
+            rungs.addWidget(cell)
+        lay.addLayout(rungs)
         return box
 
     def _update_catalog_hint(self) -> None:
@@ -1177,10 +1787,13 @@ class AuctionsView(QWidget):
         value = self._current_value_cents()
         shipping = round(self._shipping.value() * 100)
         bd = auction_math.breakdown(value, shipping, self._tax_bps())
-        parts = [f"Card value: <b>{money(value)}</b>", "&nbsp; Max bid →"]
-        for pct in auction_math.PERCENTAGES:
-            parts.append(f"{pct}%: <b>{money(bd.bids[pct])}</b>")
-        self._breakdown.setText(" &nbsp;·&nbsp; ".join(parts))
+        self._bid_amount.setText(money(bd.bids[_RECOMMENDED_PCT]))
+        self._bid_caption.setText(
+            f"All-in ≈ {_RECOMMENDED_PCT}% of {money(value)} card value · "
+            f"keeps ~{100 - _RECOMMENDED_PCT}% margin"
+        )
+        for pct, label in self._mini.items():
+            label.setText(money(bd.bids[pct]))
 
     def _save(self) -> None:
         cards = [c for c in (r.to_card() for r in self._rows) if c]
