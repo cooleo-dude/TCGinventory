@@ -12,7 +12,7 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QMovie
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -588,6 +588,15 @@ class MainWindow(QMainWindow):
             f"posted {result.posted}."
         )
         QMessageBox.information(self, "Import complete", done)
+
+    def changeEvent(self, event) -> None:
+        """Pause the Scrafty mascot while the window isn't focused; resume on
+        activation, so it only animates when the app is in front."""
+        if event.type() == QEvent.Type.ActivationChange and hasattr(
+            self, "_scrafty_movie"
+        ):
+            self._scrafty_movie.setPaused(not self.isActiveWindow())
+        super().changeEvent(event)
 
     def _paint_nav_icons(self, current: int) -> None:
         """Tint each nav icon — accent for the active row, muted for the rest."""

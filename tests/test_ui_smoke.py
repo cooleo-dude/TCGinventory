@@ -43,3 +43,26 @@ def test_nav_shows_animated_scrafty_mascot():
     window.close()
     del window
     app.processEvents()
+
+
+def test_scrafty_pauses_when_window_unfocused():
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QMovie
+    from PySide6.QtWidgets import QApplication
+
+    from tcginventory.ui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    window.isActiveWindow = lambda: True  # focused → animating
+    window.changeEvent(QEvent(QEvent.Type.ActivationChange))
+    assert window._scrafty_movie.state() == QMovie.MovieState.Running
+
+    window.isActiveWindow = lambda: False  # unfocused → paused
+    window.changeEvent(QEvent(QEvent.Type.ActivationChange))
+    assert window._scrafty_movie.state() == QMovie.MovieState.Paused
+
+    window.close()
+    del window
+    app.processEvents()
