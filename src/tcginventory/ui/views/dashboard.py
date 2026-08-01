@@ -997,12 +997,10 @@ class DashboardView(QWidget):
 
         # highlights: price-movement movers + sellers + upcoming shows (windowed).
         # Fetch the full lists (limit=None) so the columns can expand on demand.
-        self._gainers.set_movers(
-            rpt.top_gainers(intent, limit=None, since=cutoff), gain=True
-        )
-        self._losers.set_movers(
-            rpt.top_losers(intent, limit=None, since=cutoff), gain=False
-        )
+        # One combined call so the movers query isn't recomputed twice per refresh.
+        gainers, losers = rpt.price_movers(intent, limit=None, since=cutoff)
+        self._gainers.set_movers(gainers, gain=True)
+        self._losers.set_movers(losers, gain=False)
         self._sellers.set_sellers(rpt.top_sellers(window_days=days, limit=None), label)
         self._shows_box.set_shows(self._shows_service.upcoming(limit=None))
 

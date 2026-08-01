@@ -284,6 +284,26 @@ class ReportingService:
         rows.sort(key=lambda m: m.change_cents)
         return rows[:limit]  # limit None → all
 
+    def price_movers(
+        self,
+        intent: Intent | None = None,
+        limit: int | None = 5,
+        since: str | None = None,
+    ) -> tuple[list[MoverRow], list[MoverRow]]:
+        """Top gainers **and** losers in one pass. The dashboard shows both, so
+        this computes the holdings + baseline query once instead of the twice
+        that separate ``top_gainers`` + ``top_losers`` calls would."""
+        movers = self._price_movers(intent, since)
+        gainers = sorted(
+            (m for m in movers if m.change_cents > 0),
+            key=lambda m: m.change_cents,
+            reverse=True,
+        )
+        losers = sorted(
+            (m for m in movers if m.change_cents < 0), key=lambda m: m.change_cents
+        )
+        return gainers[:limit], losers[:limit]
+
     def top_sellers(
         self,
         window_days: int | None = 90,

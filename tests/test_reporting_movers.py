@@ -51,6 +51,11 @@ def test_top_gainers_losers_rank_by_market_price_movement(conn):
     assert [loss.item_id for loss in losers] == [c]
     assert losers[0].change_cents == -600
 
+    # The combined one-pass call returns the same gainers/losers.
+    g2, l2 = rpt.price_movers()
+    assert [m.item_id for m in g2] == [m.item_id for m in gainers]
+    assert [m.item_id for m in l2] == [m.item_id for m in losers]
+
 
 def test_price_movers_use_the_window_start_baseline(conn):
     svc = TransactionService(conn)
