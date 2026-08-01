@@ -463,12 +463,10 @@ class InventoryView(QWidget):
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        # The Card cell absorbs leftover width. (stretchLastSection would target
-        # a link column, so stretch the Name/Card column explicitly.)
+        # No stretch column — the Card cell is a fixed, snug width (its content
+        # isn't wide); the freed horizontal space flows to the dossier, which
+        # grows with the window (see the splitter stretch factors below).
         self._table.horizontalHeader().setStretchLastSection(False)
-        self._table.horizontalHeader().setSectionResizeMode(
-            self._col("Name"), QHeaderView.Stretch
-        )
         self._table.doubleClicked.connect(self._open_detail)
         self._table.clicked.connect(self._edit_on_click)
         self._table.selectionModel().selectionChanged.connect(self._on_selection)
@@ -572,13 +570,12 @@ class InventoryView(QWidget):
         body = QSplitter(Qt.Horizontal)
         body.addWidget(grid_box)
         body.addWidget(self._build_dossier())
-        # The grid keeps a stable width (so the Card column stays modest, not
-        # ballooning); extra window width flows to the dossier so the card
-        # preview grows into it.
-        body.setStretchFactor(0, 2)
+        # The grid stays at its content width; all extra window width flows to
+        # the dossier (stretchFactor 0 vs 1), so the card preview + graph grow.
+        body.setStretchFactor(0, 0)
         body.setStretchFactor(1, 1)
         body.setChildrenCollapsible(False)
-        body.setSizes([980, 500])
+        body.setSizes([912, 588])  # grid fits its columns; rest → dossier
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -613,22 +610,23 @@ class InventoryView(QWidget):
         )
 
     def _apply_column_widths(self) -> None:
-        """Keep the finance/chip/link columns lean so the stretching Card (Name)
-        column stays modest — the freed horizontal space goes to the dossier."""
+        """The Card (Name) column is a fixed, snug width (its content isn't wide);
+        finance/chip/link columns stay lean. Freed width goes to the dossier."""
+        self._table.setColumnWidth(self._col("Name"), 168)
         for header, width in (
-            ("Cond/Grade", 78),
-            ("Intent", 78),
-            ("Trend", 46),
-            ("Acquired", 82),
-            ("Purchase Price", 90),
-            ("Current Market", 104),
-            ("Unrealized G/L", 104),
-            ("Sold For", 78),
-            ("TCGplayer", 74),
-            ("eBay", 62),
+            ("Cond/Grade", 72),
+            ("Intent", 74),
+            ("Trend", 42),
+            ("Acquired", 78),
+            ("Purchase Price", 84),
+            ("Current Market", 92),
+            ("Unrealized G/L", 92),
+            ("Sold For", 74),
+            ("TCGplayer", 66),
+            ("eBay", 56),
         ):
             self._table.setColumnWidth(self._col(header), width)
-        self._table.horizontalHeader().setMinimumSectionSize(44)
+        self._table.horizontalHeader().setMinimumSectionSize(40)
 
     def _db_file(self) -> str | None:
         """The backing SQLite file, or None for an in-memory DB (tests)."""
@@ -1017,7 +1015,7 @@ class InventoryView(QWidget):
             f"QFrame#dossier{{background:{t.surface};border:1px solid {t.line};"
             "border-radius:14px;}"
         )
-        panel.setMinimumWidth(360)
+        panel.setMinimumWidth(460)
         v = QVBoxLayout(panel)
         v.setContentsMargins(16, 14, 16, 14)
         v.setSpacing(10)
@@ -1028,28 +1026,24 @@ class InventoryView(QWidget):
         )
         v.addWidget(cap)
 
-        # Large card art — fixed card aspect, filled, no frame (expands to fill
-        # the freed dossier height; every card renders at the same size).
-        v.addWidget(self._dossier_art, 1)
-
+        # Top region: large card art on the LEFT (fills the height), the details
+        # stacked on the RIGHT. The graph gets the whole width below.
         self._dossier_name = QLabel("—")
         self._dossier_name.setStyleSheet(
             f"color:{t.ink};font-size:16px;font-weight:700;"
         )
         self._dossier_name.setWordWrap(True)
-        v.addWidget(self._dossier_name)
 
         self._dossier_sub = QLabel("")
         self._dossier_sub.setFont(self._mono(10.5))
         self._dossier_sub.setStyleSheet(f"color:{t.ink3};")
         self._dossier_sub.setWordWrap(True)
-        v.addWidget(self._dossier_sub)
 
         # Facts — a 2-column grid of key-over-value blocks.
         facts = QGridLayout()
-        facts.setContentsMargins(0, 4, 0, 2)
+        facts.setContentsMargins(0, 6, 0, 2)
         facts.setHorizontalSpacing(16)
-        facts.setVerticalSpacing(10)
+        facts.setVerticalSpacing(11)
         self._fact_vals: dict[str, QLabel] = {}
         for i, (key, label) in enumerate(self._FACTS):
             cell = QVBoxLayout()
@@ -1067,9 +1061,22 @@ class InventoryView(QWidget):
             self._fact_vals[key] = val
         facts.setColumnStretch(0, 1)
         facts.setColumnStretch(1, 1)
-        v.addLayout(facts)
 
-        # Price-history section: divider + heading + the ranged hover-chart.
+        details = QVBoxLayout()
+        details.setSpacing(5)
+        details.addWidget(self._dossier_name)
+        details.addWidget(self._dossier_sub)
+        details.addLayout(facts)
+        details.addStretch(1)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(16)
+        top_row.addWidget(self._dossier_art, 5)  # big art on the left
+        top_row.addLayout(details, 6)
+        v.addLayout(top_row, 3)
+
+        # Price-history section: divider + heading + the ranged hover-chart,
+        # given the whole width and generous height below the art/details.
         divider = QFrame()
         divider.setFixedHeight(1)
         divider.setStyleSheet(f"background:{t.line};")
@@ -1079,7 +1086,7 @@ class InventoryView(QWidget):
             f"color:{t.ink3};font-size:10px;font-weight:700;letter-spacing:1.2px;"
         )
         v.addWidget(title)
-        v.addWidget(self._chart_view)
+        v.addWidget(self._chart_view, 2)
         return panel
 
     def _update_dossier(self, row: InventoryRow | None) -> None:
