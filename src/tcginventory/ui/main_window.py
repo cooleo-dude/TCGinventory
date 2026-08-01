@@ -187,6 +187,30 @@ class _MarketSweepWorker(QThread):
         self.done.emit(summary)
 
 
+class _MascotLabel(QLabel):
+    """Displays a ``QMovie`` scaled to the label's current width (aspect kept), so
+    the mascot fills its column instead of leaving empty space beside it — and
+    tracks the width if the nav splitter is dragged."""
+
+    def __init__(self, movie: QMovie, aspect: float) -> None:
+        super().__init__()
+        self._movie = movie
+        self._aspect = aspect  # native height / width
+        self._scaled_w = 0
+        self.setMovie(movie)
+        self._scale_to(200)  # sensible default before the first layout pass
+
+    def _scale_to(self, width: int) -> None:
+        self._scaled_w = width
+        self._movie.setScaledSize(QSize(width, round(width * self._aspect)))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        width = self.width()
+        if width > 0 and width != self._scaled_w:
+            self._scale_to(width)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, conn: sqlite3.Connection | None = None) -> None:
         super().__init__()
@@ -245,29 +269,25 @@ class MainWindow(QMainWindow):
         self._paint_nav_icons(0)
         self._nav.currentRowChanged.connect(self._on_nav_changed)
 
-        # Nav panel: the nav list, with the Scrafty mascot pinned to the bottom-
-        # left corner, animating at all times. Scale it to the nav width (its
-        # native frames are far larger) keeping aspect ratio.
-        self._scrafty = QLabel()
-        self._scrafty.setObjectName("scrafty")
-        self._scrafty.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+        # Nav panel: the nav list, with the Scrafty mascot filling the bottom of
+        # the column and animating at all times. The mascot fills the column width
+        # (aspect-preserved) so there's no empty bar beside it.
         self._scrafty_movie = QMovie(scrafty_movie_path())
         self._scrafty_movie.jumpToFrame(0)
         native = self._scrafty_movie.currentPixmap().size()
-        if native.width() > 0:
-            target_w = 150
-            self._scrafty_movie.setScaledSize(
-                QSize(target_w, round(target_w * native.height() / native.width()))
-            )
-        self._scrafty.setMovie(self._scrafty_movie)
+        aspect = native.height() / native.width() if native.width() else 1.0
+        self._scrafty = _MascotLabel(self._scrafty_movie, aspect)
+        self._scrafty.setObjectName("scrafty")
+        self._scrafty.setAlignment(Qt.AlignBottom)
         self._scrafty_movie.start()
 
         nav_panel = QWidget()
+        nav_panel.setMaximumWidth(200)  # keep the column the nav's width
         nav_col = QVBoxLayout(nav_panel)
         nav_col.setContentsMargins(0, 0, 0, 0)
         nav_col.setSpacing(0)
         nav_col.addWidget(self._nav, 1)
-        nav_col.addWidget(self._scrafty, 0, Qt.AlignLeft | Qt.AlignBottom)
+        nav_col.addWidget(self._scrafty, 0)  # no alignment → fills the column width
 
         splitter = QSplitter()
         splitter.addWidget(nav_panel)
