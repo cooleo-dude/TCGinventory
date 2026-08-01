@@ -66,6 +66,7 @@ class MoverRow:
     price_cents: int  # current market price (per unit)
     change_cents: int  # market-price change over the window (per unit)
     change_pct: float | None  # vs the window-start price (None when unknown)
+    cost_cents: int = 0  # weighted-avg purchase price of the held units (per unit)
 
 
 @dataclass
@@ -190,7 +191,8 @@ class ReportingService:
         sql = (
             "SELECT i.id AS id, i.name AS name, i.set_name AS set_name, "
             "i.card_number AS card_number, i.market_value_cents AS price_now, "
-            "SUM(l.remaining_qty) AS qty "
+            "SUM(l.remaining_qty) AS qty, "
+            "SUM(l.remaining_qty * l.unit_cost_cents) AS cost_total "
             "FROM lot l JOIN item i ON i.id = l.item_id "
             "WHERE l.remaining_qty > 0 AND l.intent NOT IN ('personal', 'ripping') "
             "AND COALESCE(i.review, 0) = 0 AND COALESCE(i.is_graded, 0) = 0 "
@@ -215,16 +217,19 @@ class ReportingService:
             if change == 0:
                 continue
             pct = (100.0 * change / base) if base else None
+            qty = r["qty"] or 0
+            cost = round(r["cost_total"] / qty) if qty else 0
             out.append(
                 MoverRow(
                     item_id=r["id"],
                     name=r["name"],
                     set_name=r["set_name"],
                     card_number=r["card_number"],
-                    qty=r["qty"],
+                    qty=qty,
                     price_cents=r["price_now"],
                     change_cents=change,
                     change_pct=pct,
+                    cost_cents=cost,
                 )
             )
         return out

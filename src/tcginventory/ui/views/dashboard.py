@@ -723,6 +723,10 @@ class MoversColumn(_PagedBox):
                 f"{money(item.revenue_cents)} · {item.sales} sale{plural}",
                 None,
             )
+        if mode == "loss":
+            # Show what was paid, so a market drop can be read against cost basis.
+            paid = f"paid {money(item.cost_cents)}"
+            sub = f"{sub} · {paid}" if sub != "—" else paid
         pct = f" ({item.change_pct:+.0f}%)" if item.change_pct is not None else ""
         arrow = "▲ " if item.change_cents >= 0 else "▼ "
         return (
