@@ -118,6 +118,7 @@ class MarketSignalService:
         sold = self._sold()
         items = {i.id: i for i in ItemRepository(self.conn).list_all()}
         since = _window_start(window_days, as_of)
+        price_series = self._snapshots.prices_by_item_since(since)
 
         out: list[MarketSignal] = []
         for item_id, acq in acquired.items():
@@ -149,10 +150,7 @@ class MarketSignalService:
                 if price is not None and onhand_avg_cost
                 else None
             )
-            prices = [
-                snap.price_cents
-                for snap in self._snapshots.history_for_item(item_id, since)
-            ]
+            prices = price_series.get(item_id, [])
             out.append(
                 MarketSignal(
                     item_id=item_id,

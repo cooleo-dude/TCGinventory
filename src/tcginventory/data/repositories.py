@@ -704,15 +704,33 @@ class PriceSnapshotRepository:
         return row["latest"] if row and row["latest"] else None
 
     def latest_prices(self) -> dict[int, int]:
-        """Map item_id → most-recent per-unit price across all polled items."""
+        """Map item_id → most-recent per-unit price across all polled items.
+
+        Reads only each item's latest snapshot (via the ``(item_id, as_of)``
+        index) rather than materialising the whole history in Python; ties on
+        ``as_of`` resolve to the highest ``id`` (last write wins)."""
         rows = self.conn.execute(
-            "SELECT item_id, price_cents, as_of FROM price_snapshot "
-            "ORDER BY item_id, as_of, id"
+            "SELECT ps.item_id AS item_id, ps.price_cents AS price "
+            "FROM price_snapshot ps JOIN ("
+            "  SELECT item_id, MAX(as_of) AS m FROM price_snapshot GROUP BY item_id"
+            ") t ON t.item_id = ps.item_id AND t.m = ps.as_of "
+            "ORDER BY ps.item_id, ps.id"
         ).fetchall()
-        latest: dict[int, int] = {}
-        for r in rows:  # ascending order → last write per item wins
-            latest[r["item_id"]] = r["price_cents"]
-        return latest
+        return {r["item_id"]: r["price"] for r in rows}
+
+    def prices_by_item_since(self, since: str | None = None) -> dict[int, list[int]]:
+        """Map item_id → its per-unit price series (oldest first) since ``since``
+        — one query for the whole set (for batch volatility), vs. per-item."""
+        sql = "SELECT item_id, price_cents FROM price_snapshot"
+        params: tuple = ()
+        if since is not None:
+            sql += " WHERE as_of >= ?"
+            params = (since,)
+        sql += " ORDER BY item_id, as_of, id"
+        out: dict[int, list[int]] = {}
+        for r in self.conn.execute(sql, params):
+            out.setdefault(r["item_id"], []).append(r["price_cents"])
+        return out
 
 
 class CardShowRepository:

@@ -75,3 +75,16 @@ def test_foreign_keys_are_enforced():
     migrate(conn)
     row = conn.execute("PRAGMA foreign_keys").fetchone()
     assert row[0] == 1
+
+
+def test_lot_consumption_lot_index_added_by_0018():
+    conn = connect(":memory:")
+    migrate(conn)
+    indexes = {
+        r["name"]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' "
+            "AND tbl_name = 'lot_consumption'"
+        )
+    }
+    assert "idx_consumption_lot" in indexes

@@ -143,18 +143,18 @@ class InventoryService:
         ripping lots are never sold (invariant 8), and personal lots are held for
         the owner's collection, not for giving away in a deal.
         """
-        out: list[tuple[Item, int]] = []
-        for item in self.items.list_all():
-            available = sum(
-                lot.remaining_qty
-                for lot in self.lots.list_for_item(item.id)
-                if lot.remaining_qty > 0
-                and not lot.missing
-                and lot.intent is Intent.RESALE
-            )
-            if available > 0:
-                out.append((item, available))
-        return out
+        rows = self.conn.execute(
+            "SELECT item_id, SUM(remaining_qty) AS available FROM lot "
+            "WHERE remaining_qty > 0 AND missing = 0 AND intent = ? "
+            "GROUP BY item_id",
+            (Intent.RESALE.value,),
+        ).fetchall()
+        available_by_item = {r["item_id"]: r["available"] for r in rows}
+        return [
+            (item, available_by_item[item.id])
+            for item in self.items.list_all()
+            if available_by_item.get(item.id, 0) > 0
+        ]
 
     def inventory_rows(self) -> list[InventoryRow]:
         """One row per lot (per SKU / acquired copy), including sold-out lots.
