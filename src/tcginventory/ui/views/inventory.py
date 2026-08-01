@@ -570,12 +570,12 @@ class InventoryView(QWidget):
         body = QSplitter(Qt.Horizontal)
         body.addWidget(grid_box)
         body.addWidget(self._build_dossier())
-        # Even 50/50 split between the grid (left) and the dossier (right); both
-        # grow equally with the window.
-        body.setStretchFactor(0, 1)
-        body.setStretchFactor(1, 1)
+        # 60/40 split favouring the grid (left); the extra room widens the Card
+        # column (see _fill_columns).
+        body.setStretchFactor(0, 3)
+        body.setStretchFactor(1, 2)
         body.setChildrenCollapsible(False)
-        body.setSizes([1000, 1000])
+        body.setSizes([1200, 800])
         self._body = body
         # Columns fill the grid pane; refit when the split is dragged.
         body.splitterMoved.connect(lambda *_: self._fill_columns())
@@ -610,20 +610,20 @@ class InventoryView(QWidget):
             if self._model.headerData(i, Qt.Horizontal) == header
         )
 
-    # Relative column weights — scaled to fill the whole grid pane (the Card
-    # column stays the widest; finance/chip/link columns stay lean).
-    _COL_WEIGHTS = {
-        "Name": 168,
-        "Cond/Grade": 72,
-        "Intent": 74,
-        "Acquired": 78,
-        "Purchase Price": 84,
-        "Current Market": 92,
+    # Fixed widths for the finance/chip/link columns; the Card (Name) column
+    # absorbs whatever's left so the grid always fills its pane and the extra
+    # 60/40 room widens Name.
+    _FIXED_WIDTHS = {
+        "Cond/Grade": 70,
+        "Intent": 72,
+        "Acquired": 76,
+        "Purchase Price": 82,
+        "Current Market": 90,
         "Trend": 42,
-        "Unrealized G/L": 92,
-        "Sold For": 74,
-        "TCGplayer": 66,
-        "eBay": 56,
+        "Unrealized G/L": 90,
+        "Sold For": 72,
+        "TCGplayer": 64,
+        "eBay": 54,
     }
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
@@ -631,21 +631,22 @@ class InventoryView(QWidget):
         self._fill_columns()
 
     def _fill_columns(self) -> None:
-        """Stretch the columns to exactly fill the grid pane (no dead space, no
-        horizontal scroll), preserving their relative widths."""
-        avail = self._table.viewport().width()
-        if avail <= 1 or not self._columns_sized:
+        """Keep the finance/chip/link columns at their tuned widths and let the
+        Card (Name) column absorb the rest, so the grid fills its pane with no
+        dead space / scroll and the extra room widens Name."""
+        if not getattr(self, "_columns_sized", False):
             return
-        cols = [(self._col(h), w) for h, w in self._COL_WEIGHTS.items()]
-        total = sum(w for _, w in cols)
+        try:
+            avail = self._table.viewport().width()
+        except RuntimeError:
+            return  # widget torn down mid-resize
+        if avail <= 1:
+            return
         used = 0
-        for i, (col, weight) in enumerate(cols):
-            if i == len(cols) - 1:
-                width = max(30, avail - used)  # last column absorbs the remainder
-            else:
-                width = max(30, round(weight * avail / total))
-                used += width
-            self._table.setColumnWidth(col, width)
+        for header, width in self._FIXED_WIDTHS.items():
+            self._table.setColumnWidth(self._col(header), width)
+            used += width
+        self._table.setColumnWidth(self._col("Name"), max(150, avail - used))
 
     def _db_file(self) -> str | None:
         """The backing SQLite file, or None for an in-memory DB (tests)."""
