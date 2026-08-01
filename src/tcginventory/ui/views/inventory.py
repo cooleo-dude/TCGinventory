@@ -576,6 +576,9 @@ class InventoryView(QWidget):
         body.setStretchFactor(1, 1)
         body.setChildrenCollapsible(False)
         body.setSizes([1000, 1000])
+        self._body = body
+        # Columns fill the grid pane; refit when the split is dragged.
+        body.splitterMoved.connect(lambda *_: self._fill_columns())
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -590,14 +593,12 @@ class InventoryView(QWidget):
         self._thumb_cache.clear()  # image map is about to be re-warmed
         rows = self._service.inventory_rows()
         self._model.set_rows(rows)
-        # Size columns only on first load — re-sizing on every edit is slow and
-        # would also discard the user's column drags.
         if not self._columns_sized and rows:
-            self._table.resizeColumnsToContents()
-            self._apply_column_widths()
+            self._table.horizontalHeader().setMinimumSectionSize(30)
             self._columns_sized = True
         self._empty.setVisible(not rows)
         self._table.setVisible(bool(rows))
+        self._fill_columns()
         self._prefetch_previews(rows)
         self._update_summary()
         self._on_selection()
@@ -609,24 +610,42 @@ class InventoryView(QWidget):
             if self._model.headerData(i, Qt.Horizontal) == header
         )
 
-    def _apply_column_widths(self) -> None:
-        """The Card (Name) column is a fixed, snug width (its content isn't wide);
-        finance/chip/link columns stay lean. Freed width goes to the dossier."""
-        self._table.setColumnWidth(self._col("Name"), 168)
-        for header, width in (
-            ("Cond/Grade", 72),
-            ("Intent", 74),
-            ("Trend", 42),
-            ("Acquired", 78),
-            ("Purchase Price", 84),
-            ("Current Market", 92),
-            ("Unrealized G/L", 92),
-            ("Sold For", 74),
-            ("TCGplayer", 66),
-            ("eBay", 56),
-        ):
-            self._table.setColumnWidth(self._col(header), width)
-        self._table.horizontalHeader().setMinimumSectionSize(40)
+    # Relative column weights — scaled to fill the whole grid pane (the Card
+    # column stays the widest; finance/chip/link columns stay lean).
+    _COL_WEIGHTS = {
+        "Name": 168,
+        "Cond/Grade": 72,
+        "Intent": 74,
+        "Acquired": 78,
+        "Purchase Price": 84,
+        "Current Market": 92,
+        "Trend": 42,
+        "Unrealized G/L": 92,
+        "Sold For": 74,
+        "TCGplayer": 66,
+        "eBay": 56,
+    }
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().resizeEvent(event)
+        self._fill_columns()
+
+    def _fill_columns(self) -> None:
+        """Stretch the columns to exactly fill the grid pane (no dead space, no
+        horizontal scroll), preserving their relative widths."""
+        avail = self._table.viewport().width()
+        if avail <= 1 or not self._columns_sized:
+            return
+        cols = [(self._col(h), w) for h, w in self._COL_WEIGHTS.items()]
+        total = sum(w for _, w in cols)
+        used = 0
+        for i, (col, weight) in enumerate(cols):
+            if i == len(cols) - 1:
+                width = max(30, avail - used)  # last column absorbs the remainder
+            else:
+                width = max(30, round(weight * avail / total))
+                used += width
+            self._table.setColumnWidth(col, width)
 
     def _db_file(self) -> str | None:
         """The backing SQLite file, or None for an in-memory DB (tests)."""
