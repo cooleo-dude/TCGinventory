@@ -145,15 +145,119 @@ class _Scene(QGraphicsScene):
         super().mouseReleaseEvent(event)
 
 
+class _ResizeHandle(QGraphicsRectItem):
+    """A small constant-size grip at a box corner; dragging it resizes the box."""
+
+    _CURSORS = {
+        "tl": Qt.SizeFDiagCursor,
+        "br": Qt.SizeFDiagCursor,
+        "tr": Qt.SizeBDiagCursor,
+        "bl": Qt.SizeBDiagCursor,
+    }
+
+    def __init__(self, box_item: _BoxItem, corner: str, color: str) -> None:
+        super().__init__(-5, -5, 10, 10, box_item)
+        self._box = box_item
+        self._corner = corner
+        self.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        self.setBrush(QBrush(QColor("#ffffff")))
+        pen = QPen(QColor(color))
+        pen.setWidthF(1.5)
+        self.setPen(pen)
+        self.setZValue(3)
+        self.setCursor(self._CURSORS[corner])
+        self.setVisible(False)
+
+    def mousePressEvent(self, event) -> None:
+        # Grab the drag so it resizes here instead of moving the parent box.
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        self._box.resize_from_handle(self._corner, event.scenePos())
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        event.accept()
+
+
 class _BoxItem(QGraphicsRectItem):
-    """A drawn card box that reports hover enter/leave so the matching segment
-    row can be cross-highlighted (and vice versa)."""
+    """A drawn card box: reports hover for cross-highlight, carries a numbered
+    badge, and grows resize grips at its corners while selected."""
+
+    _MIN = 8.0  # smallest box side (scene px)
 
     def __init__(self, rect: QRectF, number: int, on_hover) -> None:
         super().__init__(rect)
         self._number = number
         self._on_hover = on_hover  # (number, bool) -> None
+        self._badge: QGraphicsEllipseItem | None = None
+        self._handles: dict[str, _ResizeHandle] = {}
         self.setAcceptHoverEvents(True)
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+
+    def build_decorations(self, accent: str, accent_on: str) -> None:
+        """Attach the numbered badge and the (hidden) corner resize grips."""
+        badge = QGraphicsEllipseItem(-11, -11, 22, 22, self)
+        badge.setBrush(QBrush(QColor(accent)))
+        badge.setPen(QPen(Qt.NoPen))
+        badge.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        num = QGraphicsSimpleTextItem(str(self._number), badge)
+        num.setBrush(QBrush(QColor(accent_on)))
+        font = num.font()
+        font.setBold(True)
+        num.setFont(font)
+        br = num.boundingRect()
+        num.setPos(-br.width() / 2, -br.height() / 2)
+        self._badge = badge
+        for corner in ("tl", "tr", "bl", "br"):
+            self._handles[corner] = _ResizeHandle(self, corner, accent)
+        self._position_decorations()
+
+    def _position_decorations(self) -> None:
+        r = self.rect()
+        if self._badge is not None:
+            self._badge.setPos(r.topLeft())
+        corners = {
+            "tl": r.topLeft(),
+            "tr": r.topRight(),
+            "bl": r.bottomLeft(),
+            "br": r.bottomRight(),
+        }
+        for corner, handle in self._handles.items():
+            handle.setPos(corners[corner])
+
+    def resize_from_handle(self, corner: str, scene_pos: QPointF) -> None:
+        """Move ``corner`` toward the cursor, keeping the box at least _MIN wide."""
+        local = self.mapFromScene(scene_pos)
+        r = QRectF(self.rect())
+        lx, ly = local.x(), local.y()
+        if "l" in corner:
+            lx = min(lx, r.right() - self._MIN)
+        if "r" in corner:
+            lx = max(lx, r.left() + self._MIN)
+        if "t" in corner:
+            ly = min(ly, r.bottom() - self._MIN)
+        if "b" in corner:
+            ly = max(ly, r.top() + self._MIN)
+        point = QPointF(lx, ly)
+        if corner == "tl":
+            r.setTopLeft(point)
+        elif corner == "tr":
+            r.setTopRight(point)
+        elif corner == "bl":
+            r.setBottomLeft(point)
+        else:
+            r.setBottomRight(point)
+        self.setRect(r)
+        self._position_decorations()
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemSelectedChange:
+            for handle in self._handles.values():
+                handle.setVisible(bool(value))
+        return super().itemChange(change, value)
 
     def hoverEnterEvent(self, event) -> None:
         self._on_hover(self._number, True)
@@ -234,10 +338,19 @@ class _NameField(QLineEdit):
         self._refresh_meta()
 
     def _on_highlighted(self, index: QModelIndex) -> None:
-        if self._on_preview is not None:
-            card_id = index.data(self._CARD_ID_ROLE)
-            if card_id:
-                self._on_preview(card_id)
+        if self._on_preview is None:
+            return
+        card_id = index.data(self._CARD_ID_ROLE)
+        if not card_id:
+            # The signal's index lives in the completion (proxy) model; map it
+            # back to our source model to read the custom card-id role.
+            try:
+                src = self._completer.completionModel().mapToSource(index)
+                card_id = self._model.data(src, self._CARD_ID_ROLE)
+            except (RuntimeError, AttributeError):
+                card_id = None
+        if card_id:
+            self._on_preview(card_id)
 
     def _on_edited(self, text: str) -> None:
         if len(text.strip()) < 2:
@@ -255,6 +368,9 @@ class _NameField(QLineEdit):
             self._model.appendRow(item)
         if matches:
             self._completer.complete()
+            # Preview the top hit immediately; hovering the dropdown refines it.
+            if self._on_preview is not None:
+                self._on_preview(matches[0].card_id)
 
     def _pick(self, index: QModelIndex) -> None:
         card = self._matches.get(index.data(self._CARD_ID_ROLE))
@@ -695,15 +811,18 @@ class RecognitionView(QWidget):
         st.setSpacing(5)
         self._stage_draw = self._stage_tool("scan-line", "Draw box", checkable=True)
         self._stage_draw.toggled.connect(self._set_draw)
-        stage_sel = self._stage_tool("mouse-pointer-2", "Select / move")
-        stage_sel.clicked.connect(lambda: self._set_draw(False))
+        self._stage_sel = self._stage_tool(
+            "mouse-pointer-2", "Select / move / resize", checkable=True
+        )
+        self._stage_sel.setChecked(True)  # default mode
+        self._stage_sel.clicked.connect(lambda: self._set_draw(False))
         stage_del = self._stage_tool("trash-2", "Delete box")
         stage_del.clicked.connect(self._delete_selected)
         stage_rot = self._stage_tool("rotate-cw", "Rotate view (landscape / portrait)")
         stage_rot.clicked.connect(self._rotate_view)
         stage_fit = self._stage_tool("maximize", "Fit image")
         stage_fit.clicked.connect(self._fit_view)
-        for b in (self._stage_draw, stage_sel, stage_del, stage_rot, stage_fit):
+        for b in (self._stage_draw, self._stage_sel, stage_del, stage_rot, stage_fit):
             st.addWidget(b)
         self._stage_tools.move(12, 12)
         self._stage_tools.raise_()
@@ -773,8 +892,10 @@ class RecognitionView(QWidget):
         preview_cap.setObjectName("clusterCap")
         pv.addWidget(preview_cap)
         self._preview = CardImagePane()
-        self._preview.setMinimumHeight(210)
-        pv.addWidget(self._preview, 1)
+        # Fixed card-proportioned box (63:88) at the small-image's native width,
+        # so the art shows crisp without upscaling and the panel doesn't reflow.
+        self._preview.setFixedSize(245, 342)
+        pv.addWidget(self._preview, 0, Qt.AlignHCenter)
         v.addWidget(preview_wrap)
         return frame
 
@@ -1045,24 +1166,10 @@ class RecognitionView(QWidget):
         pen.setWidthF(2.0)
         item.setPen(pen)
         item.setBrush(QBrush(_BOX_FILL))
-        item.setFlag(item.GraphicsItemFlag.ItemIsMovable, True)
-        item.setFlag(item.GraphicsItemFlag.ItemIsSelectable, True)
         item.setData(0, box.number)
         item.setVisible(box.visible)
-        self._scene.addItem(item)  # the box (and its child badge) must join the scene
-        # A constant-screen-size numbered badge pinned to the box's top-left.
-        badge = QGraphicsEllipseItem(-11, -11, 22, 22, item)
-        badge.setBrush(QBrush(QColor(t.accent)))
-        badge.setPen(QPen(Qt.NoPen))
-        badge.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
-        badge.setPos(box.rect.topLeft())
-        num = QGraphicsSimpleTextItem(str(box.number), badge)
-        num.setBrush(QBrush(QColor(t.accent_on)))
-        font = num.font()
-        font.setBold(True)
-        num.setFont(font)
-        br = num.boundingRect()
-        num.setPos(-br.width() / 2, -br.height() / 2)
+        self._scene.addItem(item)  # the box (and its badge/grips) must join the scene
+        item.build_decorations(t.accent, t.accent_on)
         self._items[box.number] = item
 
     def _delete_selected(self) -> None:
@@ -1079,7 +1186,8 @@ class RecognitionView(QWidget):
         self._refresh_panel()
 
     def _set_draw(self, on: bool) -> None:
-        """Toggle draw mode, keeping the toolbar + stage draw buttons in sync."""
+        """Toggle draw mode, keeping the toolbar + stage draw/select buttons in
+        sync. Draw and Select/move are mutually exclusive modes."""
         self._scene.set_draw(on)
         for b in (self._draw_btn, getattr(self, "_stage_draw", None)):
             if b is None:
@@ -1087,6 +1195,11 @@ class RecognitionView(QWidget):
             b.blockSignals(True)
             b.setChecked(on)
             b.blockSignals(False)
+        sel = getattr(self, "_stage_sel", None)
+        if sel is not None:
+            sel.blockSignals(True)
+            sel.setChecked(not on)
+            sel.blockSignals(False)
 
     # -- cross-highlight (box <-> segment) + card preview -------------------
 
@@ -1141,7 +1254,9 @@ class RecognitionView(QWidget):
         self._preview_card(box.card.card_id)
 
     def _preview_card(self, card_id: str | None) -> None:
-        if not card_id:
+        # Never touch the network from the preview during tests (it spawns a
+        # fetch thread) — mirrors the prewarm guard.
+        if not card_id or "PYTEST_CURRENT_TEST" in os.environ:
             return
         card = CardCatalogRepository(self._conn).get(card_id)
         if card is not None:

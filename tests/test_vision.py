@@ -93,9 +93,12 @@ def app():
 
 @pytest.fixture()
 def _quiet(monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtWidgets import QDialog, QMessageBox
 
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: QMessageBox.Ok)
+    # The "annotations saved" confirmation is a themed QDialog, not a QMessageBox;
+    # keep it from blocking the headless test on exec().
+    monkeypatch.setattr(QDialog, "exec", lambda self: QDialog.Accepted)
 
 
 def _png(path, w=200, h=100):
