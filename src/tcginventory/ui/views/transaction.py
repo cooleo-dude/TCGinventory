@@ -85,7 +85,7 @@ from tcginventory.services.transactions import (
     TransactionService,
 )
 from tcginventory.ui import icons, theme
-from tcginventory.ui.card_preview import install_hover_preview
+from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
 
@@ -747,8 +747,9 @@ class TransactionView(QWidget):
         self._price_workers: list[_PriceLookupWorker] = []
         self._edit_id: int | None = None
         self._inference_pipeline = None  # lazily built (image -> [Detection])
-        # Hovering a card shows its image in a floating popup (no docked pane).
-        self._sink = None
+        # A docked preview pane (lower-left): hovering any card row — or browsing
+        # search matches — shows that card's art here; it persists on leave.
+        self._sink = CardImagePane()
 
         self._date = QLineEdit(QDate.currentDate().toString("yyyy-MM-dd"))
         self._date.setFixedWidth(130)
@@ -783,22 +784,47 @@ class TransactionView(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Scroll horizontally only when the window is too narrow for the board
+        # beside the preview column, rather than clipping the counterparty panel.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setWidget(board_w)
 
         self._save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
         self._save_shortcut.activated.connect(self._submit_via_shortcut)
+
+        content = QHBoxLayout()
+        content.setSpacing(14)
+        content.addWidget(self._build_preview_column(), 0)
+        content.addWidget(scroll, 1)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 0)
         layout.setSpacing(10)
         layout.addLayout(self._build_top_bar())
         layout.addLayout(self._build_hdr_fields())
-        layout.addWidget(scroll, 1)
+        layout.addLayout(content, 1)
         layout.addWidget(self._build_receipt())
 
         self._update_catalog_hint()
         self._update_summary()
+
+    def _build_preview_column(self) -> QWidget:
+        """A docked card-preview column on the left: shows the art of whatever
+        card row you hover or search match you browse, and keeps the last one on
+        leave (per the platform-wide preview convention)."""
+        t = theme.active()
+        col = QWidget()
+        col.setFixedWidth(190)
+        v = QVBoxLayout(col)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        cap = QLabel("PREVIEW")
+        cap.setStyleSheet(
+            f"color:{t.ink3};font-size:10px;font-weight:700;letter-spacing:.6px;"
+        )
+        v.addWidget(cap)
+        v.addWidget(self._sink, 1)
+        return col
 
     # -- top bar (totals top-left + centred type badge) --------------------
 
