@@ -374,6 +374,63 @@ def test_condition_set_while_labeling_saves_to_corpus(app, _quiet, tmp_path):
     view.deleteLater()
 
 
+def test_name_pick_keeps_identity_through_focus_out(app):
+    """Picking a catalog card must keep its id/set/number even when the completer
+    leaves the display string in the field and focus-out fires (was clobbering it
+    to a name-only free-text label, which broke the auction export)."""
+    from PySide6.QtCore import QRectF
+
+    from tcginventory.ui.views.recognition import _Box, _NameField
+
+    conn = _catalog_conn()  # has cel-4 "Charizard" · Celebrations #4
+    box = _Box(number=1, rect=QRectF(0, 0, 1, 1))
+    field = _NameField(conn, box)
+    field._on_edited("Charizard")  # populate completer matches
+    field._pick(field._model.index(0, 0))  # pick the top match
+    assert box.card.card_id == "cel-4" and box.card.set_name == "Celebrations"
+
+    field.setText("Charizard  ·  Celebrations  #4")  # completer's display string
+    field._on_free_text()  # focus-out
+    assert box.card.card_id == "cel-4"  # identity survived
+    assert box.card.set_name == "Celebrations" and box.card.card_number
+
+    # A genuinely typed name (no pick) still records as free text.
+    box2 = _Box(number=2, rect=QRectF(0, 0, 1, 1))
+    f2 = _NameField(conn, box2)
+    f2._on_edited("Custom Promo")
+    f2.setText("Custom Promo")
+    f2._on_free_text()
+    assert box2.card.card_id is None and box2.card.name == "Custom Promo"
+
+
+def test_export_counts_a_front_back_pair_once(app, _quiet, tmp_path):
+    """A card labeled on the front and copied to the back exports as one card
+    (quantity 1), not two."""
+    from PySide6.QtCore import QRectF
+
+    from tcginventory.data.db import connect
+    from tcginventory.data.migrator import migrate
+    from tcginventory.ui.views.recognition import RecognitionView
+
+    conn = connect(":memory:")
+    migrate(conn)
+    vrepo = VisionRepository(open_vision(":memory:"))
+    view = RecognitionView(
+        conn, vision_repo=vrepo, vision_dir=tmp_path,
+        recognizer=_pixel_recognizer(vrepo),
+    )
+    view._mode.setCurrentIndex(1)
+    view.add_image_paths([_png(tmp_path / "front.png", 200, 120)])
+    box = view._add_box(QRectF(10, 10, 40, 60))
+    box.card = CardLabel(card_id="cel-4", name="Charizard")
+    view._include_card_backs()
+    view.add_image_paths([_png(tmp_path / "back.png", 200, 120)])
+
+    cards = view._collect_export_cards()
+    assert len(cards) == 1 and cards[0].quantity == 1
+    view.deleteLater()
+
+
 def test_add_new_image_slot_then_fill(app, _quiet, tmp_path):
     """'Add new image' appends a blank slot; uploading/pasting fills it in place
     rather than creating a second image."""

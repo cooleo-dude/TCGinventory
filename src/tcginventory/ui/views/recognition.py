@@ -365,6 +365,7 @@ class _NameField(QLineEdit):
         self.setPlaceholderText("Card name…")
         self.setText(box.card.name or "")
         self._matches: dict[str, object] = {}
+        self._picked = False  # last interaction was a completer pick (not free text)
         self._model = QStandardItemModel(self)
         self._completer = QCompleter(self._model, self)
         self._completer.setCaseSensitivity(Qt.CaseInsensitive)
@@ -393,6 +394,7 @@ class _NameField(QLineEdit):
             self._on_preview(card_id)
 
     def _on_edited(self, text: str) -> None:
+        self._picked = False  # the user is typing — subsequent text is free text
         if len(text.strip()) < 2:
             return
         repo = CardCatalogRepository(self._conn)
@@ -425,12 +427,19 @@ class _NameField(QLineEdit):
             language=getattr(card, "language", None),
         )
         self.setText(card.name)
+        self._picked = True
         self._refresh_meta()
         self._notify()
 
     def _on_free_text(self) -> None:
+        # editingFinished right after a completer pick: the field may hold the
+        # display string ("Name · Set #Number"). That's not free text — keep the
+        # structured card (id/set/number) and restore its clean name.
+        if self._picked:
+            self._picked = False
+            self.setText(self._box.card.name or "")
+            return
         text = self.text().strip()
-        # Only overwrite when the text no longer matches the picked card's name.
         if text and text != (self._box.card.name or ""):
             self._box.card = CardLabel(name=text)
             self._refresh_meta()
@@ -1043,6 +1052,9 @@ class RecognitionView(QWidget):
         agg: dict[tuple, RecognizedCard] = {}
         order: list[tuple] = []
         for session in self._sessions:
+            if session.side == "back":
+                continue  # a back is the same physical card as its front — don't
+                # double-count it (front + back are one card)
             for box in session.boxes:
                 label = box.card
                 if not label or not (label.card_id or (label.name or "").strip()):
