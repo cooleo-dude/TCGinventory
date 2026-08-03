@@ -214,6 +214,34 @@ def test_main_window_hosts_views(app, seeded_conn):
     window.deleteLater()
 
 
+def test_history_recognition_tab_summarizes_the_corpus(app, seeded_conn):
+    """The Recognition History toggle shows one row per capture with corpus
+    counts, KPI totals, and the growth sparkline."""
+    from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
+    from tcginventory.ui.views.history import HistoryView
+
+    vrepo = VisionRepository(open_vision(":memory:"))
+    cap = vrepo.add_capture(source="transaction", now="2026-01-01T09:00:00+00:00")
+    img = vrepo.add_image(
+        cap, "s", "/a.png", width=100, height=60, now="2026-01-01T09:00:00+00:00"
+    )
+    vrepo.add_region(img, 1, (0, 0, 0.5, 1), None, CardLabel("cel-4", name="Zard"))
+    vrepo.add_region(img, 2, (0.5, 0, 0.5, 1), None, CardLabel(name="mystery"))
+
+    view = HistoryView(seeded_conn, vision_repo=vrepo)
+    assert view._pages.currentIndex() == 0  # defaults to Transaction History
+
+    view._set_mode(1)  # → Recognition History (refreshes from the corpus)
+    assert view._pages.currentIndex() == 1
+    assert view._rec._model.rowCount() == 1
+    row = view._rec._model.row_at(0)
+    assert (row.images, row.regions, row.labeled) == (1, 2, 1)
+    assert row.state == "partial"  # one of two boxes labeled
+    assert view._rec._stat_images.text() == "1"
+    assert view._rec._stat_labeled.text() == "1"
+    view.deleteLater()
+
+
 def test_nav_refresh_is_gated_until_data_changes(app, seeded_conn):
     """Switching to an unchanged screen must not re-run its refresh; a data
     mutation invalidates the views so the next visit refreshes once."""

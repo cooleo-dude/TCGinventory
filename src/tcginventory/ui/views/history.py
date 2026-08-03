@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStyle,
@@ -60,6 +61,7 @@ from tcginventory.data.repositories import (
     TransactionLineRepository,
     TransactionRepository,
 )
+from tcginventory.data.vision import VisionRepository, open_vision
 from tcginventory.domain.enums import Direction, TransactionStatus
 from tcginventory.domain.models import Item
 from tcginventory.services import cardimages
@@ -73,6 +75,10 @@ from tcginventory.ui.models.history_model import (
     CARDS_ROLE,
     HistoryRow,
     HistoryTableModel,
+)
+from tcginventory.ui.models.recognition_history_model import (
+    RecognitionHistoryModel,
+    RecognitionRow,
 )
 
 _TYPES = ["All", "purchase", "sale", "trade", "adjustment"]
@@ -146,18 +152,7 @@ class _PillDelegate(QStyledItemDelegate):
         if not text:
             return
 
-        t = theme.active()
-        voided = index.siblingAtColumn(_STATUS_COL).data() == "voided"
-        if col == _TYPE_COL:
-            fg = t.ink3 if voided else _type_color(text)
-            fill = _alpha(t.surface2 if voided else fg, 1.0 if voided else 0.15)
-            border = None
-            dot = fg
-        else:  # status — a quieter ghost pill
-            fg = t.ink3 if text == "voided" else t.ink2
-            fill = QColor(t.surface)
-            border = QColor(t.line if text == "voided" else t.line2)
-            dot = QColor(t.neg if text == "voided" else t.pos)
+        fg, fill, border, dot = self._colors(col, text, index)
 
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
@@ -188,6 +183,48 @@ class _PillDelegate(QStyledItemDelegate):
             label,
         )
         painter.restore()
+
+    def _colors(self, col, text, index):
+        """(fg, fill, border, dot) for the pill in ``col``."""
+        t = theme.active()
+        voided = index.siblingAtColumn(_STATUS_COL).data() == "voided"
+        if col == _TYPE_COL:
+            fg = t.ink3 if voided else _type_color(text)
+            fill = _alpha(t.surface2 if voided else fg, 1.0 if voided else 0.15)
+            return fg, fill, None, fg
+        # status — a quieter ghost pill
+        fg = t.ink3 if text == "voided" else t.ink2
+        return (
+            fg,
+            QColor(t.surface),
+            QColor(t.line if text == "voided" else t.line2),
+            QColor(t.neg if text == "voided" else t.pos),
+        )
+
+
+def _source_color(value: str) -> str:
+    t = theme.active()
+    return {
+        "transaction": t.info,
+        "listing": t.accent_ink,
+        "auction": t.warn,
+        "manual": t.ink3,
+    }.get(value, t.ink3)
+
+
+def _state_color(value: str) -> str:
+    t = theme.active()
+    return {"labeled": t.pos, "partial": t.warn, "unlabeled": t.ink3}.get(value, t.ink3)
+
+
+class _RecPillDelegate(_PillDelegate):
+    """Recognition-log pills: Source (col 1) and State (col 5), both filled and
+    tinted like the transaction Type pill."""
+
+    def _colors(self, col, text, index):
+        key = (text or "").lower()
+        fg = _source_color(key) if col == _TYPE_COL else _state_color(key)
+        return fg, _alpha(fg, 0.15), None, fg
 
 
 class _ThumbDelegate(QStyledItemDelegate):
@@ -465,14 +502,467 @@ def _empty_state(glyph: str, title: str, body: str, action: str) -> tuple:
     return box, text, button
 
 
+def _db_file_of(conn: sqlite3.Connection) -> str | None:
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+    except sqlite3.Error:
+        return None
+    path = row[2] if row else ""
+    return path or None
+
+
+def _kpi_tile(caption: str) -> tuple[QFrame, QLabel]:
+    """A dashboard-style summary tile; returns (frame, value_label)."""
+    t = theme.active()
+    tile = QFrame()
+    tile.setStyleSheet(
+        f"QFrame {{ background:{t.surface2}; border:1px solid {t.line};"
+        " border-radius:12px; }"
+    )
+    lay = QVBoxLayout(tile)
+    lay.setContentsMargins(16, 10, 20, 11)
+    lay.setSpacing(3)
+    cap = QLabel(caption.upper())
+    cap.setStyleSheet(
+        f"color:{t.ink3}; font-size:10px; font-weight:700;"
+        " letter-spacing:1px; border:none; background:transparent;"
+    )
+    value = QLabel("—")
+    value.setFont(QFont(theme.mono_family()))
+    value.setStyleSheet(
+        f"color:{t.ink}; font-size:20px; font-weight:700;"
+        " border:none; background:transparent;"
+    )
+    lay.addWidget(cap)
+    lay.addWidget(value)
+    return tile, value
+
+
+def _set_kpi(label: QLabel, text: str, color: str) -> None:
+    label.setStyleSheet(
+        f"color:{color}; font-size:20px; font-weight:700;"
+        " border:none; background:transparent;"
+    )
+    label.setText(text)
+
+
+class _Sparkline(QWidget):
+    """A compact cumulative-growth line (area fill + 2px accent line + end dot)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._values: list[float] = []
+        self.setMinimumHeight(52)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+    def set_values(self, values) -> None:
+        self._values = [float(v) for v in values]
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        t = theme.active()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h, pad = self.width(), self.height(), 5
+        vals = self._values
+        if len(vals) < 2:
+            p.setPen(QPen(QColor(t.line2), 2))
+            p.drawLine(pad, h - pad, w - pad, h - pad)
+            return
+        lo, hi = min(vals), max(vals)
+        span = (hi - lo) or 1.0
+        n = len(vals)
+
+        def point(i: int) -> tuple[float, float]:
+            x = pad + (w - 2 * pad) * (i / (n - 1))
+            y = (h - pad) - (h - 2 * pad) * ((vals[i] - lo) / span)
+            return x, y
+
+        pts = [point(i) for i in range(n)]
+        area = QPainterPath()
+        area.moveTo(pts[0][0], h - pad)
+        for x, y in pts:
+            area.lineTo(x, y)
+        area.lineTo(pts[-1][0], h - pad)
+        area.closeSubpath()
+        p.fillPath(area, _alpha(t.accent, 0.16))
+        line = QPainterPath()
+        line.moveTo(*pts[0])
+        for x, y in pts[1:]:
+            line.lineTo(x, y)
+        p.setPen(QPen(QColor(t.accent), 2))
+        p.drawPath(line)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(t.accent_ink))
+        ex, ey = pts[-1]
+        p.drawEllipse(QRectF(ex - 3, ey - 3, 6, 6))
+
+
+_REC_DETAIL_HEADERS = [
+    "Card",
+    "Set",
+    "#",
+    "Language",
+    "Condition",
+    "Graded",
+    "Side",
+    "Image",
+]
+
+_REC_SOURCES = ["All", "transaction", "listing", "manual"]
+
+
+class _RecFilterProxy(QSortFilterProxyModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setSortRole(Qt.UserRole)
+        self._source = "All"
+        self._text = ""
+
+    def set_source(self, value: str) -> None:
+        self._source = value
+        self.invalidateFilter()
+
+    def set_text(self, text: str) -> None:
+        self._text = text.strip().lower()
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, parent: QModelIndex) -> bool:
+        row = self.sourceModel().row_at(source_row)
+        if self._source != "All" and (row.source or "manual") != self._source:
+            return False
+        if self._text:
+            hay = f"{row.note or ''} {row.items_label}".lower()
+            if self._text not in hay:
+                return False
+        return True
+
+
+class _RecHistoryPanel(QWidget):
+    """Recognition History — a corpus log in the exact format of the transaction
+    log: one row per capture (annotation session), with KPI tiles + a
+    cumulative-images sparkline reading corpus growth at a glance."""
+
+    def __init__(self, conn: sqlite3.Connection, vision_repo=None) -> None:
+        super().__init__()
+        self._conn = conn
+        self._catalog_db = _db_file_of(conn)  # catalog art lives in the ledger DB
+        self._vision = vision_repo  # None → opened lazily on first refresh
+        self._resolver: _ThumbResolver | None = None
+        self._thumb_gen = 0
+
+        self._model = RecognitionHistoryModel()
+        self._proxy = _RecFilterProxy()
+        self._proxy.setSourceModel(self._model)
+
+        self._subtitle = QLabel("")
+        self._subtitle.setStyleSheet(f"color:{theme.active().ink3}; font-size:12px;")
+
+        # KPI strip: three tiles + the growth sparkline.
+        self._img_tile, self._stat_images = _kpi_tile("Images")
+        self._lab_tile, self._stat_labeled = _kpi_tile("Labeled crops")
+        self._card_tile, self._stat_cards = _kpi_tile("Cards covered")
+        spark_frame = self._build_spark_frame()
+        stats = QHBoxLayout()
+        stats.setSpacing(12)
+        stats.addWidget(self._img_tile)
+        stats.addWidget(self._lab_tile)
+        stats.addWidget(self._card_tile)
+        stats.addWidget(spark_frame, 1)
+
+        self._source = QComboBox()
+        self._source.addItems(_REC_SOURCES)
+        self._source.currentTextChanged.connect(self._on_source_changed)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search cards or note…")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._on_search_changed)
+        filter_bar = QHBoxLayout()
+        filter_bar.addWidget(QLabel("Source:"))
+        filter_bar.addWidget(self._source)
+        filter_bar.addWidget(self._search, 1)
+
+        self._table = QTableView()
+        self._table.setModel(self._proxy)
+        self._table.setSortingEnabled(True)
+        self._table.sortByColumn(0, Qt.DescendingOrder)  # newest first
+        self._table.setItemDelegate(_RecPillDelegate(self._table))
+        self._table.setItemDelegateForColumn(CARDS_COL, _ThumbDelegate(self._table))
+        self._table.verticalHeader().setDefaultSectionSize(40)
+        self._table.horizontalHeader().setResizeContentsPrecision(25)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.selectionModel().selectionChanged.connect(self._show_detail)
+
+        self._empty, self._empty_body, empty_btn = _empty_state(
+            "scan-line",
+            "No captures yet",
+            "Supply and label photos in the Recognition window — each saved "
+            "session lands here, growing the corpus your detector trains on.",
+            "",
+        )
+        empty_btn.setVisible(False)  # no CTA on this state
+        self._no_match, self._no_match_body, clear_btn = _empty_state(
+            "search", "No matching captures", "Nothing matches these filters.", "Clear"
+        )
+        clear_btn.clicked.connect(self._clear_filters)
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._table)
+        self._stack.addWidget(self._empty)
+        self._stack.addWidget(self._no_match)
+
+        self._detail_header = QLabel("Select a capture to see its cards.")
+        self._detail_header.setTextFormat(Qt.RichText)
+        self._detail_header.setStyleSheet("border:none; background:transparent;")
+        self._detail_band = QFrame()
+        band = QHBoxLayout(self._detail_band)
+        band.setContentsMargins(14, 9, 14, 9)
+        band.addWidget(self._detail_header)
+        band.addStretch(1)
+        self._detail_table = QTableWidget(0, len(_REC_DETAIL_HEADERS))
+        self._detail_table.setHorizontalHeaderLabels(_REC_DETAIL_HEADERS)
+        self._detail_table.verticalHeader().setVisible(False)
+        self._detail_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._detail_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._detail_table.setAlternatingRowColors(True)
+        self._detail_table.horizontalHeader().setStretchLastSection(True)
+        detail_box = QWidget()
+        dl = QVBoxLayout(detail_box)
+        dl.setContentsMargins(0, 0, 0, 0)
+        dl.setSpacing(8)
+        dl.addWidget(self._detail_band)
+        dl.addWidget(self._detail_table)
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(self._stack)
+        splitter.addWidget(detail_box)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 1)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        layout.addWidget(self._subtitle)
+        layout.addLayout(stats)
+        layout.addLayout(filter_bar)
+        layout.addWidget(splitter, 1)
+
+    def _build_spark_frame(self) -> QFrame:
+        t = theme.active()
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"QFrame {{ background:{t.surface2}; border:1px solid {t.line};"
+            " border-radius:12px; }"
+        )
+        v = QVBoxLayout(frame)
+        v.setContentsMargins(16, 10, 16, 10)
+        v.setSpacing(3)
+        cap = QLabel("IMAGES OVER TIME")
+        cap.setStyleSheet(
+            f"color:{t.ink3}; font-size:10px; font-weight:700;"
+            " letter-spacing:1px; border:none; background:transparent;"
+        )
+        self._spark = _Sparkline()
+        v.addWidget(cap)
+        v.addWidget(self._spark, 1)
+        return frame
+
+    # -- data ---------------------------------------------------------------
+
+    def _ensure_vision(self) -> VisionRepository:
+        if self._vision is None:
+            self._vision = VisionRepository(open_vision())
+        return self._vision
+
+    def refresh(self) -> None:
+        vision = self._ensure_vision()
+        cards_by_cap: dict[int, list] = {}
+        for r in vision.capture_cards():
+            cards_by_cap.setdefault(r["capture_id"], []).append(r)
+
+        rows: list[RecognitionRow] = []
+        jobs: list[tuple[int, list]] = []
+        for source_row, cap in enumerate(vision.capture_rows()):
+            cards = cards_by_cap.get(cap["id"], [])
+            labels = [
+                f"{c['name'] or ''} {c['card_number'] or ''}".strip() for c in cards
+            ]
+            idents = [
+                (c["name"], c["set_name"], c["card_number"]) for c in cards[:3]
+            ]
+            rows.append(
+                RecognitionRow(
+                    capture_id=cap["id"],
+                    source=cap["source"] or "manual",
+                    note=cap["note"] or "",
+                    occurred_at=(cap["created_at"] or "")[:10],
+                    images=cap["images"],
+                    regions=cap["regions"],
+                    labeled=cap["labeled"],
+                    items_label=", ".join(n for n in labels if n),
+                    thumb_ids=[c["card_id"] for c in cards[:3]],
+                    card_count=len(cards),
+                )
+            )
+            if idents:
+                jobs.append((source_row, idents))
+
+        self._model.set_rows(rows)
+        self._table.resizeColumnsToContents()
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._clear_detail()
+        self._update_stats(vision)
+        self._update_state()
+        self._start_resolver(jobs)
+
+    def _update_stats(self, vision: VisionRepository) -> None:
+        t = theme.active()
+        _set_kpi(self._stat_images, str(vision.image_count()), t.ink)
+        _set_kpi(self._stat_labeled, str(vision.labeled_region_count()), t.accent_ink)
+        _set_kpi(self._stat_cards, str(vision.labeled_card_count()), t.ink)
+        self._spark.set_values([n for _, n in vision.image_growth_series()])
+
+    def _update_subtitle(self) -> None:
+        total, shown = self._model.rowCount(), self._proxy.rowCount()
+        if total == 0:
+            self._subtitle.setText("")
+        elif shown == total:
+            self._subtitle.setText(f"{total} capture{'s' if total != 1 else ''}")
+        else:
+            self._subtitle.setText(f"{shown} of {total} shown")
+
+    def _update_state(self) -> None:
+        self._update_subtitle()
+        if self._model.rowCount() == 0:
+            self._stack.setCurrentWidget(self._empty)
+        elif self._proxy.rowCount() == 0:
+            self._stack.setCurrentWidget(self._no_match)
+        else:
+            self._stack.setCurrentWidget(self._table)
+
+    # -- filters ------------------------------------------------------------
+
+    def _on_source_changed(self, value: str) -> None:
+        self._proxy.set_source(value)
+        self._update_state()
+
+    def _on_search_changed(self, text: str) -> None:
+        self._proxy.set_text(text)
+        self._update_state()
+
+    def _clear_filters(self) -> None:
+        self._source.setCurrentText("All")
+        self._search.clear()
+
+    # -- thumbnails (art fetched off-thread; ids come from the corpus) -------
+
+    def _start_resolver(self, jobs: list) -> None:
+        self._stop_resolver()
+        self._thumb_gen += 1
+        if not jobs or self._catalog_db is None:
+            return
+        self._resolver = _ThumbResolver(self._catalog_db, self._thumb_gen, jobs)
+        self._resolver.resolved.connect(self._on_thumb_fetched)
+        self._resolver.start()
+
+    def _stop_resolver(self) -> None:
+        if self._resolver is not None and self._resolver.isRunning():
+            self._resolver.requestInterruption()
+
+    def _on_thumb_fetched(self, generation: int, source_row: int, ids: list) -> None:
+        # ids are ignored — the row already carries the corpus card_ids; the
+        # resolver's job was just to cache the art. Repaint to show it.
+        if generation == self._thumb_gen:
+            self._table.viewport().update()
+
+    # -- detail -------------------------------------------------------------
+
+    def _selected_capture(self) -> RecognitionRow | None:
+        indexes = self._table.selectionModel().selectedRows()
+        if not indexes:
+            return None
+        return self._model.row_at(self._proxy.mapToSource(indexes[0]).row())
+
+    def _clear_detail(self) -> None:
+        t = theme.active()
+        self._detail_band.setStyleSheet(
+            f"QFrame {{ background:{t.surface}; border:1px solid {t.line};"
+            " border-radius:10px; }"
+        )
+        self._detail_header.setStyleSheet(
+            f"color:{t.ink3}; border:none; background:transparent;"
+        )
+        self._detail_header.setText("Select a capture to see its cards.")
+        self._detail_table.setRowCount(0)
+
+    def _show_detail(self) -> None:
+        row = self._selected_capture()
+        if row is None:
+            self._clear_detail()
+            return
+        t = theme.active()
+
+        def span(text: str, color: str) -> str:
+            return f'<span style="color:{color}">{text}</span>'
+
+        sep = f'  <span style="color:{t.line2}">·</span>  '
+        parts = [
+            span(row.source.title(), _source_color(row.source)),
+            span(row.occurred_at, t.ink2),
+            span(f"{row.images} image{'s' if row.images != 1 else ''}", t.ink2),
+            span(f"{row.labeled}/{row.regions} labeled", _state_color(row.state)),
+        ]
+        if row.note:
+            parts.append(span(row.note, t.ink))
+        rail = _state_color(row.state)
+        self._detail_band.setStyleSheet(
+            f"QFrame {{ background:{t.surface2}; border:1px solid {t.line};"
+            f" border-left:3px solid {rail}; border-radius:10px; }}"
+        )
+        self._detail_header.setStyleSheet(
+            f"color:{t.ink2}; border:none; background:transparent;"
+        )
+        self._detail_header.setText(sep.join(parts))
+
+        regions = self._ensure_vision().capture_regions(row.capture_id)
+        self._detail_table.setRowCount(len(regions))
+        import os as _os
+
+        for r, reg in enumerate(regions):
+            graded = "Yes" if reg["is_graded"] else ""
+            grade = f"{reg['grading_company'] or ''} {reg['grade'] or ''}".strip()
+            values = [
+                reg["name"] or "—",
+                reg["set_name"] or "",
+                reg["card_number"] or "",
+                reg["language"] or "",
+                reg["condition"] or "",
+                grade or graded,
+                reg["side"] or reg["image_side"] or "",
+                _os.path.basename(reg["image_path"] or ""),
+            ]
+            for c, text in enumerate(values):
+                cell = QTableWidgetItem(text)
+                if c == 0 and reg["card_id"]:
+                    cell.setForeground(QColor(t.accent_ink))
+                self._detail_table.setItem(r, c, cell)
+        self._detail_table.resizeColumnsToContents()
+        self._detail_table.horizontalHeader().setStretchLastSection(True)
+
+
 class HistoryView(QWidget):
     edit_requested = Signal(int)  # transaction id to edit
     changed = Signal()  # a void changed the ledger
     new_transaction_requested = Signal()  # empty-state CTA → Transaction window
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, vision_repo=None) -> None:
         super().__init__()
         self._conn = conn
+        self._vision_repo = vision_repo  # for the Recognition History page
         self._txns = TransactionRepository(conn)
         self._lines = TransactionLineRepository(conn)
         self._consumptions = LotConsumptionRepository(conn)
@@ -489,13 +979,12 @@ class HistoryView(QWidget):
         self._proxy = _HistoryFilterProxy()
         self._proxy.setSourceModel(self._model)
 
-        title = QLabel("History")
-        title.setObjectName("pageTitle")
+        # The mode toggle above labels the page, so no separate title here —
+        # just the count subtitle (mirrors the Recognition page).
         self._subtitle = QLabel("")
         self._subtitle.setStyleSheet(f"color:{theme.active().ink3}; font-size:12px;")
         header = QHBoxLayout()
         header.setSpacing(10)
-        header.addWidget(title)
         header.addWidget(self._subtitle)
         header.addStretch(1)
 
@@ -602,13 +1091,59 @@ class HistoryView(QWidget):
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 1)
 
+        txn_page = QWidget()
+        txn_layout = QVBoxLayout(txn_page)
+        txn_layout.setContentsMargins(0, 0, 0, 0)
+        txn_layout.setSpacing(12)
+        txn_layout.addLayout(header)
+        txn_layout.addLayout(stats)
+        txn_layout.addLayout(filter_bar)
+        txn_layout.addWidget(splitter, 1)
+
+        self._rec = _RecHistoryPanel(self._conn, vision_repo=self._vision_repo)
+        self._pages = QStackedWidget()
+        self._pages.addWidget(txn_page)  # 0 Transaction
+        self._pages.addWidget(self._rec)  # 1 Recognition
+
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
-        layout.addLayout(header)
-        layout.addLayout(stats)
-        layout.addLayout(filter_bar)
-        layout.addWidget(splitter, 1)
+        layout.addLayout(self._build_mode_toggle())
+        layout.addWidget(self._pages, 1)
 
+        self._set_mode(0)  # default: Transaction History (refreshes it)
+
+    # -- mode toggle (Transaction / Recognition) ----------------------------
+
+    def _build_mode_toggle(self):
+        self._mode_txn = QPushButton("Transaction History")
+        self._mode_rec = QPushButton("Recognition History")
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        for i, btn in ((0, self._mode_txn), (1, self._mode_rec)):
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _=False, idx=i: self._set_mode(idx))
+            bar.addWidget(btn)
+        bar.addStretch(1)
+        return bar
+
+    def _set_mode(self, index: int) -> None:
+        t = theme.active()
+        self._pages.setCurrentIndex(index)
+        for i, btn in ((0, self._mode_txn), (1, self._mode_rec)):
+            active = i == index
+            btn.setChecked(active)
+            if active:
+                btn.setStyleSheet(
+                    f"background:{t.accent}; color:{t.accent_on}; border:none;"
+                    " border-radius:8px; padding:7px 15px; font-weight:700;"
+                )
+            else:
+                btn.setStyleSheet(
+                    f"background:{t.surface2}; color:{t.ink2};"
+                    f" border:1px solid {t.line}; border-radius:8px;"
+                    " padding:7px 15px; font-weight:600;"
+                )
         self.refresh()
 
     # -- KPI strip ----------------------------------------------------------
@@ -680,6 +1215,13 @@ class HistoryView(QWidget):
         self._search.clear()
 
     def refresh(self) -> None:
+        """Refresh whichever history page is active (Transaction / Recognition)."""
+        if self._pages.currentIndex() == 0:
+            self._refresh_txn()
+        else:
+            self._rec.refresh()
+
+    def _refresh_txn(self) -> None:
         # Build the rows with only cheap data (card *count* for the thumbnail
         # count); the actual card-art resolution + fetch happens off-thread.
         jobs: list[tuple[int, list]] = []

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from PySide6.QtCore import QDate, QModelIndex, QRectF, Qt, QThread, Signal
+from PySide6.QtCore import QDate, QModelIndex, QRectF, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -100,6 +100,9 @@ from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
 
 _TOOLBAR_H = 34  # Them's autofill toolbar row; matched by a You-side spacer
+_DOCK_W = 178  # preview dock width; the header fields align to the board past it
+_CONTENT_GAP = 14  # spacing between a dock and the board
+_BOARD_GAP = 16  # spacing between the You and Them panels
 
 
 def _mono_font(size: float, bold: bool = False) -> QFont:
@@ -897,9 +900,12 @@ class TransactionView(QWidget):
         )
 
         board = QHBoxLayout()
-        board.setSpacing(16)
-        board.addWidget(self._build_you_side(), 1)
-        board.addWidget(self._build_them_side(), 1)
+        board.setContentsMargins(0, 0, 0, 0)  # so the panels align with the header
+        board.setSpacing(_BOARD_GAP)
+        self._you_side = self._build_you_side()
+        self._them_side = self._build_them_side()
+        board.addWidget(self._you_side, 1)
+        board.addWidget(self._them_side, 1)
         board_w = QWidget()
         board_w.setLayout(board)
         scroll = QScrollArea()
@@ -914,7 +920,7 @@ class TransactionView(QWidget):
         self._save_shortcut.activated.connect(self._submit_via_shortcut)
 
         content = QHBoxLayout()
-        content.setSpacing(14)
+        content.setSpacing(_CONTENT_GAP)
         content.addWidget(self._build_preview_dock("you"), 0)
         content.addWidget(scroll, 1)
         content.addWidget(self._build_preview_dock("them"), 0)
@@ -940,7 +946,7 @@ class TransactionView(QWidget):
         cascade = self._cascade_you if you else self._cascade_them
 
         col = QWidget()
-        col.setFixedWidth(178)
+        col.setFixedWidth(_DOCK_W)
         v = QVBoxLayout(col)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(6)
@@ -1050,17 +1056,48 @@ class TransactionView(QWidget):
         return self._badge_frame
 
     def _build_hdr_fields(self) -> QHBoxLayout:
+        # Lock the field groups to the panels below them: skip the dock+gap on the
+        # left, then keep each group's width synced to its panel (see
+        # _sync_header_widths, since the panels don't split evenly).
         row = QHBoxLayout()
-        row.setSpacing(16)
-        you = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addSpacing(_DOCK_W + _CONTENT_GAP)
+
+        self._hdr_you = QWidget()
+        you = QHBoxLayout(self._hdr_you)
+        you.setContentsMargins(0, 0, 0, 0)
         you.setSpacing(14)
         you.addLayout(_inline_field("Date", self._date))
         you.addLayout(_inline_field("Reference", self._reference), 1)
-        row.addLayout(you, 1)
-        them = QHBoxLayout()
+        row.addWidget(self._hdr_you)
+
+        row.addSpacing(_BOARD_GAP)
+
+        self._hdr_them = QWidget()
+        them = QHBoxLayout(self._hdr_them)
+        them.setContentsMargins(0, 0, 0, 0)
         them.addLayout(_inline_field("Counterparty", self._counterparty), 1)
-        row.addLayout(them, 1)
+        row.addWidget(self._hdr_them)
+
+        row.addStretch(1)  # absorbs the right dock+gap once widths are synced
         return row
+
+    def _sync_header_widths(self) -> None:
+        """Keep the Reference / Counterparty groups exactly as wide as the You /
+        Them panels below them (the panels don't split 50/50 — Them's rows make it
+        wider)."""
+        for group, panel in (
+            (self._hdr_you, self._you_side),
+            (self._hdr_them, self._them_side),
+        ):
+            w = panel.width()
+            if w > 0 and group.width() != w:
+                group.setFixedWidth(w)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._sync_header_widths)
 
     # -- the two sides ------------------------------------------------------
 
@@ -1455,6 +1492,9 @@ class TransactionView(QWidget):
     def _update_summary(self, *_args) -> None:
         t = theme.active()
         self._refresh_cascades()
+        # Adding/removing rows can change the panel widths; re-lock the header
+        # groups once the layout has settled.
+        QTimer.singleShot(0, self._sync_header_widths)
         preview = self._service.preview(self.build_request())
         ttype = preview.inferred_type.value if preview.inferred_type else None
         self._badge.setText((ttype or "—").upper())

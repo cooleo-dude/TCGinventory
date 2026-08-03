@@ -365,3 +365,65 @@ class VisionRepository:
 
     def image_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM image").fetchone()[0]
+
+    # -- corpus summary (Recognition History view) --------------------------
+
+    def labeled_region_count(self) -> int:
+        """Regions carrying a catalog identity — the exemplar crops the matcher
+        trains on."""
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM region WHERE card_id IS NOT NULL"
+        ).fetchone()[0]
+
+    def labeled_card_count(self) -> int:
+        """Distinct catalog cards represented in the corpus (breadth)."""
+        return self.conn.execute(
+            "SELECT COUNT(DISTINCT card_id) FROM region WHERE card_id IS NOT NULL"
+        ).fetchone()[0]
+
+    def capture_rows(self) -> list[sqlite3.Row]:
+        """One row per capture (annotation session), oldest first: its source,
+        note, date, and counts of images, regions (boxes) and labeled regions."""
+        return self.conn.execute(
+            "SELECT c.id, c.source, c.note, c.created_at, "
+            "COUNT(DISTINCT i.id) AS images, "
+            "COUNT(r.id) AS regions, "
+            "COUNT(r.card_id) AS labeled "
+            "FROM capture c "
+            "LEFT JOIN image i ON i.capture_id = c.id "
+            "LEFT JOIN region r ON r.image_id = i.id "
+            "GROUP BY c.id ORDER BY c.created_at, c.id"
+        ).fetchall()
+
+    def capture_cards(self) -> list[sqlite3.Row]:
+        """Labeled regions with their identity, keyed by capture — the per-session
+        card list and thumbnail source."""
+        return self.conn.execute(
+            "SELECT i.capture_id AS capture_id, r.card_id, r.name, r.set_name, "
+            "r.card_number FROM region r JOIN image i ON i.id = r.image_id "
+            "WHERE r.card_id IS NOT NULL ORDER BY i.capture_id, r.id"
+        ).fetchall()
+
+    def capture_regions(self, capture_id: int) -> list[sqlite3.Row]:
+        """Every region in a capture (labeled or not), with its image path/side —
+        the per-capture detail drill-down."""
+        return self.conn.execute(
+            "SELECT r.*, i.path AS image_path, i.side AS image_side "
+            "FROM region r JOIN image i ON i.id = r.image_id "
+            "WHERE i.capture_id = ? ORDER BY i.id, r.number",
+            (capture_id,),
+        ).fetchall()
+
+    def image_growth_series(self) -> list[tuple[str, int]]:
+        """(day, cumulative image count) across all supplied images — the
+        corpus-growth curve behind the Recognition History sparkline."""
+        rows = self.conn.execute(
+            "SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS n "
+            "FROM image GROUP BY day ORDER BY day"
+        ).fetchall()
+        series: list[tuple[str, int]] = []
+        total = 0
+        for row in rows:
+            total += row["n"]
+            series.append((row["day"], total))
+        return series
