@@ -159,6 +159,33 @@ def _link_button(text: str, tip: str) -> QPushButton:
     return b
 
 
+def _review_chip() -> QPushButton:
+    """A checkable 'flag for review' chip that sits inline with the quick-links.
+    Amber (armed) when checked, neutral outline when off — it *is* the card's
+    review flag, so ``isChecked``/``setChecked`` drive posting as before."""
+    t = theme.active()
+    b = QPushButton("Review")
+    b.setCheckable(True)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setToolTip("Flag this card for review (e.g. the price needs a second look)")
+    b.setFixedHeight(24)
+    b.setIcon(icons.icon("triangle-alert", t.ink2, 13))
+    warn = QColor(t.warn)
+    tint = f"rgba({warn.red()},{warn.green()},{warn.blue()},0.16)"
+    b.setStyleSheet(
+        f"QPushButton{{border:1px solid {t.line2};border-radius:6px;color:{t.ink2};"
+        f"padding:1px 8px 1px 6px;font-size:11px;font-weight:600;}}"
+        f"QPushButton:hover{{border-color:{t.warn};color:{t.warn};}}"
+        f"QPushButton:checked{{background:{tint};border-color:{t.warn};"
+        f"color:{t.warn};}}"
+    )
+    # Recolour the glyph to match the armed/idle text colour.
+    b.toggled.connect(
+        lambda on: b.setIcon(icons.icon("triangle-alert", t.warn if on else t.ink2, 13))
+    )
+    return b
+
+
 def _inline_field(label: str, widget: QWidget) -> QHBoxLayout:
     """A label beside its input (used above each side)."""
     t = theme.active()
@@ -556,7 +583,7 @@ class _ReceiveRow:
         self.qty.valueChanged.connect(lambda *_: on_change())
         self.intent = _combo(Intent, capitalize=True)
         _select(self.intent, Intent.RESALE.value)
-        self.review = QCheckBox()
+        self.review = _review_chip()
         self.tcgplayer = QLineEdit()
         self.ebay = QLineEdit()
         self.notes = QLineEdit()
@@ -774,6 +801,7 @@ class _ReceiveRow:
         self._ebay_link.clicked.connect(self._open_ebay)
         main.addWidget(self._tcg_link)
         main.addWidget(self._ebay_link)
+        main.addWidget(self.review)
         self._chev = _icon_button("", "Show / hide the extra fields")
         self._chev.setIcon(icons.icon("chevron-down", t.ink3, 16))
         self._chev.clicked.connect(self._toggle_adv)
@@ -819,9 +847,7 @@ class _ReceiveRow:
         g.addWidget(self.graded, 1, 3, Qt.AlignBottom)
         cell("TCGplayer URL", self.tcgplayer, 2, 0, 2)
         cell("eBay URL", self.ebay, 2, 2, 2)
-        cell("Notes", self.notes, 3, 0, 3)
-        self.review.setText("Mark for review")
-        g.addWidget(self.review, 3, 3, Qt.AlignBottom)
+        cell("Notes", self.notes, 3, 0, 4)
         self._adv.setVisible(False)
         v.addWidget(self._adv)
         return card
