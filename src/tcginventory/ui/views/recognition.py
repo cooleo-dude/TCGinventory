@@ -129,8 +129,9 @@ class _Session:
 
 
 _STAGE_EMPTY = (
-    "Add images, then draw a box around each card.\n\n"
-    "Boxes become labeled regions your detector learns from."
+    "Upload or paste a photo of your cards.\n\n"
+    "Then draw a box around each one — the boxes become the labeled regions your "
+    "detector learns from."
 )
 _BACKS_EMPTY = (
     "Add the card-backs photo.\n\n"
@@ -731,15 +732,13 @@ class RecognitionView(QWidget):
         row.setContentsMargins(12, 8, 12, 8)
         row.setSpacing(12)
 
-        # -- Boxes cluster
-        add_btn = self._tool_button("Add images", "plus")
-        add_btn.clicked.connect(self._add_images)
+        # -- Boxes cluster (images are added from the IMAGES panel's Start button)
         self._draw_btn = self._tool_button("Draw", "scan-line")
         self._draw_btn.setCheckable(True)
         self._draw_btn.toggled.connect(self._set_draw)
         del_btn = self._tool_button("Delete", "trash-2")
         del_btn.clicked.connect(self._delete_selected)
-        row.addLayout(self._cluster("Boxes", [add_btn, self._draw_btn, del_btn]))
+        row.addLayout(self._cluster("Boxes", [self._draw_btn, del_btn]))
         row.addWidget(_vrule())
 
         # -- Assist cluster (matcher + auto box proposals)
@@ -846,14 +845,6 @@ class RecognitionView(QWidget):
         self._film_cap.setObjectName("clusterCap")
         v.addWidget(self._film_cap)
 
-        paste = QPushButton("Paste from clipboard")
-        paste.setObjectName("pasteBtn")
-        paste.setIcon(icons.icon("clipboard-paste", theme.active().ink3, 14))
-        paste.setToolTip("Paste a copied image or image file  (Ctrl+V)")
-        paste.setCursor(Qt.PointingHandCursor)
-        paste.clicked.connect(self._paste_image)
-        v.addWidget(paste)
-
         self._strip = QListWidget()
         self._strip.setObjectName("strip")
         self._strip.setFrameShape(QFrame.NoFrame)
@@ -862,13 +853,14 @@ class RecognitionView(QWidget):
         self._strip.currentRowChanged.connect(self._switch_image)
         v.addWidget(self._strip, 1)
 
-        # A blank slot appears under the last image; upload or paste into it.
-        add_new = QPushButton("  Add new image")
-        add_new.setObjectName("dropTile")
-        add_new.setIcon(icons.icon("image", theme.active().ink3, 16))
-        add_new.setToolTip("Add a blank slot, then upload or paste an image into it")
-        add_new.clicked.connect(self._add_new_image_slot)
-        v.addWidget(add_new)
+        # The only way to add an image: a blank slot opens under the last one,
+        # filled from its own Upload / Paste buttons.
+        start = QPushButton("  Start New Image")
+        start.setObjectName("dropTile")
+        start.setIcon(icons.icon("image", theme.active().ink3, 16))
+        start.setToolTip("Open a blank slot, then upload or paste an image into it")
+        start.clicked.connect(self._add_new_image_slot)
+        v.addWidget(start)
         return frame
 
     def _build_stage(self) -> QWidget:
@@ -910,16 +902,21 @@ class RecognitionView(QWidget):
         self._empty_upload.setCursor(Qt.PointingHandCursor)
         self._empty_upload.setMaximumWidth(220)
         self._empty_upload.clicked.connect(self._add_images)
-        self._empty_hint = QLabel("or paste  (Ctrl+V)")
-        self._empty_hint.setAlignment(Qt.AlignCenter)
-        self._empty_hint.setStyleSheet(f"color:{theme.active().ink3};font-size:11px;")
+        self._empty_paste = QPushButton("  Paste from clipboard")
+        self._empty_paste.setObjectName("pasteBtn")
+        self._empty_paste.setIcon(
+            icons.icon("clipboard-paste", theme.active().ink3, 15)
+        )
+        self._empty_paste.setCursor(Qt.PointingHandCursor)
+        self._empty_paste.setToolTip("Paste a copied image or image file  (Ctrl+V)")
+        self._empty_paste.clicked.connect(self._paste_image)
         self._empty_box = QWidget()
         eb = QVBoxLayout(self._empty_box)
         eb.setAlignment(Qt.AlignCenter)
         eb.setSpacing(10)
         eb.addWidget(self._empty)
         eb.addWidget(self._empty_upload, 0, Qt.AlignHCenter)
-        eb.addWidget(self._empty_hint)
+        eb.addWidget(self._empty_paste, 0, Qt.AlignHCenter)
         v.addWidget(self._empty_box, 1)
 
         # floating stage tools (parented to the canvas, top-left overlay)
