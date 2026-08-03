@@ -33,6 +33,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
     QCompleter,
     QFileDialog,
@@ -85,6 +86,7 @@ class _Box:
     rect: QRectF
     card: CardLabel = field(default_factory=CardLabel)
     condition: str | None = None  # set in card-backs mode (Condition value)
+    visible: bool = True  # box overlay shown on the canvas
 
 
 @dataclass
@@ -203,13 +205,19 @@ class _NameField(QLineEdit):
     _CARD_ID_ROLE = Qt.UserRole + 1
 
     def __init__(
-        self, conn, box: _Box, meta_label: QLabel | None = None, on_change=None
+        self,
+        conn,
+        box: _Box,
+        meta_label: QLabel | None = None,
+        on_change=None,
+        on_preview=None,
     ) -> None:
         super().__init__()
         self._conn = conn
         self._box = box
         self._meta_label = meta_label
         self._on_change = on_change  # (box) -> None, after the card identity changes
+        self._on_preview = on_preview  # (card_id) -> None, to preview art live
         self.setPlaceholderText("Card name…")
         self.setText(box.card.name or "")
         self._matches: dict[str, object] = {}
@@ -220,8 +228,16 @@ class _NameField(QLineEdit):
         self.setCompleter(self._completer)
         self.textEdited.connect(self._on_edited)
         self._completer.activated[QModelIndex].connect(self._pick)
+        # Preview each candidate's art as you arrow through the dropdown.
+        self._completer.highlighted[QModelIndex].connect(self._on_highlighted)
         self.editingFinished.connect(self._on_free_text)
         self._refresh_meta()
+
+    def _on_highlighted(self, index: QModelIndex) -> None:
+        if self._on_preview is not None:
+            card_id = index.data(self._CARD_ID_ROLE)
+            if card_id:
+                self._on_preview(card_id)
 
     def _on_edited(self, text: str) -> None:
         if len(text.strip()) < 2:
@@ -385,6 +401,8 @@ class RecognitionView(QWidget):
         self._strip_counts: dict[int, QLabel] = {}  # row -> count chip label
         self._strip_thumbs: list[QFrame] = []
         self._seg_rows: dict[int, _SegRow] = {}  # number -> segment row (current)
+        self._vis_checks: dict[int, QCheckBox] = {}  # number -> visibility checkbox
+        self._updating_checks = False  # guard master <-> per-row feedback
         self._hl: int | None = None  # cross-highlighted box/segment number
 
         t = theme.active()
@@ -718,6 +736,13 @@ class RecognitionView(QWidget):
         self._seg_count.setObjectName("segTitle")
         hh.addWidget(self._seg_count)
         hh.addStretch(1)
+        self._show_all = QCheckBox("Show boxes")
+        self._show_all.setObjectName("showAll")
+        self._show_all.setChecked(True)
+        self._show_all.setCursor(Qt.PointingHandCursor)
+        self._show_all.setToolTip("Check / uncheck to show or hide every box")
+        self._show_all.toggled.connect(self._on_show_all_toggled)
+        hh.addWidget(self._show_all)
         suggest_all = QPushButton("Suggest all")
         suggest_all.setObjectName("linkBtn")
         suggest_all.setIcon(icons.icon("sparkles", theme.active().accent_ink, 14))
@@ -1015,11 +1040,16 @@ class RecognitionView(QWidget):
     def _add_box_item(self, box: _Box) -> None:
         t = theme.active()
         item = _BoxItem(box.rect, box.number, self._on_box_hover)
-        item.setPen(QPen(_BOX_PEN, 0))
+        pen = QPen(QColor(_BOX_PEN))
+        pen.setCosmetic(True)  # constant 2px outline regardless of zoom
+        pen.setWidthF(2.0)
+        item.setPen(pen)
         item.setBrush(QBrush(_BOX_FILL))
         item.setFlag(item.GraphicsItemFlag.ItemIsMovable, True)
         item.setFlag(item.GraphicsItemFlag.ItemIsSelectable, True)
         item.setData(0, box.number)
+        item.setVisible(box.visible)
+        self._scene.addItem(item)  # the box (and its child badge) must join the scene
         # A constant-screen-size numbered badge pinned to the box's top-left.
         badge = QGraphicsEllipseItem(-11, -11, 22, 22, item)
         badge.setBrush(QBrush(QColor(t.accent)))
@@ -1097,7 +1127,7 @@ class RecognitionView(QWidget):
         if item is not None:
             pen = QPen(QColor(t.accent_ink if on else _BOX_PEN))
             pen.setCosmetic(True)
-            pen.setWidthF(3.0 if on else 0.0)
+            pen.setWidthF(3.5 if on else 2.0)
             item.setPen(pen)
             item.setZValue(1 if on else 0)
         row = self._seg_rows.get(number)
@@ -1116,6 +1146,39 @@ class RecognitionView(QWidget):
         card = CardCatalogRepository(self._conn).get(card_id)
         if card is not None:
             self._preview.show_card(card_id, getattr(card, "image_small", None))
+
+    # -- box visibility (per-box + mass check/uncheck) ----------------------
+
+    def _set_box_visible(self, box: _Box, on: bool) -> None:
+        box.visible = on
+        item = self._items.get(box.number)
+        if item is not None:
+            item.setVisible(on)
+        self._sync_show_all()
+
+    def _on_show_all_toggled(self, on: bool) -> None:
+        if self._updating_checks or not (0 <= self._current < len(self._sessions)):
+            return
+        self._updating_checks = True
+        for box in self._sessions[self._current].boxes:
+            box.visible = on
+            item = self._items.get(box.number)
+            if item is not None:
+                item.setVisible(on)
+            check = self._vis_checks.get(box.number)
+            if check is not None:
+                check.setChecked(on)
+        self._updating_checks = False
+
+    def _sync_show_all(self) -> None:
+        """Reflect the per-box states in the master checkbox (checked = all on)."""
+        if self._updating_checks or not (0 <= self._current < len(self._sessions)):
+            return
+        boxes = self._sessions[self._current].boxes
+        all_on = all(b.visible for b in boxes) if boxes else True
+        self._updating_checks = True
+        self._show_all.setChecked(all_on)
+        self._updating_checks = False
 
     # -- detector box proposals (classic-CV + trained YOLO) -----------------
 
@@ -1207,7 +1270,9 @@ class RecognitionView(QWidget):
         for box in session.boxes:
             item = self._items.get(box.number)
             if item is not None:
-                box.rect = item.sceneBoundingRect()
+                # Map the pure rect (not sceneBoundingRect, which is inflated by
+                # the pen width and the ignore-transform badge child).
+                box.rect = item.mapRectToScene(item.rect())
         if self._divider is not None:
             line = self._divider
             if session.orientation == "portrait":
@@ -1223,6 +1288,7 @@ class RecognitionView(QWidget):
         self._suggest_boxes.clear()
         self._condition_boxes.clear()
         self._seg_rows.clear()
+        self._vis_checks.clear()
         self._hl = None
         if not (0 <= self._current < len(self._sessions)):
             self._seg_count.setText("Segments")
@@ -1235,6 +1301,7 @@ class RecognitionView(QWidget):
         self._seg_list.addStretch(1)
         n = len(session.boxes)
         self._seg_count.setText(f"Segments · {n} card{'' if n == 1 else 's'}")
+        self._sync_show_all()
         self._update_strip_count()
 
     def _clear_seg_list(self) -> None:
@@ -1253,9 +1320,16 @@ class RecognitionView(QWidget):
         v.setContentsMargins(10, 9, 10, 9)
         v.setSpacing(7)
 
-        # top line: badge + name + side chip
+        # top line: visibility check + badge + name + side chip
         r1 = QHBoxLayout()
         r1.setSpacing(9)
+        vis = QCheckBox()
+        vis.setObjectName("visCheck")
+        vis.setChecked(box.visible)
+        vis.setCursor(Qt.PointingHandCursor)
+        vis.setToolTip("Show / hide this box")
+        vis.toggled.connect(lambda on, b=box: self._set_box_visible(b, on))
+        self._vis_checks[box.number] = vis
         badge = QLabel(str(box.number))
         badge.setObjectName("segBadgeRecv" if side == "receive" else "segBadge")
         badge.setFixedSize(22, 22)
@@ -1264,11 +1338,16 @@ class RecognitionView(QWidget):
         meta = QLabel()
         meta.setObjectName("segMeta")
         name = _NameField(
-            self._conn, box, meta_label=meta, on_change=self._on_card_changed
+            self._conn,
+            box,
+            meta_label=meta,
+            on_change=self._on_card_changed,
+            on_preview=self._preview_card,
         )
         name.setObjectName("segName")
         self._name_fields[box.number] = name
 
+        r1.addWidget(vis)
         r1.addWidget(badge)
         r1.addWidget(name, 1)
         if side is not None:
@@ -1643,6 +1722,13 @@ def _view_qss(t: theme.Tokens) -> str:
     QPushButton#linkBtn {{ background: transparent; border: none; color: {t.ink3};
         padding: 5px 6px; font-size: 12px; }}
     QPushButton#linkBtn:hover {{ color: {t.accent_ink}; }}
+    QCheckBox#showAll {{ color: {t.ink3}; font-size: 11px; spacing: 5px; }}
+    QCheckBox#showAll:hover {{ color: {t.ink}; }}
+    QCheckBox::indicator {{ width: 15px; height: 15px; border-radius: 4px;
+        border: 1.5px solid {t.line2}; background: {t.surface2}; }}
+    QCheckBox::indicator:hover {{ border-color: {t.accent}; }}
+    QCheckBox::indicator:checked {{ background: {t.accent}; border-color: {t.accent};
+        image: url(none); }}
     #segScroll, #segHolder {{ background: transparent; border: none; }}
     #segRow {{ background: {t.surface2}; border: 1px solid {t.line};
         border-radius: 10px; }}
