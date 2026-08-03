@@ -363,6 +363,8 @@ def test_condition_set_while_labeling_saves_to_corpus(app, _quiet, tmp_path):
     view.add_image_paths([_png(tmp_path / "s.png", 200, 100)])
     box = view._add_box(QRectF(10, 10, 40, 60))
     box.card = CardLabel(card_id="cel-4", name="Charizard")
+    assert box.condition == "NM"  # defaults to Near Mint
+    assert view._condition_boxes[box.number].currentData() == "NM"  # picker shows it
 
     view._condition_boxes[box.number].set_condition("LP")  # picker on every card
     assert box.condition == "LP"

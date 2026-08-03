@@ -105,7 +105,7 @@ class _Box:
     number: int
     rect: QRectF
     card: CardLabel = field(default_factory=CardLabel)
-    condition: str | None = None  # set in card-backs mode (Condition value)
+    condition: str | None = Condition.NM.value  # default Near Mint (Condition value)
     visible: bool = True  # box overlay shown on the canvas
 
 
@@ -819,7 +819,7 @@ class RecognitionView(QWidget):
         split.setStretchFactor(0, 0)
         split.setStretchFactor(1, 1)
         split.setStretchFactor(2, 0)
-        split.setSizes([196, 900, 360])
+        split.setSizes([196, 810, 450])  # segments pane ~1.25x wider (was 360)
         return split
 
     def _build_filmstrip(self) -> QWidget:
@@ -1837,7 +1837,12 @@ class RecognitionView(QWidget):
         )
         for b in front.boxes:  # copy labeled boxes onto the back to align
             back.boxes.append(
-                _Box(number=b.number, rect=QRectF(b.rect), card=replace(b.card))
+                _Box(
+                    number=b.number,
+                    rect=QRectF(b.rect),
+                    card=replace(b.card),
+                    condition=b.condition,  # same physical card → same condition
+                )
             )
         insert_at = self._current + 1
         self._sessions.insert(insert_at, back)
