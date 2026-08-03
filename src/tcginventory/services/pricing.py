@@ -68,19 +68,25 @@ def _number_base(norm: str) -> str:
     return norm[:i] if i > 0 and norm[i - 1].isdigit() else norm
 
 
-# pokemontcg.io names promo sets systematically differently than tcgcsv
-# ("<era> Black Star Promos" vs tcgcsv's era-specific promo group), and the
-# strings are too far apart to fuzzy-match. Bridge them by normalized set name.
+# The catalog names promo sets "<ERA> Black Star Promos" (TCGdex uses the short
+# era code — "SVP"/"MEP"/"SWSH"…), while tcgcsv uses its own era group names, too
+# far apart to fuzzy-match. Bridge them by normalized set name. tcgcsv prefixes
+# its two newest promo groups ("SV:"/"SWSH:") and added a Mega-Evolution one;
+# older groups keep their historic names. Keys are normalized set names — the
+# TCGdex names plus any older pokemontcg.io name that normalizes differently.
 _PROMO_SET_ALIASES = {
-    "swshblackstarpromos": "Sword & Shield Promo Cards",
-    "smblackstarpromos": "SM Promos",
-    "xyblackstarpromos": "XY Promos",
-    "scarletvioletblackstarpromos": "Scarlet & Violet Promo Cards",
-    "nintendoblackstarpromos": "Nintendo Promos",
     "wizardsblackstarpromos": "WoTC Promo",
-    "hgssblackstarpromos": "HGSS Promos",
+    "nintendoblackstarpromos": "Nintendo Promos",
     "dpblackstarpromos": "Diamond and Pearl Promos",
+    "hgssblackstarpromos": "HGSS Promos",
     "bwblackstarpromos": "Black and White Promos",
+    "xyblackstarpromos": "XY Promos",
+    "smblackstarpromos": "SM Promos",
+    "swshblackstarpromos": "SWSH: Sword & Shield Promo Cards",
+    "svpblackstarpromos": "SV: Scarlet & Violet Promo Cards",
+    "mepblackstarpromos": "ME: Mega Evolution Promo",
+    # Back-compat: items added under the old pokemontcg.io S&V promo name.
+    "scarletvioletblackstarpromos": "SV: Scarlet & Violet Promo Cards",
 }
 
 

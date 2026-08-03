@@ -142,6 +142,44 @@ def test_promo_alias_beats_generic_set_code():
     ) == (6231, "wotc-meowth")
 
 
+_RENAMED_PROMO_GROUPS = {
+    22872: ("SV: Scarlet & Violet Promo Cards", "Eevee", "173", "sv-eevee", 4.50),
+    24451: ("ME: Mega Evolution Promo", "Rowlet", "43", "me-rowlet", 2.00),
+    2545: ("SWSH: Sword & Shield Promo Cards", "Pikachu", "1", "swsh-pika", 9.99),
+}
+
+
+def _renamed_promo_fetch(url: str):
+    if url.endswith("/groups"):
+        return {"results": [
+            {"groupId": gid, "name": name, "abbreviation": "PR"}
+            for gid, (name, *_rest) in _RENAMED_PROMO_GROUPS.items()
+        ]}
+    for gid, (_name, cname, num, curl, price) in _RENAMED_PROMO_GROUPS.items():
+        pid = 500 + gid % 100
+        if url.endswith(f"/{gid}/products"):
+            return {"results": [{"productId": pid, "name": cname, "url": curl,
+                                 "extendedData": [{"name": "Number", "value": num}]}]}
+        if url.endswith(f"/{gid}/prices"):
+            return {"results": [{"productId": pid, "marketPrice": price}]}
+    raise AssertionError(f"unexpected url: {url}")
+
+
+def test_tcgdex_promo_names_resolve_after_tcgcsv_renames():
+    # tcgcsv prefixed the S&V / SWSH promo groups and added a Mega-Evolution one;
+    # the TCGdex catalog names must still resolve to them (svp/mep were broken).
+    p = TcgcsvProvider(fetch_json=_renamed_promo_fetch)
+    svp = p.price_for_card("SVP Black Star Promos", "173", "Eevee")
+    mep = p.price_for_card("MEP Black Star Promos", "43", "Rowlet")
+    swsh = p.price_for_card("SWSH Black Star Promos", "1", "Pikachu")
+    assert svp == (450, "sv-eevee")
+    assert mep == (200, "me-rowlet")
+    assert swsh == (999, "swsh-pika")
+    # Back-compat: an item still stored under the old pokemontcg.io S&V name.
+    old = p.price_for_card("Scarlet & Violet Black Star Promos", "173", "Eevee")
+    assert old == (450, "sv-eevee")
+
+
 def _subset_fetch(url: str):
     # A subset set whose code collides with its parent (both "HIF"), plus a set
     # (Unified Minds) that lists only the base "79", not the "79a" alt-art.
