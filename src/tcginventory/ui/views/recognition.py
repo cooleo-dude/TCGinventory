@@ -24,6 +24,7 @@ from PySide6.QtGui import (
     QColor,
     QGuiApplication,
     QKeySequence,
+    QPainter,
     QPen,
     QPixmap,
     QShortcut,
@@ -536,6 +537,33 @@ class _ConditionBox(QComboBox):
         pos = self.findData(value)
         if pos >= 0:
             self.setCurrentIndex(pos)
+
+
+class _PairRail(QWidget):
+    """Left gutter that links a front/back pair: a full-height rail on the front
+    that runs into an elbow connector on the (indented) back, both in the accent
+    colour — so a pair reads as a nested group even amid many images."""
+
+    def __init__(self, kind: str, color: str, parent=None) -> None:
+        super().__init__(parent)
+        self._kind = kind  # "front" | "back"
+        self._color = color
+        self.setFixedWidth(6 if kind == "front" else 20)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(self._color))
+        pen.setWidth(3)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        x, h, w = 3, self.height(), self.width()
+        if self._kind == "front":
+            p.drawLine(x, 4, x, h)  # runs to the bottom, toward the back below
+        else:  # back: down from the front, then elbow into the (indented) thumb
+            mid = int(h / 2)
+            p.drawLine(x, 0, x, mid)
+            p.drawLine(x, mid, w - 2, mid)
 
 
 class _CardPreviewPane(CardImagePane):
@@ -1203,11 +1231,8 @@ class RecognitionView(QWidget):
         outer = QHBoxLayout(frame)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        if session.pair_id is not None:  # front/back pair share an accent rail
-            rail = QFrame()
-            rail.setFixedWidth(3)
-            rail.setStyleSheet(f"background:{t.accent}; border:none; border-radius:0;")
-            outer.addWidget(rail)
+        if session.side in ("front", "back"):  # nest the pair with a linking rail
+            outer.addWidget(_PairRail(session.side, t.accent))
         body = QWidget()
         v = QVBoxLayout(body)
         v.setContentsMargins(0, 0, 0, 0)
