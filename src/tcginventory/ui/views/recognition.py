@@ -66,6 +66,7 @@ from tcginventory.domain.enums import Condition
 from tcginventory.services import vision as vision_svc
 from tcginventory.ui import icons, theme
 from tcginventory.ui.card_preview import CardImagePane
+from tcginventory.ui.completer_popup import show_fitted
 
 _IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
 _MODES = ["Transaction (I Give / They Give)", "Listing (one lot)"]
@@ -411,7 +412,7 @@ class _NameField(QLineEdit):
             item.setData(card.card_id, self._CARD_ID_ROLE)
             self._model.appendRow(item)
         if matches:
-            self._completer.complete()
+            show_fitted(self._completer, self)
             # Preview the top hit immediately; hovering the dropdown refines it.
             if self._on_preview is not None:
                 self._on_preview(matches[0].card_id)

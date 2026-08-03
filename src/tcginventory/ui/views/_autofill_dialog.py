@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 
 from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.ui import theme
+from tcginventory.ui.completer_popup import show_fitted
 
 _BOX_PEN = QColor(theme.DARK.accent)
 _CARD_ID_ROLE = Qt.UserRole + 1
@@ -104,7 +105,7 @@ class _Row:
             item.setData(card.card_id, _CARD_ID_ROLE)
             self._model.appendRow(item)
         if matches:
-            self._completer.complete()
+            show_fitted(self._completer, self.name)
 
     def _pick_match(self, index: QModelIndex) -> None:
         card = self._matches.get(index.data(_CARD_ID_ROLE))

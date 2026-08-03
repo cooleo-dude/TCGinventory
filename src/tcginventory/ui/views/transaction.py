@@ -107,6 +107,7 @@ from tcginventory.ui.card_preview import (
     _FetchWorker,
     install_hover_preview,
 )
+from tcginventory.ui.completer_popup import show_fitted
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
 
@@ -417,7 +418,7 @@ class _GiveRow:
     def _on_edited(self, text: str) -> None:
         self._fill(text)
         if self._model.rowCount():
-            self._completer.complete()
+            show_fitted(self._completer, self.name)
 
     def _show_all(self) -> None:
         # Focus an empty field → list everything you can give.
@@ -425,7 +426,7 @@ class _GiveRow:
             return
         self._fill("")
         if self._model.rowCount():
-            self._completer.complete()
+            show_fitted(self._completer, self.name)
 
     def _on_text_changed(self, *_) -> None:
         # Editing away from the chosen card's label drops the selection.
@@ -649,7 +650,7 @@ class _ReceiveRow:
             item.setData(label, self._LABEL_ROLE)
             self._search_model.appendRow(item)
         if matches:
-            self._completer.complete()
+            show_fitted(self._completer, self.name)
 
     def _on_match_hover(self, index: QModelIndex) -> None:
         """Preview a card image as the pointer moves over autofill matches."""

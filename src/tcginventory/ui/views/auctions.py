@@ -105,6 +105,7 @@ from tcginventory.services.transactions import IncomingCard
 from tcginventory.ui import icons, theme
 from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.card_preview import install_hover_preview
+from tcginventory.ui.completer_popup import show_fitted
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
 
@@ -541,7 +542,7 @@ class _AuctionCardRow:
             item.setData(label, self._LABEL_ROLE)
             self._search_model.appendRow(item)
         if matches:
-            self._completer.complete()
+            show_fitted(self._completer, self.name)
 
     def _on_match_hover(self, index: QModelIndex) -> None:
         card = self._matches.get(index.data(self._CARD_ID_ROLE))
