@@ -18,7 +18,7 @@ import sqlite3
 import tempfile
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QModelIndex, QRectF, QSize, Qt
+from PySide6.QtCore import QModelIndex, QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGraphicsEllipseItem,
     QGraphicsItem,
+    QGraphicsLineItem,
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
@@ -62,6 +63,7 @@ from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
 from tcginventory.domain.enums import Condition
 from tcginventory.services import vision as vision_svc
 from tcginventory.ui import icons, theme
+from tcginventory.ui.card_preview import CardImagePane
 
 _IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
 _MODES = ["Transaction (I Give / They Give)", "Listing (one lot)"]
@@ -92,7 +94,11 @@ class _Session:
     path: str
     pixmap: QPixmap
     boxes: list[_Box] = field(default_factory=list)
-    divider_x: float | None = None  # transaction-mode split (pixels); None = mid
+    # Transaction split: position (px) along the divider axis; None = mid. The
+    # axis follows the image's orientation — a landscape scene splits left/right
+    # (a vertical line), a portrait scene splits top/bottom (a horizontal one).
+    divider_pos: float | None = None
+    orientation: str = "landscape"  # "landscape" | "portrait" (from aspect)
 
 
 class _Scene(QGraphicsScene):
@@ -137,16 +143,73 @@ class _Scene(QGraphicsScene):
         super().mouseReleaseEvent(event)
 
 
+class _BoxItem(QGraphicsRectItem):
+    """A drawn card box that reports hover enter/leave so the matching segment
+    row can be cross-highlighted (and vice versa)."""
+
+    def __init__(self, rect: QRectF, number: int, on_hover) -> None:
+        super().__init__(rect)
+        self._number = number
+        self._on_hover = on_hover  # (number, bool) -> None
+        self.setAcceptHoverEvents(True)
+
+    def hoverEnterEvent(self, event) -> None:
+        self._on_hover(self._number, True)
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event) -> None:
+        self._on_hover(self._number, False)
+        super().hoverLeaveEvent(event)
+
+
+class _DividerLine(QGraphicsLineItem):
+    """The transaction split, draggable but locked to one axis (horizontal drag
+    for a vertical landscape split, vertical drag for a horizontal portrait one)."""
+
+    def __init__(self, x1, y1, x2, y2, axis: str) -> None:
+        super().__init__(x1, y1, x2, y2)
+        self._axis = axis  # "x" = vertical line slides horizontally; "y" = the reverse
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemPositionChange:
+            if self._axis == "x":
+                return QPointF(value.x(), 0.0)  # lock vertical drift
+            return QPointF(0.0, value.y())  # lock horizontal drift
+        return super().itemChange(change, value)
+
+
+class _SegRow(QFrame):
+    """A segment card row that reports hover enter/leave for cross-highlighting."""
+
+    def __init__(self, number: int, on_hover) -> None:
+        super().__init__()
+        self._number = number
+        self._on_hover = on_hover  # (number, bool) -> None
+
+    def enterEvent(self, event) -> None:
+        self._on_hover(self._number, True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._on_hover(self._number, False)
+        super().leaveEvent(event)
+
+
 class _NameField(QLineEdit):
     """Catalog-autocompleting name field that records the picked card's identity."""
 
     _CARD_ID_ROLE = Qt.UserRole + 1
 
-    def __init__(self, conn, box: _Box, meta_label: QLabel | None = None) -> None:
+    def __init__(
+        self, conn, box: _Box, meta_label: QLabel | None = None, on_change=None
+    ) -> None:
         super().__init__()
         self._conn = conn
         self._box = box
         self._meta_label = meta_label
+        self._on_change = on_change  # (box) -> None, after the card identity changes
         self.setPlaceholderText("Card name…")
         self.setText(box.card.name or "")
         self._matches: dict[str, object] = {}
@@ -191,6 +254,7 @@ class _NameField(QLineEdit):
         )
         self.setText(card.name)
         self._refresh_meta()
+        self._notify()
 
     def _on_free_text(self) -> None:
         text = self.text().strip()
@@ -198,12 +262,18 @@ class _NameField(QLineEdit):
         if text and text != (self._box.card.name or ""):
             self._box.card = CardLabel(name=text)
             self._refresh_meta()
+            self._notify()
 
     def apply_label(self, card: CardLabel) -> None:
         """Adopt a card identity picked elsewhere (e.g. a matcher suggestion)."""
         self._box.card = card
         self.setText(card.name or "")
         self._refresh_meta()
+        self._notify()
+
+    def _notify(self) -> None:
+        if self._on_change is not None:
+            self._on_change(self._box)
 
     def _refresh_meta(self) -> None:
         if self._meta_label is None:
@@ -314,6 +384,8 @@ class RecognitionView(QWidget):
         self._rotation = 0  # view rotation in degrees (landscape / portrait)
         self._strip_counts: dict[int, QLabel] = {}  # row -> count chip label
         self._strip_thumbs: list[QFrame] = []
+        self._seg_rows: dict[int, _SegRow] = {}  # number -> segment row (current)
+        self._hl: int | None = None  # cross-highlighted box/segment number
 
         t = theme.active()
         self.setStyleSheet(_view_qss(t))
@@ -571,14 +643,14 @@ class RecognitionView(QWidget):
         self._zone_bar.setObjectName("zoneBar")
         zb = QHBoxLayout(self._zone_bar)
         zb.setContentsMargins(16, 9, 16, 9)
-        give = QLabel("●  I GIVE")
-        give.setObjectName("zoneGive")
-        recv = QLabel("THEY GIVE  ●")
-        recv.setObjectName("zoneRecv")
-        recv.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        zb.addWidget(give)
+        self._zone_give = QLabel("●  I GIVE")
+        self._zone_give.setObjectName("zoneGive")
+        self._zone_recv = QLabel("THEY GIVE  ●")
+        self._zone_recv.setObjectName("zoneRecv")
+        self._zone_recv.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        zb.addWidget(self._zone_give)
         zb.addStretch(1)
-        zb.addWidget(recv)
+        zb.addWidget(self._zone_recv)
         v.addWidget(self._zone_bar)
 
         # canvas
@@ -665,6 +737,20 @@ class RecognitionView(QWidget):
         self._seg_list.addStretch(1)
         scroll.setWidget(holder)
         v.addWidget(scroll, 1)
+
+        # Card-art preview (bottom-right): fills as you label / hover segments.
+        preview_wrap = QFrame()
+        preview_wrap.setObjectName("previewWrap")
+        pv = QVBoxLayout(preview_wrap)
+        pv.setContentsMargins(13, 10, 13, 12)
+        pv.setSpacing(7)
+        preview_cap = QLabel("CARD PREVIEW")
+        preview_cap.setObjectName("clusterCap")
+        pv.addWidget(preview_cap)
+        self._preview = CardImagePane()
+        self._preview.setMinimumHeight(210)
+        pv.addWidget(self._preview, 1)
+        v.addWidget(preview_wrap)
         return frame
 
     # -- mode ---------------------------------------------------------------
@@ -730,24 +816,31 @@ class RecognitionView(QWidget):
             pixmap = QPixmap(str(path))
             if pixmap.isNull():
                 continue
-            self._sessions.append(_Session(path=str(path), pixmap=pixmap))
-            name = str(path).rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-            self._add_strip_item(pixmap, name)
+            orientation = (
+                "portrait" if pixmap.height() > pixmap.width() else "landscape"
+            )
+            session = _Session(
+                path=str(path), pixmap=pixmap, orientation=orientation
+            )
+            self._sessions.append(session)
+            self._add_strip_item(session)
         if self._sessions and self._current < 0:
             self._strip.setCurrentRow(0)
         self._film_cap.setText(f"IMAGES · {len(self._sessions)}")
 
-    def _add_strip_item(self, pixmap: QPixmap, name: str) -> None:
+    def _add_strip_item(self, session: _Session) -> None:
         row = self._strip.count()
         item = QListWidgetItem()
         item.setSizeHint(QSize(0, 118))
-        thumb, count = self._make_thumb(pixmap, name)
+        thumb, count = self._make_thumb(session)
         self._strip.addItem(item)
         self._strip.setItemWidget(item, thumb)
         self._strip_thumbs.append(thumb)
         self._strip_counts[row] = count
 
-    def _make_thumb(self, pixmap: QPixmap, name: str) -> tuple[QFrame, QLabel]:
+    def _make_thumb(self, session: _Session) -> tuple[QFrame, QLabel]:
+        t = theme.active()
+        name = session.path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
         frame = QFrame()
         frame.setObjectName("thumb")
         frame.setProperty("sel", False)
@@ -758,7 +851,7 @@ class RecognitionView(QWidget):
         pic.setObjectName("thumbPic")
         pic.setAlignment(Qt.AlignCenter)
         pic.setFixedHeight(84)
-        scaled = pixmap.scaled(
+        scaled = session.pixmap.scaled(
             QSize(150, 82), Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         pic.setPixmap(scaled)
@@ -766,17 +859,65 @@ class RecognitionView(QWidget):
         meta = QFrame()
         meta.setObjectName("thumbMeta")
         mh = QHBoxLayout(meta)
-        mh.setContentsMargins(8, 5, 7, 6)
+        mh.setContentsMargins(8, 5, 6, 6)
         mh.setSpacing(6)
         fn = QLabel(name)
         fn.setObjectName("thumbFn")
         fn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         count = QLabel("0")
         count.setObjectName("thumbCnt")
+        remove = QPushButton()
+        remove.setObjectName("thumbDel")
+        remove.setIcon(icons.icon("trash-2", t.ink3, 13))
+        remove.setFixedSize(20, 20)
+        remove.setCursor(Qt.PointingHandCursor)
+        remove.setToolTip("Remove this image from the session")
+        remove.clicked.connect(lambda _=False, s=session: self._remove_image(s))
         mh.addWidget(fn, 1)
         mh.addWidget(count)
+        mh.addWidget(remove)
         v.addWidget(meta)
         return frame, count
+
+    def _remove_image(self, session: _Session) -> None:
+        """Drop one image (and its boxes) from the active session."""
+        if session not in self._sessions:
+            return
+        # Persist edits to whatever image is currently shown before reindexing.
+        if 0 <= self._current < len(self._sessions):
+            self._sync_scene_to_model()
+        cur_session = (
+            self._sessions[self._current]
+            if 0 <= self._current < len(self._sessions)
+            else None
+        )
+        idx = self._sessions.index(session)
+        del self._sessions[idx]
+        if not self._sessions:
+            self._clear()
+            return
+        if cur_session is session or cur_session is None:
+            target = min(idx, len(self._sessions) - 1)
+        else:
+            target = self._sessions.index(cur_session)
+        self._current = -1  # force a clean load (skip stale scene sync)
+        self._rebuild_strip()
+        self._strip.setCurrentRow(target)
+
+    def _rebuild_strip(self) -> None:
+        """Rebuild the filmstrip from ``self._sessions`` after a removal."""
+        self._strip.blockSignals(True)
+        self._strip.clear()
+        self._strip_thumbs.clear()
+        self._strip_counts.clear()
+        for session in self._sessions:
+            self._add_strip_item(session)
+        self._strip.blockSignals(False)
+        for i, session in enumerate(self._sessions):
+            label = self._strip_counts.get(i)
+            if label is not None:
+                label.setText(str(len(session.boxes)))
+        self._film_cap.setText(f"IMAGES · {len(self._sessions)}")
 
     def _switch_image(self, row: int) -> None:
         if 0 <= self._current < len(self._sessions):
@@ -791,9 +932,13 @@ class RecognitionView(QWidget):
     def _load_session(self, index: int) -> None:
         self._current = index
         session = self._sessions[index]
+        # Each image opens in its own natural orientation (auto-detected); the
+        # manual rotate control still works from there.
+        self._rotation = 0
         self._empty.setVisible(False)
         self._view.setVisible(True)
         self._zone_bar.setVisible(self._is_transaction())
+        self._sync_zone_labels(session)
         self._scene.clear()
         self._items.clear()
         for items in self._proposals.values():
@@ -805,11 +950,21 @@ class RecognitionView(QWidget):
             self._add_box_item(box)
         if self._is_transaction():
             self._add_divider(session)
+        self._scene.set_draw(self._draw_btn.isChecked())  # keep draw mode persistent
         self._fit_view()
         self._refresh_panel()
         for source, toggle in (("cv", self._cv_toggle), ("yolo", self._yolo_toggle)):
             if toggle.isChecked():
                 self._show_proposals(source)
+
+    def _sync_zone_labels(self, session: _Session) -> None:
+        """Label the give/receive zones for the split's orientation."""
+        if session.orientation == "portrait":
+            self._zone_give.setText("●  I GIVE · top")
+            self._zone_recv.setText("bottom · THEY GIVE  ●")
+        else:
+            self._zone_give.setText("●  I GIVE")
+            self._zone_recv.setText("THEY GIVE  ●")
 
     def _fit_view(self) -> None:
         """Fit the scene, honouring the current landscape/portrait rotation."""
@@ -829,12 +984,18 @@ class RecognitionView(QWidget):
         t = theme.active()
         w = session.pixmap.width()
         h = session.pixmap.height()
-        if session.divider_x is None:
-            session.divider_x = w / 2
         pen = QPen(QColor(t.info), 0, Qt.DashLine)
-        line = self._scene.addLine(session.divider_x, 0, session.divider_x, h, pen)
-        line.setFlag(line.GraphicsItemFlag.ItemIsMovable, True)
+        if session.orientation == "portrait":
+            if session.divider_pos is None:
+                session.divider_pos = h / 2
+            line = _DividerLine(0, session.divider_pos, w, session.divider_pos, "y")
+        else:
+            if session.divider_pos is None:
+                session.divider_pos = w / 2
+            line = _DividerLine(session.divider_pos, 0, session.divider_pos, h, "x")
+        line.setPen(pen)
         line.setZValue(2)
+        self._scene.addItem(line)
         self._divider = line
 
     # -- boxes --------------------------------------------------------------
@@ -853,7 +1014,7 @@ class RecognitionView(QWidget):
 
     def _add_box_item(self, box: _Box) -> None:
         t = theme.active()
-        item = QGraphicsRectItem(box.rect)
+        item = _BoxItem(box.rect, box.number, self._on_box_hover)
         item.setPen(QPen(_BOX_PEN, 0))
         item.setBrush(QBrush(_BOX_FILL))
         item.setFlag(item.GraphicsItemFlag.ItemIsMovable, True)
@@ -896,6 +1057,65 @@ class RecognitionView(QWidget):
             b.blockSignals(True)
             b.setChecked(on)
             b.blockSignals(False)
+
+    # -- cross-highlight (box <-> segment) + card preview -------------------
+
+    def _box_by_number(self, number: int) -> _Box | None:
+        if not (0 <= self._current < len(self._sessions)):
+            return None
+        for box in self._sessions[self._current].boxes:
+            if box.number == number:
+                return box
+        return None
+
+    def _on_box_hover(self, number: int, on: bool) -> None:
+        self._set_highlight(number if on else None)
+        if on:
+            box = self._box_by_number(number)
+            if box is not None:
+                self._preview_card(box.card.card_id)
+
+    def _on_seg_hover(self, number: int, on: bool) -> None:
+        self._set_highlight(number if on else None)
+        if on:
+            box = self._box_by_number(number)
+            if box is not None:
+                self._preview_card(box.card.card_id)
+
+    def _set_highlight(self, number: int | None) -> None:
+        if number == self._hl:
+            return
+        self._apply_highlight(self._hl, False)
+        self._hl = number
+        self._apply_highlight(number, True)
+
+    def _apply_highlight(self, number: int | None, on: bool) -> None:
+        if number is None:
+            return
+        t = theme.active()
+        item = self._items.get(number)
+        if item is not None:
+            pen = QPen(QColor(t.accent_ink if on else _BOX_PEN))
+            pen.setCosmetic(True)
+            pen.setWidthF(3.0 if on else 0.0)
+            item.setPen(pen)
+            item.setZValue(1 if on else 0)
+        row = self._seg_rows.get(number)
+        if row is not None:
+            row.setProperty("hl", on)
+            row.style().unpolish(row)
+            row.style().polish(row)
+
+    def _on_card_changed(self, box: _Box) -> None:
+        """A segment's card identity changed — refresh the art preview."""
+        self._preview_card(box.card.card_id)
+
+    def _preview_card(self, card_id: str | None) -> None:
+        if not card_id:
+            return
+        card = CardCatalogRepository(self._conn).get(card_id)
+        if card is not None:
+            self._preview.show_card(card_id, getattr(card, "image_small", None))
 
     # -- detector box proposals (classic-CV + trained YOLO) -----------------
 
@@ -989,7 +1209,11 @@ class RecognitionView(QWidget):
             if item is not None:
                 box.rect = item.sceneBoundingRect()
         if self._divider is not None:
-            session.divider_x = self._divider.line().x1() + self._divider.x()
+            line = self._divider
+            if session.orientation == "portrait":
+                session.divider_pos = line.line().y1() + line.y()
+            else:
+                session.divider_pos = line.line().x1() + line.x()
 
     # -- segments panel -----------------------------------------------------
 
@@ -998,6 +1222,8 @@ class RecognitionView(QWidget):
         self._name_fields.clear()
         self._suggest_boxes.clear()
         self._condition_boxes.clear()
+        self._seg_rows.clear()
+        self._hl = None
         if not (0 <= self._current < len(self._sessions)):
             self._seg_count.setText("Segments")
             self._seg_list.addStretch(1)
@@ -1020,8 +1246,9 @@ class RecognitionView(QWidget):
 
     def _make_seg_row(self, box: _Box, session: _Session, backs: bool) -> QFrame:
         side = self._side_for(box, session)
-        row = QFrame()
+        row = _SegRow(box.number, self._on_seg_hover)
         row.setObjectName("segRow")
+        self._seg_rows[box.number] = row
         v = QVBoxLayout(row)
         v.setContentsMargins(10, 9, 10, 9)
         v.setSpacing(7)
@@ -1036,7 +1263,9 @@ class RecognitionView(QWidget):
 
         meta = QLabel()
         meta.setObjectName("segMeta")
-        name = _NameField(self._conn, box, meta_label=meta)
+        name = _NameField(
+            self._conn, box, meta_label=meta, on_change=self._on_card_changed
+        )
         name.setObjectName("segName")
         self._name_fields[box.number] = name
 
@@ -1076,10 +1305,16 @@ class RecognitionView(QWidget):
     def _side_for(self, box: _Box, session: _Session) -> str | None:
         if not self._is_transaction():
             return None
-        divider = session.divider_x
+        centre = box.rect.center()
+        if session.orientation == "portrait":
+            divider = session.divider_pos
+            if divider is None:
+                divider = session.pixmap.height() / 2
+            return "give" if centre.y() < divider else "receive"
+        divider = session.divider_pos
         if divider is None:
             divider = session.pixmap.width() / 2
-        return "give" if box.rect.center().x() < divider else "receive"
+        return "give" if centre.x() < divider else "receive"
 
     # -- identity suggestions (matcher) -------------------------------------
 
@@ -1302,10 +1537,14 @@ class RecognitionView(QWidget):
         self._name_fields.clear()
         self._suggest_boxes.clear()
         self._condition_boxes.clear()
+        self._seg_rows.clear()
+        self._hl = None
         for items in self._proposals.values():
             items.clear()
         self._divider = None
+        self._strip.blockSignals(True)
         self._strip.clear()
+        self._strip.blockSignals(False)
         self._strip_thumbs.clear()
         self._strip_counts.clear()
         self._scene.clear()
@@ -1377,6 +1616,9 @@ def _view_qss(t: theme.Tokens) -> str:
         font-size: 10px; }}
     #thumbCnt {{ background: {t.accent_soft}; color: {t.accent_ink};
         font-size: 9px; font-weight: 700; border-radius: 8px; padding: 1px 6px; }}
+    QPushButton#thumbDel {{ background: transparent; border: none;
+        border-radius: 5px; }}
+    QPushButton#thumbDel:hover {{ background: {t.neg_soft}; }}
 
     #zoneBar {{ background: {t.surface}; border: none;
         border-bottom: 1px solid {t.line};
@@ -1404,6 +1646,9 @@ def _view_qss(t: theme.Tokens) -> str:
     #segScroll, #segHolder {{ background: transparent; border: none; }}
     #segRow {{ background: {t.surface2}; border: 1px solid {t.line};
         border-radius: 10px; }}
+    #segRow[hl="true"] {{ border-color: {t.accent}; background: {t.accent_soft}; }}
+    #previewWrap {{ background: {t.surface}; border: none;
+        border-top: 1px solid {t.line}; }}
     #segBadge {{ background: {t.accent}; color: {t.accent_on};
         border-radius: 11px; font-weight: 800; font-size: 11px; }}
     #segBadgeRecv {{ background: {t.accent2}; color: {t.accent_on};
