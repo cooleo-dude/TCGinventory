@@ -137,6 +137,10 @@ _BACKS_EMPTY = (
     "Upload or paste a photo of these cards' backs — the front's boxes are "
     "already placed, so you'll just align each one."
 )
+_NEW_IMAGE_EMPTY = (
+    "Add an image to this slot.\n\n"
+    "Upload or paste a photo of your cards, then draw a box around each one."
+)
 
 
 class _Scene(QGraphicsScene):
@@ -607,7 +611,7 @@ class RecognitionView(QWidget):
         root.addWidget(self._build_toolbar())
         root.addWidget(self._build_body(), 1)
 
-        self._empty.setVisible(True)
+        self._empty_box.setVisible(True)
         self._view.setVisible(False)
         self._zone_bar.setVisible(False)
 
@@ -833,12 +837,6 @@ class RecognitionView(QWidget):
         self._film_cap.setObjectName("clusterCap")
         v.addWidget(self._film_cap)
 
-        drop = QPushButton("  Add images")
-        drop.setObjectName("dropTile")
-        drop.setIcon(icons.icon("image", theme.active().ink3, 18))
-        drop.clicked.connect(self._add_images)
-        v.addWidget(drop)
-
         paste = QPushButton("Paste from clipboard")
         paste.setObjectName("pasteBtn")
         paste.setIcon(icons.icon("clipboard-paste", theme.active().ink3, 14))
@@ -854,6 +852,14 @@ class RecognitionView(QWidget):
         self._strip.setSelectionMode(QAbstractItemView.SingleSelection)
         self._strip.currentRowChanged.connect(self._switch_image)
         v.addWidget(self._strip, 1)
+
+        # A blank slot appears under the last image; upload or paste into it.
+        add_new = QPushButton("  Add new image")
+        add_new.setObjectName("dropTile")
+        add_new.setIcon(icons.icon("image", theme.active().ink3, 16))
+        add_new.setToolTip("Add a blank slot, then upload or paste an image into it")
+        add_new.clicked.connect(self._add_new_image_slot)
+        v.addWidget(add_new)
         return frame
 
     def _build_stage(self) -> QWidget:
@@ -889,7 +895,23 @@ class RecognitionView(QWidget):
         self._empty.setObjectName("emptyBox")
         self._empty.setAlignment(Qt.AlignCenter)
         self._empty.setWordWrap(True)
-        v.addWidget(self._empty, 1)
+        self._empty_upload = QPushButton("  Upload image")
+        self._empty_upload.setObjectName("dropTile")
+        self._empty_upload.setIcon(icons.icon("image", theme.active().ink3, 18))
+        self._empty_upload.setCursor(Qt.PointingHandCursor)
+        self._empty_upload.setMaximumWidth(220)
+        self._empty_upload.clicked.connect(self._add_images)
+        self._empty_hint = QLabel("or paste  (Ctrl+V)")
+        self._empty_hint.setAlignment(Qt.AlignCenter)
+        self._empty_hint.setStyleSheet(f"color:{theme.active().ink3};font-size:11px;")
+        self._empty_box = QWidget()
+        eb = QVBoxLayout(self._empty_box)
+        eb.setAlignment(Qt.AlignCenter)
+        eb.setSpacing(10)
+        eb.addWidget(self._empty)
+        eb.addWidget(self._empty_upload, 0, Qt.AlignHCenter)
+        eb.addWidget(self._empty_hint)
+        v.addWidget(self._empty_box, 1)
 
         # floating stage tools (parented to the canvas, top-left overlay)
         self._stage_tools = QFrame(self._view)
@@ -1062,6 +1084,17 @@ class RecognitionView(QWidget):
         )
         self.add_image_paths(files)
 
+    def _add_new_image_slot(self) -> None:
+        """Append a blank image slot and switch to it; the user fills it by
+        uploading or pasting into the empty stage."""
+        if 0 <= self._current < len(self._sessions):
+            self._sync_scene_to_model()
+        self._sessions.append(_Session(path="", pixmap=QPixmap(), awaiting=True))
+        target = len(self._sessions) - 1
+        self._current = -1
+        self._rebuild_strip()
+        self._strip.setCurrentRow(target)
+
     _PASTE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
 
     def _paste_image(self) -> None:
@@ -1152,13 +1185,22 @@ class RecognitionView(QWidget):
         t = theme.active()
         base = session.path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
         if session.awaiting or not base:
-            base = "add backs photo"
+            base = "backs photo" if session.side == "back" else "new image"
         # Front/back pairs read as a group: prefix the name with the side.
         name = f"{session.side.title()} · {base}" if session.side else base
         frame = QFrame()
         frame.setObjectName("thumb")
         frame.setProperty("sel", False)
-        v = QVBoxLayout(frame)
+        outer = QHBoxLayout(frame)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        if session.pair_id is not None:  # front/back pair share an accent rail
+            rail = QFrame()
+            rail.setFixedWidth(3)
+            rail.setStyleSheet(f"background:{t.accent}; border:none; border-radius:0;")
+            outer.addWidget(rail)
+        body = QWidget()
+        v = QVBoxLayout(body)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         pic = QLabel()
@@ -1166,8 +1208,8 @@ class RecognitionView(QWidget):
         pic.setAlignment(Qt.AlignCenter)
         pic.setFixedHeight(84)
         if session.pixmap.isNull():
-            pic.setText("＋ backs")
-            pic.setStyleSheet(f"color:{t.ink3};")
+            pic.setText("＋")
+            pic.setStyleSheet(f"color:{t.ink3}; font-size:22px;")
         else:
             pic.setPixmap(
                 session.pixmap.scaled(
@@ -1196,6 +1238,7 @@ class RecognitionView(QWidget):
         mh.addWidget(count)
         mh.addWidget(remove)
         v.addWidget(meta)
+        outer.addWidget(body, 1)
         return frame, count
 
     def _remove_image(self, session: _Session) -> None:
@@ -1254,9 +1297,11 @@ class RecognitionView(QWidget):
         # Each image opens in its own natural orientation (auto-detected); the
         # manual rotate control still works from there.
         self._rotation = 0
-        if session.awaiting:  # a card-backs slot waiting for its photo
-            self._empty.setText(_BACKS_EMPTY)
-            self._empty.setVisible(True)
+        if session.awaiting:  # a slot waiting for its photo (backs or a new image)
+            self._empty.setText(
+                _BACKS_EMPTY if session.side == "back" else _NEW_IMAGE_EMPTY
+            )
+            self._empty_box.setVisible(True)
             self._view.setVisible(False)
             self._zone_bar.setVisible(False)
             self._scene.clear()
@@ -1265,7 +1310,7 @@ class RecognitionView(QWidget):
             self._refresh_panel()
             return
         self._empty.setText(_STAGE_EMPTY)
-        self._empty.setVisible(False)
+        self._empty_box.setVisible(False)
         self._view.setVisible(True)
         self._assess_btn.setEnabled(session.side == "back")
         self._zone_bar.setVisible(self._is_transaction())
@@ -2010,7 +2055,7 @@ class RecognitionView(QWidget):
         self._current = -1
         self._pair_seq = 0
         self._empty.setText(_STAGE_EMPTY)
-        self._empty.setVisible(True)
+        self._empty_box.setVisible(True)
         self._view.setVisible(False)
         self._items.clear()
         self._name_fields.clear()
@@ -2034,7 +2079,7 @@ class RecognitionView(QWidget):
         self._accept_btn.setEnabled(False)
         self._view.setVisible(False)
         self._zone_bar.setVisible(False)
-        self._empty.setVisible(True)
+        self._empty_box.setVisible(True)
 
     def refresh(self) -> None:  # nav hook; nothing to reload
         pass

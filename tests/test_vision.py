@@ -374,6 +374,32 @@ def test_condition_set_while_labeling_saves_to_corpus(app, _quiet, tmp_path):
     view.deleteLater()
 
 
+def test_add_new_image_slot_then_fill(app, _quiet, tmp_path):
+    """'Add new image' appends a blank slot; uploading/pasting fills it in place
+    rather than creating a second image."""
+    from tcginventory.data.db import connect
+    from tcginventory.data.migrator import migrate
+    from tcginventory.ui.views.recognition import RecognitionView
+
+    conn = connect(":memory:")
+    migrate(conn)
+    vrepo = VisionRepository(open_vision(":memory:"))
+    view = RecognitionView(
+        conn, vision_repo=vrepo, vision_dir=tmp_path,
+        recognizer=_pixel_recognizer(vrepo),
+    )
+    view._mode.setCurrentIndex(1)
+
+    view._add_new_image_slot()
+    assert len(view._sessions) == 1
+    assert view._sessions[view._current].awaiting  # blank, waiting for a photo
+
+    view.add_image_paths([_png(tmp_path / "s.png", 100, 60)])
+    assert len(view._sessions) == 1  # filled the slot, no duplicate
+    assert not view._sessions[0].awaiting
+    view.deleteLater()
+
+
 def test_card_backs_pairs_front_and_grades_from_back(app, _quiet, tmp_path):
     """Include card backs: the front is set aside, a back slot opens with the
     boxes copied over, and saving links the pair (front/back + pair_group) with
