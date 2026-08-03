@@ -157,6 +157,7 @@ class TcgcsvProvider:
         want_base = _number_base(want)  # "79a" → "79" (alt-art reprint fallback)
         want_name = _norm(name) if name else None
         prices = self._prices_for_group(category, group_id)
+        exact: list[tuple[tuple[bool, int], int, str]] = []
         base_match: tuple[int, str] | None = None
         for product_id, prod_number, url, prod_name in self._products_for_group(
             category, group_id
@@ -167,14 +168,22 @@ class TcgcsvProvider:
             cents = prices.get(product_id)
             if cents is None:
                 continue
-            if want_name:
-                pnm = _norm(prod_name)
-                if pnm and want_name not in pnm and pnm not in want_name:
-                    continue  # have a product name and it disagrees → not this card
+            pnm = _norm(prod_name)
+            if want_name and pnm and want_name not in pnm and pnm not in want_name:
+                continue  # have a product name and it disagrees → not this card
             if pn == want:
-                return cents, url  # exact number match wins
-            if base_match is None:
+                # A number can have several products (the base print plus stamped
+                # variants like "(Pokemon Center Exclusive)"). Default to the base
+                # print: the product whose name — sans the embedded number — is
+                # closest to the card name, then the shortest (fewest qualifiers).
+                core = pnm.replace(pn, "", 1) if pn else pnm
+                rank = (core != (want_name or ""), len(pnm))
+                exact.append((rank, cents, url))
+            elif base_match is None:
                 base_match = (cents, url)  # suffix-stripped fallback ("79a" → "79")
+        if exact:
+            exact.sort(key=lambda t: t[0])
+            return exact[0][1], exact[0][2]
         return base_match
 
     def _products_for_group(

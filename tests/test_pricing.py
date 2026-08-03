@@ -505,3 +505,31 @@ def test_latest_prices_and_history_since(conn):
     assert snaps.latest_prices()[item.id] == 999
     recent = snaps.history_for_item(item.id, since="2026-06-01")
     assert len(recent) == 1  # only the July snapshot is within range
+
+
+def _variant_fetch(url: str):
+    if url.endswith("/groups"):
+        return {"results": [{"groupId": 22872,
+                             "name": "SV: Scarlet & Violet Promo Cards",
+                             "abbreviation": "SVP"}]}
+    if url.endswith("/22872/products"):
+        return {"results": [
+            {"productId": 610757,
+             "name": "Eevee - 173 (Pokemon Center Exclusive)", "url": "eevee-excl",
+             "extendedData": [{"name": "Number", "value": "173"}]},
+            {"productId": 610758, "name": "Eevee - 173", "url": "eevee-base",
+             "extendedData": [{"name": "Number", "value": "173"}]},
+        ]}
+    if url.endswith("/22872/prices"):
+        return {"results": [{"productId": 610757, "marketPrice": 94.13},
+                            {"productId": 610758, "marketPrice": 13.70}]}
+    raise AssertionError(f"unexpected url: {url}")
+
+
+def test_price_defaults_to_base_print_over_stamped_variant():
+    # tcgcsv lists "(Pokemon Center Exclusive)" first; the plain base print — the
+    # product name closest to the card name — must win by default.
+    p = TcgcsvProvider(fetch_json=_variant_fetch)
+    assert p.price_for_card("SVP Black Star Promos", "173", "Eevee") == (
+        1370, "eevee-base",
+    )
