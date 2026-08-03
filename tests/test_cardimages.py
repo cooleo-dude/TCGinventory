@@ -161,3 +161,33 @@ def test_ensure_cached_swallows_fetch_failure(tmp_path, monkeypatch):
 
     assert cardimages.ensure_cached("x-1", "http://x/y.png", boom) is None
     assert not cardimages.is_cached("x-1")
+
+
+def test_image_for_reconciles_legacy_set_name(conn):
+    """An item saved under the old promo name still resolves after the catalog
+    renamed the set (Scarlet & Violet Black Star Promos -> SVP Black Star Promos)."""
+    from tcginventory.data.setnames import canonical_set_name
+    from tcginventory.domain.models import CatalogCard
+
+    assert canonical_set_name("Scarlet & Violet Black Star Promos") == (
+        "SVP Black Star Promos"
+    )
+    assert canonical_set_name("SVP Black Star Promos") is None  # already canonical
+
+    CardCatalogRepository(conn).replace_all(
+        [
+            CatalogCard(
+                card_id="svp-056", name="Charizard ex", set_id="svp",
+                set_name="SVP Black Star Promos", number="56",
+                image_small="https://img/svp-056",
+            ),
+        ],
+        "t",
+    )
+    repo = CardCatalogRepository(conn)
+    # Old name resolves via the alias; new name resolves directly.
+    assert repo.image_for("Charizard ex", "Scarlet & Violet Black Star Promos",
+                          "56/102") == ("svp-056", "https://img/svp-056")
+    assert repo.image_for("Charizard ex", "SVP Black Star Promos", "56") == (
+        "svp-056", "https://img/svp-056",
+    )

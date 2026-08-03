@@ -1037,6 +1037,13 @@ class CardCatalogRepository:
             head = (value or "").split("/", 1)[0].strip().lower()
             return head.lstrip("0") or head
 
+        # Reconcile a legacy set name ("Scarlet & Violet Black Star Promos") to
+        # the catalog's current nomenclature ("SVP Black Star Promos") so items
+        # saved before the catalog switch still resolve.
+        from tcginventory.data.setnames import canonical_set_name
+
+        set_name = canonical_set_name(set_name) or set_name
+
         want_num = norm_num(number)
         want_set = (set_name or "").strip().lower()
 
