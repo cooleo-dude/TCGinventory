@@ -21,10 +21,15 @@ from __future__ import annotations
 
 import sqlite3
 
-from PySide6.QtCore import QDate, QModelIndex, Qt, QThread, Signal
+from PySide6.QtCore import QDate, QModelIndex, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import (
+    QColor,
     QFont,
     QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
     QShortcut,
     QStandardItem,
     QStandardItemModel,
@@ -73,6 +78,7 @@ from tcginventory.domain.enums import (
     TransactionStatus,
 )
 from tcginventory.domain.models import Item
+from tcginventory.services import cardimages
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inference import write_back as inference_write_back
 from tcginventory.services.inventory import InventoryService
@@ -85,7 +91,11 @@ from tcginventory.services.transactions import (
     TransactionService,
 )
 from tcginventory.ui import icons, theme
-from tcginventory.ui.card_preview import CardImagePane, install_hover_preview
+from tcginventory.ui.card_preview import (
+    CardImagePane,
+    _FetchWorker,
+    install_hover_preview,
+)
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
 
@@ -732,6 +742,113 @@ class _ReceiveRow:
         self._chev.setIcon(icons.icon(name, theme.active().ink3, 16))
 
 
+class _CardCascade(QWidget):
+    """A downward-cascading fan of the cards on one side of the trade.
+
+    Each card's art is drawn at a fixed width, offset ``_STEP`` px below the
+    previous one and overlaid on top, so the whole side reads as one stacked
+    pile. Images are served from the on-disk cache and fetched lazily.
+    """
+
+    _CARD_W = 150
+    _STEP = 34  # vertical offset between successive cards
+    _RATIO = 88 / 63  # card height / width
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._cards: list[str] = []  # ordered card_ids
+        self._urls: dict[str, str] = {}
+        self._pix: dict[str, QPixmap] = {}
+        self._workers: list[_FetchWorker] = []
+        self.setMinimumHeight(0)
+
+    def set_cards(self, cards: list[tuple[str, str | None]]) -> None:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for card_id, url in cards:
+            if not card_id or card_id in seen:
+                continue
+            seen.add(card_id)
+            ordered.append(card_id)
+            if url:
+                self._urls[card_id] = url
+        self._cards = ordered
+        for card_id in ordered:
+            if card_id not in self._pix:
+                self._load(card_id)
+        self._resize_to_fit()
+        self.update()
+
+    def clear(self) -> None:
+        self._cards = []
+        self._resize_to_fit()
+        self.update()
+
+    def _card_h(self) -> int:
+        return round(self._CARD_W * self._RATIO)
+
+    def _resize_to_fit(self) -> None:
+        n = len(self._cards)
+        h = self._card_h() + max(0, n - 1) * self._STEP if n else 0
+        self.setMinimumHeight(h)
+
+    def _load(self, card_id: str) -> None:
+        path = cardimages.cache_path(card_id)
+        if path.exists():
+            pixmap = QPixmap(str(path))
+            if not pixmap.isNull():
+                self._pix[card_id] = pixmap
+                return
+        url = self._urls.get(card_id)
+        if not url:
+            return
+        worker = _FetchWorker(card_id, url)
+        worker.done.connect(self._on_fetched)
+        worker.finished.connect(lambda w=worker: self._retire(w))
+        self._workers.append(worker)
+        worker.start()
+
+    def _retire(self, worker: _FetchWorker) -> None:
+        if worker in self._workers:
+            self._workers.remove(worker)
+
+    def _on_fetched(self, card_id: str, path: str) -> None:
+        if path:
+            pixmap = QPixmap(path)
+            if not pixmap.isNull():
+                self._pix[card_id] = pixmap
+                self._resize_to_fit()
+                self.update()
+
+    def paintEvent(self, _event) -> None:
+        t = theme.active()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        cw, ch = self._CARD_W, self._card_h()
+        x = max(0, (self.width() - cw) // 2)
+        for i, card_id in enumerate(self._cards):
+            y = i * self._STEP
+            rect = QRectF(x, y, cw, ch)
+            clip = QPainterPath()
+            clip.addRoundedRect(rect, 8, 8)
+            painter.save()
+            painter.setClipPath(clip)
+            pixmap = self._pix.get(card_id)
+            if pixmap is not None:
+                scaled = pixmap.scaled(
+                    cw, ch, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+                )
+                painter.drawPixmap(int(x), int(y), scaled)
+            else:
+                painter.fillRect(rect, QColor(t.surface2))
+            painter.restore()
+            pen = QPen(QColor(t.line2))
+            pen.setWidthF(1.0)
+            painter.setPen(pen)
+            painter.drawPath(clip)
+        painter.end()
+
+
 class TransactionView(QWidget):
     posted = Signal()
 
@@ -747,9 +864,13 @@ class TransactionView(QWidget):
         self._price_workers: list[_PriceLookupWorker] = []
         self._edit_id: int | None = None
         self._inference_pipeline = None  # lazily built (image -> [Detection])
-        # A docked preview pane (lower-left): hovering any card row — or browsing
-        # search matches — shows that card's art here; it persists on leave.
-        self._sink = CardImagePane()
+        # Docked preview panes flanking the board: the left one previews the You
+        # side, the right one the Them side. Each shows the hovered/selected card
+        # (persisting on leave) above a cascading fan of that side's cards.
+        self._sink_you = CardImagePane()
+        self._sink_them = CardImagePane()
+        self._cascade_you = _CardCascade()
+        self._cascade_them = _CardCascade()
 
         self._date = QLineEdit(QDate.currentDate().toString("yyyy-MM-dd"))
         self._date.setFixedWidth(130)
@@ -794,8 +915,9 @@ class TransactionView(QWidget):
 
         content = QHBoxLayout()
         content.setSpacing(14)
-        content.addWidget(self._build_preview_column(), 0)
+        content.addWidget(self._build_preview_dock("you"), 0)
         content.addWidget(scroll, 1)
+        content.addWidget(self._build_preview_dock("them"), 0)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 0)
@@ -808,22 +930,51 @@ class TransactionView(QWidget):
         self._update_catalog_hint()
         self._update_summary()
 
-    def _build_preview_column(self) -> QWidget:
-        """A docked card-preview column on the left: shows the art of whatever
-        card row you hover or search match you browse, and keeps the last one on
-        leave (per the platform-wide preview convention)."""
+    def _build_preview_dock(self, side: str) -> QWidget:
+        """A docked preview column for one side: the hovered/selected card on top
+        (persisting on leave), and a cascading fan of that side's cards below."""
         t = theme.active()
+        you = side == "you"
+        accent = t.pos if you else t.accent
+        sink = self._sink_you if you else self._sink_them
+        cascade = self._cascade_you if you else self._cascade_them
+
         col = QWidget()
-        col.setFixedWidth(190)
+        col.setFixedWidth(178)
         v = QVBoxLayout(col)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(6)
-        cap = QLabel("PREVIEW")
-        cap.setStyleSheet(
-            f"color:{t.ink3};font-size:10px;font-weight:700;letter-spacing:.6px;"
+
+        header = QLabel("YOU GIVE" if you else "THEY GIVE")
+        header.setStyleSheet(
+            f"color:{accent};font-size:11px;font-weight:700;letter-spacing:.6px;"
         )
-        v.addWidget(cap)
-        v.addWidget(self._sink, 1)
+        header.setAlignment(Qt.AlignLeft if you else Qt.AlignRight)
+        v.addWidget(header)
+
+        sel_cap = QLabel("SELECTED")
+        sel_cap.setStyleSheet(
+            f"color:{t.ink3};font-size:9px;font-weight:700;letter-spacing:.7px;"
+        )
+        v.addWidget(sel_cap)
+        sink.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        sink.setFixedHeight(248)
+        v.addWidget(sink)
+
+        trade_cap = QLabel("IN THIS TRADE")
+        trade_cap.setStyleSheet(
+            f"color:{t.ink3};font-size:9px;font-weight:700;letter-spacing:.7px;"
+            "margin-top:2px;"
+        )
+        v.addWidget(trade_cap)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+        scroll.setWidget(cascade)
+        v.addWidget(scroll, 1)
         return col
 
     # -- top bar (totals top-left + centred type badge) --------------------
@@ -1142,7 +1293,7 @@ class TransactionView(QWidget):
                 self, "Nothing to give", "No sellable cards on hand."
             )
             return None
-        row = _GiveRow(self._conn, sellable, self._update_summary, sink=self._sink)
+        row = _GiveRow(self._conn, sellable, self._update_summary, sink=self._sink_you)
         row._card_widget = row.widget(lambda r=row: self._remove_row("out", r))
         self._give_list.addWidget(row._card_widget)
         self._give_rows.append(row)
@@ -1155,7 +1306,7 @@ class TransactionView(QWidget):
             lambda: self._auto_detect_cb.isChecked(),
             self._update_summary,
             on_pick=self._request_price,
-            sink=self._sink,
+            sink=self._sink_them,
         )
         row._card_widget = row.widget(lambda r=row: self._remove_row("in", r))
         self._recv_list.addWidget(row._card_widget)
@@ -1292,8 +1443,18 @@ class TransactionView(QWidget):
 
     _BADGE_COLORS = {"purchase": "info", "sale": "pos", "trade": "accent"}
 
+    def _refresh_cascades(self) -> None:
+        """Feed each side's cascade with the cards currently on that side."""
+        self._cascade_you.set_cards(
+            [c for c in (r._hover_card() for r in self._give_rows) if c]
+        )
+        self._cascade_them.set_cards(
+            [c for c in (r._hover_card() for r in self._receive_rows) if c]
+        )
+
     def _update_summary(self, *_args) -> None:
         t = theme.active()
+        self._refresh_cascades()
         preview = self._service.preview(self.build_request())
         ttype = preview.inferred_type.value if preview.inferred_type else None
         self._badge.setText((ttype or "—").upper())

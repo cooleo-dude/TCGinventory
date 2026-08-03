@@ -456,17 +456,18 @@ def test_ui_edit_reposts_and_history_void(app, conn):
 
 
 def test_transaction_has_docked_card_preview(app, conn):
-    """The window has a docked preview pane, and card rows feed it on hover /
-    search so the hovered card's art shows in that space."""
+    """Each side has its own docked preview pane; card rows feed the pane on their
+    side on hover / search so the hovered card's art shows in that space."""
     from tcginventory.ui.card_preview import CardImagePane
     from tcginventory.ui.views.transaction import TransactionView
 
     view = TransactionView(conn)
-    assert isinstance(view._sink, CardImagePane)
-    # New card rows are wired to feed that same docked pane on hover / search.
+    assert isinstance(view._sink_you, CardImagePane)
+    assert isinstance(view._sink_them, CardImagePane)
+    # Rows are wired to feed their own side's docked pane on hover / search.
     receive = view._add_receive_row()
-    assert receive._sink is view._sink
+    assert receive._sink is view._sink_them
     give = view._add_give_row()  # None when there's no sellable stock to give
     if give is not None:
-        assert give._sink is view._sink
+        assert give._sink is view._sink_you
     view.deleteLater()
