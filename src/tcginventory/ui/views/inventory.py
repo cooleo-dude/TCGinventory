@@ -613,16 +613,19 @@ class InventoryView(QWidget):
     # Fixed widths for the finance/chip/link columns; the Card (Name) column
     # absorbs whatever's left so the grid always fills its pane and the extra
     # 60/40 room widens Name.
+    # Widths fit each column's header label (semibold text + the QSS 8px
+    # side padding) so the names render in full; the Card (Name) column gives
+    # up the difference.
     _FIXED_WIDTHS = {
-        "Cond/Grade": 70,
+        "Cond/Grade": 90,
         "Intent": 72,
         "Acquired": 76,
-        "Purchase Price": 82,
-        "Current Market": 90,
-        "Trend": 42,
-        "Unrealized G/L": 90,
+        "Purchase Price": 108,
+        "Current Market": 110,
+        "Trend": 52,
+        "Unrealized G/L": 110,
         "Sold For": 72,
-        "TCGplayer": 64,
+        "TCGplayer": 82,
         "eBay": 54,
     }
 
