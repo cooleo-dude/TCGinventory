@@ -85,7 +85,11 @@ def test_link_role_exposes_urls_through_proxy(app):
     view = _view(app, conn)
 
     proxy = view._proxy
-    assert proxy.index(0, TCGPLAYER_COL).data(LINK_URL_ROLE) == "https://tcgplayer.com/x"
+    # The TCGplayer link now carries the card's fields (here just the default
+    # language) so it opens the most specific listing.
+    assert proxy.index(0, TCGPLAYER_COL).data(LINK_URL_ROLE) == (
+        "https://tcgplayer.com/x?page=1&Language=English"
+    )
     assert proxy.index(0, EBAY_COL).data(LINK_URL_ROLE) == "https://ebay.com/y"
     view.deleteLater()
 
@@ -104,7 +108,7 @@ def test_clicking_a_link_button_opens_the_url(app, monkeypatch):
         type("D", (), {"openUrl": staticmethod(lambda u: opened.append(u.toString()))}),
     )
     view._open_link(view._proxy.index(0, TCGPLAYER_COL))
-    assert opened == ["https://tcgplayer.com/x"]
+    assert opened == ["https://tcgplayer.com/x?page=1&Language=English"]
     view.deleteLater()
 
 

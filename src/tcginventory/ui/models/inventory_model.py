@@ -18,6 +18,7 @@ from tcginventory.domain.models import Item
 from tcginventory.services.ebay import sold_search_url
 from tcginventory.services.inventory import InventoryRow
 from tcginventory.services.review import without_review_note
+from tcginventory.services.tcgplayer import product_url as tcgplayer_product_url
 from tcginventory.services.trends import Trend
 from tcginventory.ui import theme
 from tcginventory.ui.formatting import money
@@ -360,7 +361,8 @@ class InventoryTableModel(QAbstractTableModel):
         if col.link is not None:  # link-button column (TCGplayer / eBay)
             if role == LINK_URL_ROLE:
                 if col.link == "tcgplayer":
-                    return row.item.tcgplayer_url
+                    # Layer the card's condition/printing/language onto the link.
+                    return tcgplayer_product_url(row.item)
                 # eBay: a manual URL wins, else a derived sold-listings search so
                 # every card has a working eBay link.
                 return row.item.ebay_url or sold_search_url(row.item)

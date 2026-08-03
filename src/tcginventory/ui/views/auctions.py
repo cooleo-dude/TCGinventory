@@ -100,6 +100,7 @@ from tcginventory.services import auctions as auction_math
 from tcginventory.services import cardimages
 from tcginventory.services.ebay import search_url
 from tcginventory.services.inference import write_back as inference_write_back
+from tcginventory.services.tcgplayer import product_url as tcgplayer_product_url
 from tcginventory.services.transactions import IncomingCard
 from tcginventory.ui import icons, theme
 from tcginventory.ui.card_gallery import CardGallery
@@ -491,8 +492,12 @@ class _AuctionCardRow:
         self._on_change()
 
     def _open_tcgplayer(self) -> None:
-        if self._tcgplayer_url:
-            QDesktopServices.openUrl(QUrl(self._tcgplayer_url))
+        # Layer the card's condition/printing/language onto the product link.
+        card = self.to_card()
+        url = tcgplayer_product_url(card) if card else None
+        url = url or self._tcgplayer_url
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
 
     def _open_ebay(self) -> None:
         name = self.name.text().strip()
