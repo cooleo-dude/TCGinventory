@@ -487,6 +487,31 @@ class _ConditionBox(QComboBox):
             self.setCurrentIndex(pos)
 
 
+class _CardPreviewPane(CardImagePane):
+    """Card preview that fills its column width and takes a card-proportioned
+    height (63:88), so the whole card shows rather than a fixed box clipping its
+    lower half. It shrinks to fit on short windows without ever clipping (the
+    base class always scales the art to fit)."""
+
+    _ASPECT = 88 / 63  # card height / width
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return round(width * self._ASPECT)
+
+    def sizeHint(self) -> QSize:
+        w = max(self.width(), self.minimumWidth())
+        return QSize(w, self.heightForWidth(w))
+
+
 class RecognitionView(QWidget):
     def __init__(
         self,
@@ -891,12 +916,12 @@ class RecognitionView(QWidget):
         preview_cap = QLabel("CARD PREVIEW")
         preview_cap.setObjectName("clusterCap")
         pv.addWidget(preview_cap)
-        self._preview = CardImagePane()
-        # Fixed card-proportioned box (63:88) at the small-image's native width,
-        # so the art shows crisp without upscaling and the panel doesn't reflow.
-        self._preview.setFixedSize(245, 342)
-        pv.addWidget(self._preview, 0, Qt.AlignHCenter)
-        v.addWidget(preview_wrap)
+        self._preview = _CardPreviewPane()
+        # Fill the panel width at the card's 63:88 aspect (height tracks width),
+        # instead of a fixed box that overran the panel and clipped the card's
+        # lower half. It shrinks to fit on short windows without ever clipping.
+        pv.addWidget(self._preview, 0)
+        v.addWidget(preview_wrap, 0)
         return frame
 
     # -- mode ---------------------------------------------------------------
