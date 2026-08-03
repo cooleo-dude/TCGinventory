@@ -17,7 +17,7 @@ import os
 import sqlite3
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QModelIndex, QRectF, Qt
+from PySide6.QtCore import QModelIndex, QRectF, QSize, Qt
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -29,24 +29,26 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QCheckBox,
     QComboBox,
     QCompleter,
     QFileDialog,
+    QFrame,
+    QGraphicsEllipseItem,
+    QGraphicsItem,
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
     QGraphicsView,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -55,15 +57,15 @@ from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
 from tcginventory.domain.enums import Condition
 from tcginventory.services import vision as vision_svc
-from tcginventory.ui import theme
+from tcginventory.ui import icons, theme
 
 _IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
 _MODES = ["Transaction (I Give / They Give)", "Listing (one lot)"]
 _BOX_PEN = QColor(theme.DARK.accent)  # confirmed box — the theme accent
 _BOX_FILL = QColor(theme.DARK.accent)
 _BOX_FILL.setAlpha(40)
-_PROPOSAL_PEN = QColor("#83a598")  # classic-CV proposals (teal — distinct)
-_YOLO_PEN = QColor("#d3869b")  # trained-detector proposals (mauve — distinct)
+_PROPOSAL_PEN = QColor(theme.DARK.info)  # classic-CV proposals (info blue)
+_YOLO_PEN = QColor(theme.DARK.accent2)  # trained-detector proposals (brick red)
 # Cosine below this gets a ⚠ in the suggestion list (advisory; frozen DINOv2 on
 # photo-vs-catalog-render is a weak baseline until the M-V2 fine-tune).
 _LOW_CONFIDENCE = 0.6
@@ -136,10 +138,12 @@ class _NameField(QLineEdit):
 
     _CARD_ID_ROLE = Qt.UserRole + 1
 
-    def __init__(self, conn, box: _Box) -> None:
+    def __init__(self, conn, box: _Box, meta_label: QLabel | None = None) -> None:
         super().__init__()
         self._conn = conn
         self._box = box
+        self._meta_label = meta_label
+        self.setPlaceholderText("Card name…")
         self.setText(box.card.name or "")
         self._matches: dict[str, object] = {}
         self._model = QStandardItemModel(self)
@@ -150,6 +154,7 @@ class _NameField(QLineEdit):
         self.textEdited.connect(self._on_edited)
         self._completer.activated[QModelIndex].connect(self._pick)
         self.editingFinished.connect(self._on_free_text)
+        self._refresh_meta()
 
     def _on_edited(self, text: str) -> None:
         if len(text.strip()) < 2:
@@ -181,17 +186,31 @@ class _NameField(QLineEdit):
             language=getattr(card, "language", None),
         )
         self.setText(card.name)
+        self._refresh_meta()
 
     def _on_free_text(self) -> None:
         text = self.text().strip()
         # Only overwrite when the text no longer matches the picked card's name.
         if text and text != (self._box.card.name or ""):
             self._box.card = CardLabel(name=text)
+            self._refresh_meta()
 
     def apply_label(self, card: CardLabel) -> None:
         """Adopt a card identity picked elsewhere (e.g. a matcher suggestion)."""
         self._box.card = card
         self.setText(card.name or "")
+        self._refresh_meta()
+
+    def _refresh_meta(self) -> None:
+        if self._meta_label is None:
+            return
+        card = self._box.card
+        parts: list[str] = []
+        if card.set_name:
+            parts.append(card.set_name)
+        if card.card_number:
+            parts.append(f"#{card.card_number}")
+        self._meta_label.setText("  ·  ".join(parts) if parts else "— not labeled —")
 
 
 class _SuggestBox(QComboBox):
@@ -288,121 +307,31 @@ class RecognitionView(QWidget):
         self._condition_boxes: dict[int, _ConditionBox] = {}
         self._assessor = None  # condition assessor, lazily built
         self._divider = None  # QGraphicsLineItem for the current image
+        self._rotation = 0  # view rotation in degrees (landscape / portrait)
+        self._strip_counts: dict[int, QLabel] = {}  # row -> count chip label
+        self._strip_thumbs: list[QFrame] = []
 
-        # -- toolbar
+        t = theme.active()
+        self.setStyleSheet(_view_qss(t))
+
+        # Mode is held by a hidden combo (the tested state holder) and mirrored by
+        # a segmented pill in the header.
         self._mode = QComboBox()
         self._mode.addItems(_MODES)
+        self._mode.setVisible(False)
         self._mode.currentIndexChanged.connect(self._on_mode_changed)
-        add_btn = QPushButton("Add images…")
-        add_btn.clicked.connect(self._add_images)
-        self._draw_btn = QPushButton("Draw boxes")
-        self._draw_btn.setCheckable(True)
-        self._draw_btn.toggled.connect(lambda on: self._scene.set_draw(on))
-        del_btn = QPushButton("Delete box")
-        del_btn.clicked.connect(self._delete_selected)
-        self._suggest_btn = QPushButton("Suggest labels")
-        self._suggest_btn.setToolTip(
-            "Rank catalog matches for each box against the cards you've already "
-            "labeled (identity matcher)"
-        )
-        self._suggest_btn.clicked.connect(self._run_suggestions)
-        # Auto-proposal toggles. Classic CV works today (no training); YOLO waits
-        # on a trained detector (M-V1.5 Phase B).
-        self._cv_toggle = QCheckBox("Classic-CV boxes")
-        self._cv_toggle.setToolTip(
-            "Auto-detect card boxes on a blank background (no training). Accept the "
-            "ones you want into numbered boxes."
-        )
-        self._cv_toggle.toggled.connect(self._on_cv_toggle)
-        self._accept_btn = QPushButton("Accept proposals")
-        self._accept_btn.setToolTip(
-            "Turn the detector's proposed boxes (selected, or all) into numbered "
-            "boxes you can label"
-        )
-        self._accept_btn.clicked.connect(self._accept_proposals)
-        self._accept_btn.setEnabled(False)
-        self._yolo_toggle = QCheckBox("YOLO boxes")
-        from tcginventory.services.detector import yolo_model_path
+        self._mode.currentIndexChanged.connect(self._sync_mode_toggle)
 
-        has_yolo = yolo_model_path() is not None
-        self._yolo_toggle.setEnabled(has_yolo)
-        self._yolo_toggle.setToolTip(
-            "Trained card detector (stronger on clutter/overlap)"
-            if has_yolo
-            else "Trained card detector — available once you train a model on your "
-            "labeled boxes (training/train_detector.py)"
-        )
-        self._yolo_toggle.toggled.connect(self._on_yolo_toggle)
-        # Card-backs mode: tag saved images as backs and grade each box.
-        self._backs_cb = QCheckBox("Card backs (condition)")
-        self._backs_cb.setToolTip(
-            "Annotating card backs: saved images are tagged 'back' and each box "
-            "can be graded for condition."
-        )
-        self._backs_cb.toggled.connect(self._on_backs_toggled)
-        self._assess_btn = QPushButton("Assess condition")
-        self._assess_btn.setToolTip(
-            "Estimate each box's condition from edge/corner whitening on the back"
-        )
-        self._assess_btn.clicked.connect(self._assess_conditions)
-        self._assess_btn.setEnabled(False)
-        save_btn = QPushButton("Save annotations")
-        save_btn.clicked.connect(self._save)
-        toolbar = QHBoxLayout()
-        toolbar.addWidget(QLabel("Mode:"))
-        toolbar.addWidget(self._mode)
-        toolbar.addWidget(add_btn)
-        toolbar.addWidget(self._draw_btn)
-        toolbar.addWidget(del_btn)
-        toolbar.addWidget(self._suggest_btn)
-        toolbar.addWidget(self._cv_toggle)
-        toolbar.addWidget(self._accept_btn)
-        toolbar.addWidget(self._yolo_toggle)
-        toolbar.addWidget(self._backs_cb)
-        toolbar.addWidget(self._assess_btn)
-        toolbar.addStretch(1)
-        toolbar.addWidget(save_btn)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(12)
+        root.addWidget(self._build_header())
+        root.addWidget(self._build_toolbar())
+        root.addWidget(self._build_body(), 1)
 
-        # -- canvas + image strip
-        self._scene = _Scene(self._add_box)
-        self._view = QGraphicsView(self._scene)
-        self._strip = QListWidget()
-        self._strip.setMaximumWidth(150)
-        self._strip.currentRowChanged.connect(self._switch_image)
-
-        # -- segments panel
-        self._panel = QTableWidget(0, 5)
-        self._panel.setHorizontalHeaderLabels(
-            ["#", "Card", "Suggestion", "Cond", "Side"]
-        )
-        self._panel.verticalHeader().setVisible(False)
-        self._panel.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._panel.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self._panel.setColumnWidth(0, 30)
-        self._panel.setColumnWidth(2, 180)
-        self._panel.setColumnWidth(3, 60)
-        self._panel.setColumnWidth(4, 70)
-
-        self._empty = QLabel("Add images, then draw a box around each card.")
-        self._empty.setAlignment(Qt.AlignCenter)
-
-        canvas_split = QSplitter(Qt.Horizontal)
-        canvas_split.addWidget(self._strip)
-        centre = QWidget()
-        centre_layout = QVBoxLayout(centre)
-        centre_layout.setContentsMargins(0, 0, 0, 0)
-        centre_layout.addWidget(self._view, 1)
-        centre_layout.addWidget(self._empty)
-        canvas_split.addWidget(centre)
-        canvas_split.addWidget(self._panel)
-        canvas_split.setStretchFactor(1, 1)
-        canvas_split.setSizes([150, 700, 300])
-
-        layout = QVBoxLayout(self)
-        layout.addLayout(toolbar)
-        layout.addWidget(canvas_split, 1)
         self._empty.setVisible(True)
         self._view.setVisible(False)
+        self._zone_bar.setVisible(False)
 
         # Warm the (heavy) identity model on a background thread so the first
         # Suggest / Transaction-autofill doesn't freeze on the model load. Uses a
@@ -416,6 +345,311 @@ class RecognitionView(QWidget):
             threading.Thread(
                 target=_recognizer.prewarm, name="tcgi-vision-prewarm", daemon=True
             ).start()
+
+    # -- header -------------------------------------------------------------
+
+    def _build_header(self) -> QWidget:
+        t = theme.active()
+        head = QWidget()
+        row = QHBoxLayout(head)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(14)
+
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        title = QLabel("Recognition")
+        title.setObjectName("recogTitle")
+        sub = QLabel(
+            "Draw a box around each card, label it from the catalog, and save the "
+            "regions your detector trains on."
+        )
+        sub.setObjectName("recogSub")
+        titles.addWidget(title)
+        titles.addWidget(sub)
+        row.addLayout(titles)
+        row.addStretch(1)
+
+        # segmented mode pill
+        self._mode_btns: list[QPushButton] = []
+        toggle = QFrame()
+        toggle.setObjectName("segToggle")
+        th = QHBoxLayout(toggle)
+        th.setContentsMargins(3, 3, 3, 3)
+        th.setSpacing(3)
+        labels = ["Transaction · I Give / They Give", "Listing · one lot"]
+        for i, label in enumerate(labels):
+            b = QPushButton(label)
+            b.setObjectName("segItem")
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, idx=i: self._mode.setCurrentIndex(idx))
+            th.addWidget(b)
+            self._mode_btns.append(b)
+        self._mode_btns[0].setChecked(True)
+        row.addWidget(toggle)
+
+        save_btn = QPushButton("Save annotations")
+        save_btn.setObjectName("primary")
+        save_btn.setIcon(icons.icon("save", t.accent_on, 15))
+        save_btn.clicked.connect(self._save)
+        row.addWidget(save_btn)
+        return head
+
+    def _sync_mode_toggle(self, index: int) -> None:
+        for i, b in enumerate(self._mode_btns):
+            b.setChecked(i == index)
+
+    # -- toolbar ------------------------------------------------------------
+
+    def _tool_button(self, text: str, icon_name: str | None = None) -> QPushButton:
+        b = QPushButton(text)
+        b.setObjectName("tool")
+        if icon_name:
+            b.setIcon(icons.icon(icon_name, theme.active().ink2, 15))
+        return b
+
+    def _build_toolbar(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("recogToolbar")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(12)
+
+        # -- Boxes cluster
+        add_btn = self._tool_button("Add images", "plus")
+        add_btn.clicked.connect(self._add_images)
+        self._draw_btn = self._tool_button("Draw", "scan-line")
+        self._draw_btn.setCheckable(True)
+        self._draw_btn.toggled.connect(self._set_draw)
+        del_btn = self._tool_button("Delete", "trash-2")
+        del_btn.clicked.connect(self._delete_selected)
+        row.addLayout(self._cluster("Boxes", [add_btn, self._draw_btn, del_btn]))
+        row.addWidget(_vrule())
+
+        # -- Assist cluster (matcher + auto box proposals)
+        self._suggest_btn = self._tool_button("Suggest labels", "sparkles")
+        self._suggest_btn.setToolTip(
+            "Rank catalog matches for each box against the cards you've already "
+            "labeled (identity matcher)"
+        )
+        self._suggest_btn.clicked.connect(self._run_suggestions)
+        self._cv_toggle = self._tool_button("Classic-CV")
+        self._cv_toggle.setCheckable(True)
+        self._cv_toggle.setToolTip(
+            "Auto-detect card boxes on a blank background (no training). Accept the "
+            "ones you want into numbered boxes."
+        )
+        self._cv_toggle.toggled.connect(self._on_cv_toggle)
+        self._yolo_toggle = self._tool_button("YOLO")
+        self._yolo_toggle.setCheckable(True)
+        from tcginventory.services.detector import yolo_model_path
+
+        has_yolo = yolo_model_path() is not None
+        self._yolo_toggle.setEnabled(has_yolo)
+        self._yolo_toggle.setToolTip(
+            "Trained card detector (stronger on clutter/overlap)"
+            if has_yolo
+            else "Trained card detector — available once you train a model on your "
+            "labeled boxes (training/train_detector.py)"
+        )
+        self._yolo_toggle.toggled.connect(self._on_yolo_toggle)
+        self._accept_btn = self._tool_button("Accept proposals")
+        self._accept_btn.setToolTip(
+            "Turn the detector's proposed boxes (selected, or all) into numbered "
+            "boxes you can label"
+        )
+        self._accept_btn.clicked.connect(self._accept_proposals)
+        self._accept_btn.setEnabled(False)
+        row.addLayout(
+            self._cluster(
+                "Assist",
+                [
+                    self._suggest_btn,
+                    self._cv_toggle,
+                    self._yolo_toggle,
+                    self._accept_btn,
+                ],
+            )
+        )
+        row.addWidget(_vrule())
+
+        # -- Card-backs cluster
+        self._backs_cb = self._tool_button("Grade backs")
+        self._backs_cb.setCheckable(True)
+        self._backs_cb.setToolTip(
+            "Annotating card backs: saved images are tagged 'back' and each box "
+            "can be graded for condition."
+        )
+        self._backs_cb.toggled.connect(self._on_backs_toggled)
+        self._assess_btn = self._tool_button("Assess condition")
+        self._assess_btn.setToolTip(
+            "Estimate each box's condition from edge/corner whitening on the back"
+        )
+        self._assess_btn.clicked.connect(self._assess_conditions)
+        self._assess_btn.setEnabled(False)
+        row.addLayout(self._cluster("Card backs", [self._backs_cb, self._assess_btn]))
+        row.addStretch(1)
+        return bar
+
+    def _cluster(self, caption: str, widgets: list[QWidget]) -> QHBoxLayout:
+        lay = QHBoxLayout()
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(7)
+        cap = QLabel(caption.upper())
+        cap.setObjectName("clusterCap")
+        lay.addWidget(cap)
+        for w in widgets:
+            lay.addWidget(w)
+        return lay
+
+    # -- body (filmstrip / stage / segments) --------------------------------
+
+    def _build_body(self) -> QWidget:
+        split = QSplitter(Qt.Horizontal)
+        split.setObjectName("recogSplit")
+        split.setChildrenCollapsible(False)
+        split.addWidget(self._build_filmstrip())
+        split.addWidget(self._build_stage())
+        split.addWidget(self._build_segments())
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setStretchFactor(2, 0)
+        split.setSizes([196, 900, 360])
+        return split
+
+    def _build_filmstrip(self) -> QWidget:
+        frame = QFrame()
+        frame.setObjectName("filmFrame")
+        frame.setMinimumWidth(178)
+        v = QVBoxLayout(frame)
+        v.setContentsMargins(11, 11, 11, 11)
+        v.setSpacing(10)
+        self._film_cap = QLabel("IMAGES")
+        self._film_cap.setObjectName("clusterCap")
+        v.addWidget(self._film_cap)
+
+        drop = QPushButton("  Add images")
+        drop.setObjectName("dropTile")
+        drop.setIcon(icons.icon("image", theme.active().ink3, 18))
+        drop.clicked.connect(self._add_images)
+        v.addWidget(drop)
+
+        self._strip = QListWidget()
+        self._strip.setObjectName("strip")
+        self._strip.setFrameShape(QFrame.NoFrame)
+        self._strip.setSpacing(6)
+        self._strip.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._strip.currentRowChanged.connect(self._switch_image)
+        v.addWidget(self._strip, 1)
+        return frame
+
+    def _build_stage(self) -> QWidget:
+        frame = QFrame()
+        frame.setObjectName("stageFrame")
+        v = QVBoxLayout(frame)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        # zone headers (transaction mode)
+        self._zone_bar = QFrame()
+        self._zone_bar.setObjectName("zoneBar")
+        zb = QHBoxLayout(self._zone_bar)
+        zb.setContentsMargins(16, 9, 16, 9)
+        give = QLabel("●  I GIVE")
+        give.setObjectName("zoneGive")
+        recv = QLabel("THEY GIVE  ●")
+        recv.setObjectName("zoneRecv")
+        recv.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        zb.addWidget(give)
+        zb.addStretch(1)
+        zb.addWidget(recv)
+        v.addWidget(self._zone_bar)
+
+        # canvas
+        self._scene = _Scene(self._add_box)
+        self._view = QGraphicsView(self._scene)
+        self._view.setObjectName("stageCanvas")
+        self._view.setFrameShape(QFrame.NoFrame)
+        v.addWidget(self._view, 1)
+
+        self._empty = QLabel(
+            "Add images, then draw a box around each card.\n\n"
+            "Boxes become labeled regions your detector learns from."
+        )
+        self._empty.setObjectName("emptyBox")
+        self._empty.setAlignment(Qt.AlignCenter)
+        self._empty.setWordWrap(True)
+        v.addWidget(self._empty, 1)
+
+        # floating stage tools (parented to the canvas, top-left overlay)
+        self._stage_tools = QFrame(self._view)
+        self._stage_tools.setObjectName("stageTools")
+        st = QHBoxLayout(self._stage_tools)
+        st.setContentsMargins(5, 5, 5, 5)
+        st.setSpacing(5)
+        self._stage_draw = self._stage_tool("scan-line", "Draw box", checkable=True)
+        self._stage_draw.toggled.connect(self._set_draw)
+        stage_sel = self._stage_tool("mouse-pointer-2", "Select / move")
+        stage_sel.clicked.connect(lambda: self._set_draw(False))
+        stage_del = self._stage_tool("trash-2", "Delete box")
+        stage_del.clicked.connect(self._delete_selected)
+        stage_rot = self._stage_tool("rotate-cw", "Rotate view (landscape / portrait)")
+        stage_rot.clicked.connect(self._rotate_view)
+        stage_fit = self._stage_tool("maximize", "Fit image")
+        stage_fit.clicked.connect(self._fit_view)
+        for b in (self._stage_draw, stage_sel, stage_del, stage_rot, stage_fit):
+            st.addWidget(b)
+        self._stage_tools.move(12, 12)
+        self._stage_tools.raise_()
+        return frame
+
+    def _stage_tool(self, icon_name, tip, checkable=False) -> QPushButton:
+        b = QPushButton()
+        b.setObjectName("stageTool")
+        b.setIcon(icons.icon(icon_name, theme.active().ink2, 17))
+        b.setIconSize(QSize(17, 17))
+        b.setFixedSize(30, 30)
+        b.setToolTip(tip)
+        b.setCheckable(checkable)
+        b.setCursor(Qt.PointingHandCursor)
+        return b
+
+    def _build_segments(self) -> QWidget:
+        frame = QFrame()
+        frame.setObjectName("segPanel")
+        frame.setMinimumWidth(320)
+        v = QVBoxLayout(frame)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        header = QFrame()
+        header.setObjectName("segHeader")
+        hh = QHBoxLayout(header)
+        hh.setContentsMargins(13, 11, 10, 11)
+        self._seg_count = QLabel("Segments")
+        self._seg_count.setObjectName("segTitle")
+        hh.addWidget(self._seg_count)
+        hh.addStretch(1)
+        suggest_all = QPushButton("Suggest all")
+        suggest_all.setObjectName("linkBtn")
+        suggest_all.setIcon(icons.icon("sparkles", theme.active().accent_ink, 14))
+        suggest_all.clicked.connect(self._run_suggestions)
+        hh.addWidget(suggest_all)
+        v.addWidget(header)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("segScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        holder = QWidget()
+        holder.setObjectName("segHolder")
+        self._seg_list = QVBoxLayout(holder)
+        self._seg_list.setContentsMargins(9, 9, 9, 9)
+        self._seg_list.setSpacing(8)
+        self._seg_list.addStretch(1)
+        scroll.setWidget(holder)
+        v.addWidget(scroll, 1)
+        return frame
 
     # -- mode ---------------------------------------------------------------
 
@@ -442,21 +676,69 @@ class RecognitionView(QWidget):
             if pixmap.isNull():
                 continue
             self._sessions.append(_Session(path=str(path), pixmap=pixmap))
-            self._strip.addItem(str(path).rsplit("/", 1)[-1].rsplit("\\", 1)[-1])
+            name = str(path).rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            self._add_strip_item(pixmap, name)
         if self._sessions and self._current < 0:
             self._strip.setCurrentRow(0)
+        self._film_cap.setText(f"IMAGES · {len(self._sessions)}")
+
+    def _add_strip_item(self, pixmap: QPixmap, name: str) -> None:
+        row = self._strip.count()
+        item = QListWidgetItem()
+        item.setSizeHint(QSize(0, 118))
+        thumb, count = self._make_thumb(pixmap, name)
+        self._strip.addItem(item)
+        self._strip.setItemWidget(item, thumb)
+        self._strip_thumbs.append(thumb)
+        self._strip_counts[row] = count
+
+    def _make_thumb(self, pixmap: QPixmap, name: str) -> tuple[QFrame, QLabel]:
+        frame = QFrame()
+        frame.setObjectName("thumb")
+        frame.setProperty("sel", False)
+        v = QVBoxLayout(frame)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        pic = QLabel()
+        pic.setObjectName("thumbPic")
+        pic.setAlignment(Qt.AlignCenter)
+        pic.setFixedHeight(84)
+        scaled = pixmap.scaled(
+            QSize(150, 82), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+        pic.setPixmap(scaled)
+        v.addWidget(pic)
+        meta = QFrame()
+        meta.setObjectName("thumbMeta")
+        mh = QHBoxLayout(meta)
+        mh.setContentsMargins(8, 5, 7, 6)
+        mh.setSpacing(6)
+        fn = QLabel(name)
+        fn.setObjectName("thumbFn")
+        fn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        count = QLabel("0")
+        count.setObjectName("thumbCnt")
+        mh.addWidget(fn, 1)
+        mh.addWidget(count)
+        v.addWidget(meta)
+        return frame, count
 
     def _switch_image(self, row: int) -> None:
         if 0 <= self._current < len(self._sessions):
             self._sync_scene_to_model()
         if 0 <= row < len(self._sessions):
             self._load_session(row)
+        for i, thumb in enumerate(self._strip_thumbs):
+            thumb.setProperty("sel", i == row)
+            thumb.style().unpolish(thumb)
+            thumb.style().polish(thumb)
 
     def _load_session(self, index: int) -> None:
         self._current = index
         session = self._sessions[index]
         self._empty.setVisible(False)
         self._view.setVisible(True)
+        self._zone_bar.setVisible(self._is_transaction())
         self._scene.clear()
         self._items.clear()
         for items in self._proposals.values():
@@ -468,21 +750,36 @@ class RecognitionView(QWidget):
             self._add_box_item(box)
         if self._is_transaction():
             self._add_divider(session)
-        self._view.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
+        self._fit_view()
         self._refresh_panel()
         for source, toggle in (("cv", self._cv_toggle), ("yolo", self._yolo_toggle)):
             if toggle.isChecked():
                 self._show_proposals(source)
 
+    def _fit_view(self) -> None:
+        """Fit the scene, honouring the current landscape/portrait rotation."""
+        if not (0 <= self._current < len(self._sessions)):
+            return
+        self._view.resetTransform()
+        if self._rotation:
+            self._view.rotate(self._rotation)
+        self._view.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
+
+    def _rotate_view(self) -> None:
+        """Rotate the canvas 90° clockwise — flips between landscape and portrait."""
+        self._rotation = (self._rotation + 90) % 360
+        self._fit_view()
+
     def _add_divider(self, session: _Session) -> None:
+        t = theme.active()
         w = session.pixmap.width()
         h = session.pixmap.height()
         if session.divider_x is None:
             session.divider_x = w / 2
-        line = self._scene.addLine(
-            session.divider_x, 0, session.divider_x, h, QPen(QColor("#458588"), 0)
-        )
+        pen = QPen(QColor(t.info), 0, Qt.DashLine)
+        line = self._scene.addLine(session.divider_x, 0, session.divider_x, h, pen)
         line.setFlag(line.GraphicsItemFlag.ItemIsMovable, True)
+        line.setZValue(2)
         self._divider = line
 
     # -- boxes --------------------------------------------------------------
@@ -500,15 +797,26 @@ class RecognitionView(QWidget):
         return box
 
     def _add_box_item(self, box: _Box) -> None:
+        t = theme.active()
         item = QGraphicsRectItem(box.rect)
         item.setPen(QPen(_BOX_PEN, 0))
         item.setBrush(QBrush(_BOX_FILL))
         item.setFlag(item.GraphicsItemFlag.ItemIsMovable, True)
         item.setFlag(item.GraphicsItemFlag.ItemIsSelectable, True)
         item.setData(0, box.number)
-        badge = QGraphicsSimpleTextItem(str(box.number), item)
-        badge.setBrush(QBrush(QColor("#ffffff")))
+        # A constant-screen-size numbered badge pinned to the box's top-left.
+        badge = QGraphicsEllipseItem(-11, -11, 22, 22, item)
+        badge.setBrush(QBrush(QColor(t.accent)))
+        badge.setPen(QPen(Qt.NoPen))
+        badge.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
         badge.setPos(box.rect.topLeft())
+        num = QGraphicsSimpleTextItem(str(box.number), badge)
+        num.setBrush(QBrush(QColor(t.accent_on)))
+        font = num.font()
+        font.setBold(True)
+        num.setFont(font)
+        br = num.boundingRect()
+        num.setPos(-br.width() / 2, -br.height() / 2)
         self._items[box.number] = item
 
     def _delete_selected(self) -> None:
@@ -523,6 +831,16 @@ class RecognitionView(QWidget):
             self._items.pop(number, None)
             self._scene.removeItem(item)
         self._refresh_panel()
+
+    def _set_draw(self, on: bool) -> None:
+        """Toggle draw mode, keeping the toolbar + stage draw buttons in sync."""
+        self._scene.set_draw(on)
+        for b in (self._draw_btn, getattr(self, "_stage_draw", None)):
+            if b is None:
+                continue
+            b.blockSignals(True)
+            b.setChecked(on)
+            b.blockSignals(False)
 
     # -- detector box proposals (classic-CV + trained YOLO) -----------------
 
@@ -621,30 +939,84 @@ class RecognitionView(QWidget):
     # -- segments panel -----------------------------------------------------
 
     def _refresh_panel(self) -> None:
-        self._panel.setRowCount(0)
+        self._clear_seg_list()
         self._name_fields.clear()
         self._suggest_boxes.clear()
         self._condition_boxes.clear()
         if not (0 <= self._current < len(self._sessions)):
+            self._seg_count.setText("Segments")
+            self._seg_list.addStretch(1)
             return
         session = self._sessions[self._current]
+        backs = self._backs_cb.isChecked()
         for box in session.boxes:
-            r = self._panel.rowCount()
-            self._panel.insertRow(r)
-            num = QTableWidgetItem(str(box.number))
-            num.setTextAlignment(Qt.AlignCenter)
-            self._panel.setItem(r, 0, num)
-            name_field = _NameField(self._conn, box)
-            suggest_box = _SuggestBox(box, name_field)
-            condition_box = _ConditionBox(box)
-            self._name_fields[box.number] = name_field
-            self._suggest_boxes[box.number] = suggest_box
-            self._condition_boxes[box.number] = condition_box
-            self._panel.setCellWidget(r, 1, name_field)
-            self._panel.setCellWidget(r, 2, suggest_box)
-            self._panel.setCellWidget(r, 3, condition_box)
-            side = self._side_for(box, session) or "—"
-            self._panel.setItem(r, 4, QTableWidgetItem(side))
+            self._seg_list.addWidget(self._make_seg_row(box, session, backs))
+        self._seg_list.addStretch(1)
+        n = len(session.boxes)
+        self._seg_count.setText(f"Segments · {n} card{'' if n == 1 else 's'}")
+        self._update_strip_count()
+
+    def _clear_seg_list(self) -> None:
+        while self._seg_list.count():
+            item = self._seg_list.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _make_seg_row(self, box: _Box, session: _Session, backs: bool) -> QFrame:
+        side = self._side_for(box, session)
+        row = QFrame()
+        row.setObjectName("segRow")
+        v = QVBoxLayout(row)
+        v.setContentsMargins(10, 9, 10, 9)
+        v.setSpacing(7)
+
+        # top line: badge + name + side chip
+        r1 = QHBoxLayout()
+        r1.setSpacing(9)
+        badge = QLabel(str(box.number))
+        badge.setObjectName("segBadgeRecv" if side == "receive" else "segBadge")
+        badge.setFixedSize(22, 22)
+        badge.setAlignment(Qt.AlignCenter)
+
+        meta = QLabel()
+        meta.setObjectName("segMeta")
+        name = _NameField(self._conn, box, meta_label=meta)
+        name.setObjectName("segName")
+        self._name_fields[box.number] = name
+
+        r1.addWidget(badge)
+        r1.addWidget(name, 1)
+        if side is not None:
+            chip = QLabel("I Give" if side == "give" else "They Give")
+            chip.setObjectName("sideGive" if side == "give" else "sideRecv")
+            chip.setAlignment(Qt.AlignCenter)
+            r1.addWidget(chip)
+        v.addLayout(r1)
+
+        # bottom line: set·number meta + suggestion (+ condition in backs mode)
+        r2 = QHBoxLayout()
+        r2.setSpacing(8)
+        r2.setContentsMargins(31, 0, 0, 0)
+        r2.addWidget(meta, 1)
+        suggest = _SuggestBox(box, name)
+        suggest.setObjectName("segSuggest")
+        self._suggest_boxes[box.number] = suggest
+        r2.addWidget(suggest)
+        cond = _ConditionBox(box)
+        cond.setObjectName("segCond")
+        cond.setVisible(backs)
+        self._condition_boxes[box.number] = cond
+        r2.addWidget(cond)
+        v.addLayout(r2)
+        return row
+
+    def _update_strip_count(self) -> None:
+        if not (0 <= self._current < len(self._sessions)):
+            return
+        label = self._strip_counts.get(self._current)
+        if label is not None:
+            label.setText(str(len(self._sessions[self._current].boxes)))
 
     def _side_for(self, box: _Box, session: _Session) -> str | None:
         if not self._is_transaction():
@@ -762,6 +1134,7 @@ class RecognitionView(QWidget):
 
     def _on_backs_toggled(self, on: bool) -> None:
         self._assess_btn.setEnabled(on)
+        self._refresh_panel()
 
     def _ensure_assessor(self):
         if self._assessor is None:
@@ -878,11 +1251,116 @@ class RecognitionView(QWidget):
             items.clear()
         self._divider = None
         self._strip.clear()
+        self._strip_thumbs.clear()
+        self._strip_counts.clear()
         self._scene.clear()
-        self._panel.setRowCount(0)
+        self._clear_seg_list()
+        self._seg_list.addStretch(1)
+        self._seg_count.setText("Segments")
+        self._film_cap.setText("IMAGES")
         self._accept_btn.setEnabled(False)
         self._view.setVisible(False)
+        self._zone_bar.setVisible(False)
         self._empty.setVisible(True)
 
     def refresh(self) -> None:  # nav hook; nothing to reload
         pass
+
+
+def _vrule() -> QFrame:
+    f = QFrame()
+    f.setObjectName("vrule")
+    f.setFixedWidth(1)
+    f.setFrameShape(QFrame.NoFrame)
+    return f
+
+
+def _view_qss(t: theme.Tokens) -> str:
+    return f"""
+    #recogTitle {{ font-size: 20px; font-weight: 700; color: {t.ink}; }}
+    #recogSub {{ color: {t.ink3}; font-size: 12px; }}
+
+    #segToggle {{ background: {t.surface2}; border: 1px solid {t.line2};
+        border-radius: 9px; }}
+    #segItem {{ background: transparent; border: none; border-radius: 6px;
+        padding: 6px 13px; color: {t.ink2}; font-size: 12px; font-weight: 600; }}
+    #segItem:hover {{ color: {t.ink}; }}
+    #segItem:checked {{ background: {t.accent_soft}; color: {t.accent_ink}; }}
+
+    #recogToolbar, #filmFrame, #stageFrame, #segPanel {{
+        background: {t.surface}; border: 1px solid {t.line}; border-radius: 12px; }}
+    #clusterCap {{ color: {t.ink3}; font-size: 10px; font-weight: 700;
+        letter-spacing: 1px; }}
+    #vrule {{ background: {t.line2}; }}
+
+    QPushButton#tool {{ background: {t.surface2}; color: {t.ink};
+        border: 1px solid {t.line2}; border-radius: 8px; padding: 6px 12px;
+        font-size: 12px; }}
+    QPushButton#tool:hover {{ border-color: {t.accent}; }}
+    QPushButton#tool:checked {{ background: {t.accent_soft}; border-color: {t.accent};
+        color: {t.accent_ink}; }}
+    QPushButton#tool:disabled {{ color: {t.ink3}; border-color: {t.line}; }}
+
+    #dropTile {{ background: transparent; border: 1.5px dashed {t.line2};
+        border-radius: 10px; padding: 13px; color: {t.ink3};
+        text-align: center; }}
+    #dropTile:hover {{ border-color: {t.accent}; color: {t.accent_ink}; }}
+
+    #strip {{ background: transparent; border: none; }}
+    #strip::item {{ border: none; }}
+    #strip::item:selected {{ background: transparent; }}
+    #thumb {{ background: {t.surface2}; border: 1px solid {t.line2};
+        border-radius: 9px; }}
+    #thumb[sel="true"] {{ border: 1px solid {t.accent}; }}
+    #thumbPic {{ background: {t.zebra}; border-top-left-radius: 8px;
+        border-top-right-radius: 8px; }}
+    #thumbMeta {{ background: transparent; border: none; }}
+    #thumbFn {{ color: {t.ink2}; font-family: "{theme.mono_family()}";
+        font-size: 10px; }}
+    #thumbCnt {{ background: {t.accent_soft}; color: {t.accent_ink};
+        font-size: 9px; font-weight: 700; border-radius: 8px; padding: 1px 6px; }}
+
+    #zoneBar {{ background: {t.surface}; border: none;
+        border-bottom: 1px solid {t.line};
+        border-top-left-radius: 12px; border-top-right-radius: 12px; }}
+    #zoneGive {{ color: {t.pos}; font-size: 10px; font-weight: 700;
+        letter-spacing: 1px; }}
+    #zoneRecv {{ color: {t.accent}; font-size: 10px; font-weight: 700;
+        letter-spacing: 1px; }}
+    #stageCanvas {{ background: {t.bg}; border: none;
+        border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }}
+    #emptyBox {{ color: {t.ink3}; font-size: 13px; }}
+    #stageTools {{ background: {t.surface}; border: 1px solid {t.line2};
+        border-radius: 9px; }}
+    QPushButton#stageTool {{ background: transparent; border: none;
+        border-radius: 6px; }}
+    QPushButton#stageTool:hover {{ background: {t.surface2}; }}
+    QPushButton#stageTool:checked {{ background: {t.accent_soft}; }}
+
+    #segHeader {{ background: transparent; border: none;
+        border-bottom: 1px solid {t.line}; }}
+    #segTitle {{ font-size: 13px; font-weight: 700; color: {t.ink}; }}
+    QPushButton#linkBtn {{ background: transparent; border: none; color: {t.ink3};
+        padding: 5px 6px; font-size: 12px; }}
+    QPushButton#linkBtn:hover {{ color: {t.accent_ink}; }}
+    #segScroll, #segHolder {{ background: transparent; border: none; }}
+    #segRow {{ background: {t.surface2}; border: 1px solid {t.line};
+        border-radius: 10px; }}
+    #segBadge {{ background: {t.accent}; color: {t.accent_on};
+        border-radius: 11px; font-weight: 800; font-size: 11px; }}
+    #segBadgeRecv {{ background: {t.accent2}; color: {t.accent_on};
+        border-radius: 11px; font-weight: 800; font-size: 11px; }}
+    QLineEdit#segName {{ background: {t.surface}; border: 1px solid {t.line2};
+        border-radius: 7px; padding: 6px 9px; color: {t.ink};
+        font-size: 12px; font-weight: 600; }}
+    QLineEdit#segName:focus {{ border-color: {t.accent}; }}
+    #segMeta {{ color: {t.ink3}; font-family: "{theme.mono_family()}";
+        font-size: 11px; }}
+    #sideGive {{ background: {t.accent_soft}; color: {t.pos};
+        border-radius: 10px; padding: 3px 9px; font-size: 10px; font-weight: 700; }}
+    #sideRecv {{ background: {t.accent_soft}; color: {t.accent};
+        border-radius: 10px; padding: 3px 9px; font-size: 10px; font-weight: 700; }}
+    QComboBox#segSuggest, QComboBox#segCond {{ background: {t.surface};
+        border: 1px solid {t.line2}; border-radius: 7px; padding: 4px 7px;
+        font-size: 11px; }}
+    """
