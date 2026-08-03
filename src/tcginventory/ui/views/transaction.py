@@ -667,11 +667,11 @@ class _ReceiveRow:
 
         # -- main line: name, set, #, condition, market, qty, intent
         self.name.setPlaceholderText("Card name…")
-        self.name.setMinimumWidth(150)
+        self.name.setMinimumWidth(112)  # ~3/4 of the old 150 — room for set / #
         self.set.setPlaceholderText("Set")
-        self.set.setFixedWidth(96)
+        self.set.setFixedWidth(120)
         self.number.setPlaceholderText("#")
-        self.number.setFixedWidth(48)
+        self.number.setFixedWidth(64)
         self.condition.setFixedWidth(66)
         self.market.setFixedWidth(86)
         self.qty.setFixedWidth(44)
