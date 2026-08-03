@@ -226,7 +226,7 @@ def test_history_recognition_tab_summarizes_the_corpus(app, seeded_conn):
         cap, "s", "/a.png", width=100, height=60, now="2026-01-01T09:00:00+00:00"
     )
     vrepo.add_region(img, 1, (0, 0, 0.5, 1), None, CardLabel("cel-4", name="Zard"))
-    vrepo.add_region(img, 2, (0.5, 0, 0.5, 1), None, CardLabel(name="mystery"))
+    vrepo.add_region(img, 2, (0.5, 0, 0.5, 1), None, CardLabel())  # drawn, unlabeled
 
     view = HistoryView(seeded_conn, vision_repo=vrepo)
     assert view._pages.currentIndex() == 0  # defaults to Transaction History

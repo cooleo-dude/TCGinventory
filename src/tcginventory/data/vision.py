@@ -368,17 +368,24 @@ class VisionRepository:
 
     # -- corpus summary (Recognition History view) --------------------------
 
+    # A region counts as *labeled* once the user has given it an identity —
+    # either a resolved catalog id or a typed name (the recognition tool often
+    # stores only the name string, with card_id left NULL).
+    _LABELED = "(r.card_id IS NOT NULL OR (r.name IS NOT NULL AND r.name <> ''))"
+
     def labeled_region_count(self) -> int:
-        """Regions carrying a catalog identity — the exemplar crops the matcher
-        trains on."""
+        """Regions carrying an identity — the labeled crops in the corpus."""
         return self.conn.execute(
-            "SELECT COUNT(*) FROM region WHERE card_id IS NOT NULL"
+            "SELECT COUNT(*) FROM region r "
+            f"WHERE {self._LABELED}"  # noqa: S608 - constant predicate
         ).fetchone()[0]
 
     def labeled_card_count(self) -> int:
-        """Distinct catalog cards represented in the corpus (breadth)."""
+        """Distinct cards represented in the corpus (breadth) — keyed by catalog
+        id when present, otherwise by name."""
         return self.conn.execute(
-            "SELECT COUNT(DISTINCT card_id) FROM region WHERE card_id IS NOT NULL"
+            "SELECT COUNT(DISTINCT COALESCE(r.card_id, r.name)) FROM region r "
+            f"WHERE {self._LABELED}"  # noqa: S608
         ).fetchone()[0]
 
     def capture_rows(self) -> list[sqlite3.Row]:
@@ -388,11 +395,11 @@ class VisionRepository:
             "SELECT c.id, c.source, c.note, c.created_at, "
             "COUNT(DISTINCT i.id) AS images, "
             "COUNT(r.id) AS regions, "
-            "COUNT(r.card_id) AS labeled "
+            f"COALESCE(SUM(CASE WHEN {self._LABELED} THEN 1 ELSE 0 END), 0) AS labeled "
             "FROM capture c "
             "LEFT JOIN image i ON i.capture_id = c.id "
             "LEFT JOIN region r ON r.image_id = i.id "
-            "GROUP BY c.id ORDER BY c.created_at, c.id"
+            "GROUP BY c.id ORDER BY c.created_at, c.id"  # noqa: S608
         ).fetchall()
 
     def capture_cards(self) -> list[sqlite3.Row]:
@@ -401,7 +408,7 @@ class VisionRepository:
         return self.conn.execute(
             "SELECT i.capture_id AS capture_id, r.card_id, r.name, r.set_name, "
             "r.card_number FROM region r JOIN image i ON i.id = r.image_id "
-            "WHERE r.card_id IS NOT NULL ORDER BY i.capture_id, r.id"
+            f"WHERE {self._LABELED} ORDER BY i.capture_id, r.id"  # noqa: S608
         ).fetchall()
 
     def capture_regions(self, capture_id: int) -> list[sqlite3.Row]:

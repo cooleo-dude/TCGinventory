@@ -53,8 +53,9 @@ def test_corpus_summary_rows_counts_and_growth(repo):
         c1, "s1", "/a.png", width=200, height=100, now="2026-01-01T09:00:00+00:00"
     )
     repo.add_region(i1, 1, (0, 0, 0.5, 1), None, CardLabel("cel-4", name="Zard"))
-    repo.add_region(i1, 2, (0.5, 0, 0.5, 1), None, CardLabel(name="mystery"))
-    # Session 2 (Jan 3): two images, one labeled box.
+    repo.add_region(i1, 2, (0.5, 0, 0.5, 1), None, CardLabel())  # drawn, unlabeled
+    # Session 2 (Jan 3): two images; a box labeled by name only (card_id NULL) —
+    # how the recognition tool actually stores most identities.
     c2 = repo.add_capture(
         source="listing", note="binder", now="2026-01-03T10:00:00+00:00"
     )
@@ -64,23 +65,24 @@ def test_corpus_summary_rows_counts_and_growth(repo):
     repo.add_image(
         c2, "s3", "/c.png", width=200, height=100, now="2026-01-03T10:05:00+00:00"
     )
-    repo.add_region(i2, 1, (0, 0, 1, 1), None, CardLabel(card_id="cel-5", name="Blast"))
+    repo.add_region(i2, 1, (0, 0, 1, 1), None, CardLabel(name="Pikachu 25/100"))
 
     rows = repo.capture_rows()
     assert [r["id"] for r in rows] == [c1, c2]  # oldest first
     assert (rows[0]["source"], rows[0]["images"], rows[0]["regions"], rows[0][
-        "labeled"]) == ("transaction", 1, 2, 1)
+        "labeled"]) == ("transaction", 1, 2, 1)  # 1 of 2 boxes carries an identity
     assert (rows[1]["source"], rows[1]["note"], rows[1]["images"], rows[1][
         "labeled"]) == ("listing", "binder", 2, 1)
 
     by_cap: dict[int, list[str]] = {}
     for row in repo.capture_cards():
         by_cap.setdefault(row["capture_id"], []).append(row["name"])
-    assert by_cap == {c1: ["Zard"], c2: ["Blast"]}  # only labeled regions
+    # A name-only label counts; a truly-blank box does not.
+    assert by_cap == {c1: ["Zard"], c2: ["Pikachu 25/100"]}
 
     assert repo.image_count() == 3
     assert repo.labeled_region_count() == 2
-    assert repo.labeled_card_count() == 2
+    assert repo.labeled_card_count() == 2  # distinct: cel-4, "Pikachu 25/100"
     # Cumulative images per day — the growth curve.
     assert repo.image_growth_series() == [("2026-01-01", 1), ("2026-01-03", 3)]
     assert len(repo.capture_regions(c1)) == 2  # both boxes, with image path
