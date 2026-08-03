@@ -471,3 +471,33 @@ def test_transaction_has_docked_card_preview(app, conn):
     if give is not None:
         assert give._sink is view._sink_you
     view.deleteLater()
+
+
+def test_receive_row_printing_picker(app, conn):
+    from tcginventory.services.pricing import CardVariant
+    from tcginventory.ui.views.transaction import TransactionView
+
+    view = TransactionView(conn)
+    row = view._add_receive_row()
+
+    # A single printing → no choice to make, picker stays hidden.
+    row.set_variants([CardVariant("Base", "u-base", 1370, True)])
+    assert row._printing_cell.isHidden()
+
+    # Two printings → picker shows, base selected, base price/url applied earlier.
+    variants = [
+        CardVariant("Base", "u-base", 1370, True),
+        CardVariant("Pokemon Center Exclusive", "u-excl", 9413, False),
+    ]
+    row.set_variants(variants)
+    assert not row._printing_cell.isHidden()
+    assert [row.printing.itemText(i) for i in range(row.printing.count())] == [
+        "Base", "Pokemon Center Exclusive",
+    ]
+
+    # Choosing the exclusive re-links the URL and market price.
+    row.printing.setCurrentIndex(1)
+    row._on_printing_changed()
+    assert row.tcgplayer.text() == "u-excl"
+    assert round(row.market.value() * 100) == 9413
+    view.deleteLater()

@@ -322,9 +322,9 @@ def _match_sellable(sellable, card) -> int | None:
 
 
 class _PriceLookupWorker(QThread):
-    """Fetch a picked card's current tcgcsv market price off the UI thread."""
+    """Fetch a picked card's tcgcsv printings (base + variants) off the UI thread."""
 
-    done = Signal(object)  # (price_cents, tcgplayer_url) or None
+    done = Signal(object)  # list[CardVariant] (base first), possibly empty
 
     def __init__(
         self,
@@ -342,19 +342,25 @@ class _PriceLookupWorker(QThread):
         self._set_code = set_code
 
     def run(self) -> None:
-        from tcginventory.services.pricing import TcgcsvProvider
+        from tcginventory.services.pricing import CardVariant, TcgcsvProvider
 
+        variants: list = []
         try:
-            result = TcgcsvProvider().price_for_card(
-                self._set,
-                self._number,
-                self._name,
-                category=self._category,
-                set_code=self._set_code,
+            provider = TcgcsvProvider()
+            variants = provider.variants_for_card(
+                self._set, self._number, self._name,
+                category=self._category, set_code=self._set_code,
             )
+            if not variants:  # suffix-strip / single-product fallback
+                result = provider.price_for_card(
+                    self._set, self._number, self._name,
+                    category=self._category, set_code=self._set_code,
+                )
+                if result:
+                    variants = [CardVariant("Base", result[1], result[0], True)]
         except Exception:  # network/parse failure → just skip the auto-price
-            result = None
-        self.done.emit(result)
+            variants = []
+        self.done.emit(variants)
 
 
 class _FocusLineEdit(QLineEdit):
@@ -605,7 +611,34 @@ class _ReceiveRow:
         self.tcgplayer = QLineEdit()
         self.ebay = QLineEdit()
         self.notes = QLineEdit()
+        # Printing picker: hidden until autofill finds a card with >1 tcgplayer
+        # product (a base print + stamped variants, e.g. Pokemon Center Exclusive).
+        self._variants: list = []
+        self.printing = QComboBox()
+        self.printing.activated.connect(self._on_printing_changed)
         self._toggle_graded(False)
+
+    def set_variants(self, variants: list) -> None:
+        """Populate the printing picker from tcgcsv variants (base first). The
+        cell shows only when there's a real choice (>1 printing)."""
+        self._variants = variants or []
+        self.printing.blockSignals(True)
+        self.printing.clear()
+        for v in self._variants:
+            self.printing.addItem(v.label, v)
+        self.printing.setCurrentIndex(0)
+        self.printing.blockSignals(False)
+        show = len(self._variants) > 1
+        self.printing.setVisible(show)
+        cell = getattr(self, "_printing_cell", None)
+        if cell is not None:
+            cell.setVisible(show)
+
+    def _on_printing_changed(self, *_args) -> None:
+        variant = self.printing.currentData()
+        if variant is not None:
+            self.market.setValue(variant.price_cents / 100)
+            self.tcgplayer.setText(variant.tcgplayer_url)
 
     def widgets(self) -> list[QWidget]:
         return [
@@ -866,6 +899,19 @@ class _ReceiveRow:
         cell("TCGplayer URL", self.tcgplayer, 2, 0, 2)
         cell("eBay URL", self.ebay, 2, 2, 2)
         cell("Notes", self.notes, 3, 0, 4)
+        # Printing picker (only shown when a card has multiple tcgplayer prints).
+        self._printing_cell = QWidget()
+        pc = QVBoxLayout(self._printing_cell)
+        pc.setContentsMargins(0, 0, 0, 0)
+        pc.setSpacing(3)
+        plab = QLabel("PRINTING")
+        plab.setStyleSheet(
+            f"color:{t.ink3};font-size:9px;font-weight:700;letter-spacing:.4px;"
+        )
+        pc.addWidget(plab)
+        pc.addWidget(self.printing)
+        g.addWidget(self._printing_cell, 4, 0, 1, 2)
+        self._printing_cell.setVisible(False)
         self._adv.setVisible(False)
         v.addWidget(self._adv)
         return card
@@ -1519,15 +1565,16 @@ class TransactionView(QWidget):
         self._price_workers.append(worker)
         worker.start()
 
-    def _on_price_ready(self, row, worker, result) -> None:
+    def _on_price_ready(self, row, worker, variants) -> None:
         if worker in self._price_workers:
             self._price_workers.remove(worker)
-        if result is None or row not in self._receive_rows:
+        if not variants or row not in self._receive_rows:
             return
-        cents, url = result
-        row.market.setValue(cents / 100)
-        if url and not row.tcgplayer.text().strip():
-            row.tcgplayer.setText(url)
+        base = variants[0]
+        row.market.setValue(base.price_cents / 100)
+        if base.tcgplayer_url and not row.tcgplayer.text().strip():
+            row.tcgplayer.setText(base.tcgplayer_url)
+        row.set_variants(variants)  # offer the picker when >1 printing
         self._update_summary()
 
     # Test/programmatic API (used by the lifecycle tests).
