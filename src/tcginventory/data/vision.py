@@ -403,12 +403,21 @@ class VisionRepository:
         ).fetchall()
 
     def capture_cards(self) -> list[sqlite3.Row]:
-        """Labeled regions with their identity, keyed by capture — the per-session
-        card list and thumbnail source."""
+        """Labeled regions keyed by capture — the per-session card list, plus the
+        box geometry + source image needed to crop each card's thumbnail."""
         return self.conn.execute(
-            "SELECT i.capture_id AS capture_id, r.card_id, r.name, r.set_name, "
-            "r.card_number FROM region r JOIN image i ON i.id = r.image_id "
+            "SELECT i.capture_id AS capture_id, r.id AS region_id, r.card_id, "
+            "r.name, r.set_name, r.card_number, r.x, r.y, r.w, r.h, "
+            "i.path AS image_path FROM region r JOIN image i ON i.id = r.image_id "
             f"WHERE {self._LABELED} ORDER BY i.capture_id, r.id"  # noqa: S608
+        ).fetchall()
+
+    def capture_images(self, capture_id: int) -> list[sqlite3.Row]:
+        """The images supplied in a capture (the filmstrip for the preview)."""
+        return self.conn.execute(
+            "SELECT id, path, side, width, height FROM image "
+            "WHERE capture_id = ? ORDER BY id",
+            (capture_id,),
         ).fetchall()
 
     def capture_regions(self, capture_id: int) -> list[sqlite3.Row]:

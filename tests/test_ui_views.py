@@ -242,6 +242,33 @@ def test_history_recognition_tab_summarizes_the_corpus(app, seeded_conn):
     view.deleteLater()
 
 
+def test_recognition_preview_and_filmstrip(app, seeded_conn):
+    """Selecting a capture loads its images into the preview; the filmstrip shows
+    only when the capture has more than one image."""
+    from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
+    from tcginventory.ui.views.history import HistoryView
+
+    vrepo = VisionRepository(open_vision(":memory:"))
+    c1 = vrepo.add_capture(source="listing", now="2026-01-01T00:00:00+00:00")
+    i1 = vrepo.add_image(c1, "a", "/a.png", now="2026-01-01T00:00:00+00:00")
+    vrepo.add_region(i1, 1, (0, 0, 1, 1), None, CardLabel(name="One"))
+    c2 = vrepo.add_capture(source="listing", now="2026-02-01T00:00:00+00:00")  # newer
+    vrepo.add_image(c2, "b", "/b.png", now="2026-02-01T00:00:00+00:00")
+    vrepo.add_image(c2, "c", "/c.png", now="2026-02-01T00:00:05+00:00")
+
+    view = HistoryView(seeded_conn, vision_repo=vrepo)
+    view._set_mode(1)
+    rec = view._rec
+
+    rec._table.selectRow(0)  # newest-first → the two-image capture
+    assert len(rec._cap_images) == 2
+    assert not rec._filmstrip.isHidden()  # filmstrip shown for multi-image
+    rec._table.selectRow(1)  # the single-image capture
+    assert len(rec._cap_images) == 1
+    assert rec._filmstrip.isHidden()  # hidden for a lone image
+    view.deleteLater()
+
+
 def test_nav_refresh_is_gated_until_data_changes(app, seeded_conn):
     """Switching to an unchanged screen must not re-run its refresh; a data
     mutation invalidates the views so the next visit refreshes once."""

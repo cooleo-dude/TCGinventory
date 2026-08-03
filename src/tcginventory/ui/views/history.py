@@ -22,6 +22,7 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QIcon,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -37,6 +38,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -64,7 +67,7 @@ from tcginventory.data.repositories import (
 from tcginventory.data.vision import VisionRepository, open_vision
 from tcginventory.domain.enums import Direction, TransactionStatus
 from tcginventory.domain.models import Item
-from tcginventory.services import cardimages
+from tcginventory.services import cardimages, regioncrops
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.reporting import ReportingService
 from tcginventory.services.transactions import TransactionService
@@ -262,16 +265,18 @@ class _ThumbDelegate(QStyledItemDelegate):
             self._overflow(painter, x, y, f"+{count - 3}", opt.font, t)
         painter.restore()
 
-    @staticmethod
-    def _pixmap(thumb_ids: list, i: int):
-        cid = thumb_ids[i] if i < len(thumb_ids) else None
-        if not cid:
+    def _pixmap(self, thumb_ids: list, i: int):
+        key = thumb_ids[i] if i < len(thumb_ids) else None
+        if not key:
             return None
-        path = cardimages.cache_path(cid)
-        if not path.exists():
+        path = self._thumb_path(key)
+        if path is None or not path.exists():
             return None
         src = QPixmap(str(path))
         return None if src.isNull() else src
+
+    def _thumb_path(self, key):
+        return cardimages.cache_path(key)  # catalog art, keyed by card id
 
     def _card(self, painter, x, y, pm, t) -> None:
         painter.fillPath(
@@ -598,17 +603,6 @@ class _Sparkline(QWidget):
         p.drawEllipse(QRectF(ex - 3, ey - 3, 6, 6))
 
 
-_REC_DETAIL_HEADERS = [
-    "Card",
-    "Set",
-    "#",
-    "Language",
-    "Condition",
-    "Graded",
-    "Side",
-    "Image",
-]
-
 _REC_SOURCES = ["All", "transaction", "listing", "manual"]
 
 
@@ -638,17 +632,95 @@ class _RecFilterProxy(QSortFilterProxyModel):
         return True
 
 
+class _CropThumbDelegate(_ThumbDelegate):
+    """Cards column for the Recognition log: thumbnails are the regions cropped
+    from their source photos (keyed by region id), not catalog art."""
+
+    def _thumb_path(self, region_id):
+        return regioncrops.crop_path(region_id)
+
+
+class _CropWorker(QThread):
+    """Crops labeled regions out of their source photos off the UI thread and
+    caches the thumbnails, pinging the view to repaint as they land."""
+
+    progress = Signal(int)  # generation
+
+    def __init__(self, generation: int, jobs: list, parent=None) -> None:
+        super().__init__(parent)
+        self._generation = generation
+        self._jobs = jobs  # list[(region_id, image_path, (x, y, w, h))]
+
+    def run(self) -> None:
+        for region_id, path, box in self._jobs:
+            if self.isInterruptionRequested():
+                return
+            if not regioncrops.is_cropped(region_id) and regioncrops.ensure_crop(
+                region_id, path, box
+            ):
+                self.progress.emit(self._generation)
+
+
+class _AnnotatedImage(QWidget):
+    """A source photo scaled to fit, with each region's box drawn on top (accent
+    for labeled boxes, muted for the rest)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._pixmap: QPixmap | None = None
+        self._regions: list = []  # (x, y, w, h, labeled_bool)
+        self.setMinimumSize(240, 220)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def set_image(self, path: str | None, regions: list) -> None:
+        self._pixmap = QPixmap(path) if path else None
+        self._regions = regions
+        self.update()
+
+    def clear(self) -> None:
+        self._pixmap = None
+        self._regions = []
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        t = theme.active()
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(t.surface))
+        if self._pixmap is None or self._pixmap.isNull():
+            p.setPen(QColor(t.ink3))
+            p.drawText(
+                self.rect(),
+                int(Qt.AlignCenter),
+                "Select a capture to preview its image",
+            )
+            return
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        avail = self.rect().adjusted(8, 8, -8, -8)
+        scaled = self._pixmap.scaled(
+            avail.width(), avail.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+        ox = avail.left() + (avail.width() - scaled.width()) // 2
+        oy = avail.top() + (avail.height() - scaled.height()) // 2
+        p.drawPixmap(ox, oy, scaled)
+        p.setRenderHint(QPainter.Antialiasing)
+        sw, sh = scaled.width(), scaled.height()
+        for x, y, w, h, labeled in self._regions:
+            p.setPen(QPen(QColor(t.accent if labeled else t.ink3), 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(QRectF(ox + x * sw, oy + y * sh, w * sw, h * sh), 3, 3)
+
+
 class _RecHistoryPanel(QWidget):
     """Recognition History — a corpus log in the exact format of the transaction
     log: one row per capture (annotation session), with KPI tiles + a
-    cumulative-images sparkline reading corpus growth at a glance."""
+    cumulative-images sparkline reading corpus growth at a glance. The bottom
+    splits table (left) | annotated-image preview with a filmstrip (right)."""
 
     def __init__(self, conn: sqlite3.Connection, vision_repo=None) -> None:
         super().__init__()
         self._conn = conn
-        self._catalog_db = _db_file_of(conn)  # catalog art lives in the ledger DB
         self._vision = vision_repo  # None → opened lazily on first refresh
-        self._resolver: _ThumbResolver | None = None
+        self._cropper: _CropWorker | None = None
         self._thumb_gen = 0
 
         self._model = RecognitionHistoryModel()
@@ -687,7 +759,7 @@ class _RecHistoryPanel(QWidget):
         self._table.setSortingEnabled(True)
         self._table.sortByColumn(0, Qt.DescendingOrder)  # newest first
         self._table.setItemDelegate(_RecPillDelegate(self._table))
-        self._table.setItemDelegateForColumn(CARDS_COL, _ThumbDelegate(self._table))
+        self._table.setItemDelegateForColumn(CARDS_COL, _CropThumbDelegate(self._table))
         self._table.verticalHeader().setDefaultSectionSize(40)
         self._table.horizontalHeader().setResizeContentsPrecision(25)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -715,32 +787,39 @@ class _RecHistoryPanel(QWidget):
         self._stack.addWidget(self._empty)
         self._stack.addWidget(self._no_match)
 
-        self._detail_header = QLabel("Select a capture to see its cards.")
-        self._detail_header.setTextFormat(Qt.RichText)
-        self._detail_header.setStyleSheet("border:none; background:transparent;")
-        self._detail_band = QFrame()
-        band = QHBoxLayout(self._detail_band)
-        band.setContentsMargins(14, 9, 14, 9)
-        band.addWidget(self._detail_header)
-        band.addStretch(1)
-        self._detail_table = QTableWidget(0, len(_REC_DETAIL_HEADERS))
-        self._detail_table.setHorizontalHeaderLabels(_REC_DETAIL_HEADERS)
-        self._detail_table.verticalHeader().setVisible(False)
-        self._detail_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._detail_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._detail_table.setAlternatingRowColors(True)
-        self._detail_table.horizontalHeader().setStretchLastSection(True)
-        detail_box = QWidget()
-        dl = QVBoxLayout(detail_box)
-        dl.setContentsMargins(0, 0, 0, 0)
-        dl.setSpacing(8)
-        dl.addWidget(self._detail_band)
-        dl.addWidget(self._detail_table)
+        # Right half: an annotated-image preview, with a scrollable filmstrip to
+        # its left when the selected capture has more than one image.
+        self._preview_caption = QLabel("PREVIEW")
+        self._preview_caption.setStyleSheet(
+            f"color:{theme.active().ink3}; font-size:10px; font-weight:700;"
+            " letter-spacing:.6px;"
+        )
+        self._filmstrip = QListWidget()
+        self._filmstrip.setIconSize(QSize(84, 108))
+        self._filmstrip.setFixedWidth(112)
+        self._filmstrip.setSpacing(4)
+        self._filmstrip.setUniformItemSizes(True)
+        self._filmstrip.currentRowChanged.connect(self._on_filmstrip_changed)
+        self._filmstrip.setVisible(False)
+        self._annotated = _AnnotatedImage()
+        preview_row = QHBoxLayout()
+        preview_row.setContentsMargins(0, 0, 0, 0)
+        preview_row.setSpacing(8)
+        preview_row.addWidget(self._filmstrip)
+        preview_row.addWidget(self._annotated, 1)
+        preview_box = QWidget()
+        pv = QVBoxLayout(preview_box)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(6)
+        pv.addWidget(self._preview_caption)
+        pv.addLayout(preview_row, 1)
+        self._cap_images: list = []  # images of the selected capture (filmstrip)
+        self._regions_by_image: dict = {}  # image_id -> [(x, y, w, h, labeled)]
 
-        splitter = QSplitter(Qt.Vertical)
-        splitter.addWidget(self._stack)
-        splitter.addWidget(detail_box)
-        splitter.setStretchFactor(0, 2)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self._stack)  # the capture log, left half
+        splitter.addWidget(preview_box)  # the annotated-image preview, right half
+        splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
 
         layout = QVBoxLayout(self)
@@ -785,15 +864,18 @@ class _RecHistoryPanel(QWidget):
             cards_by_cap.setdefault(r["capture_id"], []).append(r)
 
         rows: list[RecognitionRow] = []
-        jobs: list[tuple[int, list]] = []
-        for source_row, cap in enumerate(vision.capture_rows()):
+        jobs: list[tuple] = []  # (region_id, image_path, (x, y, w, h)) to crop
+        for cap in vision.capture_rows():
             cards = cards_by_cap.get(cap["id"], [])
             labels = [
                 f"{c['name'] or ''} {c['card_number'] or ''}".strip() for c in cards
             ]
-            idents = [
-                (c["name"], c["set_name"], c["card_number"]) for c in cards[:3]
-            ]
+            # Thumbnails are the labeled regions cropped from their photos.
+            thumb_ids = [str(c["region_id"]) for c in cards[:3]]
+            for c in cards[:3]:
+                jobs.append(
+                    (c["region_id"], c["image_path"], (c["x"], c["y"], c["w"], c["h"]))
+                )
             rows.append(
                 RecognitionRow(
                     capture_id=cap["id"],
@@ -804,20 +886,18 @@ class _RecHistoryPanel(QWidget):
                     regions=cap["regions"],
                     labeled=cap["labeled"],
                     items_label=", ".join(n for n in labels if n),
-                    thumb_ids=[c["card_id"] for c in cards[:3]],
+                    thumb_ids=thumb_ids,
                     card_count=len(cards),
                 )
             )
-            if idents:
-                jobs.append((source_row, idents))
 
         self._model.set_rows(rows)
         self._table.resizeColumnsToContents()
         self._table.horizontalHeader().setStretchLastSection(True)
-        self._clear_detail()
+        self._clear_preview()
         self._update_stats(vision)
         self._update_state()
-        self._start_resolver(jobs)
+        self._start_cropper(jobs)
 
     def _update_stats(self, vision: VisionRepository) -> None:
         t = theme.active()
@@ -858,28 +938,26 @@ class _RecHistoryPanel(QWidget):
         self._source.setCurrentText("All")
         self._search.clear()
 
-    # -- thumbnails (art fetched off-thread; ids come from the corpus) -------
+    # -- Cards thumbnails (region crops made off-thread) ---------------------
 
-    def _start_resolver(self, jobs: list) -> None:
-        self._stop_resolver()
+    def _start_cropper(self, jobs: list) -> None:
+        self._stop_cropper()
         self._thumb_gen += 1
-        if not jobs or self._catalog_db is None:
+        if not jobs:
             return
-        self._resolver = _ThumbResolver(self._catalog_db, self._thumb_gen, jobs)
-        self._resolver.resolved.connect(self._on_thumb_fetched)
-        self._resolver.start()
+        self._cropper = _CropWorker(self._thumb_gen, jobs)
+        self._cropper.progress.connect(self._on_crop_done)
+        self._cropper.start()
 
-    def _stop_resolver(self) -> None:
-        if self._resolver is not None and self._resolver.isRunning():
-            self._resolver.requestInterruption()
+    def _stop_cropper(self) -> None:
+        if self._cropper is not None and self._cropper.isRunning():
+            self._cropper.requestInterruption()
 
-    def _on_thumb_fetched(self, generation: int, source_row: int, ids: list) -> None:
-        # ids are ignored — the row already carries the corpus card_ids; the
-        # resolver's job was just to cache the art. Repaint to show it.
+    def _on_crop_done(self, generation: int) -> None:
         if generation == self._thumb_gen:
             self._table.viewport().update()
 
-    # -- detail -------------------------------------------------------------
+    # -- preview (annotated image + filmstrip) ------------------------------
 
     def _selected_capture(self) -> RecognitionRow | None:
         indexes = self._table.selectionModel().selectedRows()
@@ -887,71 +965,52 @@ class _RecHistoryPanel(QWidget):
             return None
         return self._model.row_at(self._proxy.mapToSource(indexes[0]).row())
 
-    def _clear_detail(self) -> None:
-        t = theme.active()
-        self._detail_band.setStyleSheet(
-            f"QFrame {{ background:{t.surface}; border:1px solid {t.line};"
-            " border-radius:10px; }"
-        )
-        self._detail_header.setStyleSheet(
-            f"color:{t.ink3}; border:none; background:transparent;"
-        )
-        self._detail_header.setText("Select a capture to see its cards.")
-        self._detail_table.setRowCount(0)
+    def _clear_preview(self) -> None:
+        self._cap_images = []
+        self._filmstrip.blockSignals(True)
+        self._filmstrip.clear()
+        self._filmstrip.blockSignals(False)
+        self._filmstrip.setVisible(False)
+        self._annotated.clear()
 
     def _show_detail(self) -> None:
         row = self._selected_capture()
         if row is None:
-            self._clear_detail()
+            self._clear_preview()
             return
-        t = theme.active()
+        vision = self._ensure_vision()
+        self._cap_images = vision.capture_images(row.capture_id)
+        # Group the capture's regions by image, so each photo shows its own boxes.
+        self._regions_by_image: dict[int, list] = {}
+        for reg in vision.capture_regions(row.capture_id):
+            labeled = bool(reg["card_id"] or (reg["name"] or "").strip())
+            self._regions_by_image.setdefault(reg["image_id"], []).append(
+                (reg["x"], reg["y"], reg["w"], reg["h"], labeled)
+            )
 
-        def span(text: str, color: str) -> str:
-            return f'<span style="color:{color}">{text}</span>'
+        self._filmstrip.blockSignals(True)
+        self._filmstrip.clear()
+        for img in self._cap_images:
+            item = QListWidgetItem()
+            pix = QPixmap(img["path"])
+            if not pix.isNull():
+                item.setIcon(QIcon(pix))
+            self._filmstrip.addItem(item)
+        self._filmstrip.setVisible(len(self._cap_images) > 1)
+        self._filmstrip.setCurrentRow(0 if self._cap_images else -1)
+        self._filmstrip.blockSignals(False)
+        self._display_image(0)
 
-        sep = f'  <span style="color:{t.line2}">·</span>  '
-        parts = [
-            span(row.source.title(), _source_color(row.source)),
-            span(row.occurred_at, t.ink2),
-            span(f"{row.images} image{'s' if row.images != 1 else ''}", t.ink2),
-            span(f"{row.labeled}/{row.regions} labeled", _state_color(row.state)),
-        ]
-        if row.note:
-            parts.append(span(row.note, t.ink))
-        rail = _state_color(row.state)
-        self._detail_band.setStyleSheet(
-            f"QFrame {{ background:{t.surface2}; border:1px solid {t.line};"
-            f" border-left:3px solid {rail}; border-radius:10px; }}"
-        )
-        self._detail_header.setStyleSheet(
-            f"color:{t.ink2}; border:none; background:transparent;"
-        )
-        self._detail_header.setText(sep.join(parts))
+    def _on_filmstrip_changed(self, row: int) -> None:
+        self._display_image(row)
 
-        regions = self._ensure_vision().capture_regions(row.capture_id)
-        self._detail_table.setRowCount(len(regions))
-        import os as _os
-
-        for r, reg in enumerate(regions):
-            graded = "Yes" if reg["is_graded"] else ""
-            grade = f"{reg['grading_company'] or ''} {reg['grade'] or ''}".strip()
-            values = [
-                reg["name"] or "—",
-                reg["set_name"] or "",
-                reg["card_number"] or "",
-                reg["language"] or "",
-                reg["condition"] or "",
-                grade or graded,
-                reg["side"] or reg["image_side"] or "",
-                _os.path.basename(reg["image_path"] or ""),
-            ]
-            for c, text in enumerate(values):
-                cell = QTableWidgetItem(text)
-                if c == 0 and reg["card_id"]:
-                    cell.setForeground(QColor(t.accent_ink))
-                self._detail_table.setItem(r, c, cell)
-        self._detail_table.resizeColumnsToContents()
-        self._detail_table.horizontalHeader().setStretchLastSection(True)
+    def _display_image(self, index: int) -> None:
+        if not (0 <= index < len(self._cap_images)):
+            self._annotated.clear()
+            return
+        img = self._cap_images[index]
+        regions = self._regions_by_image.get(img["id"], [])
+        self._annotated.set_image(img["path"], regions)
 
 
 class HistoryView(QWidget):
