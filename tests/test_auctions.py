@@ -203,14 +203,14 @@ def test_view_save_load_and_delete_roundtrip(app):
 
     # Deleting the loaded auction clears the editor and empties the watchlist.
     auction = view._repo.get(saved_id)
-    from PySide6.QtWidgets import QMessageBox
+    from tcginventory.ui.views import auctions as auctions_mod
 
-    orig = QMessageBox.question
-    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+    orig = auctions_mod._confirm_delete
+    auctions_mod._confirm_delete = staticmethod(lambda *a, **k: True)
     try:
         view._delete(auction)
     finally:
-        QMessageBox.question = orig
+        auctions_mod._confirm_delete = orig
     assert len(view._cards) == 0
     assert view._edit_id is None
     view.deleteLater()

@@ -27,6 +27,7 @@ from PySide6.QtCore import (
     QEvent,
     QModelIndex,
     QRectF,
+    QSize,
     Qt,
     QThread,
     QTimer,
@@ -59,6 +60,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -176,6 +178,113 @@ _CARD_WIDTHS = [190, 140, 66, 64, 90, 46, 96, 66, 30]
 
 _UNSET = object()  # sentinel: history not supplied -> open the default DB
 _THUMB_BORDER = theme.DARK.line2  # neutral thumbnail frame
+
+
+class _IconButton(QPushButton):
+    """A flat icon button that recolours its Lucide glyph on hover.
+
+    QIcon can't be restyled through QSS pseudo-states, so we swap the rendered
+    pixmap on enter/leave to move between the idle and hover colours.
+    """
+
+    def __init__(
+        self, icon_name: str, idle: str, hover: str, size: int = 16
+    ) -> None:
+        super().__init__()
+        self._icon_name = icon_name
+        self._idle = idle
+        self._hover = hover
+        self._px = size
+        self.setCursor(Qt.PointingHandCursor)
+        self.setIconSize(QSize(size, size))
+        self.setIcon(icons.icon(icon_name, idle, size))
+
+    def enterEvent(self, event) -> None:
+        self.setIcon(icons.icon(self._icon_name, self._hover, self._px))
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.setIcon(icons.icon(self._icon_name, self._idle, self._px))
+        super().leaveEvent(event)
+
+
+def _confirm_delete(parent, title: str, heading: str, body: str) -> bool:
+    """A themed frameless confirm dialog with a danger primary. Returns True on
+    confirm. Used for irreversible auction deletes."""
+    t = theme.active()
+    dlg = QDialog(parent)
+    dlg.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+    dlg.setAttribute(Qt.WA_TranslucentBackground)
+    dlg.setModal(True)
+
+    outer = QVBoxLayout(dlg)
+    outer.setContentsMargins(18, 18, 18, 18)  # room for the drop shadow
+    card = QFrame()
+    card.setObjectName("confirmCard")
+    card.setStyleSheet(
+        f"QFrame#confirmCard{{background:{t.surface};border:1px solid {t.line2};"
+        f"border-radius:16px;}}"
+    )
+    shadow = QGraphicsDropShadowEffect(dlg)
+    shadow.setBlurRadius(38)
+    shadow.setOffset(0, 10)
+    shadow.setColor(QColor(0, 0, 0, 150))
+    card.setGraphicsEffect(shadow)
+    outer.addWidget(card)
+
+    v = QVBoxLayout(card)
+    v.setContentsMargins(22, 20, 22, 18)
+    v.setSpacing(13)
+
+    top = QHBoxLayout()
+    top.setSpacing(13)
+    badge = QLabel()
+    badge.setFixedSize(40, 40)
+    badge.setAlignment(Qt.AlignCenter)
+    badge.setPixmap(icons.pixmap("triangle-alert", t.neg, 20))
+    badge.setStyleSheet(
+        f"background:{t.neg_soft};border-radius:20px;"
+    )
+    top.addWidget(badge, 0, Qt.AlignTop)
+    text_col = QVBoxLayout()
+    text_col.setSpacing(4)
+    h = QLabel(heading)
+    h.setStyleSheet(f"color:{t.ink};font-size:15px;font-weight:700;")
+    h.setWordWrap(True)
+    msg = QLabel(body)
+    msg.setStyleSheet(f"color:{t.ink2};font-size:12px;")
+    msg.setWordWrap(True)
+    text_col.addWidget(h)
+    text_col.addWidget(msg)
+    top.addLayout(text_col, 1)
+    v.addLayout(top)
+
+    btns = QHBoxLayout()
+    btns.setSpacing(9)
+    btns.addStretch(1)
+    cancel = QPushButton("Cancel")
+    cancel.setCursor(Qt.PointingHandCursor)
+    cancel.setStyleSheet(
+        f"QPushButton{{background:transparent;border:1px solid {t.line2};"
+        f"border-radius:9px;color:{t.ink2};padding:8px 16px;font-size:12px;"
+        f"font-weight:600;}}QPushButton:hover{{border-color:{t.ink3};"
+        f"color:{t.ink};}}"
+    )
+    cancel.clicked.connect(dlg.reject)
+    confirm = QPushButton("Delete")
+    confirm.setCursor(Qt.PointingHandCursor)
+    confirm.setStyleSheet(
+        f"QPushButton{{background:{t.neg};border:none;border-radius:9px;"
+        f"color:{t.accent_on};padding:8px 18px;font-size:12px;font-weight:700;}}"
+        f"QPushButton:hover{{background:{t.neg_soft};color:{t.neg};}}"
+    )
+    confirm.clicked.connect(dlg.accept)
+    btns.addWidget(cancel)
+    btns.addWidget(confirm)
+    v.addLayout(btns)
+
+    dlg.setWindowTitle(title)
+    return dlg.exec() == QDialog.Accepted
 
 
 def _is_ended(ends_at: str | None, now: datetime) -> bool:
@@ -796,12 +905,14 @@ class _AuctionCard(QFrame):
         acts.addWidget(open_btn)
         acts.addWidget(export_btn)
         acts.addStretch(1)
-        refresh = self._icon_button("↻", "Refresh card values from current prices")
+        refresh = self._icon_button(
+            "rotate-cw", "Refresh card values from current prices"
+        )
         refresh.clicked.connect(lambda _=False, a=auction: view._refresh_values(a))
         archive = self._link_button("Unarchive" if auction.archived else "Archive")
         archive.setToolTip("Save this auction for later (hidden from the watchlist)")
         archive.clicked.connect(lambda _=False, a=auction: view._toggle_archived(a))
-        delete = self._icon_button("✕", "Delete this auction", danger=True)
+        delete = self._icon_button("trash-2", "Delete this auction", danger=True)
         delete.clicked.connect(lambda _=False, a=auction: view._delete(a))
         acts.addWidget(refresh)
         acts.addWidget(archive)
@@ -839,19 +950,19 @@ class _AuctionCard(QFrame):
             )
         return b
 
-    def _icon_button(self, glyph: str, tip: str, danger: bool = False) -> QPushButton:
+    def _icon_button(
+        self, icon_name: str, tip: str, danger: bool = False
+    ) -> QPushButton:
         t = theme.active()
-        b = QPushButton(glyph)
-        b.setCursor(Qt.PointingHandCursor)
+        hover = t.neg if danger else t.ink
+        b = _IconButton(icon_name, t.ink3, hover, size=16)
         b.setToolTip(tip)
         b.setFixedSize(30, 30)
         b.setObjectName("icd" if danger else "icb")
-        hover = t.neg if danger else t.ink
         b.setStyleSheet(
             f"QPushButton#{b.objectName()}{{background:transparent;border:none;"
-            f"border-radius:8px;color:{t.ink3};font-size:14px;}}"
-            f"QPushButton#{b.objectName()}:hover{{background:{t.surface2};"
-            f"color:{hover};}}"
+            f"border-radius:8px;}}"
+            f"QPushButton#{b.objectName()}:hover{{background:{t.surface2};}}"
         )
         return b
 
@@ -1344,9 +1455,14 @@ class AuctionsView(QWidget):
 
     def _delete(self, auction: Auction) -> None:
         name = auction.title or "(untitled)"
-        if (
-            QMessageBox.question(self, "Delete auction", f"Delete '{name}'?")
-            != QMessageBox.Yes
+        cards = len(auction.cards)
+        detail = f"{cards} card{'' if cards == 1 else 's'}" if cards else "no cards"
+        if not _confirm_delete(
+            self,
+            "Delete auction",
+            f"Delete “{name}”?",
+            f"This watchlist entry ({detail}) will be permanently removed. "
+            "This can't be undone.",
         ):
             return
         self._repo.delete(auction.id)
@@ -1693,9 +1809,14 @@ class AuctionsView(QWidget):
         self._card_table.setCellWidget(r, 0, add)
 
     def _delete_button(self, row: _AuctionCardRow) -> QPushButton:
-        btn = QPushButton("✕")
-        btn.setFixedWidth(28)
+        t = theme.active()
+        btn = _IconButton("trash-2", t.ink3, t.neg, size=15)
+        btn.setFixedSize(28, 26)
         btn.setToolTip("Remove this card")
+        btn.setStyleSheet(
+            "QPushButton{background:transparent;border:none;border-radius:6px;}"
+            f"QPushButton:hover{{background:{t.surface2};}}"
+        )
         btn.clicked.connect(lambda _=False, r=row: self._remove_row(r))
         return btn
 
