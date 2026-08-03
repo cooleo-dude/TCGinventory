@@ -322,9 +322,7 @@ class _DayCell(QFrame):
         num_color = t.accent if selected else (t.accent if today else t.ink2)
         warn = ""
         if conflict:
-            warn = (
-                f"  <span style='color:{t.neg};font-weight:800'>&#9888;</span>"
-            )
+            warn = f"  <span style='color:{t.neg};font-weight:800'>&#9888;</span>"
         self._num.setText(
             f"<span style='color:{num_color};font-weight:700;font-family:monospace'>"
             f"{day_num}</span>{warn}"

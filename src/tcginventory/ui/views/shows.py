@@ -130,9 +130,14 @@ class ShowCalendar(QCalendarWidget):
         return None
 
     def eventFilter(self, obj, event) -> bool:
-        if event.type() == QEvent.Wheel and self._view is not None and obj in (
-            self._view,
-            self._view.viewport(),
+        if (
+            event.type() == QEvent.Wheel
+            and self._view is not None
+            and obj
+            in (
+                self._view,
+                self._view.viewport(),
+            )
         ):
             area = self._enclosing_scroll_area()
             if area is not None:  # scroll the page instead of changing month
@@ -270,8 +275,10 @@ class _DayShowRow(QWidget):
             except ValueError:
                 date_str = show.starts_on
         where = ", ".join(x for x in (show.venue, show.city) if x)
-        name = f'<a href="{show.detail_url}">{show.name}</a>' if show.detail_url else (
-            show.name
+        name = (
+            f'<a href="{show.detail_url}">{show.name}</a>'
+            if show.detail_url
+            else (show.name)
         )
         lead = " · ".join(x for x in (date_str, when) if x)
         head = f"{lead}&nbsp; {name}" if lead else name
@@ -503,13 +510,19 @@ class ShowsView(QWidget):
 
     @staticmethod
     def _fill_list(
-        widget, shows, on_status, with_date: bool, empty_text: str,
+        widget,
+        shows,
+        on_status,
+        with_date: bool,
+        empty_text: str,
         show_status_chip: bool = False,
     ) -> None:
         widget.clear()
         for show in shows:
             row = _DayShowRow(
-                show, on_status, with_date=with_date,
+                show,
+                on_status,
+                with_date=with_date,
                 show_status_chip=show_status_chip,
             )
             item = QListWidgetItem(widget)
@@ -530,7 +543,10 @@ class ShowsView(QWidget):
         # Statused shows first (match the cell ordering), then by time.
         shows.sort(key=lambda s: (s.status is None, s.start_time or "", s.name))
         self._fill_list(
-            self._day_list, shows, self._set_status, False,
+            self._day_list,
+            shows,
+            self._set_status,
+            False,
             "No shows on the selected date.",
         )
 
@@ -547,8 +563,12 @@ class ShowsView(QWidget):
             key=lambda s: (s.starts_on, s.start_time or "", s.name),
         )
         self._fill_list(
-            self._marked_list, marked, self._set_status, True,
-            "No marked shows.", show_status_chip=True,
+            self._marked_list,
+            marked,
+            self._set_status,
+            True,
+            "No marked shows.",
+            show_status_chip=True,
         )
 
     def _set_status(self, source_id: int, status: str | None) -> None:
