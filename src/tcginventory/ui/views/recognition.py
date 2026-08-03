@@ -1588,7 +1588,54 @@ class RecognitionView(QWidget):
         msg = f"Saved {len(sessions)} image(s) of annotations."
         if indexed:
             msg += f"\nIndexed {indexed} card crop(s) — the matcher just got smarter."
-        QMessageBox.information(self, "Saved", msg)
+        self._saved_notice(msg)
+
+    def _saved_notice(self, message: str) -> None:
+        """Themed 'annotations saved' confirmation. A bare QMessageBox ignores
+        the app stylesheet and renders in the OS default look, so build a small
+        themed dialog (green success rail + accent Done) like the rest of the UI."""
+        from PySide6.QtWidgets import QDialog
+
+        t = theme.active()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Annotations saved")
+
+        band = QFrame()
+        band.setStyleSheet(
+            f"QFrame{{background:{t.surface2}; border:1px solid {t.line};"
+            f" border-left:3px solid {t.pos}; border-radius:10px;}}"
+        )
+        bv = QVBoxLayout(band)
+        bv.setContentsMargins(14, 11, 14, 11)
+        bv.setSpacing(4)
+        title = QLabel("Annotations saved")
+        title.setStyleSheet(
+            f"color:{t.ink}; font-size:15px; font-weight:700;"
+            " border:none; background:transparent;"
+        )
+        body = QLabel(message)
+        body.setWordWrap(True)
+        body.setStyleSheet(
+            f"color:{t.ink2}; font-size:12.5px; border:none; background:transparent;"
+        )
+        bv.addWidget(title)
+        bv.addWidget(body)
+
+        ok = QPushButton("Done")
+        ok.setObjectName("primary")
+        ok.setDefault(True)
+        ok.clicked.connect(dialog.accept)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(ok)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(13)
+        layout.addWidget(band)
+        layout.addLayout(buttons)
+        dialog.setMinimumWidth(360)
+        dialog.exec()
 
     def _index_exemplars(self, repo, entries) -> int:
         """Embed the just-saved labeled crops into the exemplar store (best-effort
