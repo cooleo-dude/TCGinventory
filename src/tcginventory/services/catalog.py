@@ -95,6 +95,25 @@ def _norm_join(text: str | None) -> str:
     return "".join(ch for ch in (text or "").lower() if ch.isalnum())
 
 
+def _fetch_map(fetch, urls, workers: int = 16) -> dict:
+    """Fetch many URLs concurrently → ``{url: result | Exception}``. A catalog
+    pull is hundreds of small requests; doing them in a thread pool cuts it from
+    minutes to seconds. The injected ``fetch`` must be thread-safe (the real
+    httpx one and the test fakes are)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    out: dict = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(fetch, url): url for url in urls}
+        for fut in as_completed(futures):
+            url = futures[fut]
+            try:
+                out[url] = fut.result()
+            except Exception as exc:  # recorded per-url; caller decides
+                out[url] = exc
+    return out
+
+
 def _github_image_index(fetch) -> dict[tuple[str, str, str], str]:
     """``(name, set_name, number) → image_small`` from the pokemontcg.io dump —
     used to fill images TCGdex omits (it lacks art for most Trainer Gallery /
@@ -104,13 +123,14 @@ def _github_image_index(fetch) -> dict[tuple[str, str, str], str]:
     set_names = {
         s["id"]: s.get("name") for s in sets if isinstance(s, dict) and s.get("id")
     }
+    urls = {set_id: f"{_RAW}/cards/en/{set_id}.json" for set_id in set_names}
+    fetched = _fetch_map(fetch, list(urls.values()))
     index: dict[tuple[str, str, str], str] = {}
     for set_id, set_name in set_names.items():
-        try:
-            entries = _as_list(fetch(f"{_RAW}/cards/en/{set_id}.json"))
-        except Exception:
+        entries = fetched.get(urls[set_id])
+        if isinstance(entries, Exception):
             continue
-        for c in entries:
+        for c in _as_list(entries):
             image = (c.get("images") or {}).get("small")
             if not image:
                 continue
@@ -177,19 +197,16 @@ def update_catalog(
     summary = CatalogUpdateSummary()
 
     sets = _as_list(fetch(f"{_TCGDEX}/sets"))
-    total = len([s for s in sets if isinstance(s, dict) and s.get("id")])
+    valid = [s for s in sets if isinstance(s, dict) and s.get("id")]
+    total = len(valid)
+    details = _fetch_map(fetch, [f"{_TCGDEX}/sets/{s['id']}" for s in valid])
 
     cards: list[CatalogCard] = []
-    done = 0
-    for s in sets:
-        if not isinstance(s, dict) or not s.get("id"):
-            continue
+    for done, s in enumerate(valid, start=1):
         set_id = s["id"]
-        try:
-            detail = fetch(f"{_TCGDEX}/sets/{set_id}")
-        except Exception as exc:
-            summary.errors.append(f"{set_id}: {exc}")
-            done += 1
+        detail = details.get(f"{_TCGDEX}/sets/{set_id}")
+        if not isinstance(detail, dict):
+            summary.errors.append(f"{set_id}: {detail}")
             if on_progress is not None:
                 on_progress(done, total)
             continue
@@ -215,7 +232,6 @@ def update_catalog(
                     printed_total=printed_total,
                 )
             )
-        done += 1
         if on_progress is not None:
             on_progress(done, total)
 
