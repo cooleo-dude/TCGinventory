@@ -36,7 +36,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QCompleter,
     QDialog,
-    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -1377,50 +1376,110 @@ class TransactionView(QWidget):
         footer = []
         if result.realized_pl_cents:
             footer.append(
-                f"Margin on cards given up: {money(result.realized_pl_cents)}"
+                (f"Margin on cards given up: {money(result.realized_pl_cents)}", "info")
             )
         if old_margin is not None and old_margin != result.realized_pl_cents:
             footer.append(
-                f"⚠ Realized P/L changed: {money(old_margin)} → "
-                f"{money(result.realized_pl_cents)}"
+                (
+                    f"Realized P/L changed: {money(old_margin)} → "
+                    f"{money(result.realized_pl_cents)}",
+                    "warn",
+                )
             )
         self._success_dialog(header, items, footer)
 
     def _success_dialog(self, header, items, footer) -> None:
-        """Confirmation dialog. The received-card list is laid out in columns of
-        25, wrapping to a new column so a big transaction never runs off-screen."""
+        """Themed confirmation dialog. The received-card list is laid out in
+        columns of 25, wrapping to a new column so a big transaction never runs
+        off-screen."""
+        t = theme.active()
         dialog = QDialog(self)
-        dialog.setWindowTitle("Success")
+        dialog.setWindowTitle("Transaction recorded")
+
+        # Header in a surface2 band with a green "success" accent rail (no glyph
+        # dependency — matches the History detail band motif).
+        head = QFrame()
+        head.setStyleSheet(
+            f"QFrame{{background:{t.surface2}; border:1px solid {t.line};"
+            f" border-left:3px solid {t.pos}; border-radius:10px;}}"
+        )
+        hv = QVBoxLayout(head)
+        hv.setContentsMargins(13, 10, 13, 10)
+        hv.setSpacing(2)
+        title = QLabel(header[0])
+        title.setStyleSheet(
+            f"color:{t.ink}; font-size:15px; font-weight:700;"
+            " border:none; background:transparent;"
+        )
+        hv.addWidget(title)
+        for extra in header[1:]:
+            sub = QLabel(extra)
+            sub.setWordWrap(True)
+            sub.setStyleSheet(
+                f"color:{t.ink3}; font-size:12px; border:none; background:transparent;"
+            )
+            hv.addWidget(sub)
+
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel("\n".join(header)))
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(12)
+        layout.addWidget(head)
 
         if items:
-            layout.addWidget(QLabel("Inferred cost of each card received:"))
-            columns = QWidget()
+            cap = QLabel("INFERRED COST OF EACH CARD RECEIVED")
+            cap.setStyleSheet(
+                f"color:{t.ink3}; font-size:10px; font-weight:700;"
+                " letter-spacing:.06em;"
+            )
+            layout.addWidget(cap)
+            columns = QFrame()
+            columns.setStyleSheet(
+                f"QFrame{{background:{t.surface2}; border:1px solid {t.line};"
+                " border-radius:10px;}"
+            )
             cols_layout = QHBoxLayout(columns)
-            cols_layout.setContentsMargins(0, 0, 0, 0)
+            cols_layout.setContentsMargins(13, 11, 13, 11)
+            cols_layout.setSpacing(26)
             for start in range(0, len(items), self._ITEMS_PER_COLUMN):
                 chunk = items[start : start + self._ITEMS_PER_COLUMN]
                 col = QLabel("\n".join(chunk))
                 col.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                col.setStyleSheet(
+                    f"color:{t.ink2}; font-size:12px;"
+                    " border:none; background:transparent;"
+                )
                 cols_layout.addWidget(col, 0, Qt.AlignTop)
             cols_layout.addStretch(1)
-            # Scroll if there are so many columns they'd exceed the screen width.
+            # Scroll if there are so many columns they'd exceed the screen width;
+            # the viewport is themed so it doesn't render as a bare white box.
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.viewport().setStyleSheet(f"background:{t.bg};")
             scroll.setWidget(columns)
             layout.addWidget(scroll, 1)
 
-        if footer:
-            layout.addWidget(QLabel("\n".join(footer)))
+        for line, tone in footer:
+            lbl = QLabel(line)
+            lbl.setWordWrap(True)
+            color = t.warn if tone == "warn" else t.ink2
+            weight = "font-weight:600;" if tone == "warn" else ""
+            lbl.setStyleSheet(f"color:{color}; font-size:12.5px; {weight}")
+            layout.addWidget(lbl)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
-        buttons.accepted.connect(dialog.accept)
-        layout.addWidget(buttons)
+        ok = QPushButton("Done")
+        ok.setObjectName("primary")
+        ok.setDefault(True)
+        ok.clicked.connect(dialog.accept)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        buttons.addWidget(ok)
+        layout.addLayout(buttons)
 
         # Never exceed the visible screen; the scroll area handles overflow.
         avail = self.screen().availableGeometry()
         dialog.setMaximumSize(int(avail.width() * 0.9), int(avail.height() * 0.9))
+        dialog.setMinimumWidth(380)
         dialog.exec()
 
     def clear(self) -> None:
