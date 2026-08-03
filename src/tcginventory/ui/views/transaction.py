@@ -201,6 +201,23 @@ def _inline_field(label: str, widget: QWidget) -> QHBoxLayout:
     return row
 
 
+def _entry_scroll(entries: QVBoxLayout) -> QScrollArea:
+    """Wrap one side's give/receive card list in its own vertical scroller, so
+    the You and Them panels each traverse their own entries independently rather
+    than sharing one scrollbar for the whole board."""
+    host = QWidget()
+    host.setLayout(entries)
+    host.setStyleSheet("background:transparent;")
+    sc = QScrollArea()
+    sc.setWidgetResizable(True)
+    sc.setFrameShape(QFrame.NoFrame)
+    sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    sc.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    sc.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+    sc.setWidget(host)
+    return sc
+
+
 def _cash_block(label: str, spin: QDoubleSpinBox, rail: str) -> QWidget:
     """An emphasised cash field (label left, big mono amount right)."""
     t = theme.active()
@@ -1299,10 +1316,11 @@ class TransactionView(QWidget):
         v.setSpacing(0)
         v.addWidget(self._side_header("Y", "You", "what you put on the table", "you"))
         body = QVBoxLayout()
-        body.setContentsMargins(15, 14, 15, 15)
+        body.setContentsMargins(15, 14, 15, 0)
         body.setSpacing(9)
         # Blank slot matching the Them side's autofill toolbar, so the two cash
-        # blocks line up across the boxes.
+        # blocks line up across the boxes. (Header + cash stay pinned; only the
+        # card entries below scroll.)
         spacer = QWidget()
         spacer.setFixedHeight(_TOOLBAR_H)
         body.addWidget(spacer)
@@ -1310,11 +1328,16 @@ class TransactionView(QWidget):
         self._give_list = QVBoxLayout()
         self._give_list.setSpacing(8)
         self._give_list.setContentsMargins(0, 0, 0, 0)
-        body.addLayout(self._give_list)
+        entries = QVBoxLayout()
+        entries.setContentsMargins(0, 0, 0, 15)
+        entries.setSpacing(9)
+        entries.addLayout(self._give_list)
         # The add button sits directly below the lowest card row.
-        body.addWidget(_add_button("Add a card you're giving", self._add_give_row))
-        body.addStretch(1)
-        v.addLayout(body)
+        entries.addWidget(_add_button("Add a card you're giving", self._add_give_row))
+        entries.addStretch(1)
+        self._give_scroll = _entry_scroll(entries)
+        body.addWidget(self._give_scroll, 1)
+        v.addLayout(body, 1)
         return panel
 
     def _build_them_side(self) -> QWidget:
@@ -1330,7 +1353,7 @@ class TransactionView(QWidget):
         v.setSpacing(0)
         v.addWidget(self._side_header("T", "Them", "the counterparty", "them"))
         body = QVBoxLayout()
-        body.setContentsMargins(15, 14, 15, 15)
+        body.setContentsMargins(15, 14, 15, 0)
         body.setSpacing(9)
 
         # Autofill / auto-detect at the very top of the box.
@@ -1369,11 +1392,18 @@ class TransactionView(QWidget):
         self._recv_list = QVBoxLayout()
         self._recv_list.setSpacing(8)
         self._recv_list.setContentsMargins(0, 0, 0, 0)
-        body.addLayout(self._recv_list)
+        entries = QVBoxLayout()
+        entries.setContentsMargins(0, 0, 0, 15)
+        entries.setSpacing(9)
+        entries.addLayout(self._recv_list)
         # The add button sits directly below the lowest card row.
-        body.addWidget(_add_button("Add a card they're giving", self._add_receive_row))
-        body.addStretch(1)
-        v.addLayout(body)
+        entries.addWidget(
+            _add_button("Add a card they're giving", self._add_receive_row)
+        )
+        entries.addStretch(1)
+        self._recv_scroll = _entry_scroll(entries)
+        body.addWidget(self._recv_scroll, 1)
+        v.addLayout(body, 1)
         return panel
 
     def _build_receipt(self) -> QWidget:
