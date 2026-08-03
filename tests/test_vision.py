@@ -343,24 +343,25 @@ def test_save_indexes_labeled_crops_as_exemplars(app, _quiet, tmp_path):
     assert cards == ["L", "R"]
 
 
-def test_backs_mode_assesses_condition_and_saves_it(app, _quiet, tmp_path):
-    from PIL import Image
+def test_card_backs_pairs_front_and_grades_from_back(app, _quiet, tmp_path):
+    """Include card backs: the front is set aside, a back slot opens with the
+    boxes copied over, and saving links the pair (front/back + pair_group) with
+    the condition graded from the back."""
+    from PIL import Image, ImageDraw
     from PySide6.QtCore import QRectF
 
     from tcginventory.data.db import connect
     from tcginventory.data.migrator import migrate
     from tcginventory.ui.views.recognition import RecognitionView
 
-    # A back-like scene: white (worn) frame on the left half, clean on the right.
-    scene = tmp_path / "backs.png"
+    # Back-like photo: whitening on the left half (worn), clean on the right.
+    back_png = tmp_path / "backs.png"
     img = Image.new("RGB", (200, 120), (30, 40, 90))
-    from PIL import ImageDraw
-
     draw = ImageDraw.Draw(img)
     draw.rectangle([0, 0, 95, 8], fill=(255, 255, 255))
     draw.rectangle([0, 112, 95, 119], fill=(255, 255, 255))
     draw.rectangle([0, 0, 8, 119], fill=(255, 255, 255))
-    img.save(scene)
+    img.save(back_png)
 
     conn = connect(":memory:")
     migrate(conn)
@@ -372,22 +373,41 @@ def test_backs_mode_assesses_condition_and_saves_it(app, _quiet, tmp_path):
         recognizer=_pixel_recognizer(vrepo),
     )
     view._mode.setCurrentIndex(1)  # listing
-    view._backs_cb.setChecked(True)  # card-backs mode
-    view.add_image_paths([str(scene)])
-    worn = view._add_box(QRectF(2, 2, 90, 116))  # left half — heavy whitening
-    clean = view._add_box(QRectF(100, 20, 90, 80))  # right half — clean
 
-    view._assess_conditions()
+    # Front: two labeled cards (left + right).
+    view.add_image_paths([_png(tmp_path / "front.png", 200, 120)])
+    left = view._add_box(QRectF(2, 2, 90, 116))
+    left.card = CardLabel(card_id="L", name="Left")
+    right = view._add_box(QRectF(100, 20, 90, 80))
+    right.card = CardLabel(card_id="R", name="Right")
+
+    view._include_card_backs()  # opens a back slot with the boxes copied over
+    back = view._sessions[view._current]
+    assert back.side == "back" and back.awaiting and len(back.boxes) == 2
+
+    view.add_image_paths([str(back_png)])  # fills the awaiting slot
+    back = view._sessions[view._current]
+    assert not back.awaiting and back.side == "back"
+
+    view._assess_conditions()  # grade each card from its back crop
+    worn = next(b for b in back.boxes if b.rect.x() < 50)
+    clean = next(b for b in back.boxes if b.rect.x() >= 50)
     assert worn.condition is not None and worn.condition != "NM"
     assert clean.condition == "NM"
 
     view._save()
-    rows = vrepo.conn.execute(
-        "SELECT r.condition, i.side FROM region r JOIN image i ON i.id = r.image_id "
-        "ORDER BY r.number"
+    imgs = vrepo.conn.execute("SELECT side, pair_group FROM image").fetchall()
+    assert {r["side"] for r in imgs} == {"front", "back"}
+    assert len({r["pair_group"] for r in imgs}) == 1  # one shared pair group
+    back_conds = vrepo.conn.execute(
+        "SELECT r.condition FROM region r JOIN image i ON i.id = r.image_id "
+        "WHERE i.side = 'back'"
     ).fetchall()
-    assert rows[0]["side"] == "back" and rows[0]["condition"] == worn.condition
-    assert rows[1]["condition"] == "NM"
+    assert any(r["condition"] and r["condition"] != "NM" for r in back_conds)
+    ids = vrepo.conn.execute(
+        "SELECT DISTINCT card_id FROM region WHERE card_id IS NOT NULL"
+    ).fetchall()
+    assert sorted(r["card_id"] for r in ids) == ["L", "R"]  # identity on both
     view.deleteLater()
 
 

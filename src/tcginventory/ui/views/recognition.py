@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from PySide6.QtCore import QModelIndex, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
@@ -121,6 +121,22 @@ class _Session:
     # (a vertical line), a portrait scene splits top/bottom (a horizontal one).
     divider_pos: float | None = None
     orientation: str = "landscape"  # "landscape" | "portrait" (from aspect)
+    # Front/back pairing (Include card backs): side is "front"/"back"/None, pair_id
+    # links a front to its back, and awaiting marks a back slot with no image yet.
+    side: str | None = None
+    pair_id: int | None = None
+    awaiting: bool = False
+
+
+_STAGE_EMPTY = (
+    "Add images, then draw a box around each card.\n\n"
+    "Boxes become labeled regions your detector learns from."
+)
+_BACKS_EMPTY = (
+    "Add the card-backs photo.\n\n"
+    "Upload or paste a photo of these cards' backs — the front's boxes are "
+    "already placed, so you'll just align each one."
+)
 
 
 class _Scene(QGraphicsScene):
@@ -554,6 +570,7 @@ class RecognitionView(QWidget):
         self._rec_repo = None  # the vision repo backing the recognizer
         self._sessions: list[_Session] = []
         self._current: int = -1
+        self._pair_seq: int = 0  # increments per front/back pair (Include card backs)
         self._items: dict[int, QGraphicsRectItem] = {}  # number -> item (current)
         self._name_fields: dict[int, _NameField] = {}
         self._suggest_boxes: dict[int, _SuggestBox] = {}
@@ -759,20 +776,22 @@ class RecognitionView(QWidget):
         row.addWidget(_vrule())
 
         # -- Card-backs cluster
-        self._backs_cb = self._tool_button("Grade backs")
-        self._backs_cb.setCheckable(True)
-        self._backs_cb.setToolTip(
-            "Annotating card backs: saved images are tagged 'back' and each box "
-            "can be graded for condition."
+        self._include_backs_btn = self._tool_button("Include card backs")
+        self._include_backs_btn.setToolTip(
+            "Set the current (front) photo aside and add a photo of these cards' "
+            "backs. The labeled boxes copy over so you just align them; each "
+            "card's condition can then be graded from its back."
         )
-        self._backs_cb.toggled.connect(self._on_backs_toggled)
+        self._include_backs_btn.clicked.connect(self._include_card_backs)
         self._assess_btn = self._tool_button("Assess condition")
         self._assess_btn.setToolTip(
             "Estimate each box's condition from edge/corner whitening on the back"
         )
         self._assess_btn.clicked.connect(self._assess_conditions)
         self._assess_btn.setEnabled(False)
-        row.addLayout(self._cluster("Card backs", [self._backs_cb, self._assess_btn]))
+        row.addLayout(
+            self._cluster("Card backs", [self._include_backs_btn, self._assess_btn])
+        )
         row.addStretch(1)
         return bar
 
@@ -865,10 +884,7 @@ class RecognitionView(QWidget):
         self._view.setFrameShape(QFrame.NoFrame)
         v.addWidget(self._view, 1)
 
-        self._empty = QLabel(
-            "Add images, then draw a box around each card.\n\n"
-            "Boxes become labeled regions your detector learns from."
-        )
+        self._empty = QLabel(_STAGE_EMPTY)
         self._empty.setObjectName("emptyBox")
         self._empty.setAlignment(Qt.AlignCenter)
         self._empty.setWordWrap(True)
@@ -1085,7 +1101,23 @@ class RecognitionView(QWidget):
         return path
 
     def add_image_paths(self, paths) -> None:
-        """Load images into the session (also the test hook)."""
+        """Load images into the session (also the test hook). If the current slot
+        is an awaiting card-backs slot, the first image fills it; the rest are
+        added as new front images."""
+        paths = list(paths)
+        target = self._current
+        if paths and 0 <= self._current < len(self._sessions):
+            cur = self._sessions[self._current]
+            if cur.awaiting:
+                pix = QPixmap(str(paths[0]))
+                if not pix.isNull():
+                    cur.path = str(paths[0])
+                    cur.pixmap = pix
+                    cur.awaiting = False
+                    cur.orientation = (
+                        "portrait" if pix.height() > pix.width() else "landscape"
+                    )
+                    paths = paths[1:]
         for path in paths:
             pixmap = QPixmap(str(path))
             if pixmap.isNull():
@@ -1093,14 +1125,17 @@ class RecognitionView(QWidget):
             orientation = (
                 "portrait" if pixmap.height() > pixmap.width() else "landscape"
             )
-            session = _Session(
-                path=str(path), pixmap=pixmap, orientation=orientation
+            self._sessions.append(
+                _Session(path=str(path), pixmap=pixmap, orientation=orientation)
             )
-            self._sessions.append(session)
-            self._add_strip_item(session)
-        if self._sessions and self._current < 0:
-            self._strip.setCurrentRow(0)
-        self._film_cap.setText(f"IMAGES · {len(self._sessions)}")
+        if target < 0 and self._sessions:
+            target = 0
+        # Rebuild from scratch (thumbnails + the just-filled back slot), then
+        # reselect — mirrors the safe reindex path used on removal.
+        self._current = -1
+        self._rebuild_strip()
+        if 0 <= target < len(self._sessions):
+            self._strip.setCurrentRow(target)
 
     def _add_strip_item(self, session: _Session) -> None:
         row = self._strip.count()
@@ -1114,7 +1149,11 @@ class RecognitionView(QWidget):
 
     def _make_thumb(self, session: _Session) -> tuple[QFrame, QLabel]:
         t = theme.active()
-        name = session.path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        base = session.path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        if session.awaiting or not base:
+            base = "add backs photo"
+        # Front/back pairs read as a group: prefix the name with the side.
+        name = f"{session.side.title()} · {base}" if session.side else base
         frame = QFrame()
         frame.setObjectName("thumb")
         frame.setProperty("sel", False)
@@ -1125,10 +1164,15 @@ class RecognitionView(QWidget):
         pic.setObjectName("thumbPic")
         pic.setAlignment(Qt.AlignCenter)
         pic.setFixedHeight(84)
-        scaled = session.pixmap.scaled(
-            QSize(150, 82), Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        pic.setPixmap(scaled)
+        if session.pixmap.isNull():
+            pic.setText("＋ backs")
+            pic.setStyleSheet(f"color:{t.ink3};")
+        else:
+            pic.setPixmap(
+                session.pixmap.scaled(
+                    QSize(150, 82), Qt.KeepAspectRatio, Qt.SmoothTransformation
+                )
+            )
         v.addWidget(pic)
         meta = QFrame()
         meta.setObjectName("thumbMeta")
@@ -1209,8 +1253,20 @@ class RecognitionView(QWidget):
         # Each image opens in its own natural orientation (auto-detected); the
         # manual rotate control still works from there.
         self._rotation = 0
+        if session.awaiting:  # a card-backs slot waiting for its photo
+            self._empty.setText(_BACKS_EMPTY)
+            self._empty.setVisible(True)
+            self._view.setVisible(False)
+            self._zone_bar.setVisible(False)
+            self._scene.clear()
+            self._items.clear()
+            self._assess_btn.setEnabled(False)
+            self._refresh_panel()
+            return
+        self._empty.setText(_STAGE_EMPTY)
         self._empty.setVisible(False)
         self._view.setVisible(True)
+        self._assess_btn.setEnabled(session.side == "back")
         self._zone_bar.setVisible(self._is_transaction())
         self._sync_zone_labels(session)
         self._scene.clear()
@@ -1538,7 +1594,7 @@ class RecognitionView(QWidget):
             self._seg_list.addStretch(1)
             return
         session = self._sessions[self._current]
-        backs = self._backs_cb.isChecked()
+        backs = session.side == "back"  # condition column shows on card-backs images
         for box in session.boxes:
             self._seg_list.addWidget(self._make_seg_row(box, session, backs))
         self._seg_list.addStretch(1)
@@ -1744,9 +1800,48 @@ class RecognitionView(QWidget):
 
     # -- condition assessment (card backs, M-V3) ----------------------------
 
-    def _on_backs_toggled(self, on: bool) -> None:
-        self._assess_btn.setEnabled(on)
-        self._refresh_panel()
+    def _include_card_backs(self) -> None:
+        """Set the current (front) photo aside and open a slot for a backs photo,
+        copying the labeled boxes onto it so they only need aligning."""
+        if not (0 <= self._current < len(self._sessions)):
+            return
+        self._sync_scene_to_model()
+        front = self._sessions[self._current]
+        if front.awaiting:
+            QMessageBox.information(self, "Card backs", "Add this backs photo first.")
+            return
+        if front.side is not None:
+            QMessageBox.information(
+                self, "Card backs", "This photo is already part of a front/back pair."
+            )
+            return
+        if not front.boxes:
+            QMessageBox.information(
+                self,
+                "Card backs",
+                "Label the cards on the front first — the boxes copy onto the back.",
+            )
+            return
+        self._pair_seq += 1
+        front.side = "front"
+        front.pair_id = self._pair_seq
+        back = _Session(
+            path="",
+            pixmap=QPixmap(),
+            orientation=front.orientation,
+            side="back",
+            pair_id=self._pair_seq,
+            awaiting=True,
+        )
+        for b in front.boxes:  # copy labeled boxes onto the back to align
+            back.boxes.append(
+                _Box(number=b.number, rect=QRectF(b.rect), card=replace(b.card))
+            )
+        insert_at = self._current + 1
+        self._sessions.insert(insert_at, back)
+        self._current = -1
+        self._rebuild_strip()
+        self._strip.setCurrentRow(insert_at)
 
     def _ensure_assessor(self):
         if self._assessor is None:
@@ -1787,7 +1882,7 @@ class RecognitionView(QWidget):
 
     def _save(self) -> None:
         self._sync_scene_to_model()
-        sessions = [s for s in self._sessions if s.boxes]
+        sessions = [s for s in self._sessions if s.boxes and not s.awaiting]
         if not sessions:
             QMessageBox.information(
                 self, "Nothing to save", "Draw at least one box around a card."
@@ -1795,7 +1890,6 @@ class RecognitionView(QWidget):
             return
         repo = self._vision_repo or VisionRepository(open_vision())
         source = "transaction" if self._is_transaction() else "listing"
-        side = "back" if self._backs_cb.isChecked() else None
         capture_id = repo.add_capture(source=source)
         entries = []  # (region_id, card_id, image_path, box) for labeled regions
         for session in sessions:
@@ -1805,7 +1899,8 @@ class RecognitionView(QWidget):
                 capture_id,
                 sha,
                 str(dest),
-                side=side,
+                side=session.side,  # 'front' | 'back' | None
+                pair_group=session.pair_id,  # links a front to its back
                 width=pixmap.width(),
                 height=pixmap.height(),
             )
@@ -1821,8 +1916,12 @@ class RecognitionView(QWidget):
                 )
                 if box.condition:
                     box.card.condition = box.condition
+                # Backs carry identity + condition, not a give/receive zone.
+                region_side = (
+                    None if session.side == "back" else self._side_for(box, session)
+                )
                 region_id = repo.add_region(
-                    image_id, box.number, norm, self._side_for(box, session), box.card
+                    image_id, box.number, norm, region_side, box.card
                 )
                 if box.card and box.card.card_id:
                     entries.append((region_id, box.card.card_id, str(dest), norm))
@@ -1902,6 +2001,10 @@ class RecognitionView(QWidget):
     def _clear(self) -> None:
         self._sessions.clear()
         self._current = -1
+        self._pair_seq = 0
+        self._empty.setText(_STAGE_EMPTY)
+        self._empty.setVisible(True)
+        self._view.setVisible(False)
         self._items.clear()
         self._name_fields.clear()
         self._suggest_boxes.clear()
