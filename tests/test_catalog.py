@@ -282,3 +282,34 @@ def test_update_catalog_from_github_fallback_still_works(conn):
     assert (pika.number, pika.rarity, pika.image_small) == (
         "1", "Common", "https://images.pokemontcg.io/sv9/1.png",
     )
+
+
+def _hybrid_fetch(url: str):
+    # TCGdex side: a Trainer Gallery card with NO image (as TCGdex serves them).
+    if url.endswith("/sets"):
+        return [{"id": "swsh10tg", "name": "Astral Radiance Trainer Gallery"}]
+    if url.endswith("/sets/swsh10tg"):
+        return {
+            "id": "swsh10tg", "name": "Astral Radiance Trainer Gallery",
+            "abbreviation": {"official": "TG"},
+            "cardCount": {"official": 30, "total": 30},
+            "cards": [{"id": "swsh10.5tg-TG01", "localId": "TG01",
+                       "name": "Abomasnow", "image": None}],
+        }
+    # pokemontcg.io dump side (the fallback): same identity, WITH an image.
+    if url.endswith("/sets/en.json"):
+        return [{"id": "swsh10tg", "name": "Astral Radiance Trainer Gallery",
+                 "printedTotal": 30}]
+    if url.endswith("/cards/en/swsh10tg.json"):
+        return [{"id": "swsh10tg-TG01", "name": "Abomasnow", "number": "TG01",
+                 "images": {"small": "https://images.pokemontcg.io/swsh10tg/TG01.png"}}]
+    raise AssertionError(f"unexpected url: {url}")
+
+
+def test_missing_tcgdex_images_are_filled_from_github(conn):
+    # TCGdex lacks art for most Trainer Gallery / Shiny Vault subset cards; the
+    # pokemontcg.io dump supplies it, joined by name + set + number.
+    update_catalog(conn, fetch_json=_hybrid_fetch)
+    (card,) = CardCatalogRepository(conn).find_by_name("Abomasnow")
+    assert card.image_small == "https://images.pokemontcg.io/swsh10tg/TG01.png"
+    assert card.number == "TG01"

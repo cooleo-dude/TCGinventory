@@ -90,6 +90,61 @@ def _tcgdex_image(image: str | None) -> str | None:
     return f"{image}/low.png" if image else None
 
 
+def _norm_join(text: str | None) -> str:
+    """Loose key for joining the two sources by identity (case/punctuation-free)."""
+    return "".join(ch for ch in (text or "").lower() if ch.isalnum())
+
+
+def _github_image_index(fetch) -> dict[tuple[str, str, str], str]:
+    """``(name, set_name, number) → image_small`` from the pokemontcg.io dump —
+    used to fill images TCGdex omits (it lacks art for most Trainer Gallery /
+    Shiny Vault / Galarian Gallery subset cards, which pokemontcg.io carries).
+    Identities line up: same names, set names, and (prefixed) numbers."""
+    sets = _as_list(fetch(f"{_RAW}/sets/en.json"))
+    set_names = {
+        s["id"]: s.get("name") for s in sets if isinstance(s, dict) and s.get("id")
+    }
+    index: dict[tuple[str, str, str], str] = {}
+    for set_id, set_name in set_names.items():
+        try:
+            entries = _as_list(fetch(f"{_RAW}/cards/en/{set_id}.json"))
+        except Exception:
+            continue
+        for c in entries:
+            image = (c.get("images") or {}).get("small")
+            if not image:
+                continue
+            key = (
+                _norm_join(c.get("name")),
+                _norm_join(set_name),
+                _norm_join(c.get("number")),
+            )
+            index.setdefault(key, image)
+    return index
+
+
+def _fill_missing_images(cards, fetch) -> int:
+    """Fill ``image_small`` on TCGdex cards that have none, from the pokemontcg.io
+    dump. Best-effort — if that source is unreachable the cards just stay
+    image-less (no thumbnail), never an error."""
+    missing = [c for c in cards if not c.image_small]
+    if not missing:
+        return 0
+    try:
+        index = _github_image_index(fetch)
+    except Exception:
+        return 0
+    filled = 0
+    for card in missing:
+        image = index.get(
+            (_norm_join(card.name), _norm_join(card.set_name), _norm_join(card.number))
+        )
+        if image:
+            card.image_small = image
+            filled += 1
+    return filled
+
+
 def _tcgdex_set_code(detail: dict) -> str | None:
     abbr = detail.get("abbreviation")
     if isinstance(abbr, dict):
@@ -167,6 +222,7 @@ def update_catalog(
     if not cards:
         summary.errors.append("no cards fetched — catalog left unchanged")
         return summary
+    _fill_missing_images(cards, fetch)
     try:
         CardCatalogRepository(conn).replace_for_language(cards, "EN", now_iso())
         conn.commit()
