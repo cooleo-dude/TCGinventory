@@ -1192,11 +1192,12 @@ class TransactionView(QWidget):
         spacer.setFixedHeight(_TOOLBAR_H)
         body.addWidget(spacer)
         body.addWidget(_cash_block("Cash you pay", self._cash_out, t.pos))
-        body.addWidget(_add_button("Add a card you're giving", self._add_give_row))
         self._give_list = QVBoxLayout()
         self._give_list.setSpacing(8)
         self._give_list.setContentsMargins(0, 0, 0, 0)
         body.addLayout(self._give_list)
+        # The add button sits directly below the lowest card row.
+        body.addWidget(_add_button("Add a card you're giving", self._add_give_row))
         body.addStretch(1)
         v.addLayout(body)
         return panel
@@ -1250,11 +1251,12 @@ class TransactionView(QWidget):
         body.addWidget(tool_w)
 
         body.addWidget(_cash_block("Cash they pay you", self._cash_in, t.accent))
-        body.addWidget(_add_button("Add a card they're giving", self._add_receive_row))
         self._recv_list = QVBoxLayout()
         self._recv_list.setSpacing(8)
         self._recv_list.setContentsMargins(0, 0, 0, 0)
         body.addLayout(self._recv_list)
+        # The add button sits directly below the lowest card row.
+        body.addWidget(_add_button("Add a card they're giving", self._add_receive_row))
         body.addStretch(1)
         v.addLayout(body)
         return panel
