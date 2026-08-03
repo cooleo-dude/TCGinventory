@@ -2065,6 +2065,38 @@ class AuctionsView(QWidget):
         self._update_breakdown()
         self._refresh_gallery()
 
+    # -- Recognition export -------------------------------------------------
+
+    def editor_has_content(self) -> bool:
+        """True if the bid editor holds anything worth confirming before a clear."""
+        return bool(self._rows) or bool(self._title.text().strip())
+
+    def import_recognized(self, cards) -> None:
+        """Start a fresh lot and fill its rows from Recognition's labeled cards,
+        inheriting the same catalog + price autofill the ＋ add-card path uses."""
+        self._new()
+        for card in cards:
+            row = self._add_card_row()
+            catalog = (
+                CardCatalogRepository(self._conn).get(card.card_id)
+                if getattr(card, "card_id", None)
+                else None
+            )
+            if catalog is not None:
+                row.apply_catalog_card(catalog)
+                self._request_price(row, catalog)
+            else:
+                row.name.setText(card.name)
+                if card.set_name:
+                    row.set.setText(card.set_name)
+                if card.card_number:
+                    row.number.setText(card.card_number)
+            if card.condition:
+                _select(row.condition, card.condition)
+            row.qty.setValue(max(1, card.quantity))
+        self._update_breakdown()
+        self._refresh_gallery()
+
     def _clear_editor(self) -> None:
         self._rows.clear()
         self._card_table.setRowCount(0)

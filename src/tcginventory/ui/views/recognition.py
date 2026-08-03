@@ -18,7 +18,7 @@ import sqlite3
 import tempfile
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QModelIndex, QPointF, QRectF, QSize, Qt
+from PySide6.QtCore import QModelIndex, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -76,6 +76,26 @@ _YOLO_PEN = QColor(theme.DARK.accent2)  # trained-detector proposals (brick red)
 # Cosine below this gets a ⚠ in the suggestion list (advisory; frozen DINOv2 on
 # photo-vs-catalog-render is a weak baseline until the M-V2 fine-tune).
 _LOW_CONFIDENCE = 0.6
+
+
+@dataclass
+class RecognizedCard:
+    """A labeled card handed off to the Transaction / Auction windows on export.
+
+    Consumed duck-typed by those windows' ``import_recognized`` methods, so this
+    stays a plain data carrier (no cross-view import coupling)."""
+
+    card_id: str | None
+    name: str
+    set_name: str | None
+    card_number: str | None
+    language: str | None
+    quantity: int
+    side: str | None  # "give" | "receive" (transaction) | None (listing)
+    condition: str | None
+    is_graded: bool
+    grade: str | None
+    grading_company: str | None
 
 
 @dataclass
@@ -513,6 +533,11 @@ class _CardPreviewPane(CardImagePane):
 
 
 class RecognitionView(QWidget):
+    # Hand the current session's labeled cards to another window; payload is a
+    # list[RecognizedCard]. The main window routes + switches views.
+    export_to_transaction = Signal(object)
+    export_to_auction = Signal(object)
+
     def __init__(
         self,
         conn: sqlite3.Connection,
@@ -627,16 +652,37 @@ class RecognitionView(QWidget):
         self._mode_btns[0].setChecked(True)
         row.addWidget(toggle)
 
+        self._export_btn = QPushButton()
+        self._export_btn.setObjectName("tool")
+        self._export_btn.setIcon(icons.icon("arrow-left-right", t.ink2, 15))
+        self._export_btn.setToolTip(
+            "Send the labeled cards to the Transaction or Auction window "
+            "(by session mode)"
+        )
+        self._export_btn.clicked.connect(self._export)
+        row.addWidget(self._export_btn)
+
         save_btn = QPushButton("Save annotations")
         save_btn.setObjectName("primary")
         save_btn.setIcon(icons.icon("save", t.accent_on, 15))
         save_btn.clicked.connect(self._save)
         row.addWidget(save_btn)
+        self._sync_export_label()
         return head
 
     def _sync_mode_toggle(self, index: int) -> None:
         for i, b in enumerate(self._mode_btns):
             b.setChecked(i == index)
+        self._sync_export_label()
+
+    def _sync_export_label(self) -> None:
+        btn = getattr(self, "_export_btn", None)
+        if btn is not None:
+            btn.setText(
+                "Export to Transaction"
+                if self._is_transaction()
+                else "Export to Auction"
+            )
 
     # -- toolbar ------------------------------------------------------------
 
@@ -933,6 +979,63 @@ class RecognitionView(QWidget):
         if self._current >= 0:
             self._load_session(self._current)  # add/remove the divider
         self._refresh_panel()
+
+    # -- export to Transaction / Auction ------------------------------------
+
+    def _export(self) -> None:
+        """Hand the session's labeled cards to the window the mode implies."""
+        self._sync_scene_to_model()
+        cards = self._collect_export_cards()
+        if not cards:
+            QMessageBox.information(
+                self,
+                "Nothing to export",
+                "Label at least one card (draw a box and pick its name) first.",
+            )
+            return
+        if self._is_transaction():
+            self.export_to_transaction.emit(cards)
+        else:
+            self.export_to_auction.emit(cards)
+
+    def _collect_export_cards(self) -> list[RecognizedCard]:
+        """Labeled boxes across the session → RecognizedCards, aggregating exact
+        duplicates (same identity + side + condition + grading) into a quantity."""
+        agg: dict[tuple, RecognizedCard] = {}
+        order: list[tuple] = []
+        for session in self._sessions:
+            for box in session.boxes:
+                label = box.card
+                if not label or not (label.card_id or (label.name or "").strip()):
+                    continue  # skip unlabeled boxes
+                side = self._side_for(box, session)  # None in listing mode
+                condition = label.condition or box.condition
+                key = (
+                    label.card_id or (label.name or "").casefold(),
+                    side,
+                    condition,
+                    label.is_graded,
+                    label.grade,
+                    label.grading_company,
+                )
+                if key in agg:
+                    agg[key].quantity += 1
+                    continue
+                agg[key] = RecognizedCard(
+                    card_id=label.card_id,
+                    name=label.name or "",
+                    set_name=label.set_name,
+                    card_number=label.card_number,
+                    language=label.language,
+                    quantity=1,
+                    side=side,
+                    condition=condition,
+                    is_graded=label.is_graded,
+                    grade=label.grade,
+                    grading_company=label.grading_company,
+                )
+                order.append(key)
+        return [agg[k] for k in order]
 
     # -- images -------------------------------------------------------------
 

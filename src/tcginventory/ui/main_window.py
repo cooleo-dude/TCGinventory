@@ -70,6 +70,7 @@ NAV_ICONS = {
     "Market": "trending-up",
 }
 _TRANSACTION_INDEX = 1
+_AUCTION_INDEX = 6
 _REFRESH_STALE_HOURS = 12  # startup auto-refresh only if older than this
 
 
@@ -270,6 +271,12 @@ class MainWindow(QMainWindow):
             lambda: self._nav.setCurrentRow(_TRANSACTION_INDEX)
         )
         self._auctions.export_to_transaction.connect(self._export_from_auction)
+        self._recognition.export_to_transaction.connect(
+            self._export_recognition_to_transaction
+        )
+        self._recognition.export_to_auction.connect(
+            self._export_recognition_to_auction
+        )
 
         self._nav = QListWidget()
         self._nav.setObjectName("nav")
@@ -686,6 +693,43 @@ class MainWindow(QMainWindow):
             self._transaction.add_incoming(card)
         self._transaction.set_deal_context(counterparty="eBay", reference=title)
         self._nav.setCurrentRow(_TRANSACTION_INDEX)
+
+    def _export_recognition_to_transaction(self, cards) -> None:
+        """Recognition (Transaction session) → Transaction window."""
+        if self._transaction.has_content() and not self._confirm_overwrite(
+            "the current transaction"
+        ):
+            return
+        unmatched = self._transaction.import_recognized(cards)
+        self._nav.setCurrentRow(_TRANSACTION_INDEX)
+        if unmatched:
+            QMessageBox.information(
+                self,
+                "Some cards you're giving aren't in inventory",
+                "These give-side cards have no matching sellable lot, so they "
+                "were skipped — add them to inventory first:\n\n• "
+                + "\n• ".join(unmatched),
+            )
+
+    def _export_recognition_to_auction(self, cards) -> None:
+        """Recognition (Listing session) → Auction window."""
+        if self._auctions.editor_has_content() and not self._confirm_overwrite(
+            "the auction you're planning"
+        ):
+            return
+        self._auctions.import_recognized(cards)
+        self._nav.setCurrentRow(_AUCTION_INDEX)
+
+    def _confirm_overwrite(self, what: str) -> bool:
+        return (
+            QMessageBox.question(
+                self,
+                "Replace current cards?",
+                f"This will clear {what} and fill it with the recognized cards. "
+                "Continue?",
+            )
+            == QMessageBox.Yes
+        )
 
     def _update_status(self) -> None:
         count = self._conn.execute("SELECT COUNT(*) FROM item").fetchone()[0]

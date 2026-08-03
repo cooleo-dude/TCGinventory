@@ -112,16 +112,21 @@ def _mono_font(size: float, bold: bool = False) -> QFont:
     return f
 
 
-def _icon_button(glyph: str, tip: str, danger: bool = False) -> QPushButton:
-    """A borderless square glyph button (expand chevron / remove ✕)."""
+def _icon_button(
+    glyph: str, tip: str, danger: bool = False, icon: str | None = None
+) -> QPushButton:
+    """A borderless square button. Pass ``icon`` for a Lucide SVG (crisp + always
+    visible); ``glyph`` is a text fallback."""
     t = theme.active()
     b = QPushButton(glyph)
     b.setCursor(Qt.PointingHandCursor)
     b.setToolTip(tip)
     b.setFixedSize(26, 26)
     hover = t.neg if danger else t.ink
+    if icon:
+        b.setIcon(icons.icon(icon, t.ink2, 16))  # visible neutral; hovers to accent
     b.setStyleSheet(
-        f"QPushButton{{border:none;background:transparent;color:{t.ink3};"
+        f"QPushButton{{border:none;background:transparent;color:{t.ink2};"
         f"font-size:14px;border-radius:7px;}}"
         f"QPushButton:hover{{background:{t.surface};color:{hover};}}"
     )
@@ -204,6 +209,45 @@ def _select(combo: QComboBox, value: str) -> None:
     pos = combo.findData(value)
     if pos >= 0:
         combo.setCurrentIndex(pos)
+
+
+def _recognized_name(card) -> str:
+    """A short label for a recognized card in warnings."""
+    parts = [card.name or "?"]
+    if card.card_number:
+        parts.append(f"#{card.card_number}")
+    return " ".join(parts)
+
+
+def _match_sellable(sellable, card) -> int | None:
+    """Best-effort match of a recognized card to an owned sellable lot's item id,
+    by name (+ collector number, then set). Returns None when nothing matches."""
+
+    def norm(text) -> str:
+        return (text or "").strip().casefold()
+
+    def numkey(text) -> str:
+        return norm(text).split("/", 1)[0].lstrip("0")
+
+    name = norm(card.name)
+    if not name:
+        return None
+    num = numkey(card.card_number)
+    set_name = norm(card.set_name)
+    # 1) name + number (+ set when both sides have one); 2) name + number; 3) name.
+    for require_set in (True, False):
+        for item, _avail in sellable:
+            if norm(item.name) != name:
+                continue
+            if num and numkey(item.card_number) != num:
+                continue
+            if require_set and set_name and norm(item.set_name) != set_name:
+                continue
+            return item.id
+    for item, _avail in sellable:
+        if norm(item.name) == name:
+            return item.id
+    return None
 
 
 class _PriceLookupWorker(QThread):
@@ -401,7 +445,7 @@ class _GiveRow:
         h.addWidget(qlbl)
         self.qty.setFixedWidth(56)
         h.addWidget(self.qty)
-        remove = _icon_button("✕", "Remove this card", danger=True)
+        remove = _icon_button("", "Remove this card", danger=True, icon="trash-2")
         remove.clicked.connect(lambda: on_delete())
         h.addWidget(remove)
         return card
@@ -690,7 +734,7 @@ class _ReceiveRow:
         self._chev.setIcon(icons.icon("chevron-down", t.ink3, 16))
         self._chev.clicked.connect(self._toggle_adv)
         main.addWidget(self._chev)
-        remove = _icon_button("✕", "Remove this card", danger=True)
+        remove = _icon_button("", "Remove this card", danger=True, icon="trash-2")
         remove.clicked.connect(lambda: on_delete())
         main.addWidget(remove)
         main_w = QWidget()
@@ -1396,6 +1440,66 @@ class TransactionView(QWidget):
         row = self._add_receive_row()
         row.set_card(card)
         self._update_summary()
+
+    # -- Recognition export -------------------------------------------------
+
+    def has_content(self) -> bool:
+        """True if the window holds anything worth confirming before a clear."""
+        return bool(
+            self._give_rows
+            or self._receive_rows
+            or self._cash_in.value()
+            or self._cash_out.value()
+            or self._counterparty.text().strip()
+        )
+
+    def import_recognized(self, cards) -> list[str]:
+        """Fill a fresh deal from Recognition's labeled cards. Receive-side cards
+        become They-Give rows (via the autofill pipeline); give-side cards are
+        matched to owned sellable lots. Returns the display names of any give
+        cards with no matching inventory lot (skipped)."""
+        self.clear()
+        sellable = self._inventory.sellable_items()
+        unmatched: list[str] = []
+        for card in cards:
+            if getattr(card, "side", None) == "give":
+                item_id = _match_sellable(sellable, card)
+                if item_id is not None:
+                    self.add_outgoing(
+                        OutgoingCard(item_id=item_id, quantity=max(1, card.quantity))
+                    )
+                else:
+                    unmatched.append(_recognized_name(card))
+            else:  # receive, or listing/no-side → treat as incoming
+                self._add_recognized_receive(card)
+        self._update_summary()
+        return unmatched
+
+    def _add_recognized_receive(self, card) -> None:
+        row = self._add_receive_row()
+        catalog = (
+            CardCatalogRepository(self._conn).get(card.card_id)
+            if getattr(card, "card_id", None)
+            else None
+        )
+        if catalog is not None:
+            row.apply_catalog_card(catalog)
+            self._request_price(row, catalog)  # inherit the autofill price lookup
+        else:
+            row.name.setText(card.name)
+            if card.set_name:
+                row.set.setText(card.set_name)
+            if card.card_number:
+                row.number.setText(card.card_number)
+        if getattr(card, "is_graded", False):
+            row.graded.setChecked(True)
+            if card.grading_company:
+                _select(row.company, card.grading_company)
+            if card.grade:
+                row.grade.setText(card.grade)
+        elif card.condition:
+            _select(row.condition, card.condition)
+        row.qty.setValue(max(1, card.quantity))
 
     # -- image inference autofill (spec 06, Part 2) -------------------------
 
