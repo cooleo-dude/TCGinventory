@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlparse
 
-from tcginventory.domain.enums import Category, Condition, GradingCompany
+from tcginventory.domain.enums import (
+    Category,
+    Condition,
+    Edition,
+    GradingCompany,
+    HoloPattern,
+)
 from tcginventory.domain.models import Item
 from tcginventory.services.ebay import sold_search_url
 
@@ -37,3 +43,23 @@ def test_sold_search_url_drops_missing_parts():
     item = Item(name="Pikachu", category=Category.SINGLE)  # no set / number / cond
     q = parse_qs(urlparse(sold_search_url(item)).query)
     assert q["_nkw"] == ["Pikachu"]
+
+
+def test_sold_search_url_includes_edition_and_holo():
+    item = Item(
+        name="Charizard", category=Category.SINGLE, set_name="Base",
+        card_number="4/102", condition=Condition.LP,
+        holo_pattern=HoloPattern.HOLO, edition=Edition.FIRST,
+    )
+    q = parse_qs(urlparse(sold_search_url(item)).query)
+    assert q["_nkw"] == ["Charizard Base 4/102 1st Edition Holo LP"]
+
+
+def test_sold_search_url_reverse_holo_without_edition():
+    item = Item(
+        name="Arcanine", category=Category.SINGLE, set_name="151",
+        card_number="032", condition=Condition.HP,
+        holo_pattern=HoloPattern.REVERSE_HOLO, edition=Edition.NA,
+    )
+    q = parse_qs(urlparse(sold_search_url(item)).query)
+    assert q["_nkw"] == ["Arcanine 151 032 Reverse Holo HP"]
