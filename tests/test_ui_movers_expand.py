@@ -58,6 +58,29 @@ def test_movers_column_expands_and_collapses(app):
     col.deleteLater()
 
 
+def test_collapse_returns_to_the_fit_baseline_not_five(app):
+    from tcginventory.ui.views.dashboard import _PAGE, MoversColumn, _ImageLoader
+
+    conn = connect(":memory:")
+    migrate(conn)
+    col = MoversColumn("Top Gainers", "#ffffff", _ImageLoader(conn))
+    col.set_movers(_rows(20), gain=True)
+
+    # A tall screen auto-fits more than one page (baseline of 8 rows here).
+    col._row_h = 40
+    col.fit_to_height(8 * 40 + 80)
+    baseline = col._rows.count()
+    assert baseline > _PAGE  # the box grew past 5 to fill the screen
+
+    col._expand()
+    assert col._rows.count() == baseline + _PAGE  # user pages beyond the baseline
+
+    col._collapse()
+    # Collapse drops back to the fitted baseline, not a bare five rows.
+    assert col._rows.count() == baseline
+    col.deleteLater()
+
+
 def test_movers_column_no_expand_when_five_or_fewer(app):
     from tcginventory.ui.views.dashboard import MoversColumn, _ImageLoader
 

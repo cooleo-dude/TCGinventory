@@ -527,6 +527,7 @@ class _PagedBox(QFrame):
         self._dot_color = dot_color
         self._items: list = []
         self._visible = _PAGE
+        self._fit_visible = _PAGE  # auto-fit baseline (rows that fill the screen)
         self._user_paged = False  # once the user pages, stop auto-fitting
         self._row_h = 46  # per-row height estimate (refined after each render)
         self._outer = QVBoxLayout(self)
@@ -576,6 +577,7 @@ class _PagedBox(QFrame):
         rows_px = max(0, avail_px - overhead)
         fit = rows_px // max(1, self._row_h)
         target = min(len(self._items), max(_PAGE, fit))
+        self._fit_visible = target  # remember the baseline so Collapse returns here
         if target != self._visible:
             self._visible = target
             self._render()
@@ -640,7 +642,7 @@ class _PagedBox(QFrame):
                 )
             )
             added = True
-        if self._visible > _PAGE:
+        if self._visible > max(_PAGE, self._fit_visible):
             self._footer.addWidget(
                 self._foot_button(
                     "Collapse", "chevron-up", theme.active().ink3, self._collapse
@@ -669,8 +671,11 @@ class _PagedBox(QFrame):
         self._render()
 
     def _collapse(self) -> None:
-        self._user_paged = True
-        self._visible = _PAGE
+        # Collapse back to the auto-fit baseline (the size that filled the screen
+        # on load), not a bare five rows. Clearing _user_paged lets a later resize
+        # re-fit the box.
+        self._user_paged = False
+        self._visible = min(len(self._items) or _PAGE, max(_PAGE, self._fit_visible))
         self._render()
 
 
