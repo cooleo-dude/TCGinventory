@@ -533,3 +533,13 @@ def test_price_defaults_to_base_print_over_stamped_variant():
     assert p.price_for_card("SVP Black Star Promos", "173", "Eevee") == (
         1370, "eevee-base",
     )
+
+
+def test_variants_for_card_lists_base_first():
+    p = TcgcsvProvider(fetch_json=_variant_fetch)
+    variants = p.variants_for_card("SVP Black Star Promos", "173", "Eevee")
+    assert [(v.label, v.price_cents, v.is_base) for v in variants] == [
+        ("Base", 1370, True),
+        ("Pokemon Center Exclusive", 9413, False),
+    ]
+    assert variants[0].tcgplayer_url == "eevee-base"

@@ -98,6 +98,27 @@ class PriceQuote:
 
 
 @dataclass
+class CardVariant:
+    """One tcgplayer printing of a card — the base print or a stamped variant."""
+
+    label: str  # "Base", "Pokemon Center Exclusive", "Mirror Holo", …
+    tcgplayer_url: str
+    price_cents: int
+    is_base: bool = False
+
+
+def _variant_label(prod_name: str | None) -> tuple[str, bool]:
+    """A printing label from a tcgcsv product name. Stamped variants carry a
+    trailing "(...)"; a plain name is the base print."""
+    text = (prod_name or "").rstrip()
+    if text.endswith(")") and "(" in text:
+        inner = text[text.rfind("(") + 1 : -1].strip()
+        if inner:
+            return inner, False
+    return "Base", True
+
+
+@dataclass
 class RefreshSummary:
     priced: int = 0
     unmapped: list[str] = field(default_factory=list)  # item names with no price
@@ -185,6 +206,41 @@ class TcgcsvProvider:
             exact.sort(key=lambda t: t[0])
             return exact[0][1], exact[0][2]
         return base_match
+
+    def variants_for_card(
+        self,
+        set_name: str,
+        number: str,
+        name: str | None = None,
+        category: int = _CATEGORY_POKEMON,
+        *,
+        set_code: str | None = None,
+    ) -> list[CardVariant]:
+        """Every tcgplayer printing of a card (base + stamped variants), base
+        first. Empty if the card resolves to a single (or no) product — the
+        caller only offers a picker when there is more than one."""
+        group_id = self._resolve_group_for(set_name, set_code, number, category)
+        if group_id is None:
+            return []
+        want = _norm_number(number)
+        want_name = _norm(name) if name else None
+        prices = self._prices_for_group(category, group_id)
+        variants: list[CardVariant] = []
+        for product_id, prod_number, url, prod_name in self._products_for_group(
+            category, group_id
+        ):
+            if _norm_number(prod_number) != want:
+                continue
+            cents = prices.get(product_id)
+            if cents is None or not url:
+                continue
+            pnm = _norm(prod_name)
+            if want_name and pnm and want_name not in pnm and pnm not in want_name:
+                continue
+            label, is_base = _variant_label(prod_name)
+            variants.append(CardVariant(label, url, cents, is_base))
+        variants.sort(key=lambda v: (not v.is_base, len(v.label), v.label))
+        return variants
 
     def _products_for_group(
         self, category: int, group_id: int
