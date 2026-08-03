@@ -15,14 +15,18 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import tempfile
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QModelIndex, QRectF, QSize, Qt
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QGuiApplication,
+    QKeySequence,
     QPen,
     QPixmap,
+    QShortcut,
     QStandardItem,
     QStandardItemModel,
 )
@@ -333,6 +337,10 @@ class RecognitionView(QWidget):
         self._view.setVisible(False)
         self._zone_bar.setVisible(False)
 
+        # Ctrl+V pastes a copied image (or image file) as a new scene.
+        paste_sc = QShortcut(QKeySequence.Paste, self)
+        paste_sc.activated.connect(self._paste_image)
+
         # Warm the (heavy) identity model on a background thread so the first
         # Suggest / Transaction-autofill doesn't freeze on the model load. Uses a
         # process-wide shared embedder, so both windows benefit. Off by default,
@@ -534,6 +542,14 @@ class RecognitionView(QWidget):
         drop.clicked.connect(self._add_images)
         v.addWidget(drop)
 
+        paste = QPushButton("Paste from clipboard")
+        paste.setObjectName("pasteBtn")
+        paste.setIcon(icons.icon("clipboard-paste", theme.active().ink3, 14))
+        paste.setToolTip("Paste a copied image or image file  (Ctrl+V)")
+        paste.setCursor(Qt.PointingHandCursor)
+        paste.clicked.connect(self._paste_image)
+        v.addWidget(paste)
+
         self._strip = QListWidget()
         self._strip.setObjectName("strip")
         self._strip.setFrameShape(QFrame.NoFrame)
@@ -668,6 +684,45 @@ class RecognitionView(QWidget):
             self, "Add card scene images", "", _IMAGE_FILTER
         )
         self.add_image_paths(files)
+
+    _PASTE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+
+    def _paste_image(self) -> None:
+        """Add scene image(s) from the clipboard — either copied image files or a
+        raw bitmap (screenshot / copied image), which is spooled to a temp PNG so
+        the rest of the pipeline (crop / save / suggest) can read it from disk."""
+        clip = QGuiApplication.clipboard()
+        mime = clip.mimeData()
+
+        paths: list[str] = []
+        if mime.hasUrls():
+            for url in mime.urls():
+                if url.isLocalFile() and url.toLocalFile().lower().endswith(
+                    self._PASTE_EXTS
+                ):
+                    paths.append(url.toLocalFile())
+        if paths:
+            self.add_image_paths(paths)
+            return
+
+        image = clip.image()
+        if not image.isNull():
+            self.add_image_paths([self._spool_pasted_image(image)])
+            return
+
+        QMessageBox.information(
+            self,
+            "Paste image",
+            "The clipboard doesn't contain an image. Copy a card photo (or an "
+            "image file) and try again.",
+        )
+
+    def _spool_pasted_image(self, image) -> str:
+        """Write a pasted QImage to a temp PNG and return its path."""
+        fd, path = tempfile.mkstemp(prefix="tcgi-paste-", suffix=".png")
+        os.close(fd)
+        QPixmap.fromImage(image).save(path, "PNG")
+        return path
 
     def add_image_paths(self, paths) -> None:
         """Load images into the session (also the test hook)."""
@@ -1305,6 +1360,9 @@ def _view_qss(t: theme.Tokens) -> str:
         border-radius: 10px; padding: 13px; color: {t.ink3};
         text-align: center; }}
     #dropTile:hover {{ border-color: {t.accent}; color: {t.accent_ink}; }}
+    QPushButton#pasteBtn {{ background: transparent; border: none;
+        color: {t.ink3}; font-size: 11px; padding: 3px; }}
+    QPushButton#pasteBtn:hover {{ color: {t.accent_ink}; }}
 
     #strip {{ background: transparent; border: none; }}
     #strip::item {{ border: none; }}
