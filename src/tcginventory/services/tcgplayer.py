@@ -90,3 +90,28 @@ def product_url(item) -> str | None:
         if value:
             params.append((key, value))
     return f"{base}?{urllib.parse.urlencode(params)}"
+
+
+_SEARCH = "https://www.tcgplayer.com/search/pokemon/product"
+
+
+def search_url(item) -> str | None:
+    """A Pokémon-scoped TCGplayer search for the card (name + set + number).
+    Used when there's no stored product link to point at."""
+    name = (getattr(item, "name", None) or "").strip()
+    if not name:
+        return None
+    parts = [name]
+    for extra in (getattr(item, "set_name", None), getattr(item, "card_number", None)):
+        if extra:
+            parts.append(str(extra))
+    query = urllib.parse.urlencode({"q": " ".join(parts), "view": "grid"})
+    return f"{_SEARCH}?{query}"
+
+
+def link_for(item) -> str | None:
+    """The best TCGplayer link for a card: the specific product (its fields
+    layered on) when a product URL is stored, otherwise a search."""
+    if getattr(item, "tcgplayer_url", None):
+        return product_url(item)
+    return search_url(item)

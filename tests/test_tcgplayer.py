@@ -14,7 +14,7 @@ from tcginventory.domain.enums import (
     Language,
 )
 from tcginventory.domain.models import Item
-from tcginventory.services.tcgplayer import product_url
+from tcginventory.services.tcgplayer import link_for, product_url, search_url
 
 _BASE = "https://www.tcgplayer.com/product/84586/pokemon-team-rocket-dark-dragonite-22"
 
@@ -85,6 +85,22 @@ def test_unknown_printing_is_omitted():
 
 def test_no_stored_url_returns_none():
     assert product_url(Item(name="X", category=Category.SINGLE)) is None
+
+
+def test_search_url_from_fields():
+    item = Item(
+        name="Charizard", category=Category.SINGLE, set_name="Base", card_number="4/102"
+    )
+    url = search_url(item)
+    assert url.startswith("https://www.tcgplayer.com/search/pokemon/product?")
+    assert _params(url)["q"] == "Charizard Base 4/102"
+
+
+def test_link_for_prefers_product_then_search():
+    assert "/product/84586/" in link_for(_item(condition=Condition.NM))
+    no_link = Item(name="Pikachu", category=Category.SINGLE, card_number="25")
+    assert "/search/pokemon/product" in link_for(no_link)
+    assert link_for(Item(name="", category=Category.SINGLE)) is None
 
 
 def test_accepts_raw_string_fields_like_an_auction_card():

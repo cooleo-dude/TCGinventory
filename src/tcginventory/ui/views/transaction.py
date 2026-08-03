@@ -21,9 +21,19 @@ from __future__ import annotations
 
 import sqlite3
 
-from PySide6.QtCore import QDate, QModelIndex, QRectF, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import (
+    QDate,
+    QModelIndex,
+    QRectF,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
+    QDesktopServices,
     QFont,
     QKeySequence,
     QPainter,
@@ -78,7 +88,8 @@ from tcginventory.domain.enums import (
     TransactionStatus,
 )
 from tcginventory.domain.models import Item
-from tcginventory.services import cardimages
+from tcginventory.services import cardimages, tcgplayer
+from tcginventory.services.ebay import sold_search_url
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inference import write_back as inference_write_back
 from tcginventory.services.inventory import InventoryService
@@ -129,6 +140,21 @@ def _icon_button(
         f"QPushButton{{border:none;background:transparent;color:{t.ink2};"
         f"font-size:14px;border-radius:7px;}}"
         f"QPushButton:hover{{background:{t.surface};color:{hover};}}"
+    )
+    return b
+
+
+def _link_button(text: str, tip: str) -> QPushButton:
+    """A compact outlined quick-link chip (e.g. TCG / eBay) that hovers to accent."""
+    t = theme.active()
+    b = QPushButton(text)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setToolTip(tip)
+    b.setFixedHeight(24)
+    b.setStyleSheet(
+        f"QPushButton{{border:1px solid {t.line2};border-radius:6px;color:{t.ink2};"
+        f"padding:1px 8px;font-size:11px;font-weight:600;}}"
+        f"QPushButton:hover{{border-color:{t.accent};color:{t.accent_ink};}}"
     )
     return b
 
@@ -696,6 +722,17 @@ class _ReceiveRow:
             review=self.review.isChecked(),
         )
 
+    def _open_tcgplayer(self) -> None:
+        card = self.to_card()  # None until the row has a name
+        if card is not None and (url := tcgplayer.link_for(card.item)):
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _open_ebay(self) -> None:
+        card = self.to_card()
+        if card is not None:
+            url = card.item.ebay_url or sold_search_url(card.item)
+            QDesktopServices.openUrl(QUrl(url))
+
     def widget(self, on_delete) -> QWidget:
         """A card-row: essentials inline, advanced fields behind an expander."""
         t = theme.active()
@@ -730,6 +767,13 @@ class _ReceiveRow:
         main.addWidget(self.market)
         main.addWidget(self.qty)
         main.addWidget(self.intent)
+        # Quick market lookups — built from the card's fields (URL / search).
+        self._tcg_link = _link_button("TCG", "Look this card up on TCGplayer")
+        self._tcg_link.clicked.connect(self._open_tcgplayer)
+        self._ebay_link = _link_button("eBay", "eBay sold listings for this card")
+        self._ebay_link.clicked.connect(self._open_ebay)
+        main.addWidget(self._tcg_link)
+        main.addWidget(self._ebay_link)
         self._chev = _icon_button("", "Show / hide the extra fields")
         self._chev.setIcon(icons.icon("chevron-down", t.ink3, 16))
         self._chev.clicked.connect(self._toggle_adv)
