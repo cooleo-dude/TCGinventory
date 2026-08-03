@@ -1,8 +1,9 @@
 """Local reference card catalog.
 
-* **English** comes from the open pokemontcg.io dataset
-  (github.com/PokemonTCG/pokemon-tcg-data) — an index of sets plus one JSON file
-  of cards per set.
+* **English** comes from the open **TCGdex** API (api.tcgdex.net) — a set index
+  plus one set-detail file per set (its full card list + images). It's the most
+  current free source (has the newest promos the pokemontcg.io GitHub dump lags
+  on). The GitHub dump remains as :func:`update_catalog_from_github`.
 * **Japanese** comes from tcgcsv.com's "Pokemon Japan" category (85): groups
   (sets) and one products file per group, with English/romaji names, collector
   numbers, TCGplayer-CDN images, and — later — the same source for pricing.
@@ -30,6 +31,7 @@ from tcginventory.domain.models import CatalogCard
 _NUMBER_IN_NAME = re.compile(r"\s*-\s*\d+/[\w-]+")
 
 _RAW = "https://raw.githubusercontent.com/PokemonTCG/pokemon-tcg-data/master"
+_TCGDEX = "https://api.tcgdex.net/v2/en"
 _TCGCSV = "https://tcgcsv.com/tcgplayer"
 _CATEGORY_JP = 85  # tcgcsv "Pokemon Japan"
 
@@ -72,16 +74,118 @@ class CatalogUpdateSummary:
     errors: list[str] = field(default_factory=list)
 
 
+def _tcgdex_number(local_id: str | None) -> str | None:
+    """TCGdex ``localId`` → our collector-number convention. Numeric ids are
+    zero-padded there ("001"); strip that to match the historical "1" form.
+    Lettered ids ("SV074", "TG01") are kept as-is."""
+    text = (local_id or "").strip()
+    if not text:
+        return None
+    return str(int(text)) if text.isdigit() else text
+
+
+def _tcgdex_image(image: str | None) -> str | None:
+    """TCGdex serves an *asset base* URL; the concrete file needs a quality +
+    extension. Use a small-ish PNG comparable to pokemontcg.io's ``small``."""
+    return f"{image}/low.png" if image else None
+
+
+def _tcgdex_set_code(detail: dict) -> str | None:
+    abbr = detail.get("abbreviation")
+    if isinstance(abbr, dict):
+        return abbr.get("official") or abbr.get("localId")
+    if isinstance(abbr, str):
+        return abbr
+    serie = detail.get("serie")
+    return serie.get("id") if isinstance(serie, dict) else None
+
+
 def update_catalog(
     conn: sqlite3.Connection,
     fetch_json: Callable[[str], object] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> CatalogUpdateSummary:
-    """Pull the full English card dataset into ``card_catalog``. Atomic.
+    """Pull the full English card dataset from **TCGdex** into ``card_catalog``.
 
-    Fetches the sets index, then each set's card file, and replaces the catalog
-    wholesale. A single set that fails to fetch is recorded and skipped.
+    Fetches the set index (``/sets``), then each set's detail (``/sets/{id}``,
+    which carries that set's full card list + images), and replaces the English
+    catalog wholesale. A single set that fails is recorded and skipped; if the
+    whole pull yields nothing (TCGdex unreachable) the existing catalog is left
+    untouched rather than wiped. No API key.
+
+    TCGdex omits per-card rarity/supertype from the set payload (they need a
+    per-card request each), so those columns are left NULL — the app doesn't key
+    behaviour on them. See :func:`update_catalog_from_github` for the legacy
+    source, kept as a fallback.
     """
+    fetch = fetch_json or _fetch_json
+    summary = CatalogUpdateSummary()
+
+    sets = _as_list(fetch(f"{_TCGDEX}/sets"))
+    total = len([s for s in sets if isinstance(s, dict) and s.get("id")])
+
+    cards: list[CatalogCard] = []
+    done = 0
+    for s in sets:
+        if not isinstance(s, dict) or not s.get("id"):
+            continue
+        set_id = s["id"]
+        try:
+            detail = fetch(f"{_TCGDEX}/sets/{set_id}")
+        except Exception as exc:
+            summary.errors.append(f"{set_id}: {exc}")
+            done += 1
+            if on_progress is not None:
+                on_progress(done, total)
+            continue
+        set_name = detail.get("name") or s.get("name")
+        set_code = _tcgdex_set_code(detail)
+        counts = detail.get("cardCount") or {}
+        printed_total = counts.get("official") or counts.get("total")
+        for c in detail.get("cards") or []:
+            card_id = c.get("id")
+            if not card_id:
+                continue
+            cards.append(
+                CatalogCard(
+                    card_id=card_id,
+                    name=c.get("name") or "",
+                    set_id=set_id,
+                    set_name=set_name,
+                    set_code=set_code,
+                    number=_tcgdex_number(c.get("localId")),
+                    rarity=None,
+                    supertype=None,
+                    image_small=_tcgdex_image(c.get("image")),
+                    printed_total=printed_total,
+                )
+            )
+        done += 1
+        if on_progress is not None:
+            on_progress(done, total)
+
+    if not cards:
+        summary.errors.append("no cards fetched — catalog left unchanged")
+        return summary
+    try:
+        CardCatalogRepository(conn).replace_for_language(cards, "EN", now_iso())
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    summary.sets = total
+    summary.cards = len(cards)
+    return summary
+
+
+def update_catalog_from_github(
+    conn: sqlite3.Connection,
+    fetch_json: Callable[[str], object] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> CatalogUpdateSummary:
+    """Legacy English source: the pokemontcg.io GitHub dump. Kept as a fallback
+    (it lags the live data for the newest promos). Atomic; a single failed set is
+    recorded and skipped."""
     fetch = fetch_json or _fetch_json
     summary = CatalogUpdateSummary()
 

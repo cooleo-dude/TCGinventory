@@ -66,30 +66,41 @@ def test_update_catalog_ja_imports_numberless_vintage_cards(conn):
     assert gm.language == "JP"
     assert gm.number is None  # tcgcsv has no collector number for this set
 
+# TCGdex shape: a brief /sets index + a /sets/{id} detail carrying the full card
+# list (id, localId, name, image). Numbers are zero-padded there ("001").
 _SETS = [
-    {"id": "sv9", "name": "Journey Together", "ptcgoCode": "JTG",
-     "printedTotal": 159},
-    {"id": "cel25", "name": "Celebrations", "ptcgoCode": "CEL",
-     "printedTotal": 25},
+    {"id": "sv9", "name": "Journey Together"},
+    {"id": "cel25", "name": "Celebrations"},
 ]
-_CARDS = {
-    "sv9": [
-        {"id": "sv9-163", "name": "Iono's Kilowattrel", "number": "163",
-         "rarity": "Illustration Rare", "supertype": "Pokémon"},
-        {"id": "sv9-1", "name": "Pikachu", "number": "1", "supertype": "Pokémon"},
-    ],
-    "cel25": [
-        {"id": "cel25-5", "name": "Pikachu", "number": "5", "supertype": "Pokémon"},
-    ],
+_SET_DETAIL = {
+    "sv9": {
+        "id": "sv9", "name": "Journey Together",
+        "abbreviation": {"official": "JTG"},
+        "cardCount": {"official": 159, "total": 159},
+        "cards": [
+            {"id": "sv9-163", "localId": "163", "name": "Iono's Kilowattrel",
+             "image": "https://assets.tcgdex.net/en/sv/sv9/163"},
+            {"id": "sv9-1", "localId": "001", "name": "Pikachu",
+             "image": "https://assets.tcgdex.net/en/sv/sv9/001"},
+        ],
+    },
+    "cel25": {
+        "id": "cel25", "name": "Celebrations",
+        "abbreviation": {"official": "CEL"},
+        "cardCount": {"official": 25, "total": 25},
+        "cards": [
+            {"id": "cel25-5", "localId": "5", "name": "Pikachu", "image": None},
+        ],
+    },
 }
 
 
 def _fake_fetch(url: str):
-    if url.endswith("/sets/en.json"):
+    if url.endswith("/sets"):
         return _SETS
-    for set_id, cards in _CARDS.items():
-        if url.endswith(f"/cards/en/{set_id}.json"):
-            return cards
+    for set_id, detail in _SET_DETAIL.items():
+        if url.endswith(f"/sets/{set_id}"):
+            return detail
     raise AssertionError(f"unexpected url: {url}")
 
 
@@ -115,9 +126,10 @@ def test_catalog_autocomplete_queries(conn):
         ("Celebrations", "5"),
     }
     (kilo,) = repo.find_by_name("Iono's Kilowattrel")
-    assert (kilo.set_code, kilo.number, kilo.rarity) == (
-        "JTG", "163", "Illustration Rare",
-    )
+    # set_code comes from TCGdex's abbreviation; rarity isn't in the set payload.
+    assert (kilo.set_code, kilo.number, kilo.rarity) == ("JTG", "163", None)
+    # image_small is TCGdex's asset base + quality/extension.
+    assert kilo.image_small == "https://assets.tcgdex.net/en/sv/sv9/163/low.png"
 
 
 def test_search_enriches_with_set_and_number(conn):
@@ -228,7 +240,7 @@ def test_update_catalog_replaces_and_skips_bad_set(conn):
     update_catalog(conn, fetch_json=_fake_fetch)
 
     def flaky(url: str):
-        if url.endswith("/cards/en/cel25.json"):
+        if url.endswith("/sets/cel25"):
             raise RuntimeError("boom")
         return _fake_fetch(url)
 
@@ -236,3 +248,37 @@ def test_update_catalog_replaces_and_skips_bad_set(conn):
     assert summary.cards == 2  # only sv9's cards survived
     assert summary.errors and "cel25" in summary.errors[0]
     assert CardCatalogRepository(conn).count() == 2  # replaced, not appended
+
+
+def test_update_catalog_keeps_catalog_when_source_unreachable(conn):
+    update_catalog(conn, fetch_json=_fake_fetch)
+    assert CardCatalogRepository(conn).count() == 3
+
+    # TCGdex down → the set index is empty; the existing catalog must survive.
+    summary = update_catalog(conn, fetch_json=lambda _url: [])
+    assert summary.cards == 0 and summary.errors
+    assert CardCatalogRepository(conn).count() == 3  # left intact, not wiped
+
+
+def test_update_catalog_from_github_fallback_still_works(conn):
+    from tcginventory.services.catalog import update_catalog_from_github
+
+    sets = [{"id": "sv9", "name": "Journey Together", "ptcgoCode": "JTG",
+             "printedTotal": 159}]
+    cards = [{"id": "sv9-1", "name": "Pikachu", "number": "1", "rarity": "Common",
+              "supertype": "Pokémon",
+              "images": {"small": "https://images.pokemontcg.io/sv9/1.png"}}]
+
+    def fetch(url: str):
+        if url.endswith("/sets/en.json"):
+            return sets
+        if url.endswith("/cards/en/sv9.json"):
+            return cards
+        raise AssertionError(url)
+
+    summary = update_catalog_from_github(conn, fetch_json=fetch)
+    assert summary.cards == 1
+    (pika,) = CardCatalogRepository(conn).find_by_name("Pikachu")
+    assert (pika.number, pika.rarity, pika.image_small) == (
+        "1", "Common", "https://images.pokemontcg.io/sv9/1.png",
+    )

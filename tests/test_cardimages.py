@@ -8,37 +8,38 @@ from tcginventory.services.catalog import update_catalog
 
 _PNG = b"\x89PNG\r\n\x1a\n" + b"fake-bytes"
 
-_SETS = [{"id": "sv9", "name": "Journey Together", "ptcgoCode": "JTG"}]
-_CARDS = {
-    "sv9": [
-        {
-            "id": "sv9-163",
-            "name": "Iono's Kilowattrel",
-            "number": "163",
-            "supertype": "Pokémon",
-            "images": {
-                "small": "https://images.pokemontcg.io/sv9/163.png",
-                "large": "https://images.pokemontcg.io/sv9/163_hires.png",
-            },
-        },
-        # A card with no image (defensive: dataset occasionally omits it).
-        {"id": "sv9-1", "name": "Pikachu", "number": "1", "supertype": "Pokémon"},
-    ],
+# TCGdex shape: /sets index + /sets/{id} detail. ``image`` is an asset base URL;
+# the catalog appends "/low.png". Some cards omit the image entirely.
+_SETS = [{"id": "sv9", "name": "Journey Together"}]
+_SET_DETAIL = {
+    "sv9": {
+        "id": "sv9", "name": "Journey Together",
+        "abbreviation": {"official": "JTG"},
+        "cardCount": {"official": 159, "total": 159},
+        "cards": [
+            {"id": "sv9-163", "localId": "163", "name": "Iono's Kilowattrel",
+             "image": "https://assets.tcgdex.net/en/sv/sv9/163"},
+            # A card with no image (dataset occasionally omits it).
+            {"id": "sv9-1", "localId": "001", "name": "Pikachu", "image": None},
+        ],
+    },
 }
+
+_KILO_IMG = "https://assets.tcgdex.net/en/sv/sv9/163/low.png"
 
 
 def _fetch(url: str):
-    if url.endswith("/sets/en.json"):
+    if url.endswith("/sets"):
         return _SETS
-    if url.endswith("/cards/en/sv9.json"):
-        return _CARDS["sv9"]
+    if url.endswith("/sets/sv9"):
+        return _SET_DETAIL["sv9"]
     raise AssertionError(f"unexpected url: {url}")
 
 
 def test_catalog_stores_small_image_url(conn):
     update_catalog(conn, fetch_json=_fetch)
     (kilo,) = CardCatalogRepository(conn).find_by_name("Iono's Kilowattrel")
-    assert kilo.image_small == "https://images.pokemontcg.io/sv9/163.png"
+    assert kilo.image_small == _KILO_IMG
 
 
 def test_image_for_matches_by_identity(conn):
@@ -46,7 +47,7 @@ def test_image_for_matches_by_identity(conn):
     repo = CardCatalogRepository(conn)
 
     hit = repo.image_for("Iono's Kilowattrel", "Journey Together", "163/159")
-    assert hit == ("sv9-163", "https://images.pokemontcg.io/sv9/163.png")
+    assert hit == ("sv9-163", _KILO_IMG)
 
     # A card whose only printing has no image yields nothing to preview.
     assert repo.image_for("Pikachu", "Journey Together", "1") is None
