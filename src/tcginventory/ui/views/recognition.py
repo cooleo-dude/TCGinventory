@@ -498,7 +498,8 @@ class _SuggestBox(QComboBox):
 
 
 class _ConditionBox(QComboBox):
-    """Per-box condition picker (card-backs mode); writes to the box."""
+    """Per-box condition picker; writes the wear grade to the box so the saved
+    corpus region records each card's condition."""
 
     def __init__(self, box: _Box) -> None:
         super().__init__()
@@ -1594,9 +1595,8 @@ class RecognitionView(QWidget):
             self._seg_list.addStretch(1)
             return
         session = self._sessions[self._current]
-        backs = session.side == "back"  # condition column shows on card-backs images
         for box in session.boxes:
-            self._seg_list.addWidget(self._make_seg_row(box, session, backs))
+            self._seg_list.addWidget(self._make_seg_row(box, session))
         self._seg_list.addStretch(1)
         n = len(session.boxes)
         self._seg_count.setText(f"Segments · {n} card{'' if n == 1 else 's'}")
@@ -1610,7 +1610,7 @@ class RecognitionView(QWidget):
             if w is not None:
                 w.deleteLater()
 
-    def _make_seg_row(self, box: _Box, session: _Session, backs: bool) -> QFrame:
+    def _make_seg_row(self, box: _Box, session: _Session) -> QFrame:
         side = self._side_for(box, session)
         row = _SegRow(box.number, self._on_seg_hover)
         row.setObjectName("segRow")
@@ -1656,7 +1656,7 @@ class RecognitionView(QWidget):
             r1.addWidget(chip)
         v.addLayout(r1)
 
-        # bottom line: set·number meta + suggestion (+ condition in backs mode)
+        # bottom line: set·number meta + suggestion + condition picker
         r2 = QHBoxLayout()
         r2.setSpacing(8)
         r2.setContentsMargins(31, 0, 0, 0)
@@ -1665,9 +1665,11 @@ class RecognitionView(QWidget):
         suggest.setObjectName("segSuggest")
         self._suggest_boxes[box.number] = suggest
         r2.addWidget(suggest)
+        # Condition picker on every card so the corpus records its grade — not
+        # just on card backs. "Assess condition" still auto-fills it on backs.
         cond = _ConditionBox(box)
         cond.setObjectName("segCond")
-        cond.setVisible(backs)
+        cond.setToolTip("Condition / wear grade for this card (saved to the corpus)")
         self._condition_boxes[box.number] = cond
         r2.addWidget(cond)
         v.addLayout(r2)

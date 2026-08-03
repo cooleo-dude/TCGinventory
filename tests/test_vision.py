@@ -343,6 +343,35 @@ def test_save_indexes_labeled_crops_as_exemplars(app, _quiet, tmp_path):
     assert cards == ["L", "R"]
 
 
+def test_condition_set_while_labeling_saves_to_corpus(app, _quiet, tmp_path):
+    """The per-card condition picker is available on any card (not just backs),
+    and its value is written to the saved region."""
+    from PySide6.QtCore import QRectF
+
+    from tcginventory.data.db import connect
+    from tcginventory.data.migrator import migrate
+    from tcginventory.ui.views.recognition import RecognitionView
+
+    conn = connect(":memory:")
+    migrate(conn)
+    vrepo = VisionRepository(open_vision(":memory:"))
+    view = RecognitionView(
+        conn, vision_repo=vrepo, vision_dir=tmp_path,
+        recognizer=_pixel_recognizer(vrepo),
+    )
+    view._mode.setCurrentIndex(1)  # listing — a plain front image
+    view.add_image_paths([_png(tmp_path / "s.png", 200, 100)])
+    box = view._add_box(QRectF(10, 10, 40, 60))
+    box.card = CardLabel(card_id="cel-4", name="Charizard")
+
+    view._condition_boxes[box.number].set_condition("LP")  # picker on every card
+    assert box.condition == "LP"
+
+    view._save()
+    assert vrepo.conn.execute("SELECT condition FROM region").fetchone()[0] == "LP"
+    view.deleteLater()
+
+
 def test_card_backs_pairs_front_and_grades_from_back(app, _quiet, tmp_path):
     """Include card backs: the front is set aside, a back slot opens with the
     boxes copied over, and saving links the pair (front/back + pair_group) with
