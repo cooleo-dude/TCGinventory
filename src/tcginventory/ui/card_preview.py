@@ -15,6 +15,7 @@ currently-requested id).
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QThread, Signal
@@ -25,6 +26,8 @@ from tcginventory.services import cardimages
 from tcginventory.ui import theme
 
 _PREVIEW_WIDTH = 240  # px; small-image PNGs are ~245px wide natively
+_MAX_INFLIGHT = 6  # concurrent image fetches, process-wide
+_MAX_PENDING = 48  # queued fetches before the oldest are dropped
 
 
 class _FetchWorker(QThread):
@@ -38,6 +41,56 @@ class _FetchWorker(QThread):
     def run(self) -> None:  # pragma: no cover - thread body exercised via UI
         path = cardimages.ensure_cached(self._card_id, self._url)
         self.done.emit(self._card_id, str(path) if path else "")
+
+
+class _FetchQueue:
+    """Process-wide bounded queue for card-image fetches.
+
+    Every preview/pane/cascade routes fetches through the single shared queue so
+    a cold cache + rapid hovering can't spawn hundreds of QThreads at once (which
+    exhausts Qt's thread limits and crashes). At most ``_MAX_INFLIGHT`` run
+    concurrently; excess is queued (oldest dropped past ``_MAX_PENDING``, since a
+    stale hover no longer matters). ``on_done(card_id, path)`` fires on the main
+    thread; the caller decides whether the result is still wanted.
+    """
+
+    def __init__(self) -> None:
+        self._pending: deque[tuple[str, str, Callable[[str, str], None]]] = deque()
+        self._active: list[_FetchWorker] = []
+
+    def submit(
+        self, card_id: str | None, url: str | None, on_done: Callable[[str, str], None]
+    ) -> None:
+        if not card_id or not url:
+            return
+        self._pending.append((card_id, url, on_done))
+        while len(self._pending) > _MAX_PENDING:
+            self._pending.popleft()  # drop the stalest request
+        self._pump()
+
+    def _pump(self) -> None:
+        while len(self._active) < _MAX_INFLIGHT and self._pending:
+            card_id, url, cb = self._pending.popleft()
+            worker = _FetchWorker(card_id, url)
+            worker.done.connect(cb)
+            worker.finished.connect(lambda w=worker: self._retire(w))
+            self._active.append(worker)
+            worker.start()
+
+    def _retire(self, worker: _FetchWorker) -> None:
+        if worker in self._active:
+            self._active.remove(worker)
+        self._pump()
+
+
+_QUEUE: _FetchQueue | None = None
+
+
+def _fetch_queue() -> _FetchQueue:
+    global _QUEUE
+    if _QUEUE is None:
+        _QUEUE = _FetchQueue()
+    return _QUEUE
 
 
 class CardImagePreview(QObject):
@@ -74,11 +127,7 @@ class CardImagePreview(QObject):
         if path.exists():
             self._show(str(path))
             return
-        worker = _FetchWorker(card_id, url)
-        worker.done.connect(self._on_fetched)
-        worker.finished.connect(lambda w=worker: self._retire(w))
-        self._workers.append(worker)
-        worker.start()
+        _fetch_queue().submit(card_id, url, self._on_fetched)
 
     def clear(self) -> None:
         self._current = None
@@ -161,11 +210,7 @@ class CardImagePane(QLabel):
         if path.exists():
             self._set_image(card_id, str(path))
             return
-        worker = _FetchWorker(card_id, url)
-        worker.done.connect(self._on_fetched)
-        worker.finished.connect(lambda w=worker: self._retire(w))
-        self._workers.append(worker)
-        worker.start()
+        _fetch_queue().submit(card_id, url, self._on_fetched)
 
     def clear(self) -> None:
         # Leaving a card keeps the last one shown (persistent preview). Nothing
