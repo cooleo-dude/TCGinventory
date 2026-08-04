@@ -147,6 +147,20 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   - **Operations shows** the current version and its provenance ("trained on 20
     images / 88 boxes", stale when the corpus has moved on), the last run's
     accuracy, the per-run accuracy trend, and the **Train** trigger.
+  - **Next, agreed 2026-08-04 — two open pieces:**
+    1. **Build the Operations fields** — the `models.detector.train` entry in the
+       reserved `models` group plus the panel described above (version,
+       provenance, stale pill, metrics, accuracy trend, run history including
+       failures). The data is all there; only the UI is missing.
+    2. **Decide how the condition model is generated.** Today the framework only
+       trains a **detector**. Condition has a heuristic
+       (`services/condition.py`), a `condition_regions()` feed of (back-side
+       crop, grade) pairs and an untried `training/train_condition.py` scaffold,
+       but no defined path from corpus → model → installed artifact, and the run
+       log is detector-shaped: a second model kind needs either a sibling table
+       or a `kind` column on `detector_run`. The identifier has the same gap for
+       its optional ArcFace fine-tune (its exemplar path needs no training, so
+       it's less urgent).
 - **M-V2** — learning from the ingested corpus. **Crop-exemplar retrieval ✅
   done (usable now):** every labeled region is embedded and stored
   (`region_embedding`), and `Recognizer.suggest` scores each card by its best
