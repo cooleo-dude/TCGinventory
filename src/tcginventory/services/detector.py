@@ -52,8 +52,19 @@ def yolo_model_path() -> Path | None:
 
 def available() -> bool:
     """Whether a trained detector is installed — detection is a no-op without
-    one (nothing proposes boxes until ``training/train_detector.py`` has run)."""
+    one (nothing proposes boxes until a model has been trained)."""
     return yolo_model_path() is not None
+
+
+def trained_model_destination() -> Path:
+    """Where a training run should write its model.
+
+    The data dir, not the package: a frozen install's ``_internal`` is replaced
+    wholesale on upgrade, and writing there would lose the model. This is the
+    second location :func:`yolo_model_path` checks, so a model trained from the
+    Operations window is picked up on the next lookup.
+    """
+    return config.data_dir() / "vision" / "models" / YOLO_MODEL_FILENAME
 
 
 

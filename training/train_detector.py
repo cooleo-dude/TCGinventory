@@ -1,26 +1,28 @@
-"""Offline trainer for the single-class 'card' detector (spec 06, M-V1.5 Phase B).
+"""Train the single-class 'card' detector from the command line (spec 06, M-V1.5).
 
-NOT imported by the app — run it by hand in a training environment once you have
-a labeled corpus in ``vision.db`` (draw + save boxes in the Recognition window).
-It needs the heavy training stack, kept out of the app:
+Thin wrapper over the *same* orchestration the Operations window uses
+(``services.training``): export the labeled regions to a YOLO dataset, open a row
+in the ``detector_run`` log, run :mod:`yolo_train_worker` in an interpreter that
+has ultralytics, then record the metrics, hash the artifact and apply the
+promotion gate. Keeping one path means the CLI exercises exactly what the UI does.
 
-    pip install ultralytics          # pulls torch (~2 GB)
+The heavy stack stays out of the app: this process doesn't import ultralytics
+either — the worker subprocess does. Point ``--python`` at an interpreter that has
+it (defaults to the saved preference, else the current one):
 
-Pipeline: export the labeled regions to a YOLO dataset, fine-tune yolov8n on the
-single ``card`` class, export to ONNX, and copy it where the app looks for it
-(``src/tcginventory/models/card_yolo.onnx`` — track it with Git LFS like the
-DINOv2 weights; the PyInstaller spec already bundles ``models/*.onnx``).
+    pip install ultralytics          # in that interpreter (~2 GB, pulls torch)
 
 Examples
 --------
     python training/train_detector.py --epochs 100
-    python training/train_detector.py --data-yaml build/yolo/data.yaml
+    python training/train_detector.py --python .trainvenv/Scripts/python.exe
+    python training/train_detector.py --out src/tcginventory/models/card_yolo.onnx
 """
 
 from __future__ import annotations
 
 import argparse
-import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -34,9 +36,7 @@ from tcginventory.data.vision import (  # noqa: E402
     VisionRepository,
     open_vision,
 )
-from tcginventory.services import training  # noqa: E402
-from tcginventory.services.detector import YOLO_MODEL_FILENAME  # noqa: E402
-from tcginventory.services.detector_dataset import export_yolo_dataset  # noqa: E402
+from tcginventory.services import detector, training  # noqa: E402
 
 
 def _parse_args(argv=None):
@@ -44,17 +44,26 @@ def _parse_args(argv=None):
     p.add_argument(
         "--dataset", default="build/yolo", help="where to write the YOLO dataset"
     )
-    p.add_argument(
-        "--data-yaml",
-        default=None,
-        help="use an existing data.yaml instead of exporting from vision.db",
-    )
     p.add_argument("--vision-db", default=None, help="override the vision.db path")
+    p.add_argument(
+        "--python",
+        default=None,
+        help="interpreter that has ultralytics (default: saved preference, "
+        "else this one)",
+    )
     p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--imgsz", type=int, default=640)
+    p.add_argument("--weights", default="yolov8n.pt", help="base checkpoint")
+    p.add_argument(
+        "--out",
+        default=None,
+        help="destination for the exported ONNX (default: the app's data dir, "
+        "where a UI-triggered run puts it)",
+    )
     p.add_argument(
         "--source",
-        default="manual",
-        help="who asked for this run (recorded in the log): manual | scheduled",
+        default="cli",
+        help="recorded in the run log: cli | ui | scheduled",
     )
     p.add_argument(
         "--promote-margin",
@@ -67,132 +76,68 @@ def _parse_args(argv=None):
         action="store_true",
         help="install the new model even if it scores worse than the current one",
     )
-    p.add_argument("--imgsz", type=int, default=640)
-    p.add_argument("--weights", default="yolov8n.pt", help="base checkpoint")
-    p.add_argument(
-        "--out",
-        default=str(
-            REPO_ROOT / "src" / "tcginventory" / "models" / YOLO_MODEL_FILENAME
-        ),
-        help="destination for the exported ONNX model",
-    )
     return p.parse_args(argv)
 
 
 def main(argv=None) -> int:
     args = _parse_args(argv)
 
-    # The run log lives in vision.db beside the corpus; open it for the whole run
-    # so a crash still leaves a 'running' row behind rather than nothing.
+    env = training.probe_training_env(args.python)
+    print(f"Training interpreter: {env.python}\n  {env.detail}")
+
     conn = open_vision(args.vision_db) if args.vision_db else open_vision()
     repo = VisionRepository(conn)
     runs = DetectorRunRepository(conn)
-    snapshot = training.corpus_snapshot(repo)
-    incumbent = runs.current_model()
-
-    data_yaml = args.data_yaml
-    summary = None
-    if data_yaml is None:
-        summary = export_yolo_dataset(repo, args.dataset)
-        msg = (
-            f"Exported {summary.images} images "
-            f"({summary.train} train / {summary.val} val), {summary.boxes} boxes"
+    try:
+        job = training.prepare_detector_training(
+            repo,
+            runs,
+            env=env,
+            dataset_dir=args.dataset,
+            out_path=args.out or detector.trained_model_destination(),
+            epochs=args.epochs,
+            imgsz=args.imgsz,
+            weights=args.weights,
+            source=args.source,
         )
-        if summary.skipped_missing:
-            msg += f", skipped {summary.skipped_missing} missing"
-        print(msg)
-        if summary.images == 0:
-            print(
-                "No labeled images found — annotate cards in the Recognition "
-                "window and save first."
-            )
-            conn.close()
-            return 1
-        data_yaml = str(summary.data_yaml)
+    except training.TrainingUnavailable as exc:
+        print(f"Cannot train: {exc}", file=sys.stderr)
+        conn.close()
+        return 1
 
-    run_id = runs.start(
-        source=args.source,
-        corpus_images=snapshot.images,
-        corpus_boxes=snapshot.boxes,
-        corpus_cards=snapshot.cards,
-        corpus_fingerprint=snapshot.fingerprint,
-        base_weights=args.weights,
-        epochs=args.epochs,
-        imgsz=args.imgsz,
-        val_frac=None if summary is None else 0.2,
-        split_seed=None if summary is None else 0,
-    )
     print(
-        f"Run #{run_id} recorded (corpus: {snapshot.images} images, "
-        f"{snapshot.boxes} boxes, {snapshot.cards} cards)"
+        f"Run #{job.run_id}: {job.train_images} train / {job.val_images} val images, "
+        f"{job.boxes} boxes\n  " + " ".join(job.command)
     )
-
     try:
-        from ultralytics import YOLO
-    except ImportError:
-        runs.finish(run_id, status="failed", notes="ultralytics is not installed")
+        proc = subprocess.run(job.command, capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        training.fail_detector_training(job, runs, str(exc))
         conn.close()
-        print(
-            "ultralytics is not installed. Install the training stack with:\n"
-            "    pip install ultralytics\n"
-            "(this pulls torch, ~2 GB — intentionally kept out of the app).",
-            file=sys.stderr,
-        )
-        return 2
-
-    try:
-        model = YOLO(args.weights)
-        results = model.train(
-            data=data_yaml, epochs=args.epochs, imgsz=args.imgsz, single_cls=True
-        )
-        exported = model.export(format="onnx", imgsz=args.imgsz, opset=12)
-    except Exception as exc:  # a failed run is data too
-        runs.finish(run_id, status="failed", notes=str(exc)[:500])
-        conn.close()
-        print(f"Training failed: {exc}", file=sys.stderr)
+        print(f"Could not start the worker: {exc}", file=sys.stderr)
         return 3
 
-    # Per-epoch curve + the epoch the exported weights actually represent.
-    epochs = []
-    csv_path = Path(getattr(results, "save_dir", ".")) / "results.csv"
-    if csv_path.is_file():
-        epochs = training.parse_results_csv(csv_path)
-        runs.add_epochs(run_id, epochs)
-    best = training.best_epoch(epochs) or {}
+    sys.stdout.write(proc.stdout or "")
+    sys.stderr.write(proc.stderr or "")
+    if proc.returncode != 0:
+        reason = (proc.stderr or "").strip().splitlines()[-1:] or ["worker failed"]
+        training.fail_detector_training(job, runs, reason[0])
+        conn.close()
+        return proc.returncode
 
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(exported, out)
-
-    runs.finish(
-        run_id,
-        train_images=None if summary is None else summary.train,
-        val_images=None if summary is None else summary.val,
-        map50=best.get("map50"),
-        map50_95=best.get("map50_95"),
-        precision=best.get("precision"),
-        recall=best.get("recall"),
-        best_epoch=best.get("epoch"),
-        artifact_path=str(out),
-        artifact_sha256=training.sha256_file(out),
-        artifact_bytes=out.stat().st_size,
-        notes=f"{len(epochs)} epochs recorded",
+    outcome = training.complete_detector_training(
+        job,
+        runs,
+        worker_output=proc.stdout or "",
+        promote_margin=args.promote_margin,
+        force_promote=args.force_promote,
     )
-
-    # Promotion: don't let a worse model take over just because it trained later.
-    incumbent_score = incumbent["map50_95"] if incumbent else None
-    promote = args.force_promote or training.should_promote(
-        best.get("map50_95"), incumbent_score, margin=args.promote_margin
-    )
-    if promote:
-        version = runs.promote(run_id)
-        print(f"Promoted as detector v{version}: {out}")
-        print("(track with Git LFS; it will bundle into the exe)")
-    else:
+    print(f"\n{outcome.summary}  ({outcome.epochs} epochs recorded)")
+    if outcome.promoted:
+        print(f"Model: {job.out_path}")
         print(
-            f"Not promoted — mAP50-95 {best.get('map50_95')} does not beat the "
-            f"model in use ({incumbent_score}). Re-run with --force-promote to "
-            "install it anyway."
+            "To ship it with the exe, copy it to src/tcginventory/models/ and "
+            "track it with Git LFS."
         )
     conn.close()
     return 0

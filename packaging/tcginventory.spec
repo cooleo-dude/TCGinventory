@@ -46,6 +46,16 @@ datas += [
     (model, "tcginventory/models")
     for model in glob.glob(os.path.join(src, "tcginventory", "models", "*.onnx"))
 ]
+# The training worker — a standalone script the app runs in a *separate*
+# interpreter that has ultralytics (torch is ~2 GB and deliberately unbundled).
+# Shipped as data, not code: it must exist as a real .py on disk for another
+# interpreter to execute, and nothing in the app imports it.
+datas += [
+    (
+        os.path.join(spec_dir, "..", "training", "yolo_train_worker.py"),
+        "tcginventory/training",
+    )
+]
 
 a = Analysis(
     [os.path.join(spec_dir, "entry.py")],
