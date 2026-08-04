@@ -6,8 +6,10 @@ list of :class:`Detection` the entry windows (Transaction / Auction) turn into
 pre-filled rows, flagging low-confidence guesses and leaving unidentified boxes
 for the user to complete.
 
-Detection works from day one (classic-CV needs no data); identification fills in
-as the corpus grows (empty pool → boxes with no name, flagged for review). Qt-free.
+Detection needs the trained detector: with no model installed nothing is proposed
+and the caller sees an empty list (see ``services.detector.available``).
+Identification fills in as the corpus grows (empty pool → boxes with no name,
+flagged for review). Qt-free.
 """
 
 from __future__ import annotations
@@ -153,12 +155,19 @@ class Pipeline:
         )
 
 
-def build_pipeline(conn, vision_repo=None, *, prefer_yolo: bool = True) -> Pipeline:
+def _no_detector(_image_path) -> list[Box]:
+    """Stand-in when no trained detector is installed: proposes nothing, so the
+    caller's empty-result path handles it instead of crashing."""
+    return []
+
+
+def build_pipeline(conn, vision_repo=None) -> Pipeline:
     """Assemble a ready-to-call :class:`Pipeline`.
 
-    Chooses the trained YOLO detector when a model is present, else the classic-CV
-    proposer; identifies against the labeled corpus (crop exemplars + catalog
-    fallback). Building loads the ONNX model(s), so call this lazily.
+    Uses the trained YOLO detector when a model is installed and proposes nothing
+    when one isn't (there is no untrained fallback — see ``services/detector.py``);
+    identifies against the labeled corpus (crop exemplars + catalog fallback).
+    Building loads the ONNX model(s), so call this lazily.
     """
     from tcginventory.data.vision import VisionRepository, open_vision
     from tcginventory.services import detector as det
@@ -169,14 +178,13 @@ def build_pipeline(conn, vision_repo=None, *, prefer_yolo: bool = True) -> Pipel
 
     repo = vision_repo or VisionRepository(open_vision())
 
-    detect = det.propose_card_boxes
-    if prefer_yolo:
-        model = det.yolo_model_path()
-        if model is not None:
-            try:
-                detect = det.OnnxCardDetector(model).detect
-            except Exception:  # pragma: no cover - bad/incompatible model
-                detect = det.propose_card_boxes
+    detect = _no_detector
+    model = det.yolo_model_path()
+    if model is not None:
+        try:
+            detect = det.OnnxCardDetector(model).detect
+        except Exception:  # pragma: no cover - bad/incompatible model
+            detect = _no_detector
 
     recognizer = Recognizer(repo, reference_image=catalog_reference_resolver(conn))
     return Pipeline(detect, recognizer, catalog_label_resolver(conn), repo)

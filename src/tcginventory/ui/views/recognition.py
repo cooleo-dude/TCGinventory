@@ -8,7 +8,7 @@ follows the zone its centre sits in); *Listing* mode is one lot. Multiple images
 per session share one card set.
 
 Model-agnostic: it collects the training data the detector/identifier will learn
-from. Auto box-proposals (classic-CV / YOLO) toggle in here later.
+from. Trained-detector box proposals toggle in here.
 """
 
 from __future__ import annotations
@@ -73,7 +73,6 @@ _MODES = ["Transaction (I Give / They Give)", "Listing (one lot)"]
 _BOX_PEN = QColor(theme.DARK.accent)  # confirmed box — the theme accent
 _BOX_FILL = QColor(theme.DARK.accent)
 _BOX_FILL.setAlpha(40)
-_PROPOSAL_PEN = QColor(theme.DARK.info)  # classic-CV proposals (info blue)
 _YOLO_PEN = QColor(theme.DARK.accent2)  # trained-detector proposals (brick red)
 # Cosine below this gets a ⚠ in the suggestion list (advisory; frozen DINOv2 on
 # photo-vs-catalog-render is a weak baseline until the M-V2 fine-tune).
@@ -626,7 +625,7 @@ class RecognitionView(QWidget):
         self._name_fields: dict[int, _NameField] = {}
         self._suggest_boxes: dict[int, _SuggestBox] = {}
         # detector overlays, per proposer source ("cv" | "yolo")
-        self._proposals: dict[str, list[QGraphicsRectItem]] = {"cv": [], "yolo": []}
+        self._proposals: dict[str, list[QGraphicsRectItem]] = {"yolo": []}
         self._yolo_detector = None  # OnnxCardDetector, lazily built
         self._condition_boxes: dict[int, _ConditionBox] = {}
         self._assessor = None  # condition assessor, lazily built
@@ -784,13 +783,6 @@ class RecognitionView(QWidget):
             "labeled (identity matcher)"
         )
         self._suggest_btn.clicked.connect(self._run_suggestions)
-        self._cv_toggle = self._tool_button("Classic-CV")
-        self._cv_toggle.setCheckable(True)
-        self._cv_toggle.setToolTip(
-            "Auto-detect card boxes on a blank background (no training). Accept the "
-            "ones you want into numbered boxes."
-        )
-        self._cv_toggle.toggled.connect(self._on_cv_toggle)
         self._yolo_toggle = self._tool_button("YOLO")
         self._yolo_toggle.setCheckable(True)
         from tcginventory.services.detector import yolo_model_path
@@ -814,12 +806,7 @@ class RecognitionView(QWidget):
         row.addLayout(
             self._cluster(
                 "Assist",
-                [
-                    self._suggest_btn,
-                    self._cv_toggle,
-                    self._yolo_toggle,
-                    self._accept_btn,
-                ],
+                [self._suggest_btn, self._yolo_toggle, self._accept_btn],
             )
         )
         row.addWidget(_vrule())
@@ -1371,9 +1358,8 @@ class RecognitionView(QWidget):
         self._scene.set_draw(self._draw_btn.isChecked())  # keep draw mode persistent
         self._fit_view()
         self._refresh_panel()
-        for source, toggle in (("cv", self._cv_toggle), ("yolo", self._yolo_toggle)):
-            if toggle.isChecked():
-                self._show_proposals(source)
+        if self._yolo_toggle.isChecked():
+            self._show_proposals("yolo")
 
     def _sync_zone_labels(self, session: _Session) -> None:
         """Label the give/receive zones for the split's orientation."""
@@ -1567,10 +1553,7 @@ class RecognitionView(QWidget):
         self._show_all.setChecked(all_on)
         self._updating_checks = False
 
-    # -- detector box proposals (classic-CV + trained YOLO) -----------------
-
-    def _on_cv_toggle(self, on: bool) -> None:
-        self._toggle_proposals("cv", on)
+    # -- detector box proposals (trained YOLO) ------------------------------
 
     def _on_yolo_toggle(self, on: bool) -> None:
         self._toggle_proposals("yolo", on)
@@ -1582,12 +1565,11 @@ class RecognitionView(QWidget):
             self._clear_proposals(source)
 
     def _detect(self, source: str, path: str):
-        """Run a proposer; returns normalised boxes, or [] on any failure."""
+        """Run the trained detector; returns normalised boxes, or [] on any
+        failure (including no model installed)."""
         from tcginventory.services import detector as det
 
         try:
-            if source == "cv":
-                return det.propose_card_boxes(path)
             if self._yolo_detector is None:
                 model = det.yolo_model_path()
                 if model is None:
@@ -1610,7 +1592,7 @@ class RecognitionView(QWidget):
             norm_boxes = self._detect(source, session.path)
         finally:
             QApplication.restoreOverrideCursor()
-        colour = _PROPOSAL_PEN if source == "cv" else _YOLO_PEN
+        colour = _YOLO_PEN
         pen = QPen(colour, 0, Qt.DashLine)
         brush = QBrush(QColor(colour.red(), colour.green(), colour.blue(), 30))
         for nx, ny, nw, nh in norm_boxes:

@@ -525,19 +525,26 @@ def test_card_backs_pairs_front_and_grades_from_back(app, _quiet, tmp_path):
     view.deleteLater()
 
 
-def test_cv_proposals_overlay_then_accept_into_boxes(app, _quiet, tmp_path):
-    from PIL import Image, ImageDraw
+def test_detector_proposals_overlay_then_accept_into_boxes(
+    app, _quiet, tmp_path, monkeypatch
+):
+    """The YOLO toggle overlays the detector's boxes, discards them when switched
+    off, and Accept promotes them into numbered boxes. The detector itself is
+    stubbed — there's no untrained proposer since classic-CV was removed."""
+    from PIL import Image
 
     from tcginventory.data.db import connect
     from tcginventory.data.migrator import migrate
     from tcginventory.ui.views.recognition import RecognitionView
 
     scene = tmp_path / "scene.png"
-    img = Image.new("L", (240, 160), color=255)
-    draw = ImageDraw.Draw(img)
-    draw.rectangle([20, 20, 80, 130], fill=0)  # two dark cards with a gap between
-    draw.rectangle([150, 20, 210, 130], fill=0)
-    img.save(scene)
+    Image.new("L", (240, 160), color=255).save(scene)
+
+    monkeypatch.setattr(
+        RecognitionView,
+        "_detect",
+        lambda self, source, path: [(0.08, 0.12, 0.25, 0.7), (0.62, 0.12, 0.25, 0.7)],
+    )
 
     conn = connect(":memory:")
     migrate(conn)
@@ -546,18 +553,18 @@ def test_cv_proposals_overlay_then_accept_into_boxes(app, _quiet, tmp_path):
     view._mode.setCurrentIndex(1)  # listing
     view.add_image_paths([str(scene)])
 
-    view._cv_toggle.setChecked(True)  # emits toggled → detect + overlay
-    assert len(view._proposals["cv"]) == 2
+    view._yolo_toggle.setChecked(True)  # emits toggled → detect + overlay
+    assert len(view._proposals["yolo"]) == 2
     assert view._accept_btn.isEnabled()
 
-    view._cv_toggle.setChecked(False)  # toggling off discards overlays
-    assert view._proposals["cv"] == []
+    view._yolo_toggle.setChecked(False)  # toggling off discards overlays
+    assert view._proposals["yolo"] == []
     assert not view._accept_btn.isEnabled()
 
-    view._cv_toggle.setChecked(True)
+    view._yolo_toggle.setChecked(True)
     view._accept_proposals()  # promote all proposals to numbered boxes
     assert len(view._sessions[0].boxes) == 2
-    assert view._proposals["cv"] == []
+    assert view._proposals["yolo"] == []
     assert not view._accept_btn.isEnabled()
     view.deleteLater()
 
