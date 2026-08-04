@@ -87,6 +87,53 @@ CREATE TABLE IF NOT EXISTS region_embedding (
 );
 CREATE INDEX IF NOT EXISTS idx_region_embedding_card
     ON region_embedding(model_version, card_id);
+CREATE TABLE IF NOT EXISTS detector_run (
+    id                 INTEGER PRIMARY KEY,
+    version            INTEGER,            -- model version, set when promoted
+    status             TEXT    NOT NULL,   -- 'running' | 'ok' | 'failed'
+    source             TEXT    NOT NULL,   -- 'manual' (Operations) | 'scheduled'
+    started_at         TEXT    NOT NULL,
+    finished_at        TEXT,
+    -- the corpus snapshot it trained on (so a model can be called stale)
+    corpus_images      INTEGER NOT NULL DEFAULT 0,
+    corpus_boxes       INTEGER NOT NULL DEFAULT 0,
+    corpus_cards       INTEGER NOT NULL DEFAULT 0,
+    corpus_fingerprint TEXT,               -- hash of the (image, box) set
+    train_images       INTEGER,
+    val_images         INTEGER,
+    val_frac           REAL,
+    split_seed         INTEGER,
+    -- how it was trained
+    base_weights       TEXT,
+    epochs             INTEGER,
+    imgsz              INTEGER,
+    -- how it scored on its own val split
+    map50              REAL,
+    map50_95           REAL,
+    precision          REAL,
+    recall             REAL,
+    best_epoch         INTEGER,
+    -- what it produced
+    artifact_path      TEXT,
+    artifact_sha256    TEXT,
+    artifact_bytes     INTEGER,
+    promoted           INTEGER NOT NULL DEFAULT 0,
+    notes              TEXT,               -- summary, or the error on failure
+    created_at         TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_detector_run_started
+    ON detector_run(started_at DESC);
+CREATE TABLE IF NOT EXISTS detector_epoch (
+    run_id    INTEGER NOT NULL REFERENCES detector_run(id) ON DELETE CASCADE,
+    epoch     INTEGER NOT NULL,
+    map50     REAL,
+    map50_95  REAL,
+    precision REAL,
+    recall    REAL,
+    box_loss  REAL,
+    cls_loss  REAL,
+    PRIMARY KEY (run_id, epoch)
+);
 """
 
 
@@ -443,3 +490,191 @@ class VisionRepository:
             total += row["n"]
             series.append((row["day"], total))
         return series
+
+
+class DetectorRunRepository:
+    """The detector's training log (``detector_run`` + ``detector_epoch``).
+
+    One row per training attempt, holding what it trained on, how, how it scored,
+    and what it produced — so the Operations window can state the current model's
+    version and provenance, say whether the corpus has moved on since, and chart
+    accuracy across runs. Mirrors ``OperationRunRepository`` in the ledger DB, but
+    lives here because it describes the vision corpus.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def start(
+        self,
+        *,
+        source: str = "manual",
+        corpus_images: int = 0,
+        corpus_boxes: int = 0,
+        corpus_cards: int = 0,
+        corpus_fingerprint: str | None = None,
+        base_weights: str | None = None,
+        epochs: int | None = None,
+        imgsz: int | None = None,
+        val_frac: float | None = None,
+        split_seed: int | None = None,
+        now: str | None = None,
+    ) -> int:
+        """Open a run (status ``running``) and return its id.
+
+        Recorded *before* training so a crashed or killed attempt still leaves a
+        trace rather than vanishing.
+        """
+        stamp = now or _now()
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO detector_run (status, source, started_at, "
+                "corpus_images, corpus_boxes, corpus_cards, corpus_fingerprint, "
+                "base_weights, epochs, imgsz, val_frac, split_seed, created_at) "
+                "VALUES ('running',?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    source,
+                    stamp,
+                    corpus_images,
+                    corpus_boxes,
+                    corpus_cards,
+                    corpus_fingerprint,
+                    base_weights,
+                    epochs,
+                    imgsz,
+                    val_frac,
+                    split_seed,
+                    stamp,
+                ),
+            )
+        return int(cur.lastrowid)
+
+    def finish(
+        self,
+        run_id: int,
+        *,
+        status: str = "ok",
+        train_images: int | None = None,
+        val_images: int | None = None,
+        map50: float | None = None,
+        map50_95: float | None = None,
+        precision: float | None = None,
+        recall: float | None = None,
+        best_epoch: int | None = None,
+        artifact_path: str | None = None,
+        artifact_sha256: str | None = None,
+        artifact_bytes: int | None = None,
+        notes: str | None = None,
+        now: str | None = None,
+    ) -> None:
+        """Close a run with its outcome. Promotion is a separate step."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE detector_run SET status = ?, finished_at = ?, "
+                "train_images = ?, val_images = ?, map50 = ?, map50_95 = ?, "
+                "precision = ?, recall = ?, best_epoch = ?, artifact_path = ?, "
+                "artifact_sha256 = ?, artifact_bytes = ?, notes = ? WHERE id = ?",
+                (
+                    status,
+                    now or _now(),
+                    train_images,
+                    val_images,
+                    map50,
+                    map50_95,
+                    precision,
+                    recall,
+                    best_epoch,
+                    artifact_path,
+                    artifact_sha256,
+                    artifact_bytes,
+                    notes,
+                    run_id,
+                ),
+            )
+
+    def add_epochs(self, run_id: int, rows) -> int:
+        """Record the per-epoch curve: dicts with ``epoch`` plus any of map50,
+        map50_95, precision, recall, box_loss, cls_loss. Returns the row count."""
+        payload = [
+            (
+                run_id,
+                int(r["epoch"]),
+                r.get("map50"),
+                r.get("map50_95"),
+                r.get("precision"),
+                r.get("recall"),
+                r.get("box_loss"),
+                r.get("cls_loss"),
+            )
+            for r in rows
+        ]
+        if not payload:
+            return 0
+        with self.conn:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO detector_epoch (run_id, epoch, map50, "
+                "map50_95, precision, recall, box_loss, cls_loss) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                payload,
+            )
+        return len(payload)
+
+    def promote(self, run_id: int) -> int:
+        """Mark a run's artifact as the model in use; returns its new version.
+
+        Versions are a simple incrementing series, so "detector v3" in the UI
+        always means the third model that was actually put to work.
+        """
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(version), 0) AS v FROM detector_run"
+        ).fetchone()
+        version = int(row["v"]) + 1
+        with self.conn:
+            self.conn.execute(
+                "UPDATE detector_run SET promoted = 1, version = ? WHERE id = ?",
+                (version, run_id),
+            )
+        return version
+
+    # -- reads --------------------------------------------------------------
+
+    def get(self, run_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM detector_run WHERE id = ?", (run_id,)
+        ).fetchone()
+
+    def recent(self, limit: int = 20) -> list[sqlite3.Row]:
+        """Newest runs first — the training history list."""
+        return self.conn.execute(
+            "SELECT * FROM detector_run ORDER BY started_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def last_run(self) -> sqlite3.Row | None:
+        """The most recent attempt, whatever its outcome."""
+        rows = self.recent(limit=1)
+        return rows[0] if rows else None
+
+    def current_model(self) -> sqlite3.Row | None:
+        """The promoted run behind the model in use (highest version)."""
+        return self.conn.execute(
+            "SELECT * FROM detector_run WHERE promoted = 1 "
+            "ORDER BY version DESC, id DESC LIMIT 1"
+        ).fetchone()
+
+    def epochs(self, run_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM detector_epoch WHERE run_id = ? ORDER BY epoch",
+            (run_id,),
+        ).fetchall()
+
+    def accuracy_series(self, limit: int = 20) -> list[tuple[int, float]]:
+        """(version, map50_95) for promoted models, oldest first — the accuracy
+        trend the Operations panel charts."""
+        rows = self.conn.execute(
+            "SELECT version, map50_95 FROM detector_run "
+            "WHERE promoted = 1 AND map50_95 IS NOT NULL "
+            "ORDER BY version DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [(int(r["version"]), float(r["map50_95"])) for r in reversed(rows)]

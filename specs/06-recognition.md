@@ -60,21 +60,19 @@ label) and to tuning the auto-accept vs. flag **thresholds**.
 **Decomposition — a class-agnostic detector + an embedding identifier
 (both decided 2026-07-23):**
 
-1. **Detector (find the cards) — two box proposers, toggled per method.** Both
-   propose class-agnostic "card" boxes as overlays the user accepts/edits:
-   - **Classic CV** (contour/quadrilateral detection + perspective correction) —
-     zero training, available immediately; strong for cards on a blank
-     background.
-   - **YOLO-nano** (single "card" class, ONNX/CPU) — trained on the drawn boxes;
-     stronger on clutter/overlap; available once trained.
-
-   The detection canvas carries a **checkbox per method** to toggle that
-   method's proposed boxes on/off, so the user can view either, compare both,
-   and promote the good ones into regions (or draw their own). The same
-   proposers feed Part 2's inference autofill.
-   - **Bootstrapping:** classic CV gives usable proposals from day one; YOLO
-     adds a better layer as the corpus grows — so auto-boxing isn't gated on
-     training, it just improves with it.
+1. **Detector (find the cards) — one trained box proposer.**
+   **YOLO-nano** (single "card" class, ONNX/CPU), trained on the drawn boxes,
+   proposes class-agnostic "card" boxes as overlays the user accepts/edits. The
+   canvas carries a **toggle** for it, so proposals can be shown, compared with
+   the boxes already drawn, and promoted into regions. The same proposer feeds
+   Part 2's inference autofill.
+   - **No untrained fallback (revised 2026-08-04).** A classic-CV
+     projection-profile proposer filled this slot until it was removed: it only
+     worked on cards laid out with gaps on a plain mat, merged anything
+     touching, and correcting its proposals cost more than drawing boxes by
+     hand. Detection is therefore **dark until the detector is trained** — the
+     toggle and photo-autofill propose nothing — which is the intended trade:
+     hand-drawn boxes feed the corpus, and the corpus feeds the detector.
 2. **Identifier (name the card) — embedding + nearest-neighbour retrieval**
    (not a fixed-class classifier: the ~47k catalog grows constantly, so
    open-vocabulary retrieval — add a reference vector, no retraining — is
@@ -116,20 +114,39 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   (no temp files); reference embeddings cache in `vision.db`. Frozen-model
   crop-vs-render is a weak baseline that the M-V2 fine-tune sharpens without UI
   changes.
-- **M-V1.5** — the card **detector** (two box proposers). **Phase A ✅ done:**
-  a dependency-free **classic-CV proposer** (`services/detector.py`,
-  `propose_card_boxes` — projection-profile segmentation over a background-diff
-  mask) wired to the window's **Classic-CV boxes** toggle; proposals overlay as
-  editable boxes an **Accept proposals** action promotes into regions. **Phase B
-  scaffolding ✅ done (training pending a corpus):** the full trained-detector
-  path exists without pulling torch into the app — `detector_dataset.py`
-  exports the labeled regions to a YOLO dataset; `training/train_detector.py`
-  (offline, dev-only `ultralytics`/`torch`) fine-tunes yolov8n and exports
-  `card_yolo.onnx`; `OnnxCardDetector` + `yolo_model_path()` load it (bundled via
-  the `models/*.onnx` glob, like DINOv2) and the **YOLO boxes** toggle lights up
-  and overlays proposals once a model is present. Postprocessing (`_decode_yolo`,
-  `_nms`) is pure + unit-tested. **Remaining:** label a corpus → run the trainer
-  → drop the `.onnx` in (LFS).
+- **M-V1.5** — the card **detector**. **Trained-only as of 2026-08-04:** the
+  classic-CV proposer was deleted (see the decomposition note above), so
+  `services/detector.py` is now `yolo_model_path()` / `available()`, the pure
+  postprocessing (`_decode_yolo`, `_nms`, unit-tested without a model) and
+  `OnnxCardDetector`. `detector_dataset.py` exports the labeled regions to a YOLO
+  dataset; `training/train_detector.py` (offline, dev-only `ultralytics`/`torch`)
+  fine-tunes yolov8n and exports `card_yolo.onnx`, bundled via the `models/*.onnx`
+  glob like DINOv2. The window's **YOLO** toggle lights up once a model is
+  present; `build_pipeline` uses it when installed and proposes nothing when it
+  isn't. **No model has been trained yet**, so detection is inactive.
+- **M-V1.5b — the training loop and its metrics (in progress).** Training is
+  never triggered by the app: supplying images or saving a capture only *grows
+  the corpus* (and re-embeds crop exemplars, which is what makes the identifier
+  improve live). Retraining the detector is an explicit act, run from the
+  **Operations** window ("Models & signals" group) and executed by
+  `training/train_detector.py` outside the frozen app, because ultralytics/torch
+  are deliberately not shipped.
+  - **`detector_run` + `detector_epoch` (vision.db)** log every attempt: the
+    corpus snapshot it trained on (images / boxes / cards + a **fingerprint** of
+    the exact (image, box) set), the split, the hyperparameters, the scores
+    (mAP50, mAP50-95, precision, recall, best epoch), the artifact (path,
+    sha256, size) and whether it was **promoted** — promotion assigning the
+    incrementing **model version** the UI shows as "detector v*N*". A run is
+    recorded *before* training starts, so a crashed attempt leaves a trace.
+  - **`services/training.py`** is the Qt-free layer both sides read:
+    `corpus_snapshot` (counts + fingerprint), `detector_status` (installed?
+    which version? trained on what? **stale** — the fingerprint no longer matches
+    the corpus), `parse_results_csv` / `best_epoch` (ultralytics metrics → the
+    run log), and `should_promote` — the gate that stops a worse model replacing
+    a better one just because it trained later.
+  - **Operations shows** the current version and its provenance ("trained on 20
+    images / 88 boxes", stale when the corpus has moved on), the last run's
+    accuracy, the per-run accuracy trend, and the **Train** trigger.
 - **M-V2** — learning from the ingested corpus. **Crop-exemplar retrieval ✅
   done (usable now):** every labeled region is embedded and stored
   (`region_embedding`), and `Recognizer.suggest` scores each card by its best
@@ -144,8 +161,8 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   it.
 - **Inference** — Part 2 autofill in Transaction/Auction ✅ **done (read
   path):** `services/inference.py` (`run_inference` / `build_pipeline`) detects
-  boxes (YOLO if trained, else classic-CV) and identifies each crop against the
-  exemplar corpus, returning per-card confidence + a confident flag. An
+  boxes (YOLO when a model is installed, nothing when not) and identifies each
+  crop against the exemplar corpus, returning per-card confidence + a confident flag. An
   **"Autofill from photo…"** button in both windows opens `AutofillDialog` and
   adds the confirmed cards as rows (reusing `apply_catalog_card` +
   `_request_price`). Detect-only with an empty corpus; sharpens as it grows.
