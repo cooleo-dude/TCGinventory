@@ -269,6 +269,101 @@ def test_recognition_preview_and_filmstrip(app, seeded_conn):
     view.deleteLater()
 
 
+def test_thumbcache_decodes_each_thumbnail_once(app, tmp_path):
+    """A thumbnail is decoded+scaled once per session; a not-yet-written file is
+    remembered as a miss until a worker reports new files on disk."""
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QColor, QPixmap
+
+    from tcginventory.ui import thumbcache
+
+    src = QPixmap(48, 64)
+    src.fill(QColor("#ff8800"))
+    path = tmp_path / "t.png"
+    src.save(str(path))
+
+    thumbcache.forget_misses()
+    first = thumbcache.scaled("test", "t", path, 24, 32)
+    second = thumbcache.scaled("test", "t", path, 24, 32)
+    assert first is not None and first.size() == QSize(24, 32)
+    assert second is not None and second.cacheKey() == first.cacheKey()  # reused
+
+    missing = tmp_path / "later.png"
+    assert thumbcache.scaled("test", "later", missing, 24, 32) is None
+    src.save(str(missing))  # a crop/download lands after the first paint
+    assert thumbcache.scaled("test", "later", missing, 24, 32) is None  # miss cached
+    thumbcache.forget_misses()
+    assert thumbcache.scaled("test", "later", missing, 24, 32) is not None
+
+
+def test_history_thumbnails_persist_across_refreshes(app, monkeypatch):
+    """Resolved card art is memoised for the session: a rebuild paints the same
+    thumbnails straight away instead of re-resolving them from the catalog."""
+    from conftest import incoming
+    from tcginventory.services import cardimages
+    from tcginventory.services.transactions import (
+        TransactionRequest,
+        TransactionService,
+    )
+    from tcginventory.ui.views import history as history_mod
+
+    conn = connect(":memory:")
+    migrate(conn)
+    TransactionService(conn).post(
+        TransactionRequest(
+            occurred_at="2026-01-01",
+            cash_out_cents=1000,
+            incoming=[incoming("Charizard ex", 1000)],
+            counterparty="eBay",
+        )
+    )
+
+    history_mod._CARD_ID_MEMO.clear()
+    lookups: list[str] = []
+    monkeypatch.setattr(cardimages, "is_cached", lambda card_id: True)
+    monkeypatch.setattr(
+        history_mod.CardCatalogRepository,
+        "image_for",
+        lambda self, name, set_name, number: (lookups.append(name), ("cel-4", None))[1],
+    )
+
+    view = history_mod.HistoryView(conn)  # in-memory DB → resolves inline
+    assert view._model.row_at(0).thumb_ids == ["cel-4"]
+    assert len(lookups) == 1
+
+    view.refresh()  # the ledger changed → rows rebuilt
+    assert view._model.row_at(0).thumb_ids == ["cel-4"]  # no blank flash
+    assert len(lookups) == 1  # and no second catalog lookup
+
+    view.deleteLater()
+    conn.close()
+
+
+def test_history_mode_toggle_reuses_loaded_pages(app, seeded_conn, monkeypatch):
+    """Toggling Transaction/Recognition re-shows an already-loaded page as-is; only
+    a data change (refresh) rebuilds it."""
+    from tcginventory.ui.views.history import HistoryView
+
+    view = HistoryView(seeded_conn)  # __init__ loads the Transaction page
+    txn_loads: list[int] = []
+    rec_loads: list[int] = []
+    monkeypatch.setattr(view, "_refresh_txn", lambda: txn_loads.append(1))
+    monkeypatch.setattr(view._rec, "refresh", lambda: rec_loads.append(1))
+
+    view._set_mode(1)  # first visit to Recognition → loads once
+    assert (txn_loads, rec_loads) == ([], [1])
+    view._set_mode(0)  # both pages now loaded → toggling is free
+    view._set_mode(1)
+    assert (txn_loads, rec_loads) == ([], [1])
+
+    view.refresh()  # data changed → the visible page reloads
+    assert (txn_loads, rec_loads) == ([], [1, 1])
+    view._set_mode(0)  # …and the other one on its next visit
+    assert txn_loads == [1]
+
+    view.deleteLater()
+
+
 def test_nav_refresh_is_gated_until_data_changes(app, seeded_conn):
     """Switching to an unchanged screen must not re-run its refresh; a data
     mutation invalidates the views so the next visit refreshes once."""

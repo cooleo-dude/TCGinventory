@@ -71,7 +71,7 @@ from tcginventory.services import cardimages, regioncrops
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.reporting import ReportingService
 from tcginventory.services.transactions import TransactionService
-from tcginventory.ui import icons, theme
+from tcginventory.ui import icons, theme, thumbcache
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.models.history_model import (
     CARDS_COL,
@@ -232,9 +232,13 @@ class _RecPillDelegate(_PillDelegate):
 
 class _ThumbDelegate(QStyledItemDelegate):
     """Paints an overlapping stack of up to 3 card thumbnails + a "+N" overflow
-    chip in the Cards column — the same preview the auctions watchlist uses."""
+    chip in the Cards column — the same preview the auctions watchlist uses.
+
+    Thumbnails come from :mod:`tcginventory.ui.thumbcache`, so each image is
+    decoded once per session rather than on every repaint."""
 
     _W, _H, _STEP = 24, 32, 16
+    _NAMESPACE = "card"  # catalog art, keyed by card id
 
     def sizeHint(self, option, index) -> QSize:
         count = (index.data(CARDS_ROLE) or ([], 0))[1]
@@ -269,11 +273,9 @@ class _ThumbDelegate(QStyledItemDelegate):
         key = thumb_ids[i] if i < len(thumb_ids) else None
         if not key:
             return None
-        path = self._thumb_path(key)
-        if path is None or not path.exists():
-            return None
-        src = QPixmap(str(path))
-        return None if src.isNull() else src
+        return thumbcache.scaled(
+            self._NAMESPACE, str(key), self._thumb_path(key), self._W, self._H
+        )
 
     def _thumb_path(self, key):
         return cardimages.cache_path(key)  # catalog art, keyed by card id
@@ -286,10 +288,7 @@ class _ThumbDelegate(QStyledItemDelegate):
         if pm is not None:
             painter.save()
             painter.setClipPath(face)
-            scaled = pm.scaled(
-                self._W, self._H, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
-            )
-            painter.drawPixmap(int(x), int(y), scaled)
+            painter.drawPixmap(int(x), int(y), pm)  # already scaled by thumbcache
             painter.restore()
         else:
             grad = QLinearGradient(x, y, x, y + self._H)
@@ -307,15 +306,33 @@ class _ThumbDelegate(QStyledItemDelegate):
         f.setPointSizeF(8.5)
         painter.setFont(f)
         painter.setPen(QColor(t.ink3))
-        painter.drawText(
-            QRectF(x, y, self._W, self._H), int(Qt.AlignCenter), text
-        )
+        painter.drawText(QRectF(x, y, self._W, self._H), int(Qt.AlignCenter), text)
 
 
 def _rounded(x: float, y: float, w: float, h: float, r: float) -> QPainterPath:
     path = QPainterPath()
     path.addRoundedRect(QRectF(x, y, w, h), r, r)
     return path
+
+
+# (name, set, number) -> catalog card id (None = no match), memoised for the
+# session. Art resolution is a catalog query per card, so re-running it on every
+# refresh is what made the Cards column repopulate from scratch on each visit;
+# with the memo a refresh paints the thumbnails it already knows immediately.
+# Written from the resolver thread, read on the UI thread: plain dict of
+# immutable keys/values, so single assignments are enough — no lock needed.
+_CARD_ID_MEMO: dict[tuple, str | None] = {}
+
+
+def _needs_resolve(idents: list, ids: list) -> bool:
+    """True when a row still needs a catalog lookup or an image download; rows
+    that are fully memoised and cached skip the resolver entirely."""
+    for ident, card_id in zip(idents, ids, strict=False):
+        if ident not in _CARD_ID_MEMO:
+            return True
+        if card_id is not None and not cardimages.is_cached(card_id):
+            return True
+    return False
 
 
 class _ThumbResolver(QThread):
@@ -341,19 +358,30 @@ class _ThumbResolver(QThread):
                 if self.isInterruptionRequested():
                     return
                 ids: list[str | None] = []
-                for name, set_name, number in idents:
-                    resolved = catalog.image_for(name, set_name, number)
-                    if resolved:
-                        card_id, url = resolved
-                        ids.append(card_id)
-                        if url and not cardimages.is_cached(card_id):
-                            cardimages.ensure_cached(card_id, url)
-                    else:
-                        ids.append(None)
+                for ident in idents:
+                    ids.append(self._resolve_one(catalog, ident))
                 if any(ids):
                     self.resolved.emit(self._generation, source_row, ids)
         finally:
             conn.close()
+
+    @staticmethod
+    def _resolve_one(catalog: CardCatalogRepository, ident: tuple) -> str | None:
+        """Card id for one (name, set, number), fetching its art if needed. Reuses
+        the session memo unless the image still isn't on disk (a failed or never-
+        attempted download), in which case we re-query to get the URL and retry."""
+        memoised = ident in _CARD_ID_MEMO
+        card_id = _CARD_ID_MEMO.get(ident)
+        if memoised and (card_id is None or cardimages.is_cached(card_id)):
+            return card_id
+        resolved = catalog.image_for(*ident)
+        card_id = resolved[0] if resolved else None
+        _CARD_ID_MEMO[ident] = card_id
+        if resolved:
+            url = resolved[1]
+            if url and not cardimages.is_cached(card_id):
+                cardimages.ensure_cached(card_id, url)
+        return card_id
 
 
 class _HistoryFilterProxy(QSortFilterProxyModel):
@@ -635,6 +663,8 @@ class _RecFilterProxy(QSortFilterProxyModel):
 class _CropThumbDelegate(_ThumbDelegate):
     """Cards column for the Recognition log: thumbnails are the regions cropped
     from their source photos (keyed by region id), not catalog art."""
+
+    _NAMESPACE = "crop"
 
     def _thumb_path(self, region_id):
         return regioncrops.crop_path(region_id)
@@ -955,6 +985,7 @@ class _RecHistoryPanel(QWidget):
 
     def _on_crop_done(self, generation: int) -> None:
         if generation == self._thumb_gen:
+            thumbcache.forget_misses()  # new crops are on disk now
             self._table.viewport().update()
 
     # -- preview (annotated image + filmstrip) ------------------------------
@@ -1033,6 +1064,9 @@ class HistoryView(QWidget):
         self._db_file = self._resolve_db_file(conn)
         self._resolver: _ThumbResolver | None = None
         self._thumb_gen = 0  # bumps each refresh so stale resolver emits are ignored
+        # Per-page freshness (0 Transaction, 1 Recognition): a page is rebuilt on
+        # its first show and after a data change, never on a plain mode toggle.
+        self._stale = {0: True, 1: True}
 
         self._model = HistoryTableModel()
         self._proxy = _HistoryFilterProxy()
@@ -1203,7 +1237,7 @@ class HistoryView(QWidget):
                     f" border:1px solid {t.line}; border-radius:8px;"
                     " padding:7px 15px; font-weight:600;"
                 )
-        self.refresh()
+        self._load_page(index)
 
     # -- KPI strip ----------------------------------------------------------
 
@@ -1274,32 +1308,45 @@ class HistoryView(QWidget):
         self._search.clear()
 
     def refresh(self) -> None:
-        """Refresh whichever history page is active (Transaction / Recognition)."""
-        if self._pages.currentIndex() == 0:
+        """The ledger changed (or this is the first show): both pages are stale —
+        reload the visible one now, the other on its next visit."""
+        self._stale = dict.fromkeys(self._stale, True)
+        self._load_page(self._pages.currentIndex())
+
+    def _load_page(self, index: int) -> None:
+        """Rebuild a history page only if it's stale; toggling the mode buttons
+        back and forth re-shows the page (thumbnails and all) instantly."""
+        if not self._stale.get(index, True):
+            return
+        if index == 0:
             self._refresh_txn()
         else:
             self._rec.refresh()
+        self._stale[index] = False
 
     def _refresh_txn(self) -> None:
         # Build the rows with only cheap data (card *count* for the thumbnail
-        # count); the actual card-art resolution + fetch happens off-thread.
+        # count) plus whatever art this session has already resolved, so revisits
+        # paint their thumbnails immediately; anything still unknown (or not yet
+        # downloaded) is resolved + fetched off-thread.
         jobs: list[tuple[int, list]] = []
         rows: list[HistoryRow] = []
         for source_row, txn in enumerate(self._txns.list_all()):
             items = self._txn_items(txn.id)
             labels = [f"{it.name} {it.card_number or ''}".strip() for it in items]
             idents = [(it.name, it.set_name, it.card_number) for it in items[:3]]
+            thumb_ids = [_CARD_ID_MEMO.get(ident) for ident in idents]
             rows.append(
                 HistoryRow(
                     transaction=txn,
                     margin_cents=self._reporting.transaction_margin_cents(txn.id),
                     proceeds_cents=self._reporting.transaction_proceeds_cents(txn.id),
                     items_label=", ".join(labels),
-                    thumb_ids=[None] * len(idents),  # filled in by the resolver
+                    thumb_ids=thumb_ids,
                     card_count=len(items),
                 )
             )
-            if idents:
+            if idents and _needs_resolve(idents, thumb_ids):
                 jobs.append((source_row, idents))
         self._model.set_rows(rows)
         self._table.resizeColumnsToContents()
@@ -1344,8 +1391,7 @@ class HistoryView(QWidget):
     def _resolve_inline(self, jobs: list) -> None:
         for source_row, idents in jobs:
             ids = [
-                (r[0] if (r := self._catalog.image_for(n, s, num)) else None)
-                for n, s, num in idents
+                _ThumbResolver._resolve_one(self._catalog, ident) for ident in idents
             ]
             if any(ids):
                 self._on_thumbs_resolved(self._thumb_gen, source_row, ids)
@@ -1362,6 +1408,7 @@ class HistoryView(QWidget):
             return  # a newer refresh superseded this resolver
         if 0 <= source_row < self._model.rowCount():
             self._model.row_at(source_row).thumb_ids[:] = ids
+            thumbcache.forget_misses()  # freshly downloaded art is on disk now
             self._table.viewport().update()
 
     def _update_state(self) -> None:

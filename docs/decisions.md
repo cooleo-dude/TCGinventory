@@ -1023,3 +1023,29 @@ _Template for new entries:_
   and writes a trimmed history backup; File ▸ "Update market prices" triggers it
   manually. Owned-card sets are swept first. Foundation for the market-trend
   feature (surfacing per-card history in the UI is a follow-on).
+
+### 2026-08-04 — History thumbnails: session-scoped pixmap + card-id caches
+- **Decision:** The Cards column in both History pages (Transaction card art,
+  Recognition region crops) now paints through a shared, process-wide
+  `ui/thumbcache.py` — Qt's `QPixmapCache` holding the *pre-scaled* 24×32
+  thumbnails, keyed by `namespace:key:WxH`, with a miss set that background
+  workers clear via `forget_misses()` as new files land. Catalog art resolution
+  is memoised for the session too (`_CARD_ID_MEMO`: (name, set, number) →
+  card_id), so a rebuild pre-fills each row's `thumb_ids` and only queues rows
+  that still need a lookup or a download. History's mode toggle is stale-gated
+  per page (mirroring the nav-level gate), so switching Transaction ⇄ Recognition
+  re-shows a loaded page as-is.
+- **Context / why:** The delegate decoded each PNG from disk *inside* `paint()`,
+  so every repaint — a scroll, a hover, or navigating back to History — re-read
+  and re-scaled dozens of files, and each refresh threw away the resolved card
+  ids and re-queried the catalog. The thumbnails visibly re-loaded on every
+  visit. Measured on the real DB (260 transactions): 19 decodes on a cold render,
+  **0 on every later repaint**.
+- **Alternatives considered:** A per-view dict (rejected: dies with the view, so
+  a rebuild still re-decodes — this is what the Inventory grid does); caching the
+  full-size source pixmaps (rejected: rescaling per paint stays, and card art is
+  ~50× the bytes of the 24×32 thumbnail).
+- **Consequences:** `thumbcache` is the convention for any future grid painting
+  small cached images. Un-downloaded art is still retried on a later refresh (the
+  memo doesn't suppress the fetch), so art that missed while offline appears once
+  it's fetched. Cache limit raised to 32 MiB (~thousands of thumbnails).
