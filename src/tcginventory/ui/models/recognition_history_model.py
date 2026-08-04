@@ -19,7 +19,7 @@ _ROOT = QModelIndex()
 _HEADERS = [
     "Date",
     "Source",
-    "Note",
+    "Export",
     "Images",
     "Labeled",
     "State",
@@ -30,10 +30,12 @@ _HEADERS = [
 # Same slots the transaction log uses, so the shared pill/thumbnail delegates
 # paint the right columns: Source pill = 1, State pill = 5, thumbnails = 6.
 SOURCE_COL = _HEADERS.index("Source")
+EXPORT_COL = _HEADERS.index("Export")
 STATE_COL = _HEADERS.index("State")
 CARDS_COL = _HEADERS.index("Cards")
 ITEMS_COL = _HEADERS.index("Items")
 CARDS_ROLE = Qt.UserRole + 1  # (thumb_card_ids, total_card_count)
+EXPORT_ROLE = Qt.UserRole + 2  # (capture_id, exportable_card_count)
 
 
 @dataclass(frozen=True)
@@ -98,8 +100,13 @@ class RecognitionHistoryModel(QAbstractTableModel):
             return self._sort_key(row, col)
         if role == CARDS_ROLE and col == CARDS_COL:
             return (row.thumb_ids, row.card_count)
+        if role == EXPORT_ROLE and col == EXPORT_COL:
+            return (row.capture_id, row.card_count)
         if role == Qt.ToolTipRole and col in (CARDS_COL, ITEMS_COL) and row.items_label:
             return row.items_label
+        # The note lost its own column to the export buttons — keep it readable.
+        if role == Qt.ToolTipRole and col in (0, SOURCE_COL) and row.note:
+            return row.note
         if role == Qt.TextAlignmentRole and col in (3, 4):
             return int(Qt.AlignRight | Qt.AlignVCenter)
         if role == Qt.FontRole and col in (0, 3, 4):  # date + counts → mono
@@ -112,8 +119,8 @@ class RecognitionHistoryModel(QAbstractTableModel):
             return row.occurred_at
         if col == SOURCE_COL:
             return row.source or "manual"
-        if col == 2:
-            return row.note or ""
+        if col == EXPORT_COL:
+            return ""  # painted by the export-buttons delegate
         if col == 3:
             return str(row.images)
         if col == 4:
@@ -129,7 +136,7 @@ class RecognitionHistoryModel(QAbstractTableModel):
         return {
             0: row.occurred_at,
             SOURCE_COL: row.source or "",
-            2: (row.note or "").lower(),
+            EXPORT_COL: row.card_count,  # sorts exportable captures together
             3: row.images,
             4: row.labeled,
             STATE_COL: row.state,

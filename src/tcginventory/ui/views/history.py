@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 
 from PySide6.QtCore import (
+    QEvent,
     QModelIndex,
     QRectF,
     QSize,
@@ -51,6 +52,7 @@ from PySide6.QtWidgets import (
     QTableView,
     QTableWidget,
     QTableWidgetItem,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -80,6 +82,8 @@ from tcginventory.ui.models.history_model import (
     HistoryTableModel,
 )
 from tcginventory.ui.models.recognition_history_model import (
+    EXPORT_COL,
+    EXPORT_ROLE,
     RecognitionHistoryModel,
     RecognitionRow,
 )
@@ -660,6 +664,145 @@ class _RecFilterProxy(QSortFilterProxyModel):
         return True
 
 
+class _ExportDelegate(QStyledItemDelegate):
+    """Two small icon buttons in the Recognition log's Export column: send this
+    capture's labeled cards to the Transaction window (⇆) or start an auction lot
+    from them (gavel).
+
+    Painted rather than embedded as widgets, so sorting/filtering can't strand a
+    stale button on a row. Captures with nothing labeled show the pair dimmed and
+    ignore clicks. Hover is tracked through an event filter on the viewport —
+    ``editorEvent`` never sees plain mouse moves, and per-button feedback is what
+    makes these read as buttons.
+    """
+
+    _W, _H, _GAP, _PAD = 23, 20, 4, 6
+    _TARGETS = (  # (glyph, target, tooltip)
+        ("arrow-left-right", "transaction", "Export to Transaction"),
+        ("gavel", "auction", "Export to Auction"),
+    )
+
+    def __init__(self, view, on_export) -> None:
+        super().__init__(view)
+        self._view = view
+        self._on_export = on_export  # (target, capture_id) -> None
+        self._hover: tuple[int, int] | None = None  # (row, button index)
+        view.setMouseTracking(True)  # so the viewport sends us mouse moves
+        # Hold the viewport rather than re-reading view.viewport() in the filter:
+        # teardown delivers events after the C++ view is gone, and dereferencing
+        # it then raises.
+        self._viewport = view.viewport()
+        self._viewport.installEventFilter(self)
+
+    def sizeHint(self, option, index) -> QSize:
+        slots = len(self._TARGETS)
+        return QSize(
+            self._PAD * 2 + slots * self._W + (slots - 1) * self._GAP, self._H + 8
+        )
+
+    def _button_rects(self, cell) -> list[QRectF]:
+        y = cell.center().y() - self._H / 2
+        x = cell.left() + self._PAD
+        rects = []
+        for _ in self._TARGETS:
+            rects.append(QRectF(x, y, self._W, self._H))
+            x += self._W + self._GAP
+        return rects
+
+    def _hit(self, cell, pos) -> int | None:
+        for i, rect in enumerate(self._button_rects(cell)):
+            if rect.contains(pos):
+                return i
+        return None
+
+    # -- painting -----------------------------------------------------------
+
+    def paint(self, painter, option, index) -> None:
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, widget)
+
+        _capture_id, count = index.data(EXPORT_ROLE) or (None, 0)
+        t = theme.active()
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing)
+        for i, rect in enumerate(self._button_rects(option.rect)):
+            glyph = self._TARGETS[i][0]
+            live = count > 0
+            hovered = live and self._hover == (index.row(), i)
+            path = QPainterPath()
+            path.addRoundedRect(rect, 6, 6)
+            if hovered:
+                painter.fillPath(path, QColor(t.accent))
+                ink = t.accent_on
+            else:
+                painter.fillPath(path, QColor(t.surface2))
+                painter.setPen(QPen(_alpha(t.line2 if live else t.line, 1.0), 1))
+                painter.drawPath(path)
+                ink = t.ink2 if live else t.ink3
+            pm = icons.pixmap(glyph, ink, 13)
+            if not live:
+                painter.setOpacity(0.45)
+            painter.drawPixmap(
+                int(rect.center().x() - 6.5), int(rect.center().y() - 6.5), pm
+            )
+            painter.setOpacity(1.0)
+        painter.restore()
+
+    # -- interaction --------------------------------------------------------
+
+    def editorEvent(self, event, model, option, index) -> bool:
+        if event.type() == QEvent.MouseButtonRelease:
+            capture_id, count = index.data(EXPORT_ROLE) or (None, 0)
+            which = self._hit(option.rect, event.position())
+            if which is not None and count > 0 and capture_id is not None:
+                self._on_export(self._TARGETS[which][1], capture_id)
+                return True
+            if which is not None:
+                return True  # swallow clicks on a dimmed pair
+        return super().editorEvent(event, model, option, index)
+
+    def eventFilter(self, obj, event) -> bool:
+        """Track which button the pointer is over, for hover feedback."""
+        if obj is self._viewport:
+            if event.type() == QEvent.MouseMove:
+                self._set_hover(event.position().toPoint())
+            elif event.type() == QEvent.Leave:
+                self._set_hover(None)
+        return super().eventFilter(obj, event)
+
+    def _set_hover(self, pos) -> None:
+        hover = None
+        if pos is not None:
+            index = self._view.indexAt(pos)
+            if index.isValid() and index.column() == EXPORT_COL:
+                cell = self._view.visualRect(index)
+                which = self._hit(cell, pos)
+                if which is not None and (index.data(EXPORT_ROLE) or (None, 0))[1] > 0:
+                    hover = (index.row(), which)
+        if hover != self._hover:
+            self._hover = hover
+            self._viewport.setCursor(Qt.PointingHandCursor if hover else Qt.ArrowCursor)
+            self._viewport.update()
+
+    def helpEvent(self, event, view, option, index) -> bool:
+        """Tooltip per button, so the icons don't have to explain themselves."""
+        which = self._hit(option.rect, event.pos())
+        if which is not None:
+            count = (index.data(EXPORT_ROLE) or (None, 0))[1]
+            tip = (
+                self._TARGETS[which][2]
+                if count
+                else "Nothing labeled in this capture to export"
+            )
+            QToolTip.showText(event.globalPos(), tip, view)
+            return True
+        return super().helpEvent(event, view, option, index)
+
+
 class _CropThumbDelegate(_ThumbDelegate):
     """Cards column for the Recognition log: thumbnails are the regions cropped
     from their source photos (keyed by region id), not catalog art."""
@@ -782,25 +925,10 @@ class _RecHistoryPanel(QWidget):
         self._search.setPlaceholderText("Search cards or note…")
         self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self._on_search_changed)
-        # Re-export an old batch without re-annotating it — the same handoff the
-        # Recognition window's export button makes, acting on the selected capture.
-        self._export_txn_btn = self._export_button(
-            "Export to Transaction",
-            "Fill the Transaction window with this capture's labeled cards "
-            "(give/receive sides as they were labeled).",
-            "transaction",
-        )
-        self._export_auc_btn = self._export_button(
-            "Export to Auction",
-            "Start an auction lot from this capture's labeled cards.",
-            "auction",
-        )
         filter_bar = QHBoxLayout()
         filter_bar.addWidget(QLabel("Source:"))
         filter_bar.addWidget(self._source)
         filter_bar.addWidget(self._search, 1)
-        filter_bar.addWidget(self._export_txn_btn)
-        filter_bar.addWidget(self._export_auc_btn)
 
         self._table = QTableView()
         self._table.setModel(self._proxy)
@@ -808,6 +936,11 @@ class _RecHistoryPanel(QWidget):
         self._table.sortByColumn(0, Qt.DescendingOrder)  # newest first
         self._table.setItemDelegate(_RecPillDelegate(self._table))
         self._table.setItemDelegateForColumn(CARDS_COL, _CropThumbDelegate(self._table))
+        # Export buttons live in the row itself (where the Note column used to be),
+        # so any capture is one click from a Transaction or an auction lot.
+        self._table.setItemDelegateForColumn(
+            EXPORT_COL, _ExportDelegate(self._table, self._export)
+        )
         self._table.verticalHeader().setDefaultSectionSize(40)
         self._table.horizontalHeader().setResizeContentsPrecision(25)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -898,28 +1031,10 @@ class _RecHistoryPanel(QWidget):
         v.addWidget(self._spark, 1)
         return frame
 
-    # -- export the selected capture ----------------------------------------
+    # -- export a capture (row buttons in the Export column) -----------------
 
-    def _export_button(self, label: str, tip: str, target: str) -> QPushButton:
-        btn = QPushButton(label)
-        btn.setIcon(icons.icon("arrow-left-right", theme.active().ink2, 15))
-        btn.setToolTip(tip)
-        btn.setEnabled(False)  # until a capture with labeled cards is selected
-        btn.clicked.connect(lambda _=False, t=target: self._export(t))
-        return btn
-
-    def _sync_export_buttons(self) -> None:
-        """Export needs a selected capture that actually has labeled cards."""
-        row = self._selected_capture()
-        enabled = row is not None and row.card_count > 0
-        for btn in (self._export_txn_btn, self._export_auc_btn):
-            btn.setEnabled(enabled)
-
-    def _export(self, target: str) -> None:
-        row = self._selected_capture()
-        if row is None:
-            return
-        cards = corpus.capture_export_cards(self._ensure_vision(), row.capture_id)
+    def _export(self, target: str, capture_id: int) -> None:
+        cards = corpus.capture_export_cards(self._ensure_vision(), capture_id)
         if not cards:
             QMessageBox.information(
                 self,
@@ -1056,11 +1171,9 @@ class _RecHistoryPanel(QWidget):
         self._filmstrip.blockSignals(False)
         self._filmstrip.setVisible(False)
         self._annotated.clear()
-        self._sync_export_buttons()
 
     def _show_detail(self) -> None:
         row = self._selected_capture()
-        self._sync_export_buttons()
         if row is None:
             self._clear_preview()
             return

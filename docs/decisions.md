@@ -4,6 +4,31 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-04 — Dashboard highlights are links into the owning screen
+
+- **Decision:** A Top Gainers / Losers / Sellers row opens that card **selected in
+  Inventory**; an Upcoming Shows row opens that **day on the Calendar**. The
+  Dashboard emits intent (`item_activated(item_id)` /
+  `show_date_activated(iso)`); `MainWindow` routes it, and the destination screens
+  own the "go here" verbs (`InventoryView.select_item`, `CalendarView.show_date`).
+  Dashboard stays ignorant of the nav stack.
+- **Selection, not a dialog:** selecting the row reuses the existing selection
+  path, so the dossier (art, facts, price-history chart) fills in exactly as if
+  the user had clicked the row — no second detail surface to maintain.
+- **Three non-obvious choices:**
+  - **Navigate first, then select.** Switching screens can refresh the grid,
+    which rebuilds rows and drops the selection; selecting after the switch
+    survives it.
+  - **Filters that hide the target are cleared** (search, In-stock, Review,
+    intent/sold/graded segments, via the widgets so the bar stays honest).
+    Otherwise "show me this card" silently does nothing — e.g. a fully-sold Top
+    Seller while the In-stock chip is on.
+  - **An in-stock lot wins** when a card has several rows, so a partially-sold
+    card lands on the copies still on hand.
+- **Consequences:** highlight rows now carry a hover wash + pointing-hand cursor
+  (`_ClickableRow`), which required `WA_StyledBackground` — that also fixed the
+  rows' hairline separators, which had never actually painted.
+
 ### 2026-07-31 — Cleanup pass: reconcile spec 02 / CLAUDE.md with the code
 
 A spec-conformance audit found the money core sound (Qt-free layers, integer
@@ -1064,6 +1089,13 @@ _Template for new entries:_
   is re-usable without re-annotating it. Both windows' `import_recognized` are
   duck-typed, so a neutral service-layer carrier feeds them directly — no
   view→view import from History into the Recognition window.
+- **Placement:** the buttons live **in the row**, in the Export column that
+  replaced Note (a painted `_ExportDelegate`, not embedded widgets, so sorting and
+  filtering can't strand a stale button): two small icon pills — ⇆ Transaction and
+  a gavel for Auction, echoing the nav glyphs — dimmed and inert on captures with
+  nothing labeled. The note keeps its content as the Date/Source cell tooltip.
+  Per-button hover needs an event filter on the viewport: `editorEvent` never sees
+  plain mouse moves.
 - **Consequences:** `corpus.ExportCard` and `recognition.RecognizedCard` are now
   two carriers with identical fields. `ExportCard` is the layer-correct one (a
   service, headlessly testable); **follow-up:** have the Recognition window emit

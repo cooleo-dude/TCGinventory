@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QRectF  # noqa: E402
+from PySide6.QtCore import QRectF, Qt  # noqa: E402
 
 from tcginventory.data.auctions import open_auctions  # noqa: E402
 from tcginventory.data.db import connect  # noqa: E402
@@ -206,37 +206,85 @@ def test_capture_export_cards_rebuilds_the_payload():
     assert cards[0].condition == "NM"
 
 
-def test_recognition_history_exports_the_selected_capture(app, conn):
-    """The Cards a capture holds hand off to Transaction / Auction, and the
-    buttons only enable once a capture with labeled cards is selected."""
-    from tcginventory.data.vision import VisionRepository, open_vision
+def _click_export(rec, row: int, which: int) -> None:
+    """Click one of a row's Export-column buttons the way a user would."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    from tcginventory.ui.models.recognition_history_model import EXPORT_COL
+
+    index = rec._proxy.index(row, EXPORT_COL)
+    delegate = rec._table.itemDelegateForColumn(EXPORT_COL)
+    cell = rec._table.visualRect(index)
+    center = delegate._button_rects(cell)[which].center()
+    QTest.mouseClick(
+        rec._table.viewport(),
+        Qt.LeftButton,
+        pos=QPoint(int(center.x()), int(center.y())),
+    )
+
+
+def test_recognition_history_exports_a_row_from_its_export_buttons(app, conn):
+    """Each row's Export column hands that capture's cards to Transaction /
+    Auction — no selection needed, and rows with nothing labeled don't fire."""
+    from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
     from tcginventory.ui.views.history import HistoryView
 
     vrepo = VisionRepository(open_vision(":memory:"))
-    _stored_capture(vrepo, source="listing")
+    _stored_capture(vrepo, source="listing")  # newest → row 0
+    bare = vrepo.add_capture(source="manual", now="2026-01-01T00:00:00+00:00")
+    img = vrepo.add_image(bare, "bare-sha", "/bare.png", "front")
+    vrepo.add_region(img, 1, (0.0, 0.0, 0.2, 0.4), None, CardLabel())  # unlabeled
 
     view = HistoryView(conn, vision_repo=vrepo)
-    rec = view._rec
+    view.resize(1100, 600)
+    view.show()  # a real geometry, so visualRect gives clickable coordinates
     view._set_mode(1)  # → Recognition History
-    assert not rec._export_txn_btn.isEnabled()  # nothing selected yet
-    assert not rec._export_auc_btn.isEnabled()
+    app.processEvents()
+    rec = view._rec
+    assert rec._model.rowCount() == 2
 
     to_txn, to_auc = [], []
     view.export_to_transaction.connect(to_txn.append)  # relayed by HistoryView
     view.export_to_auction.connect(to_auc.append)
 
-    rec._table.selectRow(0)
-    assert rec._export_txn_btn.isEnabled() and rec._export_auc_btn.isEnabled()
-
-    rec._export_auc_btn.click()
+    _click_export(rec, 0, 1)  # the labeled capture → Auction
     assert len(to_auc) == 1
     assert [(c.name, c.quantity) for c in to_auc[0]] == [
         ("Charizard", 2),
         ("Blastoise", 1),
     ]
-    rec._export_txn_btn.click()
+    _click_export(rec, 0, 0)  # → Transaction
     assert len(to_txn) == 1
 
+    _click_export(rec, 1, 0)  # the capture with nothing labeled: dimmed, inert
+    _click_export(rec, 1, 1)
+    assert (len(to_txn), len(to_auc)) == (1, 1)
+
+    view.close()
+    view.deleteLater()
+
+
+def test_export_column_replaced_the_note_column(app, conn):
+    """The Note column gave up its slot to the buttons; the note lives on as a
+    tooltip so it isn't lost."""
+    from tcginventory.data.vision import VisionRepository, open_vision
+    from tcginventory.ui.models.recognition_history_model import EXPORT_COL
+    from tcginventory.ui.views.history import HistoryView
+
+    vrepo = VisionRepository(open_vision(":memory:"))
+    cap = _stored_capture(vrepo)
+    vrepo.conn.execute("UPDATE capture SET note = ? WHERE id = ?", ("box break", cap))
+    vrepo.conn.commit()
+
+    view = HistoryView(conn, vision_repo=vrepo)
+    view._set_mode(1)
+    model = view._rec._model
+    headers = [model.headerData(c, Qt.Horizontal) for c in range(model.columnCount())]
+    assert "Note" not in headers
+    assert headers[EXPORT_COL] == "Export"
+    assert model.data(model.index(0, EXPORT_COL), Qt.DisplayRole) == ""
+    assert model.data(model.index(0, 0), Qt.ToolTipRole) == "box break"
     view.deleteLater()
 
 
