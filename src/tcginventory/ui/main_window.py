@@ -12,10 +12,9 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 
-from PySide6.QtCore import QEvent, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer
 from PySide6.QtGui import QMovie
 from PySide6.QtWidgets import (
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -30,11 +29,9 @@ from PySide6.QtWidgets import (
 
 from tcginventory import __version__, config
 from tcginventory.data.auctions import open_auctions
-from tcginventory.data.backup import backup_database
 from tcginventory.data.db import connect
 from tcginventory.data.migrator import migrate
 from tcginventory.data.repositories import PriceSnapshotRepository
-from tcginventory.services import importexport
 from tcginventory.ui.assets import app_icon, scrafty_movie_path
 from tcginventory.ui.views.auctions import AuctionsView
 from tcginventory.ui.views.calendar import CalendarView
@@ -43,6 +40,7 @@ from tcginventory.ui.views.history import HistoryView
 from tcginventory.ui.views.inventory import InventoryView
 from tcginventory.ui.views.market import PriceLookupView
 from tcginventory.ui.views.market_signal import MarketView
+from tcginventory.ui.views.operations import OperationsView
 from tcginventory.ui.views.recognition import RecognitionView
 from tcginventory.ui.views.transaction import TransactionView
 
@@ -56,6 +54,7 @@ NAV_ITEMS = [
     "eBay Auctions",
     "Recognition",
     "Market",
+    "Operations",
 ]
 # Lucide icon per nav destination (see ui/icons.py).
 NAV_ICONS = {
@@ -68,124 +67,15 @@ NAV_ICONS = {
     "eBay Auctions": "gavel",
     "Recognition": "scan-line",
     "Market": "trending-up",
+    "Operations": "sliders-horizontal",
 }
-_TRANSACTION_INDEX = 1
-_AUCTION_INDEX = 6
+# Derived, not hardcoded: inserting a destination silently invalidated literals.
+_TRANSACTION_INDEX = NAV_ITEMS.index("Transaction")
+_INVENTORY_INDEX = NAV_ITEMS.index("Inventory")
+_CALENDAR_INDEX = NAV_ITEMS.index("Calendar")
+_AUCTION_INDEX = NAV_ITEMS.index("eBay Auctions")
+_OPERATIONS_INDEX = NAV_ITEMS.index("Operations")
 _REFRESH_STALE_HOURS = 12  # startup auto-refresh only if older than this
-
-
-class _PriceRefreshWorker(QThread):
-    """Runs a price refresh off the UI thread with its own DB connection."""
-
-    done = Signal(object)  # RefreshSummary
-
-    def __init__(self, db_path) -> None:
-        super().__init__()
-        self._db_path = db_path
-
-    def run(self) -> None:
-        import logging
-
-        from tcginventory.data.db import open_database
-        from tcginventory.services.pricing import PricingService, RefreshSummary
-
-        try:
-            conn = open_database(self._db_path)
-            try:
-                summary = PricingService(conn).refresh()
-            finally:
-                conn.close()
-        except Exception as exc:  # never crash the thread
-            summary = RefreshSummary(errors=[str(exc)])
-        logging.getLogger(__name__).info(
-            "price refresh: priced=%d unmapped=%d errors=%s",
-            summary.priced,
-            len(summary.unmapped),
-            summary.errors,
-        )
-        self.done.emit(summary)
-
-
-class _CatalogUpdateWorker(QThread):
-    """Pulls the reference card catalog off the UI thread (its own connection)."""
-
-    done = Signal(object)  # CatalogUpdateSummary
-
-    def __init__(self, db_path, language: str = "EN") -> None:
-        super().__init__()
-        self._db_path = db_path
-        self._language = language
-
-    def run(self) -> None:
-        import logging
-
-        from tcginventory.data.db import open_database
-        from tcginventory.services.catalog import (
-            CatalogUpdateSummary,
-            update_catalog,
-            update_catalog_ja,
-        )
-
-        pull = update_catalog_ja if self._language == "JP" else update_catalog
-        try:
-            conn = open_database(self._db_path)
-            try:
-                summary = pull(conn)
-            finally:
-                conn.close()
-        except Exception as exc:  # never crash the thread
-            summary = CatalogUpdateSummary(errors=[str(exc)])
-        logging.getLogger(__name__).info(
-            "catalog update: sets=%d cards=%d errors=%d",
-            summary.sets,
-            summary.cards,
-            len(summary.errors),
-        )
-        self.done.emit(summary)
-
-
-class _MarketSweepWorker(QThread):
-    """Price the whole catalog into the price-history DB, off the UI thread."""
-
-    done = Signal(object)  # SweepSummary
-
-    def __init__(self, db_path) -> None:
-        super().__init__()
-        self._db_path = db_path
-
-    def run(self) -> None:
-        import logging
-
-        from tcginventory import config
-        from tcginventory.data.backup import (
-            backup_price_history,
-            timestamp_for_filename,
-        )
-        from tcginventory.data.db import open_database
-        from tcginventory.data.pricehistory import open_history
-        from tcginventory.services.marketprices import SweepSummary, sweep
-
-        try:
-            conn = open_database(self._db_path)
-            hist = open_history()
-            try:
-                summary = sweep(conn, hist)
-                backup_price_history(
-                    hist, config.data_dir() / "backups", timestamp_for_filename()
-                )
-            finally:
-                hist.close()
-                conn.close()
-        except Exception as exc:
-            summary = SweepSummary(errors=[str(exc)])
-        logging.getLogger(__name__).info(
-            "market sweep: sets=%d priced=%d snapshots=%d errors=%d",
-            summary.sets,
-            summary.priced,
-            summary.snapshots,
-            len(summary.errors),
-        )
-        self.done.emit(summary)
 
 
 class _MascotLabel(QLabel):
@@ -221,9 +111,6 @@ class MainWindow(QMainWindow):
             migrate(conn)
         self._conn = conn
         self._db_file = self._resolve_db_file()  # None for in-memory (tests)
-        self._price_worker: _PriceRefreshWorker | None = None
-        self._catalog_worker: _CatalogUpdateWorker | None = None
-        self._market_worker: _MarketSweepWorker | None = None
 
         self.setWindowTitle(f"TCGinventory {__version__}")
         self.setWindowIcon(app_icon())
@@ -243,16 +130,22 @@ class MainWindow(QMainWindow):
         self._calendar = CalendarView(conn)
         self._recognition = RecognitionView(conn, prewarm=True)
         self._market = MarketView(conn)
+        self._operations = OperationsView(conn)
+        # Stack order must match NAV_ITEMS.
         self._stack = QStackedWidget()
-        self._stack.addWidget(self._dashboard)  # 0 Dashboard
-        self._stack.addWidget(self._transaction)  # 1 Transaction
-        self._stack.addWidget(self._inventory)  # 2 Inventory
-        self._stack.addWidget(self._history)  # 3 History
-        self._stack.addWidget(self._calendar)  # 4 Calendar
-        self._stack.addWidget(self._price_lookup)  # 5 Price Lookup
-        self._stack.addWidget(self._auctions)  # 6 eBay Auctions
-        self._stack.addWidget(self._recognition)  # 7 Recognition
-        self._stack.addWidget(self._market)  # 8 Market
+        for view in (
+            self._dashboard,
+            self._transaction,
+            self._inventory,
+            self._history,
+            self._calendar,
+            self._price_lookup,
+            self._auctions,
+            self._recognition,
+            self._market,
+            self._operations,
+        ):
+            self._stack.addWidget(view)
 
         # Refresh-on-demand: every view is pre-built and refreshed once on first
         # visit; a screen only re-refreshes when the data behind it has actually
@@ -266,10 +159,15 @@ class MainWindow(QMainWindow):
         self._transaction.posted.connect(self._on_ledger_changed)
         self._history.changed.connect(self._on_ledger_changed)
         self._inventory.changed.connect(self._on_ledger_changed)
+        # An import or a price refresh changes what every read screen shows.
+        self._operations.changed.connect(self._on_ledger_changed)
         self._history.edit_requested.connect(self._start_edit)
         self._history.new_transaction_requested.connect(
             lambda: self._nav.setCurrentRow(_TRANSACTION_INDEX)
         )
+        # Dashboard highlights are links into the screen that owns the detail.
+        self._dashboard.item_activated.connect(self._show_item_in_inventory)
+        self._dashboard.show_date_activated.connect(self._show_date_in_calendar)
         self._auctions.export_to_transaction.connect(self._export_from_auction)
         self._recognition.export_to_transaction.connect(
             self._export_recognition_to_transaction
@@ -322,6 +220,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
         self._build_menu()
+        self._reconcile_auto_updates()
         self.setStatusBar(QStatusBar())
         # Persistent (right-aligned) indicator of when prices last updated —
         # stays visible even while a transient "Refreshing…" message shows.
@@ -337,7 +236,7 @@ class MainWindow(QMainWindow):
         # Throttled auto-refresh shortly after the window shows (file DB only).
         QTimer.singleShot(0, self._maybe_startup_refresh)
 
-    # -- price refresh ------------------------------------------------------
+    # -- startup upkeep ------------------------------------------------------
 
     def _resolve_db_file(self) -> str | None:
         for _seq, name, file in self._conn.execute("PRAGMA database_list").fetchall():
@@ -359,164 +258,39 @@ class MainWindow(QMainWindow):
         )
 
     def _maybe_startup_refresh(self) -> None:
+        """Throttled auto-refresh shortly after launch (file DB only).
+
+        Runs *through the Operations screen* so its tile, its Activity entry and
+        the status bar all say the same thing as a manual run.
+        """
         if not self._db_file:
             return
         has_items = self._conn.execute("SELECT COUNT(*) FROM item").fetchone()[0] > 0
         if has_items and self._prices_are_stale():
-            self._refresh_prices(silent=True)
+            self._operations.refresh_prices(silent=True)
 
-    def _refresh_prices(self, silent: bool = False) -> None:
-        if not self._db_file:
-            if not silent:
-                QMessageBox.information(
-                    self, "Refresh prices", "Not available for an in-memory database."
-                )
-            return
-        if self._price_worker is not None and self._price_worker.isRunning():
-            return
-        self._refresh_silent = silent
-        self._refresh_action.setEnabled(False)
-        self.statusBar().showMessage("Refreshing prices…")
-        self._price_worker = _PriceRefreshWorker(self._db_file)
-        self._price_worker.done.connect(self._on_prices_refreshed)
-        self._price_worker.start()
-
-    def _on_prices_refreshed(self, summary) -> None:
-        self._refresh_action.setEnabled(True)
-        self._price_worker = None
-        # Record the fresh collection value so the dashboard chart tracks the
-        # tile (deduped per day).
-        try:
-            from tcginventory.services.reporting import ReportingService
-
-            ReportingService(self._conn).record_collection_value()
-        except Exception:
-            pass  # best-effort; never block the refresh completion
-        self._on_ledger_changed()  # re-read views (prices now live)
-        if not self._refresh_silent:
-            msg = f"Priced {summary.priced} item(s)."
-            if summary.unmapped:
-                msg += (
-                    f"\n{len(summary.unmapped)} not priced "
-                    "(missing TCGplayer link or unmatched set)."
-                )
-            if summary.errors:
-                msg += "\nErrors: " + "; ".join(summary.errors)
-            QMessageBox.information(self, "Prices refreshed", msg)
-
-    # -- menu (import / export / backup) ------------------------------------
+    # -- menu ------------------------------------------------------------------
 
     def _build_menu(self) -> None:
+        """A deliberately thin File menu.
+
+        Every maintenance verb lives on the **Operations** screen, which can say
+        what each one does and when it last ran — a menu label can do neither, and
+        two trigger paths for one job drift apart.
+        """
         # Keep a reference so the QMenu isn't garbage-collected (PySide6 quirk).
         self._file_menu = self.menuBar().addMenu("&File")
-        self._file_menu.addAction("Import items from CSV…", self._import_items)
-        self._file_menu.addAction("Import purchases from CSV…", self._import_purchases)
+        self._operations_action = self._file_menu.addAction(
+            "Operations", lambda: self._nav.setCurrentRow(_OPERATIONS_INDEX)
+        )
+        self._operations_action.setShortcut("Ctrl+Shift+O")
+        self._operations_action.setStatusTip(
+            "Imports, exports, backups, price and card-database updates"
+        )
         self._file_menu.addSeparator()
-        self._file_menu.addAction("Export inventory to CSV…", self._export_inventory)
-        self._file_menu.addAction("Export full backup (CSV folder)…", self._export_all)
-        self._file_menu.addAction("Backup database…", self._backup_database)
-        self._file_menu.addSeparator()
-        self._refresh_action = self._file_menu.addAction(
-            "Refresh prices…", lambda: self._refresh_prices(silent=False)
-        )
-        self._catalog_action = self._file_menu.addAction(
-            "Update card database (English)…", lambda: self._update_catalog("EN")
-        )
-        self._catalog_action_ja = self._file_menu.addAction(
-            "Update card database (Japanese)…", lambda: self._update_catalog("JP")
-        )
-        self._market_action = self._file_menu.addAction(
-            "Update market prices…", self._update_market_prices
-        )
-        self._build_auto_update_action()
+        self._file_menu.addAction("Exit", self.close)
 
-    def _update_catalog(self, language: str = "EN") -> None:
-        if not self._db_file:
-            QMessageBox.information(
-                self, "Card database", "Not available for an in-memory database."
-            )
-            return
-        if self._catalog_worker is not None and self._catalog_worker.isRunning():
-            return
-        label = "Japanese" if language == "JP" else "English"
-        self._catalog_action.setEnabled(False)
-        self._catalog_action_ja.setEnabled(False)
-        self.statusBar().showMessage(
-            f"Updating {label} card database… (one-time bulk pull)"
-        )
-        self._catalog_worker = _CatalogUpdateWorker(self._db_file, language)
-        self._catalog_worker.done.connect(self._on_catalog_updated)
-        self._catalog_worker.start()
-
-    def _on_catalog_updated(self, summary) -> None:
-        self._catalog_action.setEnabled(True)
-        self._catalog_action_ja.setEnabled(True)
-        self._catalog_worker = None
-        self._update_status()
-        if summary.errors and not summary.cards:
-            QMessageBox.warning(
-                self, "Card database", "Update failed:\n" + "\n".join(summary.errors)
-            )
-        else:
-            self._invalidate_views()  # catalog changed → catalog-derived views stale
-            msg = f"Loaded {summary.cards:,} cards from {summary.sets} sets."
-            if summary.errors:
-                msg += f"\n({len(summary.errors)} set(s) skipped)"
-            QMessageBox.information(self, "Card database updated", msg)
-
-    def _update_market_prices(self) -> None:
-        if not self._db_file:
-            QMessageBox.information(
-                self, "Market prices", "Not available for an in-memory database."
-            )
-            return
-        if self._market_worker is not None and self._market_worker.isRunning():
-            return
-        self._market_action.setEnabled(False)
-        self.statusBar().showMessage("Updating market prices… (pricing the catalog)")
-        self._market_worker = _MarketSweepWorker(self._db_file)
-        self._market_worker.done.connect(self._on_market_swept)
-        self._market_worker.start()
-
-    def _on_market_swept(self, summary) -> None:
-        self._market_action.setEnabled(True)
-        self._market_worker = None
-        if summary.errors and not summary.priced:
-            QMessageBox.warning(
-                self,
-                "Market prices",
-                "Update failed:\n" + "\n".join(summary.errors[:5]),
-            )
-        else:
-            self.statusBar().showMessage(
-                f"Market prices updated: {summary.priced:,} cards across "
-                f"{summary.sets} sets ({summary.snapshots:,} changes recorded).",
-                8000,
-            )
-            self._invalidate_views()  # prices changed → price/holdings views stale
-
-    def _build_auto_update_action(self) -> None:
-        from tcginventory import scheduling
-
-        if not scheduling.is_supported():
-            return
-        self._auto_update_action = self._file_menu.addAction(
-            "Automatic daily price updates"
-        )
-        self._auto_update_action.setCheckable(True)
-        self._auto_update_action.setToolTip(
-            "Refresh prices once a day in the background, even when the app is "
-            "closed (uses the Windows Task Scheduler)."
-        )
-        # Default ON: the preference is on unless the user has turned it off.
-        enabled = self._auto_update_pref()
-        # Set state before connecting so this doesn't fire the toggle handler.
-        self._auto_update_action.setChecked(enabled)
-        self._auto_update_action.toggled.connect(self._toggle_auto_updates)
-        # Only the packaged app registers the OS task (so the task points at the
-        # exe, and running from source / tests has no side effects).
-        if getattr(sys, "frozen", False):
-            self._reconcile_auto_updates(enabled)
+    # -- automatic daily updates (the OS task; the toggle lives in Operations) --
 
     @staticmethod
     def _settings():
@@ -527,10 +301,16 @@ class MainWindow(QMainWindow):
     def _auto_update_pref(self) -> bool:
         return bool(self._settings().value("auto_update/enabled", True, type=bool))
 
-    def _reconcile_auto_updates(self, enabled: bool) -> None:
-        """Make the OS task match the preference (self-heals a missing task)."""
+    def _reconcile_auto_updates(self) -> None:
+        """Make the scheduled task match the preference, self-healing one that
+        went missing. Only the packaged app registers it, so running from source
+        (or under tests) has no side effects.
+        """
         from tcginventory import scheduling
 
+        if not getattr(sys, "frozen", False) or not scheduling.is_supported():
+            return
+        enabled = self._auto_update_pref()
         try:
             if enabled and not scheduling.is_enabled():
                 scheduling.enable()
@@ -538,99 +318,6 @@ class MainWindow(QMainWindow):
                 scheduling.disable()
         except Exception:
             logging.getLogger(__name__).exception("auto-update reconcile failed")
-
-    def _toggle_auto_updates(self, on: bool) -> None:
-        from tcginventory import scheduling
-
-        try:
-            if on:
-                scheduling.enable()
-            else:
-                scheduling.disable()
-        except Exception as exc:
-            QMessageBox.warning(self, "Automatic updates", str(exc))
-            # Reflect the real state after a failure.
-            self._auto_update_action.blockSignals(True)
-            self._auto_update_action.setChecked(scheduling.is_enabled())
-            self._auto_update_action.blockSignals(False)
-            return
-        self._settings().setValue("auto_update/enabled", on)
-        if on:
-            QMessageBox.information(
-                self,
-                "Automatic updates on",
-                "Prices will refresh once a day in the background (around "
-                f"{scheduling.DEFAULT_TIME}), even when the app is closed.",
-            )
-
-    def _backup_database(self) -> None:
-        default = str(config.data_dir() / "inventory-backup.db")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Backup database", default, "SQLite database (*.db)"
-        )
-        if not path:
-            return
-        try:
-            backup_database(self._conn, path)
-        except Exception as exc:  # pragma: no cover - surfaced to user
-            QMessageBox.warning(self, "Backup failed", str(exc))
-            return
-        QMessageBox.information(self, "Backup complete", f"Saved to:\n{path}")
-
-    def _export_inventory(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export inventory", "inventory.csv", "CSV (*.csv)"
-        )
-        if not path:
-            return
-        importexport.export_inventory_csv(self._conn, path)
-        QMessageBox.information(self, "Export complete", f"Saved to:\n{path}")
-
-    def _export_all(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Export full backup folder")
-        if not directory:
-            return
-        importexport.export_all(self._conn, directory)
-        importexport.export_items_csv(self._conn, f"{directory}/items_readable.csv")
-        importexport.export_inventory_csv(
-            self._conn, f"{directory}/inventory_readable.csv"
-        )
-        importexport.export_transactions_csv(
-            self._conn, f"{directory}/transactions_readable.csv"
-        )
-        QMessageBox.information(self, "Export complete", f"Wrote CSVs to:\n{directory}")
-
-    def _import_items(self) -> None:
-        self._run_import("items", importexport.import_items, "items")
-
-    def _import_purchases(self) -> None:
-        self._run_import("purchases", importexport.import_purchases, "purchases")
-
-    def _run_import(self, mode: str, apply_fn, label: str) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, f"Import {label} from CSV", "", "CSV (*.csv)"
-        )
-        if not path:
-            return
-        preview = importexport.preview_import(path, mode=mode)
-        summary = f"{preview.ok_count} valid rows, {preview.error_count} error(s)."
-        if preview.errors:
-            summary += "\n\n" + "\n".join(preview.errors[:10])
-            if preview.error_count > 10:
-                summary += f"\n…and {preview.error_count - 10} more."
-        if preview.ok_count == 0:
-            QMessageBox.warning(self, "Nothing to import", summary)
-            return
-        prompt = f"{summary}\n\nImport the {preview.ok_count} valid rows?"
-        if QMessageBox.question(self, "Confirm import", prompt) != QMessageBox.Yes:
-            return
-        result = apply_fn(self._conn, path)
-        self._on_ledger_changed()
-        done = (
-            f"Created {result.created}, matched {result.matched}, "
-            f"posted {result.posted}."
-        )
-        QMessageBox.information(self, "Import complete", done)
 
     def changeEvent(self, event) -> None:
         """Pause the Scrafty mascot while the window isn't focused; resume on
@@ -686,6 +373,23 @@ class MainWindow(QMainWindow):
     def _start_edit(self, transaction_id: int) -> None:
         if self._transaction.load_transaction(transaction_id):
             self._nav.setCurrentRow(_TRANSACTION_INDEX)
+
+    def _show_item_in_inventory(self, item_id: int) -> None:
+        """Dashboard mover/seller → that card selected in Inventory.
+
+        Navigate first: switching screens can refresh the grid (which rebuilds
+        its rows and drops any selection), so the selection has to come after.
+        """
+        self._nav.setCurrentRow(_INVENTORY_INDEX)
+        if not self._inventory.select_item(item_id):
+            self.statusBar().showMessage(
+                "That card is no longer in the inventory grid.", 5000
+            )
+
+    def _show_date_in_calendar(self, iso: str) -> None:
+        """Dashboard upcoming show → that day on the Calendar."""
+        self._nav.setCurrentRow(_CALENDAR_INDEX)
+        self._calendar.show_date(iso)
 
     def _export_from_auction(self, payload) -> None:
         """Auction → Transaction: prefill a fresh purchase with the auction's

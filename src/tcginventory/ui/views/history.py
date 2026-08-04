@@ -59,7 +59,6 @@ from PySide6.QtWidgets import (
 
 from tcginventory.data.db import connect
 from tcginventory.data.repositories import (
-    CardCatalogRepository,
     ItemRepository,
     LotConsumptionRepository,
     LotRepository,
@@ -357,28 +356,27 @@ class _ThumbResolver(QThread):
     def run(self) -> None:
         conn = connect(self._db_file)
         try:
-            catalog = CardCatalogRepository(conn)
             for source_row, idents in self._jobs:
                 if self.isInterruptionRequested():
                     return
                 ids: list[str | None] = []
                 for ident in idents:
-                    ids.append(self._resolve_one(catalog, ident))
+                    ids.append(self._resolve_one(conn, ident))
                 if any(ids):
                     self.resolved.emit(self._generation, source_row, ids)
         finally:
             conn.close()
 
     @staticmethod
-    def _resolve_one(catalog: CardCatalogRepository, ident: tuple) -> str | None:
-        """Card id for one (name, set, number), fetching its art if needed. Reuses
-        the session memo unless the image still isn't on disk (a failed or never-
-        attempted download), in which case we re-query to get the URL and retry."""
+    def _resolve_one(conn, ident: tuple) -> str | None:
+        """Art key for one (name, set, number), fetching its image if needed.
+        Reuses the session memo unless the image still isn't on disk (a failed or
+        never-attempted download), in which case we re-resolve and retry."""
         memoised = ident in _CARD_ID_MEMO
         card_id = _CARD_ID_MEMO.get(ident)
         if memoised and (card_id is None or cardimages.is_cached(card_id)):
             return card_id
-        resolved = catalog.image_for(*ident)
+        resolved = cardimages.art_for(conn, *ident)
         card_id = resolved[0] if resolved else None
         _CARD_ID_MEMO[ident] = card_id
         if resolved:
@@ -1231,7 +1229,6 @@ class HistoryView(QWidget):
         self._items = ItemRepository(conn)
         self._reporting = ReportingService(conn)
         self._service = TransactionService(conn)
-        self._catalog = CardCatalogRepository(conn)
         self._db_file = self._resolve_db_file(conn)
         self._resolver: _ThumbResolver | None = None
         self._thumb_gen = 0  # bumps each refresh so stale resolver emits are ignored
@@ -1563,9 +1560,7 @@ class HistoryView(QWidget):
 
     def _resolve_inline(self, jobs: list) -> None:
         for source_row, idents in jobs:
-            ids = [
-                _ThumbResolver._resolve_one(self._catalog, ident) for ident in idents
-            ]
+            ids = [_ThumbResolver._resolve_one(self._conn, ident) for ident in idents]
             if any(ids):
                 self._on_thumbs_resolved(self._thumb_gen, source_row, ids)
 

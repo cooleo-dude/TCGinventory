@@ -60,7 +60,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.domain.enums import Intent
 from tcginventory.services import cardimages
 from tcginventory.services.cardshows import CardShowService
@@ -277,7 +276,7 @@ class _ImageLoader(QObject):
 
     def __init__(self, conn, parent=None) -> None:
         super().__init__(parent)
-        self._catalog = CardCatalogRepository(conn)
+        self._conn = conn
         self._thumbs: dict[str, list[CardThumb]] = {}
         self._queue: dict[str, str] = {}  # card_id -> url awaiting fetch
         self._worker: _ThumbFetchWorker | None = None
@@ -290,7 +289,7 @@ class _ImageLoader(QObject):
         number: str | None,
         fallback: str,
     ) -> None:
-        res = self._catalog.image_for(name, set_name, number)
+        res = cardimages.art_for(self._conn, name, set_name, number)
         if not res:
             thumb.show_placeholder(fallback)
             return
@@ -513,6 +512,38 @@ class KpiCard(QFrame):
         self._spark.set_data(spark, rail)
 
 
+class _ClickableRow(QWidget):
+    """A highlights row that reads as a link: hover tint + click emits ``clicked``.
+
+    The row keeps its hairline top border (set by the caller) and adds a hover
+    wash, so a whole entry behaves like one target instead of the labels inside
+    it competing for the click.
+    """
+
+    clicked = Signal()
+
+    def __init__(self, object_name: str, first: bool) -> None:
+        super().__init__()
+        self.setObjectName(object_name)
+        self.setCursor(Qt.PointingHandCursor)
+        # A plain QWidget ignores stylesheet background/border without this, so
+        # neither the hairline separator nor the hover wash would paint.
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        t = theme.active()
+        border = "" if first else f"border-top:1px solid {t.line};"
+        self.setStyleSheet(
+            f"QWidget#{object_name}{{{border}border-radius:8px;}}"
+            f"QWidget#{object_name}:hover{{background:{t.accent_soft};}}"
+        )
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if event.button() == Qt.LeftButton and self.rect().contains(
+            event.position().toPoint()
+        ):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
 class _PagedBox(QFrame):
     """A titled highlights card that shows _PAGE items with "Show 5 more" /
     "Collapse" paging.
@@ -680,7 +711,13 @@ class _PagedBox(QFrame):
 
 
 class MoversColumn(_PagedBox):
-    """Top Gainers / Losers / Sellers rows, with card-art thumbnails."""
+    """Top Gainers / Losers / Sellers rows, with card-art thumbnails.
+
+    Clicking a row emits ``activated`` with the card's ``item_id`` — the main
+    window uses it to open that card in Inventory.
+    """
+
+    activated = Signal(int)  # item_id
 
     def __init__(self, title: str, dot_color: str, images: _ImageLoader) -> None:
         super().__init__(title, dot_color)
@@ -689,7 +726,7 @@ class MoversColumn(_PagedBox):
         self._label = ""  # window label (sellers empty-state)
 
     def _render_item(self, item, first: bool) -> None:
-        self._row(*self._format(item, self._mode), first=first)
+        self._row(*self._format(item, self._mode), first=first, item_id=item.item_id)
 
     def _row(
         self,
@@ -701,9 +738,13 @@ class MoversColumn(_PagedBox):
         r_bottom: str,
         r_tone: str | None,
         first: bool,
+        item_id: int | None = None,
     ) -> None:
         t = theme.active()
-        row = QWidget()
+        row = _ClickableRow("mvrow", first)
+        row.setToolTip(f"Show {name} in Inventory")
+        if item_id is not None:
+            row.clicked.connect(lambda i=item_id: self.activated.emit(i))
         h = QHBoxLayout(row)
         h.setContentsMargins(2, 7, 2, 7)
         h.setSpacing(11)
@@ -735,9 +776,6 @@ class MoversColumn(_PagedBox):
         right.addWidget(rt)
         right.addWidget(rb)
         h.addLayout(right)
-        row.setObjectName("mvrow")
-        if not first:
-            row.setStyleSheet(f"QWidget#mvrow{{border-top:1px solid {t.line};}}")
         self._rows.addWidget(row)
 
     def set_movers(self, rows: list[MoverRow], gain: bool) -> None:
@@ -789,7 +827,13 @@ class MoversColumn(_PagedBox):
 
 
 class UpcomingShowsBox(_PagedBox):
-    """Upcoming card shows (attending/walking), paged like the movers."""
+    """Upcoming card shows (attending/walking), paged like the movers.
+
+    Clicking a show emits ``activated`` with its ISO start date — the main window
+    uses it to open that day on the Calendar.
+    """
+
+    activated = Signal(str)  # ISO start date
 
     def __init__(self) -> None:
         super().__init__("Upcoming Shows", theme.active().info)
@@ -802,8 +846,9 @@ class UpcomingShowsBox(_PagedBox):
 
     def _render_item(self, show, first: bool) -> None:
         t = theme.active()
-        row = QWidget()
-        row.setObjectName("showrow")
+        row = _ClickableRow("showrow", first)
+        row.setToolTip(f"Show {show.starts_on} on the Calendar")
+        row.clicked.connect(lambda iso=show.starts_on: self.activated.emit(iso))
         h = QHBoxLayout(row)
         h.setContentsMargins(2, 7, 2, 7)
         h.setSpacing(11)
@@ -840,8 +885,6 @@ class UpcomingShowsBox(_PagedBox):
         h.addStretch(1)
         if show.status:
             h.addWidget(_status_badge(show.status), 0, Qt.AlignVCenter)
-        if not first:
-            row.setStyleSheet(f"QWidget#showrow{{border-top:1px solid {t.line};}}")
         self._rows.addWidget(row)
 
 
@@ -860,6 +903,11 @@ def _eyebrow(text: str) -> QLabel:
 
 
 class DashboardView(QWidget):
+    # Highlights entries are shortcuts into the screen that owns the detail: a
+    # mover/seller card opens in Inventory, a show opens on the Calendar.
+    item_activated = Signal(int)  # item_id
+    show_date_activated = Signal(str)  # ISO date
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         super().__init__()
         self._reporting = ReportingService(conn)
@@ -916,6 +964,9 @@ class DashboardView(QWidget):
         self._losers = MoversColumn("Top Losers", t.neg, self._images)
         self._sellers = MoversColumn("Top Sellers", t.warn, self._images)
         self._shows_box = UpcomingShowsBox()
+        for col in (self._gainers, self._losers, self._sellers):
+            col.activated.connect(self.item_activated)
+        self._shows_box.activated.connect(self.show_date_activated)
         movers = QHBoxLayout()
         movers.setSpacing(16)
         # Top-align so each box keeps its own height — expanding one doesn't

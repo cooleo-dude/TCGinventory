@@ -145,6 +145,11 @@ class ItemRepository:
         ).fetchone()
         return self._to_model(row) if row else None
 
+    def count(self) -> int:
+        """How many distinct cards exist (the Operations fact strip)."""
+        row = self.conn.execute("SELECT COUNT(*) AS n FROM item").fetchone()
+        return int(row["n"]) if row else 0
+
     def list_all(self) -> list[Item]:
         rows = self.conn.execute("SELECT * FROM item ORDER BY id").fetchall()
         return [self._to_model(r) for r in rows]
@@ -310,6 +315,13 @@ class LotRepository:
     def list_all(self) -> list[Lot]:
         rows = self.conn.execute("SELECT * FROM lot ORDER BY id").fetchall()
         return [self._to_model(r) for r in rows]
+
+    def on_hand_total(self) -> int:
+        """Total copies still held across every lot (the Operations fact strip)."""
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(remaining_qty), 0) AS n FROM lot"
+        ).fetchone()
+        return int(row["n"]) if row else 0
 
     def find_by_sku(self, sku: str) -> Lot | None:
         row = self.conn.execute(
@@ -800,6 +812,14 @@ class CardShowRepository:
         ).fetchall()
         return [self._to_model_with_status(r) for r in rows]
 
+    def count_from(self, today: str) -> int:
+        """How many scraped shows are still ahead — what a refresh actually
+        produced, as opposed to the handful you've marked attending."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM card_show WHERE starts_on >= ?", (today,)
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
     def list_between(self, start_date: str, end_date: str) -> list[CardShow]:
         """Shows with ``starts_on`` in [start_date, end_date] (inclusive)."""
         rows = self.conn.execute(
@@ -1030,7 +1050,13 @@ class CardCatalogRepository:
           *other* set.
         * If no set is given, the collector **number and name** must both agree.
 
-        A weaker match returns ``None``: better no image than the wrong card.
+        A weaker match returns ``None``: better no image than the wrong card. In
+        particular, when the number agrees with nothing in the set, only a *sole*
+        same-name printing is trusted — picking one of several by name alone is a
+        guess, and a wrong art is worse than a blank. A variant the catalog simply
+        doesn't carry (the alt-art "195a/214") therefore resolves to nothing here;
+        :func:`tcginventory.services.cardimages.art_for` covers it from the
+        item's own TCGplayer product instead.
         """
 
         def norm_num(value: str | None) -> str:
@@ -1070,9 +1096,8 @@ class CardCatalogRepository:
             gather("name = ? COLLATE NOCASE AND image_small IS NOT NULL", (name,))
         if want_num:
             gather(
-                "(number = ? OR number = ? OR number = ?) "
-                "AND image_small IS NOT NULL LIMIT 400",
-                ((number or "").strip(), norm_num(number), want_num),
+                "(number = ? OR number = ?) AND image_small IS NOT NULL LIMIT 400",
+                ((number or "").strip(), want_num),
             )
         if not pool and name:  # loose fallback when nothing else hit
             gather(
@@ -1107,18 +1132,34 @@ class CardCatalogRepository:
                 flat_name in other or other in flat_name
             )
 
+        def name_exact(row: sqlite3.Row) -> bool:
+            """Same card name, ignoring case/punctuation. Containment alone is
+            far too loose to pick a printing by — "Giovanni" is a substring of
+            "Giovanni's Machamp" — so an exact hit is preferred over it."""
+            return bool(flat_name) and flat(row["name"]) == flat_name
+
         # 1) A set was named. An *exact* set match is trustworthy on its own, so
-        #    the best card in that set (by number, then name) wins. A looser
-        #    containment match ("Mega Evolution" ⊂ "Mega Evolution Promo") is
-        #    NOT trustworthy alone — it must also agree on name AND number, or
+        #    the best card in that set wins — by number first, then by name. A
+        #    looser containment match ("Mega Evolution" ⊂ "Mega Evolution Promo")
+        #    is NOT trustworthy alone — it must also agree on name AND number, or
         #    we'd borrow a different set's same-numbered card.
         if want_set:
-            exact = [
-                r for r in pool.values() if set_exact(r) and (num_ok(r) or name_ok(r))
-            ]
-            if exact:
-                best = max(exact, key=lambda r: (num_ok(r), name_ok(r)))
+            in_set = [r for r in pool.values() if set_exact(r)]
+            numbered = [r for r in in_set if num_ok(r)]
+            if numbered:
+                best = max(numbered, key=lambda r: (num_ok(r), name_ok(r)))
                 return best["card_id"], best["image_small"]
+            # No number agreement. A sole printing of this card in the set is a
+            # safe read; several are a coin flip, so show nothing rather than an
+            # arbitrary one. Exact names are tried before loose containment.
+            for candidates in (
+                [r for r in in_set if name_exact(r)],
+                [r for r in in_set if name_ok(r)],
+            ):
+                if len(candidates) == 1:
+                    return candidates[0]["card_id"], candidates[0]["image_small"]
+                if candidates:
+                    return None
             fuzzy = [
                 r for r in pool.values()
                 if set_ok(r) and name_ok(r) and num_ok(r)
@@ -1145,6 +1186,91 @@ class CardCatalogRepository:
         if len(strong) == 1:
             return strong[0]["card_id"], strong[0]["image_small"]
         return None
+
+    def stats(self, language: str | None = None) -> tuple[int, str | None]:
+        """``(cards, last_updated)`` for one language, or the whole catalog.
+
+        ``updated_at`` is stamped by :meth:`replace_all` / ``replace_for_language``,
+        so its maximum is when that catalog was last pulled.
+        """
+        sql = "SELECT COUNT(*) AS n, MAX(updated_at) AS at FROM card_catalog"
+        params: tuple = ()
+        if language:
+            sql += " WHERE language = ?"
+            params = (language,)
+        row = self.conn.execute(sql, params).fetchone()
+        return (row["n"] or 0, row["at"]) if row else (0, None)
+
+
+class OperationRunRepository:
+    """The maintenance run log (operation_run) behind the Operations window.
+
+    Every import, export, backup, price or catalog run appends a row here — from
+    the UI, the daily background task, or the startup backup — so each tile can
+    say when it last ran and the Activity list survives a restart.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def record(
+        self,
+        op: str,
+        *,
+        ok: bool = True,
+        summary: str | None = None,
+        source: str = "ui",
+        started_at: str | None = None,
+        finished_at: str | None = None,
+    ) -> int:
+        """Append one run; returns its id. ``started_at`` defaults to now, so a
+        caller that didn't time the work still gets an ordered entry."""
+        now = now_iso()
+        cur = self.conn.execute(
+            "INSERT INTO operation_run (op, started_at, finished_at, ok, summary, "
+            "source) VALUES (?,?,?,?,?,?)",
+            (op, started_at or now, finished_at or now, int(ok), summary, source),
+        )
+        return int(cur.lastrowid)
+
+    def last_run(self, op: str) -> sqlite3.Row | None:
+        """The most recent run of ``op``, or None if it has never run."""
+        return self.conn.execute(
+            "SELECT * FROM operation_run WHERE op = ? "
+            "ORDER BY started_at DESC, id DESC LIMIT 1",
+            (op,),
+        ).fetchone()
+
+    def last_runs(self) -> dict[str, sqlite3.Row]:
+        """Latest run per operation, in one pass (the window needs them all)."""
+        rows = self.conn.execute(
+            "SELECT r.* FROM operation_run r JOIN ("
+            "  SELECT op, MAX(started_at) AS at, MAX(id) AS rid"
+            "  FROM operation_run GROUP BY op"
+            ") m ON r.op = m.op AND r.id = m.rid"
+        ).fetchall()
+        return {row["op"]: row for row in rows}
+
+    def recent(self, limit: int = 25) -> list[sqlite3.Row]:
+        """Newest runs first — the Activity list."""
+        return self.conn.execute(
+            "SELECT * FROM operation_run ORDER BY started_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def prune(self, keep: int = 500) -> int:
+        """Drop all but the ``keep`` newest rows; returns how many were removed.
+
+        Mirrors the keep-10 backup rotation: the log is a convenience, not a
+        record to retain forever.
+        """
+        cur = self.conn.execute(
+            "DELETE FROM operation_run WHERE id NOT IN ("
+            "  SELECT id FROM operation_run ORDER BY started_at DESC, id DESC LIMIT ?"
+            ")",
+            (keep,),
+        )
+        return cur.rowcount or 0
 
 
 class CalendarEntryRepository:

@@ -322,9 +322,12 @@ def test_history_thumbnails_persist_across_refreshes(app, monkeypatch):
     lookups: list[str] = []
     monkeypatch.setattr(cardimages, "is_cached", lambda card_id: True)
     monkeypatch.setattr(
-        history_mod.CardCatalogRepository,
-        "image_for",
-        lambda self, name, set_name, number: (lookups.append(name), ("cel-4", None))[1],
+        cardimages,
+        "art_for",
+        lambda conn, name, set_name=None, number=None: (
+            lookups.append(name),
+            ("cel-4", None),
+        )[1],
     )
 
     view = history_mod.HistoryView(conn)  # in-memory DB → resolves inline
@@ -333,7 +336,7 @@ def test_history_thumbnails_persist_across_refreshes(app, monkeypatch):
 
     view.refresh()  # the ledger changed → rows rebuilt
     assert view._model.row_at(0).thumb_ids == ["cel-4"]  # no blank flash
-    assert len(lookups) == 1  # and no second catalog lookup
+    assert len(lookups) == 1  # and no second art lookup
 
     view.deleteLater()
     conn.close()

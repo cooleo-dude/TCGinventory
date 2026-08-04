@@ -76,6 +76,7 @@ maintained afterward.
 | F-VW-9 | **Every** card/inventory attribute is filterable **and** sortable in the Inventory view (incl. sold status, intent, value ranges). | MUST |
 | F-VW-10 | **Ripping** lots are valued at $0 (shown as an unrealized loss = cost basis), stay visible in inventory, and are never offered as sellable. | MUST |
 | F-VW-11 | Dashboard **Highlights**: Top Gainers / Top Losers (by unrealized $), Top Sellers (units sold, trailing 90 days) and Upcoming Shows (attending/walking only). Movers reflect a **resale** business view. | SHOULD |
+| F-VW-12 | Highlights entries are **links**: clicking a mover/seller opens that card selected in Inventory (dossier art, facts and price chart follow the selection, clearing filters that would hide the row); clicking a show opens that day on the Calendar. | SHOULD |
 
 > **Movers — current exclusions (V1).** The Top Gainers / Losers / Sellers
 > windows currently **exclude graded slabs and items marked for review**, in
@@ -84,6 +85,19 @@ maintained afterward.
 > automatic feed), so they can't be ranked by market movement. Ways to include
 > them (e.g. a graded-price source, or ranking reviewed items by their maintained
 > value) will be explored in a future iteration.
+
+## Operations (maintenance hub)
+
+| ID | Req | Priority |
+|----|-----|----------|
+| F-OP-1 | An **Operations** screen owns every maintenance job — imports, exports, backup, price refresh, market sweep, card-database updates, the daily-update toggle — each as a tile stating what it does, when it last ran, and its state (ready / running / stale / never run). | SHOULD |
+| F-OP-2 | Operations are declared **as data** (`services/operations.py`), grouped; the view renders itself from the registry, so a new operation is one entry plus one runner. Empty groups render nothing (a `models` group is reserved for model metrics/triggers). | SHOULD |
+| F-OP-3 | Every run is recorded (`operation_run`) with its outcome and source — `ui`, `scheduled` (daily background task) or `startup` — and shown in an **Activity** list that survives a restart. Results appear inline; modals are kept for decisions (import preview) and failures. | SHOULD |
+| F-OP-4 | A **fact strip** reports the install: database file + size, item/copy counts, when prices last updated, card-database size and languages, schema version, and a shortcut to the data folder. | SHOULD |
+| F-OP-5 | The **File menu is only a way in** (Operations, Exit): one place runs each job and one place describes it. | MUST |
+| F-OP-6 | **Maintenance & diagnostics**: verify the database (`integrity_check` + `foreign_key_check`), compact it (VACUUM, reporting what it reclaimed), and re-index the recognition corpus — the tile showing corpus size (captures / labelled / indexed) and flagging labelled-but-unindexed cards. | SHOULD |
+| F-OP-7 | **Card shows** can be re-scraped on demand from Operations (not only as a side effect of toggling a state in Calendar), showing how many upcoming shows are stored. | SHOULD |
+| F-OP-8 | A **"while you were away" digest** heads the screen: the `scheduled`/`startup` runs the user hasn't acknowledged, with failures called out, dismissible and remembered (acknowledged by run id — `now_iso` is second-precision, so a timestamp cutoff would swallow same-second runs). | SHOULD |
 
 ## Search & filter
 

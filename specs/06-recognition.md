@@ -146,10 +146,21 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   path):** `services/inference.py` (`run_inference` / `build_pipeline`) detects
   boxes (YOLO if trained, else classic-CV) and identifies each crop against the
   exemplar corpus, returning per-card confidence + a confident flag. An
-  **"Autofill from photo…"** button in both windows opens `AutofillDialog`
-  (scene + numbered boxes + editable guesses, ⚠ low-confidence, per-row
-  include/qty) and adds the confirmed cards as rows (reusing `apply_catalog_card`
-  + `_request_price`). Detect-only with an empty corpus; sharpens as it grows.
+  **"Autofill from photo…"** button in both windows opens `AutofillDialog` and
+  adds the confirmed cards as rows (reusing `apply_catalog_card` +
+  `_request_price`). Detect-only with an empty corpus; sharpens as it grows.
+  The dialog is themed from the Ember Duo tokens with the Recognition window's
+  vocabulary: a framed **scene canvas** (fit-to-view, dashed accent boxes,
+  fixed-size numbered badges) beside one `surface2` **identity card** per
+  detection (number badge, autocompleting name, set/no./qty, a confidence pill —
+  green / amber ⚠ / outlined "no match"), hover cross-highlighting between a row
+  and its box, a live "N to add" count, and dimmed-dashed rows for unchecked
+  (skipped) detections.
+  Both windows also carry a **"From clipboard"** button beside it — the same flow
+  fed by the clipboard (copied image file(s), or a raw bitmap/screenshot spooled
+  to a temp PNG via `ui/clipboard_images.py`, since the pipeline reads scenes
+  from disk). Each window's file/clipboard pair shares one `_autofill_paths`
+  runner, so the two entry points can't drift.
   **Feedback loop closed:** confirmed cards flow back into the corpus
   (`services/corpus.py` `ingest_labeled_scene` → capture + region per box +
   crop exemplar per identified card), and the dialog's Name field autocompletes

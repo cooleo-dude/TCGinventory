@@ -67,6 +67,46 @@ def test_autofill_dialog_maps_include_edit_and_confidence(app, tmp_path):
     dlg.deleteLater()
 
 
+def test_autofill_dialog_live_count_and_hover_highlight(app, tmp_path):
+    """The header count / primary button track what's actually going in, and
+    hovering a row cross-highlights its box in the scene."""
+    from tcginventory.ui.views._autofill_dialog import AutofillDialog
+
+    scene = _scene(tmp_path / "scene.png")
+    dets = [
+        _det(
+            1,
+            (0.0, 0.0, 0.4, 1.0),
+            CardLabel(card_id="cel-4", name="Charizard"),
+            0.9,
+            True,
+        ),
+        _det(
+            2,
+            (0.5, 0.0, 0.4, 1.0),
+            CardLabel(card_id="cel-5", name="Blastoise"),
+            0.3,
+            False,
+        ),
+    ]
+    dlg = AutofillDialog(scene, dets)
+
+    assert dlg._count.text() == "2 to add"
+    dlg._rows[1].include.setChecked(False)
+    assert dlg._count.text() == "1 to add"
+    assert dlg._cards[2].property("off") is True
+    dlg._rows[0].include.setChecked(False)
+    assert dlg._count.text() == "0 to add"
+    assert not dlg._add.isEnabled()  # nothing to add → can't submit
+
+    dlg._on_hover(1, True)
+    assert dlg._cards[1].property("hl") is True
+    assert dlg._box_items[1].zValue() == 1
+    dlg._on_hover(1, False)
+    assert dlg._cards[1].property("hl") is False
+    dlg.deleteLater()
+
+
 def _patch_flow(monkeypatch, scene, dialog_cls):
     from PySide6.QtWidgets import QDialog, QFileDialog
 
@@ -103,6 +143,59 @@ def test_transaction_autofill_adds_receive_rows(app, monkeypatch, tmp_path):
     assert len(view._receive_rows) == 1
     assert view._receive_rows[0].name.text() == "Charizard"
     assert view._receive_rows[0].review.isChecked()
+    view.deleteLater()
+
+
+def test_transaction_autofill_from_clipboard_adds_receive_rows(
+    app, monkeypatch, tmp_path
+):
+    """The clipboard button runs the same flow, sourcing the scene from a pasted
+    bitmap (spooled to a temp PNG) instead of a file dialog."""
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QDialog
+
+    from tcginventory.data.db import connect
+    from tcginventory.data.migrator import migrate
+    from tcginventory.ui import clipboard_images
+    from tcginventory.ui.views import transaction as txn_mod
+    from tcginventory.ui.views.transaction import TransactionView
+
+    conn = connect(":memory:")
+    migrate(conn)
+    view = TransactionView(conn)
+    view._inference_pipeline = lambda _p: [
+        _det(
+            1,
+            (0, 0, 1, 1),
+            CardLabel(name="Snorlax", set_name="Base", card_number="11"),
+            0.9,
+            True,
+        )
+    ]
+    monkeypatch.setattr(txn_mod.AutofillDialog, "exec", lambda self: QDialog.Accepted)
+
+    # No image on the clipboard → an explanatory prompt, no rows.
+    monkeypatch.setattr(txn_mod, "clipboard_image_paths", lambda: [])
+    seen: list[str] = []
+    monkeypatch.setattr(
+        txn_mod.QMessageBox,
+        "information",
+        staticmethod(lambda *a, **k: seen.append(a[1])),
+    )
+    view._autofill_from_clipboard()
+    assert seen and not view._receive_rows
+
+    # A pasted bitmap is spooled to a real file the pipeline can read.
+    image = QImage(200, 100, QImage.Format_RGB32)
+    image.fill(0xFFFFFF)
+    pasted = clipboard_images.spool_image(image)
+    assert os.path.exists(pasted)
+    monkeypatch.setattr(txn_mod, "clipboard_image_paths", lambda: [pasted])
+
+    view._autofill_from_clipboard()
+
+    assert len(view._receive_rows) == 1
+    assert view._receive_rows[0].name.text() == "Snorlax"
     view.deleteLater()
 
 
@@ -186,4 +279,54 @@ def test_auction_autofill_adds_card_rows(app, monkeypatch, tmp_path):
 
     assert len(view._rows) == 1
     assert view._rows[0].name.text() == "Pikachu"
+    view.deleteLater()
+
+
+def test_auction_autofill_from_clipboard_adds_card_rows(app, monkeypatch, tmp_path):
+    """The auction editor's clipboard button runs the same flow from a pasted
+    bitmap, and says so when the clipboard holds no image."""
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QDialog
+
+    from tcginventory.data.auctions import open_auctions
+    from tcginventory.data.db import connect
+    from tcginventory.data.migrator import migrate
+    from tcginventory.ui import clipboard_images
+    from tcginventory.ui.views import auctions as auc_mod
+    from tcginventory.ui.views.auctions import AuctionsView
+
+    conn = connect(":memory:")
+    migrate(conn)
+    view = AuctionsView(conn, auctions_conn=open_auctions(":memory:"), history=None)
+    view._inference_pipeline = lambda _p: [
+        _det(
+            1,
+            (0, 0, 1, 1),
+            CardLabel(name="Gengar", set_name="Fossil", card_number="5"),
+            0.85,
+            True,
+        )
+    ]
+    monkeypatch.setattr(auc_mod.AutofillDialog, "exec", lambda self: QDialog.Accepted)
+
+    monkeypatch.setattr(auc_mod, "clipboard_image_paths", lambda: [])
+    seen: list[str] = []
+    monkeypatch.setattr(
+        auc_mod.QMessageBox,
+        "information",
+        staticmethod(lambda *a, **k: seen.append(a[1])),
+    )
+    view._autofill_from_clipboard()
+    assert seen and not view._rows
+
+    image = QImage(200, 100, QImage.Format_RGB32)
+    image.fill(0xFFFFFF)
+    monkeypatch.setattr(
+        auc_mod, "clipboard_image_paths", lambda: [clipboard_images.spool_image(image)]
+    )
+
+    view._autofill_from_clipboard()
+
+    assert len(view._rows) == 1
+    assert view._rows[0].name.text() == "Gengar"
     view.deleteLater()

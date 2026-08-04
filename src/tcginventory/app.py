@@ -21,8 +21,11 @@ def refresh_prices_headless() -> int:
     config.configure_logging()
     log = logging.getLogger(__name__)
 
+    # Each phase below also appends to the maintenance run log (``record``), so
+    # the Operations window can report what happened while the app was closed.
     from tcginventory.data.db import open_database
     from tcginventory.services.cardshows import CardShowService
+    from tcginventory.services.operations import record
     from tcginventory.services.pricing import PricingService
 
     config.ensure_data_dir()
@@ -43,13 +46,30 @@ def refresh_prices_headless() -> int:
                 summary.errors,
             )
             had_error = had_error or bool(summary.errors)
+            note = f"{summary.priced} priced"
+            if summary.unmapped:
+                note += f", {len(summary.unmapped)} skipped (no TCGplayer link)"
+            record(
+                conn,
+                "prices.refresh",
+                ok=not summary.errors,
+                summary=note,
+                source="scheduled",
+            )
             # Record today's effective collection value (drives the dashboard
             # chart) now that prices are fresh.
             from tcginventory.services.reporting import ReportingService
 
             ReportingService(conn).record_collection_value()
-        except Exception:
+        except Exception as exc:
             log.exception("headless price refresh failed")
+            record(
+                conn,
+                "prices.refresh",
+                ok=False,
+                summary=str(exc)[:200],
+                source="scheduled",
+            )
             had_error = True
 
         # Catalog-wide market sweep → separate price-history DB (+ trimmed backup).
@@ -72,6 +92,16 @@ def refresh_prices_headless() -> int:
                     s.errors,
                 )
                 had_error = had_error or bool(s.errors)
+                record(
+                    conn,
+                    "prices.market_sweep",
+                    ok=not s.errors,
+                    summary=(
+                        f"{s.sets} sets, {s.priced:,} priced, "
+                        f"{s.snapshots:,} changes recorded"
+                    ),
+                    source="scheduled",
+                )
                 backup_price_history(
                     hist_conn,
                     config.data_dir() / "backups",
@@ -79,8 +109,15 @@ def refresh_prices_headless() -> int:
                 )
             finally:
                 hist_conn.close()
-        except Exception:
+        except Exception as exc:
             log.exception("headless market sweep failed")
+            record(
+                conn,
+                "prices.market_sweep",
+                ok=False,
+                summary=str(exc)[:200],
+                source="scheduled",
+            )
             had_error = True
 
         states = list(config.get_pref("show_states", []))
@@ -94,8 +131,22 @@ def refresh_prices_headless() -> int:
                     shows.errors,
                 )
                 had_error = had_error or bool(shows.errors)
-            except Exception:
+                record(
+                    conn,
+                    "shows.refresh",
+                    ok=not shows.errors,
+                    summary=f"{shows.fetched} shows across {', '.join(states)}",
+                    source="scheduled",
+                )
+            except Exception as exc:
                 log.exception("headless show refresh failed")
+                record(
+                    conn,
+                    "shows.refresh",
+                    ok=False,
+                    summary=str(exc)[:200],
+                    source="scheduled",
+                )
                 had_error = True
     finally:
         conn.close()
@@ -149,6 +200,14 @@ def main() -> int:
                 conn, data_dir / "backups", stamp=timestamp_for_filename()
             )
             log.info("Startup backup: %s", dest)
+            from tcginventory.services.operations import record
+
+            record(
+                conn,
+                "backup.database",
+                summary=f"startup backup — {dest.name}",
+                source="startup",
+            )
         except Exception:
             log.exception("Startup backup failed (continuing)")
 

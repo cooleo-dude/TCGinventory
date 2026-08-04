@@ -13,12 +13,17 @@ _PNG = b"\x89PNG\r\n\x1a\n" + b"fake-bytes"
 _SETS = [{"id": "sv9", "name": "Journey Together"}]
 _SET_DETAIL = {
     "sv9": {
-        "id": "sv9", "name": "Journey Together",
+        "id": "sv9",
+        "name": "Journey Together",
         "abbreviation": {"official": "JTG"},
         "cardCount": {"official": 159, "total": 159},
         "cards": [
-            {"id": "sv9-163", "localId": "163", "name": "Iono's Kilowattrel",
-             "image": "https://assets.tcgdex.net/en/sv/sv9/163"},
+            {
+                "id": "sv9-163",
+                "localId": "163",
+                "name": "Iono's Kilowattrel",
+                "image": "https://assets.tcgdex.net/en/sv/sv9/163",
+            },
             # A card with no image (dataset occasionally omits it).
             {"id": "sv9-1", "localId": "001", "name": "Pikachu", "image": None},
         ],
@@ -63,41 +68,62 @@ def test_image_for_keys_on_set_and_number_not_exact_name(conn):
     CardCatalogRepository(conn).replace_all(
         [
             CatalogCard(
-                card_id="me3-119", name="Mega Clefable ex", set_id="me3",
-                set_name="Perfect Order", number="119",
+                card_id="me3-119",
+                name="Mega Clefable ex",
+                set_id="me3",
+                set_name="Perfect Order",
+                number="119",
                 image_small="https://img/me3-119",
             ),
             CatalogCard(
-                card_id="ex6-106", name="Clefable ex", set_id="ex6",
-                set_name="FireRed & LeafGreen", number="106",
+                card_id="ex6-106",
+                name="Clefable ex",
+                set_id="ex6",
+                set_name="FireRed & LeafGreen",
+                number="106",
                 image_small="https://img/ex6-106",
             ),
             CatalogCard(
-                card_id="sv3-82", name="Clefable ex", set_id="sv3",
-                set_name="Obsidian Flames", number="82",
+                card_id="sv3-82",
+                name="Clefable ex",
+                set_id="sv3",
+                set_name="Obsidian Flames",
+                number="82",
                 image_small="https://img/sv3-82",
             ),
             # Mewtwo #14 in a WoTC promo set (set total 117) — a decoy for a
             # card whose real set ("Trading Card Game Classic", /034) the dataset
             # does not carry.
             CatalogCard(
-                card_id="basep-14", name="Mewtwo", set_id="basep",
-                set_name="Wizards Black Star Promos", number="14",
-                printed_total=117, image_small="https://img/basep-14",
+                card_id="basep-14",
+                name="Mewtwo",
+                set_id="basep",
+                set_name="Wizards Black Star Promos",
+                number="14",
+                printed_total=117,
+                image_small="https://img/basep-14",
             ),
             # Alt-art Jirachi-GX filed under its base set (Unified Minds, /236);
             # hyphen vs space in the name, unique number "79a".
             CatalogCard(
-                card_id="sm11-79a", name="Jirachi-GX", set_id="sm11",
-                set_name="Unified Minds", number="79a",
-                printed_total=236, image_small="https://img/sm11-79a",
+                card_id="sm11-79a",
+                name="Jirachi-GX",
+                set_id="sm11",
+                set_name="Unified Minds",
+                number="79a",
+                printed_total=236,
+                image_small="https://img/sm11-79a",
             ),
             # Frosmoth #43 in the base set "Mega Evolution" — a decoy for a
             # "Mega Evolution Promo" query (the base set name is a substring).
             CatalogCard(
-                card_id="me1-43", name="Frosmoth", set_id="me1",
-                set_name="Mega Evolution", number="43",
-                printed_total=132, image_small="https://img/me1-43",
+                card_id="me1-43",
+                name="Frosmoth",
+                set_id="me1",
+                set_name="Mega Evolution",
+                number="43",
+                printed_total=132,
+                image_small="https://img/me1-43",
             ),
         ],
         "t",
@@ -132,6 +158,241 @@ def test_image_for_keys_on_set_and_number_not_exact_name(conn):
     assert repo.image_for("Rowlet", "Mega Evolution Promo", "043") is None
     # The exact base set still resolves its own card.
     assert repo.image_for("Frosmoth", "Mega Evolution", "43")[0] == "me1-43"
+
+
+def _unbroken_bonds_catalog(conn):
+    """The three Dedenne-GX printings the catalog carries — note there is no
+    "195a" row: the alt art exists only as a TCGplayer product."""
+    from tcginventory.domain.models import CatalogCard
+
+    CardCatalogRepository(conn).replace_all(
+        [
+            CatalogCard(
+                card_id="sm10-57",
+                name="Dedenne GX",
+                set_id="sm10",
+                set_name="Unbroken Bonds",
+                number="57",
+                printed_total=214,
+                image_small="https://img/sm10-57",
+            ),
+            CatalogCard(
+                card_id="sm10-195",
+                name="Dedenne GX",
+                set_id="sm10",
+                set_name="Unbroken Bonds",
+                number="195",
+                printed_total=214,
+                image_small="https://img/sm10-195",
+            ),
+            CatalogCard(
+                card_id="sm10-219",
+                name="Dedenne GX",
+                set_id="sm10",
+                set_name="Unbroken Bonds",
+                number="219",
+                printed_total=214,
+                image_small="https://img/sm10-219",
+            ),
+        ],
+        "t",
+    )
+
+
+def _add_item(conn, name, set_name, number, tcgplayer_url=None):
+    from tcginventory.data.repositories import ItemRepository
+    from tcginventory.domain.enums import Category
+    from tcginventory.domain.models import Item
+
+    return ItemRepository(conn).add(
+        Item(
+            name=name,
+            category=Category.SINGLE,
+            set_name=set_name,
+            card_number=number,
+            tcgplayer_url=tcgplayer_url,
+        )
+    )
+
+
+def test_alt_art_number_never_borrows_a_sibling_printing(conn):
+    """Regression (Dedenne-GX 195a/214): the catalog has no "195a", and 195a is a
+    *different artwork* from 195 — so neither #57 (what it used to show) nor #195
+    (stripping the "a") is acceptable. With no other source: nothing."""
+    _unbroken_bonds_catalog(conn)
+    repo = CardCatalogRepository(conn)
+
+    assert repo.image_for("Dedenne-GX", "Unbroken Bonds", "195a/214") is None
+    assert cardimages.art_for(conn, "Dedenne-GX", "Unbroken Bonds", "195a/214") is None
+
+    # Every printing the catalog does carry still pins exactly.
+    for number, expect in (
+        ("195/214", "sm10-195"),
+        ("57/214", "sm10-57"),
+        ("219/214", "sm10-219"),
+    ):
+        assert repo.image_for("Dedenne-GX", "Unbroken Bonds", number)[0] == expect
+        assert (
+            cardimages.art_for(conn, "Dedenne-GX", "Unbroken Bonds", number)[0]
+            == expect
+        )
+
+
+def test_art_for_falls_back_to_the_items_tcgplayer_product(conn):
+    """The alt art the catalog lacks comes from the product the card is priced
+    from — the id names that exact printing."""
+    _unbroken_bonds_catalog(conn)
+    _add_item(
+        conn,
+        "Dedenne-GX",
+        "Unbroken Bonds",
+        "195a/214",
+        "https://www.tcgplayer.com/product/216699/pokemon-alternate-art-promos"
+        "-dedenne-gx-195a-214?Condition=Near+Mint",
+    )
+
+    key, url = cardimages.art_for(conn, "Dedenne-GX", "Unbroken Bonds", "195a/214")
+    assert key == "tcgp-216699"
+    assert url == "https://tcgplayer-cdn.tcgplayer.com/product/216699_400w.jpg"
+
+    # A catalog printing that *is* pinned by number keeps the catalog scan.
+    assert (
+        cardimages.art_for(conn, "Dedenne-GX", "Unbroken Bonds", "195/214")[0]
+        == "sm10-195"
+    )
+
+
+def test_art_for_covers_a_catalog_row_with_no_image(conn):
+    """svp-214 exists but carries no image URL, so the catalog can't help; the
+    product photo can. (Previously this showed an unrelated Pikachu promo.)"""
+    from tcginventory.domain.models import CatalogCard
+
+    CardCatalogRepository(conn).replace_all(
+        [
+            CatalogCard(
+                card_id="svp-027",
+                name="Pikachu",
+                set_id="svp",
+                set_name="SVP Black Star Promos",
+                number="27",
+                printed_total=225,
+                image_small="https://img/svp-027",
+            ),
+            CatalogCard(  # the right card — but imageless upstream
+                card_id="svp-214",
+                name="Pikachu",
+                set_id="svp",
+                set_name="SVP Black Star Promos",
+                number="214",
+                printed_total=225,
+                image_small=None,
+            ),
+        ],
+        "t",
+    )
+    _add_item(
+        conn,
+        "Pikachu",
+        "SVP Black Star Promos",
+        "214/225",
+        "https://www.tcgplayer.com/product/620106/pokemon-svp-pikachu",
+    )
+
+    assert (
+        cardimages.art_for(conn, "Pikachu", "SVP Black Star Promos", "214/225")[0]
+        == "tcgp-620106"
+    )
+
+
+def test_art_for_will_not_guess_between_disagreeing_products(conn):
+    """Two items behind one printed identity pointing at different products is a
+    coin flip — same rule as the catalog matcher: show nothing."""
+    _unbroken_bonds_catalog(conn)
+    _add_item(
+        conn,
+        "Dedenne-GX",
+        "Unbroken Bonds",
+        "195a/214",
+        "https://www.tcgplayer.com/product/216699/x",
+    )
+    _add_item(
+        conn,
+        "Dedenne-GX",
+        "Unbroken Bonds",
+        "195a/214",
+        "https://www.tcgplayer.com/product/999999/y",
+    )
+
+    assert cardimages.art_for(conn, "Dedenne-GX", "Unbroken Bonds", "195a/214") is None
+
+
+def test_product_id_and_image_url():
+    from tcginventory.services import tcgplayer
+
+    url = (
+        "https://www.tcgplayer.com/product/216699/pokemon-alternate-art-promos"
+        "-dedenne-gx-195a-214?Condition=Near+Mint&Language=English"
+    )
+    assert tcgplayer.product_id(url) == "216699"
+    assert tcgplayer.product_id("https://www.tcgplayer.com/search/pokemon") is None
+    assert tcgplayer.product_id(None) is None
+    assert tcgplayer.product_image_url("216699") == (
+        "https://tcgplayer-cdn.tcgplayer.com/product/216699_400w.jpg"
+    )
+
+
+def test_image_for_prefers_an_exact_name_over_containment(conn):
+    """Regression: "Giovanni's Machamp" showed the *Giovanni* trainer card, because
+    name matching accepts substrings in either direction and the tie-break was
+    arbitrary. An exact name wins; a genuine tie shows nothing."""
+    from tcginventory.domain.models import CatalogCard
+
+    CardCatalogRepository(conn).replace_all(
+        [
+            CatalogCard(
+                card_id="jp-1",
+                name="Giovanni",
+                set_id="cftd",
+                set_name="Challenge from the Darkness",
+                image_small="https://img/giovanni",
+            ),
+            CatalogCard(
+                card_id="jp-2",
+                name="Giovanni's Machamp",
+                set_id="cftd",
+                set_name="Challenge from the Darkness",
+                image_small="https://img/machamp",
+            ),
+            # Two same-name printings with no number to tell them apart.
+            CatalogCard(
+                card_id="jp-3",
+                name="Mew",
+                set_id="cftd",
+                set_name="Challenge from the Darkness",
+                number="10",
+                image_small="https://img/mew-10",
+            ),
+            CatalogCard(
+                card_id="jp-4",
+                name="Mew",
+                set_id="cftd",
+                set_name="Challenge from the Darkness",
+                number="88",
+                image_small="https://img/mew-88",
+            ),
+        ],
+        "t",
+    )
+    repo = CardCatalogRepository(conn)
+
+    assert repo.image_for("Giovanni's Machamp", "Challenge from the Darkness")[0] == (
+        "jp-2"
+    )
+    assert repo.image_for("Giovanni", "Challenge from the Darkness")[0] == "jp-1"
+    # Numberless and genuinely ambiguous (two Mews) → no guess.
+    assert repo.image_for("Mew", "Challenge from the Darkness") is None
+    # …but with the number it is unambiguous.
+    assert repo.image_for("Mew", "Challenge from the Darkness", "88")[0] == "jp-4"
 
 
 def test_ensure_cached_fetches_once_then_serves_from_disk(tmp_path, monkeypatch):
@@ -177,8 +438,11 @@ def test_image_for_reconciles_legacy_set_name(conn):
     CardCatalogRepository(conn).replace_all(
         [
             CatalogCard(
-                card_id="svp-056", name="Charizard ex", set_id="svp",
-                set_name="SVP Black Star Promos", number="56",
+                card_id="svp-056",
+                name="Charizard ex",
+                set_id="svp",
+                set_name="SVP Black Star Promos",
+                number="56",
                 image_small="https://img/svp-056",
             ),
         ],
@@ -186,8 +450,10 @@ def test_image_for_reconciles_legacy_set_name(conn):
     )
     repo = CardCatalogRepository(conn)
     # Old name resolves via the alias; new name resolves directly.
-    assert repo.image_for("Charizard ex", "Scarlet & Violet Black Star Promos",
-                          "56/102") == ("svp-056", "https://img/svp-056")
+    assert repo.image_for(
+        "Charizard ex", "Scarlet & Violet Black Star Promos", "56/102"
+    ) == ("svp-056", "https://img/svp-056")
     assert repo.image_for("Charizard ex", "SVP Black Star Promos", "56") == (
-        "svp-056", "https://img/svp-056",
+        "svp-056",
+        "https://img/svp-056",
     )

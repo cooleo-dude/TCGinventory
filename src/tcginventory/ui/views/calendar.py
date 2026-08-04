@@ -575,6 +575,17 @@ class CalendarView(QWidget):
         self._selected = iso
         self.reload()
 
+    def show_date(self, iso: str) -> None:
+        """Open the month containing ``iso`` with that day selected — the entry
+        point for links from elsewhere (e.g. a Dashboard upcoming show)."""
+        try:
+            day = date.fromisoformat(iso)
+        except (TypeError, ValueError):
+            return
+        self._year, self._month = day.year, day.month
+        self._selected = day.isoformat()
+        self.reload()
+
     def _update_month_label(self) -> None:
         self._month_lbl.setText(f"{_cal.month_name[self._month]} {self._year}")
 

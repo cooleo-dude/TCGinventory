@@ -98,6 +98,7 @@ from tcginventory.services.tcgplayer import product_url as tcgplayer_product_url
 from tcginventory.services.transactions import IncomingCard
 from tcginventory.ui import icons, theme
 from tcginventory.ui.card_gallery import CardGallery
+from tcginventory.ui.clipboard_images import clipboard_image_paths
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
 from tcginventory.ui.views._card_entry import CardEntryMixin, PriceLookupWorker
@@ -1544,13 +1545,24 @@ class AuctionsView(QWidget):
         self._catalog_hint = QLabel("")
         self._catalog_hint.setStyleSheet(f"color: {theme.active().warn};")
         self._autofill_btn = QPushButton("Autofill from photo…")
+        self._autofill_btn.setIcon(icons.icon("scan-line", theme.active().ink2, 15))
         self._autofill_btn.setToolTip(
             "Detect and identify the cards in one or more scene photos, then add "
             "them as auction rows to confirm."
         )
         self._autofill_btn.clicked.connect(self._autofill_from_photo)
+        self._autofill_clip_btn = QPushButton("From clipboard")
+        self._autofill_clip_btn.setIcon(
+            icons.icon("clipboard-paste", theme.active().ink2, 15)
+        )
+        self._autofill_clip_btn.setToolTip(
+            "Same autofill, from the image on your clipboard — a screenshot or a "
+            "copied photo, no file needed."
+        )
+        self._autofill_clip_btn.clicked.connect(self._autofill_from_clipboard)
         head = QHBoxLayout()
         head.addWidget(self._autofill_btn)
+        head.addWidget(self._autofill_clip_btn)
         head.addWidget(self._catalog_hint)
         head.addStretch(1)
         head.addWidget(self._auto_detect)
@@ -1758,6 +1770,27 @@ class AuctionsView(QWidget):
             "",
             "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)",
         )
+        self._autofill_paths(paths)
+
+    def _autofill_from_clipboard(self) -> None:
+        """Same autofill, sourced from the clipboard: copied image file(s), or a
+        raw bitmap (screenshot / copied image) spooled to a temp PNG."""
+        paths = clipboard_image_paths()
+        if not paths:
+            QMessageBox.information(
+                self,
+                "Nothing to autofill",
+                "The clipboard doesn't contain an image. Copy a card photo (or an "
+                "image file) and try again.",
+            )
+            return
+        self._autofill_paths(paths, pasted=True)
+
+    def _autofill_paths(self, paths, *, pasted: bool = False) -> None:
+        """Run the detect → review → add-rows flow over each scene image.
+
+        ``pasted`` only affects wording — a spooled temp path means nothing to
+        the user, so a miss is reported as "the pasted image"."""
         if not paths:
             return
         try:
@@ -1772,8 +1805,9 @@ class AuctionsView(QWidget):
             finally:
                 QApplication.restoreOverrideCursor()
             if not detections:
+                where = "the pasted image" if pasted else str(path)
                 QMessageBox.information(
-                    self, "No cards found", f"No cards detected in {path}."
+                    self, "No cards found", f"No cards detected in {where}."
                 )
                 continue
             dialog = AutofillDialog(path, detections, self._conn, self)

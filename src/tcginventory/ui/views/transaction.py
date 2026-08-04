@@ -105,6 +105,7 @@ from tcginventory.ui.card_preview import (
     _FetchWorker,
     install_hover_preview,
 )
+from tcginventory.ui.clipboard_images import clipboard_image_paths
 from tcginventory.ui.completer_popup import show_fitted
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
@@ -438,8 +439,8 @@ class _GiveRow:
         self._on_change()
 
     def _image_for(self, item: Item) -> tuple[str, str] | None:
-        return CardCatalogRepository(self._conn).image_for(
-            item.name, item.set_name, item.card_number
+        return cardimages.art_for(
+            self._conn, item.name, item.set_name, item.card_number
         )
 
     def _preview(self, item_id) -> None:
@@ -1257,18 +1258,32 @@ class TransactionView(QWidget):
         self._auto_detect_cb.toggled.connect(self._on_auto_detect_toggled)
         self._catalog_hint = QLabel("")
         self._catalog_hint.setStyleSheet(f"color:{t.warn};font-size:11px;")
-        self._autofill_btn = QPushButton("  Autofill from photo")
-        self._autofill_btn.setIcon(icons.icon("scan-line", t.ink2, 15))
-        self._autofill_btn.setCursor(Qt.PointingHandCursor)
-        self._autofill_btn.setStyleSheet(
+        tool_css = (
             f"QPushButton{{border:1px solid {t.line2};border-radius:9px;"
             f"color:{t.ink2};padding:6px 11px;font-size:12px;font-weight:600;}}"
             f"QPushButton:hover{{border-color:{t.accent};color:{t.accent_ink};}}"
         )
+        self._autofill_btn = QPushButton("  Autofill from photo")
+        self._autofill_btn.setIcon(icons.icon("scan-line", t.ink2, 15))
+        self._autofill_btn.setCursor(Qt.PointingHandCursor)
+        self._autofill_btn.setToolTip(
+            "Pick card photo file(s) and detect the cards in them."
+        )
+        self._autofill_btn.setStyleSheet(tool_css)
         self._autofill_btn.clicked.connect(self._autofill_from_photo)
+        self._autofill_clip_btn = QPushButton("  From clipboard")
+        self._autofill_clip_btn.setIcon(icons.icon("clipboard-paste", t.ink2, 15))
+        self._autofill_clip_btn.setCursor(Qt.PointingHandCursor)
+        self._autofill_clip_btn.setToolTip(
+            "Same autofill, from the image on your clipboard — a screenshot or a "
+            "copied photo, no file needed."
+        )
+        self._autofill_clip_btn.setStyleSheet(tool_css)
+        self._autofill_clip_btn.clicked.connect(self._autofill_from_clipboard)
         tool = QHBoxLayout()
         tool.setContentsMargins(0, 0, 0, 0)
         tool.addWidget(self._autofill_btn)
+        tool.addWidget(self._autofill_clip_btn)
         tool.addWidget(self._catalog_hint)
         tool.addStretch(1)
         tool.addWidget(self._auto_detect_cb)
@@ -1508,6 +1523,27 @@ class TransactionView(QWidget):
             "",
             "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)",
         )
+        self._autofill_paths(paths)
+
+    def _autofill_from_clipboard(self) -> None:
+        """Same autofill, sourced from the clipboard: copied image file(s), or a
+        raw bitmap (screenshot / copied image) spooled to a temp PNG."""
+        paths = clipboard_image_paths()
+        if not paths:
+            QMessageBox.information(
+                self,
+                "Nothing to autofill",
+                "The clipboard doesn't contain an image. Copy a card photo (or an "
+                "image file) and try again.",
+            )
+            return
+        self._autofill_paths(paths, pasted=True)
+
+    def _autofill_paths(self, paths, *, pasted: bool = False) -> None:
+        """Run the detect → review → add-rows flow over each scene image.
+
+        ``pasted`` only affects wording — a spooled temp path means nothing to
+        the user, so a miss is reported as "the pasted image"."""
         if not paths:
             return
         try:
@@ -1523,8 +1559,9 @@ class TransactionView(QWidget):
             finally:
                 QApplication.restoreOverrideCursor()
             if not detections:
+                where = "the pasted image" if pasted else str(path)
                 QMessageBox.information(
-                    self, "No cards found", f"No cards detected in {path}."
+                    self, "No cards found", f"No cards detected in {where}."
                 )
                 continue
             dialog = AutofillDialog(path, detections, self._conn, self)

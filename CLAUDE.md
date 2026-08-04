@@ -63,6 +63,19 @@ offline; no external price feeds in V1.
 - **V1 is feature-complete (M0–M6).** Post-V1 backlog in [`specs/05-roadmap.md`](specs/05-roadmap.md)
   (price feeds, explicit rip/open event, dashboard calendar, specific-lot basis,
   images/scanning, intent-change history, the 30-day void-restore idea, etc.).
+- **M-Ops1 (Operations window): done** — the File menu's ten maintenance jobs
+  became a nav destination (`ui/views/operations.py`) drawn from a Qt-free
+  registry (`services/operations.py`): a tile each with what it does, its status
+  and inline progress, a fact strip, and an Activity list backed by a run log
+  (migration `0019_operation_run`, also written by the daily background task and
+  the startup backup). The File menu is now just *Operations* + *Exit*, and the
+  three price/catalog worker threads moved out of `main_window`. Also carries a
+  **Maintenance & diagnostics** group (integrity check, VACUUM, recognition-corpus
+  re-index with corpus stats), an on-demand **card-shows scrape**, and a
+  **"while you were away" digest** of background runs. **Adding a future
+  operation = one registry entry + one runner** (a generic `_TaskWorker` covers
+  "call a service, report a sentence"); a `models` group is reserved for
+  metrics/triggers. Restore is M-Ops2 (see the ADR).
 
 ## Source of truth
 

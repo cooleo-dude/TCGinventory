@@ -15,6 +15,7 @@ any card-like object — the ledger ``Item`` (enum fields) or an ``AuctionCard``
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 
 # Keyed by each enum's ``.value`` string, so both enum and raw-string fields work.
@@ -115,3 +116,24 @@ def link_for(item) -> str | None:
     if getattr(item, "tcgplayer_url", None):
         return product_url(item)
     return search_url(item)
+
+
+_PRODUCT_ID = re.compile(r"/product/(\d+)")
+_IMAGE_CDN = "https://tcgplayer-cdn.tcgplayer.com/product"
+
+
+def product_id(url: str | None) -> str | None:
+    """The numeric product id inside a TCGplayer product URL, or None."""
+    match = _PRODUCT_ID.search(url or "")
+    return match.group(1) if match else None
+
+
+def product_image_url(product_id: str, width: int = 400) -> str:
+    """Product-photo URL on TCGplayer's CDN.
+
+    A product id names one exact printing — including the alt arts and promo
+    variants the card catalog doesn't carry — so this is the reliable art for a
+    card we've priced but can't pin in the catalog. (The Japanese catalog already
+    stores its images in this form.)
+    """
+    return f"{_IMAGE_CDN}/{product_id}_{width}w.jpg"

@@ -4,6 +4,102 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-04 — Operations window (M-Ops1): the File menu becomes a screen
+
+- **Problem:** ten maintenance jobs lived only in the File menu, where a label
+  can't say that *Import items* adds cards while *Import purchases* posts
+  transactions with cost basis, can't show when anything last ran, and leaves
+  nowhere to put the next one. Long jobs reported through a status-bar message
+  and a modal that was dismissed and lost.
+- **Decision — operations are data.** `services/operations.py` (Qt-free) declares
+  each job: id, group, title, blurb, verb, icon, kind (`dialog` / `background` /
+  `toggle`), staleness window. `ui/views/operations.py` renders the screen from
+  that registry and holds the runners, so **a future operation is one entry plus
+  one runner** and cannot drift out of visual line. A `models` group is
+  **reserved** for the coming metrics/triggers work; groups with no entries render
+  nothing, so it costs nothing until used.
+- **Run log now, not later** (owner's call): migration `0019_operation_run`
+  records op, start/finish, ok, summary and **source** (`ui` | `scheduled` |
+  `startup`). Imports and exports had no history at all; everything else derives
+  from data that already existed (price snapshots, `card_catalog.updated_at`, the
+  price-history file, the backup files, the scheduled task). The same table backs
+  the Activity list across restarts, and `source` is what a later
+  "since you last opened" digest will read.
+  - **Not** added to `importexport._ALL_TABLES` — that list is the ledger
+    (`card_catalog`, `card_show`, `calendar_entry` are already excluded); a run log
+    is local telemetry and must not be wiped or replayed by a restore.
+  - `app.refresh_prices_headless()` and the startup backup record their own runs,
+    so the window reports what happened while the app was closed.
+- **File menu trimmed to Operations + Exit.** Two live trigger paths for one job
+  drift apart, and re-pointing "Backup database…" at a *window* breaks the promise
+  that it opens a save dialog. The three `QThread` workers moved from
+  `main_window` to the screen that shows them; the window is a shell again, and
+  the nav index constants are now derived from `NAV_ITEMS` (inserting a
+  destination silently invalidated the literals).
+- **Status honesty:** a tile's state comes from the thing itself, not from the
+  fact that a run happened — the price tile reads the latest snapshot, so a
+  refresh that priced nothing doesn't claim success. A successful-but-old run can
+  still read **Stale** (the full-backup export has a 14-day window).
+- **Shipped in the same pass** (they were what the owner picked; scheduling them
+  into a later milestone was the wrong read):
+  - **Maintenance & diagnostics** group — `integrity_check` + `foreign_key_check`,
+    VACUUM reporting what it reclaimed, and **re-index the recognition corpus**
+    (`exemplars.reindex_all`), whose tile carries the corpus stats and flags
+    labelled-but-unindexed cards. These arrive through one generic `_TaskWorker`
+    that runs `task(conn) -> summary`, so the next such job is a function.
+  - **Card-shows scrape** on demand, previously reachable only as a side effect of
+    toggling a state in Calendar. It reports *stored upcoming* shows, not
+    `upcoming()` (which counts only ones marked attending — 0 for most people).
+  - **"While you were away" digest** — unacknowledged `scheduled`/`startup` runs,
+    headed at the top of the screen, failures called out, dismissible.
+    **Acknowledged by run id, not timestamp:** `now_iso` is second-precision and a
+    nightly task logs several runs inside one second, which a timestamp cutoff
+    silently swallowed (caught by a test).
+- **Deferred to M-Ops2:** restore (both the `.db` swap and the existing unexposed
+  `importexport.import_all`), behind a typed confirmation and a pre-restore
+  backup, using the danger tile already built.
+
+### 2026-08-04 — Card art: TCGplayer product photo where the catalog can't pin the printing
+
+- **Bug:** *Dedenne-GX · Unbroken Bonds · 195a/214* displayed **sm10-57**, the
+  plain GX. `195a` matches no catalog number, so `image_for` fell back to "any
+  same-name card in this set" and `max()` over an all-equal tie-break key returned
+  whichever row the candidate pool happened to hold first.
+- **Why it regressed:** the EN catalog moved from the pokemontcg.io dump to the
+  **TCGdex API** (ADR 2026-07-14), and TCGdex carries only mainline printings — no
+  `sm10-195a` row, and `…/sm10/195a/low.png` 404s. Letter-suffixed alt arts had
+  resolved directly before the swap. (pokemontcg.io's API now answers 500, so it
+  is not a source to fall back to.)
+- **Rejected: stripping the suffix** (`195a` → `195`). An alt art is a *different
+  artwork*, not a variant of #195's, so the base full art is simply another wrong
+  picture.
+- **Decision:** keep `CardCatalogRepository.image_for` catalog-pure (its result is
+  also used as a price-history key in `services/trends.py`) and add
+  `cardimages.art_for(conn, name, set, number)`, which layers the sources:
+  1. the **catalog** when it *pins* the printing (number agrees, or no number was
+     given) — clean, consistent scans;
+  2. else the **TCGplayer product photo of the matching ledger item**
+     (`tcgplayer-cdn…/product/<id>_400w.jpg`, cache key `tcgp-<id>`). A product id
+     names one exact printing, so it covers what the catalog lacks. The Japanese
+     catalog already stores images in this form; when both routes name the same
+     product the catalog entry is kept, so nothing is downloaded twice.
+  3. Items disagreeing on the product → nothing, the same no-coin-flip rule the
+     catalog matcher follows.
+- **Also fixed in `image_for`:** an **exact (flattened) name beats containment**,
+  and an ambiguous name-only match returns nothing. Containment runs both ways, so
+  *"Giovanni"* matched *"Giovanni's Machamp"* and won the arbitrary tie — that item
+  had been showing the Giovanni trainer card.
+- **Measured against the live 890-item inventory:** 868 unchanged, **6 re-pointed
+  from a wrong card to the right one** (both alt arts — Dedenne-GX 195a and
+  Jirachi-GX 79a — plus three SVP promos and Giovanni's Machamp), **15 newly
+  resolved** that had been blank (MEP promos, trainer-kit and promo cards), **0
+  lost**. 805 EN catalog rows carry no image; the product fallback now covers the
+  owned ones.
+- **Pricing was already right** — these cards resolve to the genuine
+  "Alternate Art Promos" product; only image lookup was affected. A consequence
+  worth noting: art and price now come from the same product link, so a wrong
+  image is a visible symptom of a wrong price link.
+
 ### 2026-08-04 — Dashboard highlights are links into the owning screen
 
 - **Decision:** A Top Gainers / Losers / Sellers row opens that card **selected in

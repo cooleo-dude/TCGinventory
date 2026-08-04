@@ -58,7 +58,6 @@ from PySide6.QtWidgets import (
 
 from tcginventory.data.db import now_iso
 from tcginventory.data.repositories import (
-    CardCatalogRepository,
     ItemRepository,
     LotRepository,
     PriceSnapshotRepository,
@@ -259,14 +258,13 @@ class _PreviewPrefetchWorker(QThread):
                     hist_conn = open_history()
                 except Exception:
                     hist_conn = None  # no catalog history → snapshot fallback
-                catalog = CardCatalogRepository(conn)
                 snaps = PriceSnapshotRepository(conn)
                 trend_svc = TrendService(conn, hist_conn)
                 today = date.today()
                 for lot_id, item_id, name, set_name, number in self._rows:
                     if self.isInterruptionRequested():
                         break
-                    hit = catalog.image_for(name, set_name, number)
+                    hit = cardimages.art_for(conn, name, set_name, number)
                     if hit:
                         images[lot_id] = hit
                         cardimages.ensure_cached(hit[0], hit[1])  # warm disk
@@ -602,6 +600,52 @@ class InventoryView(QWidget):
         self._prefetch_previews(rows)
         self._update_summary()
         self._on_selection()
+
+    # -- external navigation (Dashboard highlights → this grid) --------------
+
+    def select_item(self, item_id: int) -> bool:
+        """Select ``item_id``'s row, scroll it into view, and show it in the
+        dossier (art + facts + price chart). Returns False if the item has no
+        row here at all.
+
+        An item can hold several lots (one row each): an in-stock lot wins, so a
+        partially-sold card lands on the copies still on hand. Filters that would
+        hide the row are cleared first — otherwise "show me this card" would
+        silently do nothing whenever, say, the In-stock chip is on and the card
+        is fully sold.
+        """
+        candidates = [
+            src
+            for src in range(self._model.rowCount())
+            if (row := self._model.row_at(src)) is not None and row.item.id == item_id
+        ]
+        if not candidates:
+            return False
+        candidates.sort(key=lambda src: not self._model.row_at(src).in_stock)
+        target = candidates[0]
+
+        if not self._proxy.mapFromSource(self._model.index(target, 0)).isValid():
+            self._clear_filters()
+        index = self._proxy.mapFromSource(self._model.index(target, 0))
+        if not index.isValid():  # still hidden (shouldn't happen) — say so
+            return False
+
+        row = self._model.row_at(target)
+        self._last_hovered_row = row  # hover-convention fallback shows it too
+        self._table.selectRow(index.row())  # → _on_selection → _display_card
+        self._table.scrollTo(index, QAbstractItemView.PositionAtCenter)
+        self._table.setFocus(Qt.OtherFocusReason)
+        return True
+
+    def _clear_filters(self) -> None:
+        """Reset the filter bar to 'show everything' (widgets included, so the
+        bar never disagrees with what the grid is filtering on)."""
+        self._search.clear()
+        self._in_stock.setChecked(False)
+        self._review_only.setChecked(False)
+        self._intent.select("All")
+        self._sold.select("All")
+        self._graded.select("All")
 
     def _col(self, header: str) -> int:
         return next(
