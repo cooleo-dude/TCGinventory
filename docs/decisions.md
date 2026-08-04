@@ -1049,3 +1049,23 @@ _Template for new entries:_
   small cached images. Un-downloaded art is still retried on a later refresh (the
   memo doesn't suppress the fetch), so art that missed while offline appears once
   it's fetched. Cache limit raised to 32 MiB (~thousands of thumbnails).
+
+### 2026-08-04 — Recognition History can re-export a stored capture
+- **Decision:** Recognition History gets **Export to Transaction** / **Export to
+  Auction** buttons acting on the selected capture, routed through the *same*
+  `MainWindow._export_recognition_to_{transaction,auction}` handlers the live
+  Recognition window uses (overwrite confirmation, nav switch, unmatched-give
+  warning all reused). The payload is rebuilt from the corpus by a new Qt-free
+  `services/corpus.capture_export_cards(repo, capture_id)` returning `ExportCard`s
+  — unlabeled boxes skipped, back-side images not double-counted, exact duplicates
+  aggregated into a quantity, mirroring the live window's `_collect_export_cards`.
+- **Context / why:** The corpus already stores everything an export needs per
+  region (identity, side, condition, grading), so a batch you annotated days ago
+  is re-usable without re-annotating it. Both windows' `import_recognized` are
+  duck-typed, so a neutral service-layer carrier feeds them directly — no
+  view→view import from History into the Recognition window.
+- **Consequences:** `corpus.ExportCard` and `recognition.RecognizedCard` are now
+  two carriers with identical fields. `ExportCard` is the layer-correct one (a
+  service, headlessly testable); **follow-up:** have the Recognition window emit
+  `ExportCard` and delete `RecognizedCard`. A listing-source capture exported to
+  Transaction has `side=None`, which Transaction already treats as incoming.

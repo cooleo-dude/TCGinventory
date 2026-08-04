@@ -29,6 +29,75 @@ class IngestResult:
     exemplars: int
 
 
+@dataclass
+class ExportCard:
+    """One labeled card handed from a **stored** capture to the Transaction /
+    Auction windows.
+
+    Field-for-field what their ``import_recognized`` reads (they duck-type the
+    payload), so Recognition History can re-export an old batch without going
+    back through the live annotation window.
+    """
+
+    card_id: str | None
+    name: str
+    set_name: str | None
+    card_number: str | None
+    language: str | None
+    quantity: int
+    side: str | None  # "give" | "receive" (transaction) | None (listing)
+    condition: str | None
+    is_graded: bool
+    grade: str | None
+    grading_company: str | None
+
+
+def capture_export_cards(repo: VisionRepository, capture_id: int) -> list[ExportCard]:
+    """The labeled cards of a stored capture, ready to hand to Transaction/Auction.
+
+    Mirrors what the live Recognition window collects on export: unlabeled boxes
+    are skipped, a back-side image doesn't double-count the front it belongs to,
+    and exact duplicates (same identity + side + condition + grading) aggregate
+    into a quantity. Order follows first appearance.
+    """
+    agg: dict[tuple, ExportCard] = {}
+    order: list[tuple] = []
+    for row in repo.capture_regions(capture_id):
+        if (row["image_side"] or "") == "back":
+            continue  # front + back are one physical card
+        card_id = row["card_id"]
+        name = (row["name"] or "").strip()
+        if not (card_id or name):
+            continue  # a drawn but unlabeled box
+        is_graded = bool(row["is_graded"])
+        key = (
+            card_id or name.casefold(),
+            row["side"],
+            row["condition"],
+            is_graded,
+            row["grade"],
+            row["grading_company"],
+        )
+        if key in agg:
+            agg[key].quantity += 1
+            continue
+        agg[key] = ExportCard(
+            card_id=card_id,
+            name=name,
+            set_name=row["set_name"],
+            card_number=row["card_number"],
+            language=row["language"],
+            quantity=1,
+            side=row["side"],
+            condition=row["condition"],
+            is_graded=is_graded,
+            grade=row["grade"],
+            grading_company=row["grading_company"],
+        )
+        order.append(key)
+    return [agg[key] for key in order]
+
+
 def ingest_labeled_scene(
     repo: VisionRepository,
     embedder,
@@ -52,9 +121,7 @@ def ingest_labeled_scene(
         width = height = None
 
     capture_id = repo.add_capture(source=source)
-    image_id = repo.add_image(
-        capture_id, sha, str(dest), width=width, height=height
-    )
+    image_id = repo.add_image(capture_id, sha, str(dest), width=width, height=height)
 
     exemplar_entries = []
     regions = 0

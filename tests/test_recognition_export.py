@@ -167,6 +167,102 @@ def test_match_sellable_by_identity():
     assert _match_sellable(sellable, _rc("Mewtwo")) is None
 
 
+# -- Recognition History: re-exporting a stored capture ----------------------
+
+
+def _stored_capture(vrepo, *, source="transaction"):
+    """A capture with: two identical give-side Charizards, one receive-side
+    Blastoise, an unlabeled box, and a back-side shot of the Charizard."""
+    cap = vrepo.add_capture(source=source, now="2026-03-01T00:00:00+00:00")
+    front = vrepo.add_image(cap, "front-sha", "/front.png", "front")
+    zard = CardLabel(card_id="cel-4", name="Charizard", condition="NM")
+    vrepo.add_region(front, 1, (0.0, 0.0, 0.2, 0.4), "give", zard)
+    vrepo.add_region(front, 2, (0.2, 0.0, 0.2, 0.4), "give", zard)  # duplicate
+    vrepo.add_region(
+        front, 3, (0.6, 0.0, 0.2, 0.4), "receive", CardLabel(name="Blastoise")
+    )
+    vrepo.add_region(
+        front, 4, (0.8, 0.0, 0.1, 0.2), "receive", CardLabel()
+    )  # unlabeled
+    back = vrepo.add_image(cap, "back-sha", "/back.png", "back")
+    vrepo.add_region(back, 1, (0.0, 0.0, 0.2, 0.4), "give", zard)  # same card's back
+    return cap
+
+
+def test_capture_export_cards_rebuilds_the_payload():
+    """A stored capture re-exports exactly what the live window would collect."""
+    from tcginventory.data.vision import VisionRepository, open_vision
+    from tcginventory.services.corpus import capture_export_cards
+
+    vrepo = VisionRepository(open_vision(":memory:"))
+    cap = _stored_capture(vrepo)
+
+    cards = capture_export_cards(vrepo, cap)
+    assert [(c.name, c.side, c.quantity) for c in cards] == [
+        ("Charizard", "give", 2),  # duplicates aggregated, back not double-counted
+        ("Blastoise", "receive", 1),  # unlabeled box skipped
+    ]
+    assert cards[0].card_id == "cel-4"
+    assert cards[0].condition == "NM"
+
+
+def test_recognition_history_exports_the_selected_capture(app, conn):
+    """The Cards a capture holds hand off to Transaction / Auction, and the
+    buttons only enable once a capture with labeled cards is selected."""
+    from tcginventory.data.vision import VisionRepository, open_vision
+    from tcginventory.ui.views.history import HistoryView
+
+    vrepo = VisionRepository(open_vision(":memory:"))
+    _stored_capture(vrepo, source="listing")
+
+    view = HistoryView(conn, vision_repo=vrepo)
+    rec = view._rec
+    view._set_mode(1)  # → Recognition History
+    assert not rec._export_txn_btn.isEnabled()  # nothing selected yet
+    assert not rec._export_auc_btn.isEnabled()
+
+    to_txn, to_auc = [], []
+    view.export_to_transaction.connect(to_txn.append)  # relayed by HistoryView
+    view.export_to_auction.connect(to_auc.append)
+
+    rec._table.selectRow(0)
+    assert rec._export_txn_btn.isEnabled() and rec._export_auc_btn.isEnabled()
+
+    rec._export_auc_btn.click()
+    assert len(to_auc) == 1
+    assert [(c.name, c.quantity) for c in to_auc[0]] == [
+        ("Charizard", 2),
+        ("Blastoise", 1),
+    ]
+    rec._export_txn_btn.click()
+    assert len(to_txn) == 1
+
+    view.deleteLater()
+
+
+def test_history_export_payload_feeds_both_windows(app, conn):
+    """The stored-capture payload is accepted by the real ingestion methods."""
+    from tcginventory.data.vision import VisionRepository, open_vision
+    from tcginventory.services.corpus import capture_export_cards
+    from tcginventory.ui.views.auctions import AuctionsView
+    from tcginventory.ui.views.transaction import TransactionView
+
+    vrepo = VisionRepository(open_vision(":memory:"))
+    cards = capture_export_cards(vrepo, _stored_capture(vrepo))
+
+    txn = TransactionView(conn)
+    unmatched = txn.import_recognized(cards)
+    assert [r.name.text() for r in txn._receive_rows] == ["Blastoise"]
+    assert unmatched == ["Charizard"]  # give side, nothing owned to match
+    txn.deleteLater()
+
+    auc = AuctionsView(conn, auctions_conn=open_auctions(":memory:"), history=None)
+    auc.import_recognized(cards)
+    assert [r.name.text() for r in auc._rows] == ["Charizard", "Blastoise"]
+    assert auc._rows[0].qty.value() == 2
+    auc.deleteLater()
+
+
 # -- Auction ingestion -------------------------------------------------------
 
 

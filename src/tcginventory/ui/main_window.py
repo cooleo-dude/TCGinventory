@@ -274,9 +274,12 @@ class MainWindow(QMainWindow):
         self._recognition.export_to_transaction.connect(
             self._export_recognition_to_transaction
         )
-        self._recognition.export_to_auction.connect(
-            self._export_recognition_to_auction
+        self._recognition.export_to_auction.connect(self._export_recognition_to_auction)
+        # Recognition History re-exporting a stored capture takes the same route.
+        self._history.export_to_transaction.connect(
+            self._export_recognition_to_transaction
         )
+        self._history.export_to_auction.connect(self._export_recognition_to_auction)
 
         self._nav = QListWidget()
         self._nav.setObjectName("nav")

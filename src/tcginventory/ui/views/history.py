@@ -67,7 +67,7 @@ from tcginventory.data.repositories import (
 from tcginventory.data.vision import VisionRepository, open_vision
 from tcginventory.domain.enums import Direction, TransactionStatus
 from tcginventory.domain.models import Item
-from tcginventory.services import cardimages, regioncrops
+from tcginventory.services import cardimages, corpus, regioncrops
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.reporting import ReportingService
 from tcginventory.services.transactions import TransactionService
@@ -746,6 +746,9 @@ class _RecHistoryPanel(QWidget):
     cumulative-images sparkline reading corpus growth at a glance. The bottom
     splits table (left) | annotated-image preview with a filmstrip (right)."""
 
+    export_to_transaction = Signal(object)  # [ExportCard] → Transaction window
+    export_to_auction = Signal(object)  # [ExportCard] → Auction window
+
     def __init__(self, conn: sqlite3.Connection, vision_repo=None) -> None:
         super().__init__()
         self._conn = conn
@@ -779,10 +782,25 @@ class _RecHistoryPanel(QWidget):
         self._search.setPlaceholderText("Search cards or note…")
         self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self._on_search_changed)
+        # Re-export an old batch without re-annotating it — the same handoff the
+        # Recognition window's export button makes, acting on the selected capture.
+        self._export_txn_btn = self._export_button(
+            "Export to Transaction",
+            "Fill the Transaction window with this capture's labeled cards "
+            "(give/receive sides as they were labeled).",
+            "transaction",
+        )
+        self._export_auc_btn = self._export_button(
+            "Export to Auction",
+            "Start an auction lot from this capture's labeled cards.",
+            "auction",
+        )
         filter_bar = QHBoxLayout()
         filter_bar.addWidget(QLabel("Source:"))
         filter_bar.addWidget(self._source)
         filter_bar.addWidget(self._search, 1)
+        filter_bar.addWidget(self._export_txn_btn)
+        filter_bar.addWidget(self._export_auc_btn)
 
         self._table = QTableView()
         self._table.setModel(self._proxy)
@@ -879,6 +897,41 @@ class _RecHistoryPanel(QWidget):
         v.addWidget(cap)
         v.addWidget(self._spark, 1)
         return frame
+
+    # -- export the selected capture ----------------------------------------
+
+    def _export_button(self, label: str, tip: str, target: str) -> QPushButton:
+        btn = QPushButton(label)
+        btn.setIcon(icons.icon("arrow-left-right", theme.active().ink2, 15))
+        btn.setToolTip(tip)
+        btn.setEnabled(False)  # until a capture with labeled cards is selected
+        btn.clicked.connect(lambda _=False, t=target: self._export(t))
+        return btn
+
+    def _sync_export_buttons(self) -> None:
+        """Export needs a selected capture that actually has labeled cards."""
+        row = self._selected_capture()
+        enabled = row is not None and row.card_count > 0
+        for btn in (self._export_txn_btn, self._export_auc_btn):
+            btn.setEnabled(enabled)
+
+    def _export(self, target: str) -> None:
+        row = self._selected_capture()
+        if row is None:
+            return
+        cards = corpus.capture_export_cards(self._ensure_vision(), row.capture_id)
+        if not cards:
+            QMessageBox.information(
+                self,
+                "Nothing to export",
+                "This capture has no labeled cards — open it in the Recognition "
+                "window and name its boxes first.",
+            )
+            return
+        if target == "transaction":
+            self.export_to_transaction.emit(cards)
+        else:
+            self.export_to_auction.emit(cards)
 
     # -- data ---------------------------------------------------------------
 
@@ -1003,9 +1056,11 @@ class _RecHistoryPanel(QWidget):
         self._filmstrip.blockSignals(False)
         self._filmstrip.setVisible(False)
         self._annotated.clear()
+        self._sync_export_buttons()
 
     def _show_detail(self) -> None:
         row = self._selected_capture()
+        self._sync_export_buttons()
         if row is None:
             self._clear_preview()
             return
@@ -1048,6 +1103,9 @@ class HistoryView(QWidget):
     edit_requested = Signal(int)  # transaction id to edit
     changed = Signal()  # a void changed the ledger
     new_transaction_requested = Signal()  # empty-state CTA → Transaction window
+    # Recognition History re-exporting a stored capture (relayed from its panel).
+    export_to_transaction = Signal(object)
+    export_to_auction = Signal(object)
 
     def __init__(self, conn: sqlite3.Connection, vision_repo=None) -> None:
         super().__init__()
@@ -1194,6 +1252,8 @@ class HistoryView(QWidget):
         txn_layout.addWidget(splitter, 1)
 
         self._rec = _RecHistoryPanel(self._conn, vision_repo=self._vision_repo)
+        self._rec.export_to_transaction.connect(self.export_to_transaction)
+        self._rec.export_to_auction.connect(self.export_to_auction)
         self._pages = QStackedWidget()
         self._pages.addWidget(txn_page)  # 0 Transaction
         self._pages.addWidget(self._rec)  # 1 Recognition
