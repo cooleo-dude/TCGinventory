@@ -25,11 +25,9 @@ from datetime import datetime
 from PySide6.QtCore import (
     QDateTime,
     QEvent,
-    QModelIndex,
     QRectF,
     QSize,
     Qt,
-    QThread,
     QTimer,
     QUrl,
     Signal,
@@ -43,8 +41,6 @@ from PySide6.QtGui import (
     QPainter,
     QPainterPath,
     QPixmap,
-    QStandardItem,
-    QStandardItemModel,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -53,7 +49,6 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
-    QCompleter,
     QDateEdit,
     QDialog,
     QDoubleSpinBox,
@@ -71,7 +66,6 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
-    QStyledItemDelegate,
     QTableWidget,
     QTimeEdit,
     QVBoxLayout,
@@ -104,10 +98,9 @@ from tcginventory.services.tcgplayer import product_url as tcgplayer_product_url
 from tcginventory.services.transactions import IncomingCard
 from tcginventory.ui import icons, theme
 from tcginventory.ui.card_gallery import CardGallery
-from tcginventory.ui.card_preview import install_hover_preview
-from tcginventory.ui.completer_popup import show_fitted
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
+from tcginventory.ui.views._card_entry import CardEntryMixin, PriceLookupWorker
 
 _RECOMMENDED_PCT = 80  # the "bid to here" rung highlighted on every ladder
 
@@ -175,8 +168,10 @@ def _select(combo: QComboBox, value: str | None) -> None:
         combo.setCurrentIndex(idx)
 
 
-_CARD_HEADERS = ["Name", "Set", "#", "Cond", "Market", "Qty", "TCGplayer", "eBay", ""]
-_CARD_WIDTHS = [190, 140, 66, 64, 90, 46, 96, 66, 30]
+_CARD_HEADERS = [
+    "Name", "Set", "#", "Cond", "Market", "Qty", "TCGplayer", "eBay", "Printing", ""
+]
+_CARD_WIDTHS = [190, 140, 66, 64, 90, 46, 96, 66, 104, 30]
 
 _UNSET = object()  # sentinel: history not supplied -> open the default DB
 _THUMB_BORDER = theme.DARK.line2  # neutral thumbnail frame
@@ -348,63 +343,12 @@ def _money_spin() -> QDoubleSpinBox:
     return spin
 
 
-class _LivePriceWorker(QThread):
-    """Fetch a picked card's current tcgcsv market price off the UI thread.
-
-    A fallback for cards that aren't in ``pricehistory.db`` yet (mirrors the
-    Transaction window's price-on-pick).
-    """
-
-    done = Signal(object)  # (price_cents, tcgplayer_url) or None
-
-    def __init__(self, set_name, number, name, category=3, set_code=None) -> None:
-        super().__init__()
-        self._set = set_name
-        self._number = number
-        self._name = name
-        self._category = category
-        self._set_code = set_code
-
-    def run(self) -> None:
-        from tcginventory.services.pricing import TcgcsvProvider
-
-        try:
-            result = TcgcsvProvider().price_for_card(
-                self._set,
-                self._number,
-                self._name,
-                category=self._category,
-                set_code=self._set_code,
-            )
-        except Exception:  # network/parse failure -> skip the auto-price
-            result = None
-        self.done.emit(result)
-
-
-class _MatchDelegate(QStyledItemDelegate):
-    """Paint autofill popup rows with the fuller "name · set #number" label,
-    while QCompleter still inserts just the clean card name."""
-
-    def __init__(self, label_role: int, parent=None) -> None:
-        super().__init__(parent)
-        self._label_role = label_role
-
-    def initStyleOption(self, option, index) -> None:
-        super().initStyleOption(option, index)
-        label = index.data(self._label_role)
-        if label:
-            option.text = label
-
-
-class _AuctionCardRow:
+class _AuctionCardRow(CardEntryMixin):
     """Inline editor row for one card bundled in an auction.
 
     The Name field autocompletes from the local catalog; picking a match fills
     set/number/language and triggers a price lookup that fills Market.
     """
-
-    _CARD_ID_ROLE = Qt.UserRole + 1
-    _LABEL_ROLE = Qt.UserRole + 2
 
     def __init__(self, conn, is_auto, on_change, on_pick=None, sink=None) -> None:
         self._conn = conn
@@ -412,29 +356,12 @@ class _AuctionCardRow:
         self._on_change = on_change
         self._on_pick = on_pick  # (row, CatalogCard) -> None : after a pick
         self._sink = sink  # card-image preview target
-        self._matches: dict[str, object] = {}
-        self._card_id: str | None = None
-        self._image_url: str | None = None
         self._tcgplayer_url: str | None = None
         self._language: str = "EN"
 
         self.name = QLineEdit()
         self.name.setPlaceholderText("e.g. Charizard Obsidian Flames 125")
-        self._search_model = QStandardItemModel(self.name)
-        self._completer = QCompleter(self._search_model, self.name)
-        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
-        self.name.setCompleter(self._completer)
-        self.name.textEdited.connect(self._on_name_edited)
-        self._completer.activated[QModelIndex].connect(self._pick_match)
-        self.name.textChanged.connect(lambda *_: on_change())
-        install_hover_preview(self.name, self._hover_card, self._sink)
-        popup = self._completer.popup()
-        popup.setMouseTracking(True)
-        popup.entered.connect(self._on_match_hover)
-        self._match_delegate = _MatchDelegate(self._LABEL_ROLE, popup)
-        popup.setItemDelegate(self._match_delegate)
-        install_hover_preview(popup, lambda: None, self._sink)
+        self._init_catalog_search()  # shared catalog autocomplete + hover preview
 
         # Minimal field set (+ condition) — the rest of the card details are
         # entered in the Transaction window after export.
@@ -464,6 +391,9 @@ class _AuctionCardRow:
         self.name.textChanged.connect(
             lambda *_: self.ebay_btn.setEnabled(bool(self.name.text().strip()))
         )
+        # Printing picker (shared standard): shows in its own column only when a
+        # card has >1 tcgplayer product (base + stamped variants).
+        self._init_printing_picker()
         # Track whether Market was hand-edited away from the auto-fetched price,
         # so export can note it, overwrite the item price, and mark for review.
         self._auto_market_cents: int | None = None
@@ -480,7 +410,12 @@ class _AuctionCardRow:
             self.qty,
             self.tcg_btn,
             self.ebay_btn,
+            self.printing,
         ]
+
+    def _apply_variant(self, variant) -> None:
+        self.set_market_cents(variant.price_cents)
+        self.set_tcgplayer_url(variant.tcgplayer_url)
 
     def _on_market_changed(self, *_args) -> None:
         # A user edit (not our own programmatic set) that differs from the last
@@ -524,59 +459,12 @@ class _AuctionCardRow:
         )
 
     # -- catalog autofill ---------------------------------------------------
-
-    def _on_name_edited(self, text: str) -> None:
-        if not self._is_auto() or len(text.strip()) < 2:
-            return
-        repo = CardCatalogRepository(self._conn)
-        matches = repo.search(text, limit=25)
-        self._matches = {c.card_id: c for c in matches}
-        self._search_model.clear()
-        for card in matches:
-            item = QStandardItem(card.name)
-            label = (
-                f"{card.name}  ·  {card.set_name or '?'}  "
-                f"#{repo.display_number(card) or '?'}"
-            )
-            item.setData(card.card_id, self._CARD_ID_ROLE)
-            item.setData(label, self._LABEL_ROLE)
-            self._search_model.appendRow(item)
-        if matches:
-            show_fitted(self._completer, self.name)
-
-    def _on_match_hover(self, index: QModelIndex) -> None:
-        card = self._matches.get(index.data(self._CARD_ID_ROLE))
-        if card is not None and self._sink is not None:
-            self._sink.show_card(card.card_id, getattr(card, "image_small", None))
-
-    def _hover_card(self) -> tuple[str, str] | None:
-        if self._card_id and self._image_url:
-            return self._card_id, self._image_url
-        name = self.name.text().strip()
-        if not name:
-            return None
-        return CardCatalogRepository(self._conn).image_for(
-            name, self.set.text().strip(), self.number.text().strip()
-        )
-
-    def _pick_match(self, index: QModelIndex) -> None:
-        card = self._matches.get(index.data(self._CARD_ID_ROLE))
-        if card is not None:
-            self.apply_catalog_card(card)
-            if self._on_pick is not None:
-                self._on_pick(self, card)
+    # Search, hover-preview, and pick-match behaviour comes from CardEntryMixin.
 
     def apply_catalog_card(self, card) -> None:
-        self._card_id = card.card_id
-        self._image_url = getattr(card, "image_small", None)
         self._language = getattr(card, "language", None) or "EN"
         self.set_tcgplayer_url(None)  # cleared until the price lookup resolves it
-        self.name.setText(card.name)
-        self.set.setText(card.set_name or "")
-        number = CardCatalogRepository(self._conn).display_number(card)
-        self.number.setText(number or card.full_number or card.number or "")
-        if self._sink is not None and self._image_url:
-            self._sink.show_card(self._card_id, self._image_url)
+        self._apply_catalog_common(card)  # identity + name/set/number + preview
         self._on_change()
 
     # -- (de)serialise ------------------------------------------------------
@@ -1053,7 +941,7 @@ class AuctionsView(QWidget):
         self._history = _safe_open_history() if history is _UNSET else history
 
         self._rows: list[_AuctionCardRow] = []
-        self._price_workers: list[_LivePriceWorker] = []
+        self._price_workers: list[PriceLookupWorker] = []
         self._edit_id: int | None = None
         self._inference_pipeline = None  # lazily built (image -> [Detection])
         self._ended_ids: set[int] = set()  # which auctions were ended last refresh
@@ -1512,7 +1400,7 @@ class AuctionsView(QWidget):
 
         for card in live:
             category = 85 if card.language == "JP" else 3
-            worker = _LivePriceWorker(
+            worker = PriceLookupWorker(
                 card.set_name,
                 card.number,
                 card.name,
@@ -1520,8 +1408,8 @@ class AuctionsView(QWidget):
                 set_code=getattr(card, "set_code", None),
             )
             worker.done.connect(
-                lambda result, a=auction, c=card, w=worker: self._on_refresh_price(
-                    a, c, w, result
+                lambda variants, a=auction, c=card, w=worker: self._on_refresh_price(
+                    a, c, w, variants
                 )
             )
             self._price_workers.append(worker)
@@ -1540,15 +1428,15 @@ class AuctionsView(QWidget):
             )
         QMessageBox.information(self, "Refresh values", "\n".join(parts))
 
-    def _on_refresh_price(self, auction, card, worker, result) -> None:
+    def _on_refresh_price(self, auction, card, worker, variants) -> None:
         if worker in self._price_workers:
             self._price_workers.remove(worker)
-        if result is None:
+        if not variants:
             return
-        cents, url = result
-        card.market_value_cents = cents
-        if url:
-            card.tcgplayer_url = url
+        base = variants[0]  # base print is authoritative for a stored card
+        card.market_value_cents = base.price_cents
+        if base.tcgplayer_url:
+            card.tcgplayer_url = base.tcgplayer_url
         self._repo.save(auction)
         # Watchlist only (no editor reload) so an async result never clobbers
         # in-progress edits.
@@ -1936,7 +1824,7 @@ class AuctionsView(QWidget):
         if not card.set_name or not card.number:
             return
         category = 85 if getattr(card, "language", "EN") == "JP" else 3
-        worker = _LivePriceWorker(
+        worker = PriceLookupWorker(
             card.set_name,
             card.number,
             card.name,
@@ -1944,23 +1832,24 @@ class AuctionsView(QWidget):
             set_code=getattr(card, "set_code", None),
         )
         worker.done.connect(
-            lambda result, r=row, w=worker: self._on_price_ready(r, w, result)
+            lambda variants, r=row, w=worker: self._on_price_ready(r, w, variants)
         )
         self._price_workers.append(worker)
         worker.start()
 
-    def _on_price_ready(self, row, worker, result) -> None:
+    def _on_price_ready(self, row, worker, variants) -> None:
         if worker in self._price_workers:
             self._price_workers.remove(worker)
-        if result is None or row not in self._rows:
+        if not variants or row not in self._rows:
             return
-        cents, url = result
-        if url:
-            row.set_tcgplayer_url(url)  # exact product link for the button
-        # Live product price is authoritative — apply it over the history
+        base = variants[0]
+        if base.tcgplayer_url:
+            row.set_tcgplayer_url(base.tcgplayer_url)  # exact product link
+        # Live base price is authoritative — apply it over the history
         # provisional, but never stomp a value the user hand-edited.
         if not row.market_is_manual:
-            row.set_market_cents(cents)
+            row.set_market_cents(base.price_cents)
+        row.set_variants(variants)  # offer the printing picker when >1 product
         self._update_breakdown()
 
     # -- breakdown / save / load --------------------------------------------

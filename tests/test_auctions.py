@@ -18,6 +18,12 @@ from tcginventory.services.auctions import (
     breakdown,
     max_bid_cents,
 )
+from tcginventory.services.pricing import CardVariant
+
+
+def _variants(cents: int, url: str) -> list[CardVariant]:
+    """One base printing — the shape PriceLookupWorker emits for a plain card."""
+    return [CardVariant("Base", url, cents, True)]
 
 # ---------------------------------------------------------------------------
 # max-bid math
@@ -298,12 +304,42 @@ def test_price_result_populates_tcgplayer_button(app):
     view = _view(app)
     row = view._add_card_row()
     row.name.setText("Charizard")
-    # Simulate the live tcgcsv lookup returning (price_cents, product_url).
-    view._on_price_ready(row, None, (1850, "https://www.tcgplayer.com/product/123"))
+    # Simulate the live tcgcsv lookup returning the card's printings (base first).
+    view._on_price_ready(
+        row, None, _variants(1850, "https://www.tcgplayer.com/product/123")
+    )
     assert row.tcg_btn.isEnabled()
     assert row.market.value() == 18.50  # live price applied
     assert row.to_card().tcgplayer_url == "https://www.tcgplayer.com/product/123"
     assert row.to_card().market_is_manual is False  # an auto price, not a manual edit
+    view.deleteLater()
+
+
+def test_auction_row_printing_picker(app):
+    # A card with more than one tcgplayer product offers a per-row Printing
+    # dropdown; base is applied by default, picking the exclusive re-prices.
+    view = _view(app)
+    row = view._add_card_row()
+    row.name.setText("Eevee")
+    variants = [
+        CardVariant("Base", "u-base", 1370, True),
+        CardVariant("Pokemon Center Exclusive", "u-excl", 9413, False),
+    ]
+    view._on_price_ready(row, None, variants)
+    assert row.market.value() == 13.70  # base applied
+    assert row.to_card().tcgplayer_url == "u-base"
+    assert not row.printing.isHidden()  # picker offered
+    assert row.printing.count() == 2
+
+    row.printing.setCurrentIndex(1)
+    row._on_printing_changed()
+    assert row.market.value() == 94.13
+    assert row.to_card().tcgplayer_url == "u-excl"
+
+    # A single-printing card hides the picker (nothing to choose).
+    row2 = view._add_card_row()
+    view._on_price_ready(row2, None, _variants(500, "u1"))
+    assert row2.printing.isHidden()
     view.deleteLater()
 
 
@@ -370,7 +406,7 @@ def test_live_price_overrides_stale_history_provisional(app):
     row = view._add_card_row()
     row.set_market_cents(552)  # instant history provisional
     assert row.market.value() == 5.52
-    view._on_price_ready(row, None, (6231, "http://t"))  # live product price
+    view._on_price_ready(row, None, _variants(6231, "http://t"))  # live product price
     assert row.market.value() == 62.31
     view.deleteLater()
 
@@ -381,7 +417,7 @@ def test_live_price_respects_manual_override(app):
     row.set_market_cents(552)
     row.market.setValue(80.00)  # user hand-edits before the live result lands
     assert row.market_is_manual is True
-    view._on_price_ready(row, None, (6231, "http://t"))
+    view._on_price_ready(row, None, _variants(6231, "http://t"))
     assert row.market.value() == 80.00  # manual edit preserved
     view.deleteLater()
 
@@ -417,7 +453,7 @@ def test_manual_market_edit_flags_review_and_notes_on_export(app):
     row = view._add_card_row()
     row.name.setText("Charizard")
     # Auto price fills (not manual), then the user overrides it (manual).
-    view._on_price_ready(row, None, (2000, "http://t"))
+    view._on_price_ready(row, None, _variants(2000, "http://t"))
     assert row.to_card().market_is_manual is False
     row.market.setValue(12.00)
     assert row.to_card().market_is_manual is True
@@ -436,7 +472,7 @@ def test_auto_price_export_is_not_flagged(app):
     view = _view(app)
     row = view._add_card_row()
     row.name.setText("Pikachu")
-    view._on_price_ready(row, None, (500, "http://t"))
+    view._on_price_ready(row, None, _variants(500, "http://t"))
     captured = {}
     view.export_to_transaction.connect(lambda p: captured.update(cards=p[1]))
     view._export_current()

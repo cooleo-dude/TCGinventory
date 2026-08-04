@@ -26,7 +26,6 @@ from PySide6.QtCore import (
     QModelIndex,
     QRectF,
     Qt,
-    QThread,
     QTimer,
     QUrl,
     Signal,
@@ -63,7 +62,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
@@ -110,6 +108,10 @@ from tcginventory.ui.card_preview import (
 from tcginventory.ui.completer_popup import show_fitted
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
+from tcginventory.ui.views._card_entry import (
+    CardEntryMixin,
+    PriceLookupWorker,
+)
 
 _TOOLBAR_H = 34  # Them's autofill toolbar row; matched by a You-side spacer
 _DOCK_W = 178  # preview dock width; the header fields align to the board past it
@@ -321,48 +323,6 @@ def _match_sellable(sellable, card) -> int | None:
     return None
 
 
-class _PriceLookupWorker(QThread):
-    """Fetch a picked card's tcgcsv printings (base + variants) off the UI thread."""
-
-    done = Signal(object)  # list[CardVariant] (base first), possibly empty
-
-    def __init__(
-        self,
-        set_name: str,
-        number: str,
-        name: str,
-        category: int = 3,
-        set_code: str | None = None,
-    ) -> None:
-        super().__init__()
-        self._set = set_name
-        self._number = number
-        self._name = name
-        self._category = category
-        self._set_code = set_code
-
-    def run(self) -> None:
-        from tcginventory.services.pricing import CardVariant, TcgcsvProvider
-
-        variants: list = []
-        try:
-            provider = TcgcsvProvider()
-            variants = provider.variants_for_card(
-                self._set, self._number, self._name,
-                category=self._category, set_code=self._set_code,
-            )
-            if not variants:  # suffix-strip / single-product fallback
-                result = provider.price_for_card(
-                    self._set, self._number, self._name,
-                    category=self._category, set_code=self._set_code,
-                )
-                if result:
-                    variants = [CardVariant("Base", result[1], result[0], True)]
-        except Exception:  # network/parse failure → just skip the auto-price
-            variants = []
-        self.done.emit(variants)
-
-
 class _FocusLineEdit(QLineEdit):
     """A line edit that announces focus-in, so an empty picker can pop its list."""
 
@@ -528,26 +488,7 @@ class _GiveRow:
         return card
 
 
-class _MatchDelegate(QStyledItemDelegate):
-    """Render autofill popup rows with the full "name · set #number" label.
-
-    QCompleter shows *and* inserts its completion role, so the completion text
-    is kept as the clean card name (what lands in the Name field) while this
-    delegate paints the richer label from a separate role in the popup only.
-    """
-
-    def __init__(self, label_role: int, parent=None) -> None:
-        super().__init__(parent)
-        self._label_role = label_role
-
-    def initStyleOption(self, option, index) -> None:
-        super().initStyleOption(option, index)
-        label = index.data(self._label_role)
-        if label:
-            option.text = label
-
-
-class _ReceiveRow:
+class _ReceiveRow(CardEntryMixin):
     """Inline row for a card you receive: the full card field set, entered
     directly. Name autocompletes from the catalog and fills set/number."""
 
@@ -557,31 +498,11 @@ class _ReceiveRow:
         self._on_change = on_change
         self._on_pick = on_pick  # (row, CatalogCard) -> None : after a pick
         self._sink = sink  # preview target (Transaction's lower-left pane)
-        self._matches: dict[str, object] = {}
-        self._card_id: str | None = None  # set when a catalog card is applied
-        self._image_url: str | None = None
 
         self.name = QLineEdit()
         self.name.setPlaceholderText("e.g. Pikachu Celebrations 005/025")
-        # Whole-string catalog search: type name (+set +number), pick a match.
-        self._search_model = QStandardItemModel(self.name)
-        self._completer = QCompleter(self._search_model, self.name)
-        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
-        self.name.setCompleter(self._completer)
-        self.name.textEdited.connect(self._on_name_edited)
-        self._completer.activated[QModelIndex].connect(self._pick_match)
-        self.name.textChanged.connect(lambda *_: on_change())
-        # Hover the Name field to preview the card image; hover a match in the
-        # autofill popup to preview it before picking. Previews land in the
-        # Transaction window's lower-left pane (the sink).
-        install_hover_preview(self.name, self._hover_card, self._sink)
-        popup = self._completer.popup()
-        popup.setMouseTracking(True)
-        popup.entered.connect(self._on_match_hover)
-        self._match_delegate = _MatchDelegate(self._LABEL_ROLE, popup)
-        popup.setItemDelegate(self._match_delegate)
-        install_hover_preview(popup, lambda: None, self._sink)  # clear on leave
+        # Whole-string catalog search + hover preview (shared standard).
+        self._init_catalog_search()
 
         self.category = _combo(Category, capitalize=True)
         self.set = QLineEdit()
@@ -611,34 +532,15 @@ class _ReceiveRow:
         self.tcgplayer = QLineEdit()
         self.ebay = QLineEdit()
         self.notes = QLineEdit()
-        # Printing picker: hidden until autofill finds a card with >1 tcgplayer
-        # product (a base print + stamped variants, e.g. Pokemon Center Exclusive).
-        self._variants: list = []
-        self.printing = QComboBox()
-        self.printing.activated.connect(self._on_printing_changed)
+        # Printing picker (shared standard): hidden until autofill finds a card
+        # with >1 tcgplayer product (base + stamped variants, e.g. Pokemon
+        # Center Exclusive). Shown in the advanced grid via _printing_cell.
+        self._init_printing_picker()
         self._toggle_graded(False)
 
-    def set_variants(self, variants: list) -> None:
-        """Populate the printing picker from tcgcsv variants (base first). The
-        cell shows only when there's a real choice (>1 printing)."""
-        self._variants = variants or []
-        self.printing.blockSignals(True)
-        self.printing.clear()
-        for v in self._variants:
-            self.printing.addItem(v.label, v)
-        self.printing.setCurrentIndex(0)
-        self.printing.blockSignals(False)
-        show = len(self._variants) > 1
-        self.printing.setVisible(show)
-        cell = getattr(self, "_printing_cell", None)
-        if cell is not None:
-            cell.setVisible(show)
-
-    def _on_printing_changed(self, *_args) -> None:
-        variant = self.printing.currentData()
-        if variant is not None:
-            self.market.setValue(variant.price_cents / 100)
-            self.tcgplayer.setText(variant.tcgplayer_url)
+    def _apply_variant(self, variant) -> None:
+        self.market.setValue(variant.price_cents / 100)
+        self.tcgplayer.setText(variant.tcgplayer_url)
 
     def widgets(self) -> list[QWidget]:
         return [
@@ -676,70 +578,11 @@ class _ReceiveRow:
         self.grade.setEnabled(graded)
         self.cert.setEnabled(graded)
 
-    _CARD_ID_ROLE = Qt.UserRole + 1
-    _LABEL_ROLE = Qt.UserRole + 2
-
-    def _on_name_edited(self, text: str) -> None:
-        """Query the catalog as the user types (when Auto Detect is on) and show
-        the matches in the popup."""
-        if not self._is_auto() or len(text.strip()) < 2:
-            return
-        repo = CardCatalogRepository(self._conn)
-        matches = repo.search(text, limit=25)
-        self._matches = {c.card_id: c for c in matches}
-        self._search_model.clear()
-        for card in matches:
-            # Completion text is the clean name (what QCompleter inserts into the
-            # Name field); the popup shows the fuller label via _MatchDelegate.
-            item = QStandardItem(card.name)
-            label = (
-                f"{card.name}  ·  {card.set_name or '?'}  "
-                f"#{repo.display_number(card) or '?'}"
-            )
-            item.setData(card.card_id, self._CARD_ID_ROLE)
-            item.setData(label, self._LABEL_ROLE)
-            self._search_model.appendRow(item)
-        if matches:
-            show_fitted(self._completer, self.name)
-
-    def _on_match_hover(self, index: QModelIndex) -> None:
-        """Preview a card image as the pointer moves over autofill matches."""
-        card = self._matches.get(index.data(self._CARD_ID_ROLE))
-        if card is not None and self._sink is not None:
-            self._sink.show_card(card.card_id, getattr(card, "image_small", None))
-
-    def _hover_card(self) -> tuple[str, str] | None:
-        if self._card_id and self._image_url:
-            return self._card_id, self._image_url
-        name = self.name.text().strip()
-        if not name:
-            return None
-        return CardCatalogRepository(self._conn).image_for(
-            name, self.set.text().strip(), self.number.text().strip()
-        )
-
-    def _pick_match(self, index: QModelIndex) -> None:
-        card = self._matches.get(index.data(self._CARD_ID_ROLE))
-        if card is not None:
-            self.apply_catalog_card(card)
-            if self._on_pick is not None:
-                self._on_pick(self, card)
-
     def apply_catalog_card(self, card) -> None:
         """Populate as many fields as possible from a chosen catalog card."""
-        self._card_id = card.card_id
-        self._image_url = getattr(card, "image_small", None)
-        self.name.setText(card.name)
-        self.set.setText(card.set_name or "")
-        # Catalog-derived denominator: correct for prefixed subsets like Radiant
-        # Collection ("RC19/RC32"), where the parent set's total would be wrong.
-        number = CardCatalogRepository(self._conn).display_number(card)
-        self.number.setText(number or card.full_number or card.number or "")
+        self._apply_catalog_common(card)  # identity + name/set/number + preview
         _select(self.category, Category.SINGLE.value)  # catalog cards are singles
         _select(self.language, getattr(card, "language", None) or Language.EN.value)
-        # Keep the chosen card showing in the pane after the popup closes.
-        if self._sink is not None and self._image_url:
-            self._sink.show_card(self._card_id, self._image_url)
         self._on_change()
 
     def set_card(self, card: IncomingCard) -> None:
@@ -1042,7 +885,7 @@ class TransactionView(QWidget):
 
         self._give_rows: list[_GiveRow] = []
         self._receive_rows: list[_ReceiveRow] = []
-        self._price_workers: list[_PriceLookupWorker] = []
+        self._price_workers: list[PriceLookupWorker] = []
         self._edit_id: int | None = None
         self._inference_pipeline = None  # lazily built (image -> [Detection])
         # Docked preview panes flanking the board: the left one previews the You
@@ -1552,7 +1395,7 @@ class TransactionView(QWidget):
             return
         # Japanese cards price against tcgcsv category 85, English against 3.
         category = 85 if getattr(card, "language", "EN") == "JP" else 3
-        worker = _PriceLookupWorker(
+        worker = PriceLookupWorker(
             card.set_name,
             card.number,
             card.name,
