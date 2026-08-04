@@ -1101,3 +1101,33 @@ _Template for new entries:_
   service, headlessly testable); **follow-up:** have the Recognition window emit
   `ExportCard` and delete `RecognizedCard`. A listing-source capture exported to
   Transaction has `side=None`, which Transaction already treats as incoming.
+
+### 2026-08-04 â€” Autofill popups: a fitter that survives the keystroke
+- **Bug:** every autofill popup in the app opened exactly as wide as its input
+  box, so card names were truncated â€” worst in a table cell (the Transaction
+  receive-row Name field measured **76px** against labels needing **613px**;
+  Auction 189px; Recognition 240px, which is why only Recognition looked
+  acceptable). `show_fitted` was doing the right thing and being *undone*:
+  `QLineEdit::keyPressEvent` changes the text (emitting `textEdited`, where call
+  sites resize the popup) and *then* calls its own `completer->complete()` with no
+  rect, which `QCompleterPrivate::showPopup` reads as "use `widget->width()`" and
+  applies via `setGeometry`. The resize was overwritten on every keystroke.
+- **Decision:** the first `show_fitted` call installs a persistent `_PopupFitter`
+  on the completer (found back via `findChild`, so once per completer) that
+  filters the popup's own `Show`/`Resize` events and re-applies the fitted width â€”
+  whoever sizes it, content wins. The fixed 620px cap is replaced by a
+  screen-aware bound (available width âˆ’ 40px, with the popup pulled back on screen
+  when widening would overflow); `max_width` stays as an opt-in override. The
+  scrollbar's width is reserved whenever the row count exceeds `maxVisibleItems`,
+  since it reports hidden before the popup is shown.
+- **Why in the helper:** all five autofill entries already route through
+  `show_fitted`, so no call site changed â€” the fix lands everywhere at once.
+- **Testing note:** calling the `textEdited` slot directly never reproduces this;
+  the tests type with `QTest.keyClicks`, and one disables the fitter's re-apply as
+  a negative control to prove the popup collapses back to the field width.
+- **Follow-up (queued):** only two of the five entries (Transaction receive,
+  Auction card) share `_card_entry.CardEntryMixin`; Recognition's `_NameField`,
+  Transaction's `_GiveRow` and the image-autofill dialog each roll their own
+  completer/popup/hover wiring â€” which is why the hover-preview bug existed in one
+  and not the others. Consolidate them onto one backing so behaviour is inherited,
+  not re-implemented. Deferred while those four files are under concurrent edit.
