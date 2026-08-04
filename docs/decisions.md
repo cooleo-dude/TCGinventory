@@ -4,6 +4,49 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-04 — Detection is trained-only, and every training run is logged
+
+- **Decision (part 1):** delete the **classic-CV proposer**. Detection is now
+  exclusively the trained YOLO-nano model, with **no untrained fallback**:
+  `build_pipeline` uses the model when one is installed and proposes nothing when
+  it isn't, and the Recognition window keeps only the YOLO toggle.
+- **Why:** the projection-profile proposer only worked on cards laid out with
+  gaps on a plain mat, merged anything touching, and correcting its proposals
+  cost more than drawing the boxes by hand. Owner's verdict: "garbage, and quite
+  frankly doesn't have any reason to be in the system at all."
+- **Consequence, accepted deliberately:** photo/clipboard autofill and the YOLO
+  toggle **propose nothing until a detector is trained** (none exists yet). No
+  detections beats wrong detections, and hand-drawn boxes are what feed the
+  corpus that trains the model.
+- **Decision (part 2):** training is **never** triggered by the app. Supplying
+  images or saving a capture only grows the corpus — and re-embeds crop
+  exemplars, which is why the *identifier* improves live while the *detector*
+  does not. Retraining is an explicit act triggered from the **Operations**
+  window ("Models & signals"), executed by `training/train_detector.py` outside
+  the frozen app because ultralytics/torch (~2 GB) are deliberately not shipped.
+- **Decision (part 3):** log every attempt in **`detector_run` + `detector_epoch`
+  (vision.db)**: the corpus snapshot trained on (images / boxes / cards + a
+  **fingerprint** of the exact (image, box) set), the split, the
+  hyperparameters, mAP50 / mAP50-95 / precision / recall / best epoch, the
+  artifact (path, sha256, bytes), and whether it was **promoted** — promotion
+  assigning the incrementing **model version** shown as "detector v*N*".
+  `services/training.py` reads it back Qt-free: `corpus_snapshot`,
+  `detector_status` (installed? which version? trained on what? **stale** when the
+  fingerprint no longer matches), `parse_results_csv`, `should_promote`.
+- **Why a fingerprint and not just counts:** counts can't tell "20 images, two of
+  them re-boxed" from "the same 20 images", and *stale* is the question the
+  Operations tile has to answer. Relabeling a card deliberately does **not**
+  change it — identity is the identifier's business, not the detector's.
+- **Why a promotion gate:** otherwise the newest run always wins, and a run on a
+  thin val split can quietly replace a better model. A first model always
+  promotes; after that a candidate must beat the incumbent's mAP50-95 (by
+  `--promote-margin` if set) or be forced with `--force-promote`.
+- **Recorded before training, not after:** a killed or crashed run leaves a
+  `running`/`failed` row with its reason instead of vanishing.
+- **Caveat on the numbers:** at 20 images / 88 boxes the default 20% split leaves
+  **4 validation images**, so mAP will swing hard. Metrics are worth *recording*
+  now and worth *gating on* at ~100+ images.
+
 ### 2026-08-04 — Operations window (M-Ops1): the File menu becomes a screen
 
 - **Problem:** ten maintenance jobs lived only in the File menu, where a label
