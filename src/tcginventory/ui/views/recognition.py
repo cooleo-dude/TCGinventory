@@ -376,8 +376,15 @@ class _NameField(QLineEdit):
         self.setCompleter(self._completer)
         self.textEdited.connect(self._on_edited)
         self._completer.activated[QModelIndex].connect(self._pick)
-        # Preview each candidate's art as you arrow through the dropdown.
+        # Preview each candidate's art as you arrow through the dropdown…
         self._completer.highlighted[QModelIndex].connect(self._on_highlighted)
+        # …and as you *hover* one with the mouse. QCompleter only emits
+        # `highlighted` when the popup's selection changes (keyboard nav), so
+        # mouse tracking + `entered` is what makes hovering preview as well —
+        # the same wiring the shared card-entry rows use (_card_entry.py).
+        popup = self._completer.popup()
+        popup.setMouseTracking(True)
+        popup.entered.connect(self._on_highlighted)
         self.editingFinished.connect(self._on_free_text)
         self._refresh_meta()
 
