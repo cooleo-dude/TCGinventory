@@ -10,7 +10,7 @@ The heavy stack stays out of the app: this process doesn't import ultralytics
 either — the worker subprocess does. Point ``--python`` at an interpreter that has
 it (defaults to the saved preference, else the current one):
 
-    pip install ultralytics          # in that interpreter (~2 GB, pulls torch)
+    pip install ultralytics onnx onnxslim onnxruntime   # ~280 MB, CPU torch
 
 Examples
 --------

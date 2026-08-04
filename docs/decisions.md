@@ -23,7 +23,14 @@ Lightweight ADR-style record of significant decisions. Newest first.
   exemplars, which is why the *identifier* improves live while the *detector*
   does not. Retraining is an explicit act triggered from the **Operations**
   window ("Models & signals"), executed by `training/train_detector.py` outside
-  the frozen app because ultralytics/torch (~2 GB) are deliberately not shipped.
+  the frozen app because ultralytics/torch are deliberately not shipped.
+- **Correction (2026-08-04, measured):** the training stack is **~280 MB of
+  downloads / ~1 GB installed**, not the ~2 GB quoted in earlier entries — the
+  Windows PyPI `torch` wheel is CPU-only (122 MB, no CUDA). Also `onnx`,
+  `onnxslim` and `onnxruntime` are **required and not** in a plain
+  `pip install ultralytics` (they're behind its `export-base` extra); without
+  them a run trains to completion and then fails at the ONNX export.
+  `services.training.TRAINING_REQUIREMENTS` now holds the authoritative list.
 - **Decision (part 3):** log every attempt in **`detector_run` + `detector_epoch`
   (vision.db)**: the corpus snapshot trained on (images / boxes / cards + a
   **fingerprint** of the exact (image, box) set), the split, the

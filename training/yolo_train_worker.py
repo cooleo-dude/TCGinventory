@@ -1,6 +1,6 @@
 """Train a single-class YOLO card detector. Runs in a **separate** interpreter.
 
-This is the only piece that needs the heavy stack (``ultralytics`` → torch, ~2 GB),
+This is the only piece that needs the training stack (``ultralytics`` + torch),
 so it is deliberately **standalone**: it imports nothing from ``tcginventory`` and
 takes everything by argument. That lets the app drive it from a training venv the
 app itself knows nothing about — including from the frozen exe, which ships this

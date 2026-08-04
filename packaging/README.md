@@ -35,16 +35,26 @@ machine with no Python installed.
 
 ## Training the card detector from the frozen app
 
-Training needs `ultralytics` (which pulls torch, ~2 GB). That is deliberately
-**not** bundled — a 292 MB app would become a ~2.5 GB one, and the app never
-needs it to *use* a model, only to make one. Instead the app drives a separate
-interpreter that has it:
+Training needs `ultralytics` and torch. That is deliberately **not** bundled — the
+app never needs them to *use* a model, only to make one — so the app drives a
+separate interpreter that has them.
+
+Measured on Windows (2026-08-04): **~280 MB of downloads, ~1 GB installed.** The
+Windows PyPI `torch` wheel is **CPU-only** (122 MB, no CUDA packages), which is
+fine here: yolov8n on a 20-image corpus trains in minutes on CPU.
+
+`onnx`, `onnxslim` and `onnxruntime` are **required** and are *not* part of a plain
+`pip install ultralytics` — they sit behind its `export-base` extra, and without
+them a run trains to completion and then fails at the ONNX export:
 
 ```powershell
 # one time, anywhere on the machine
 py -m venv C:\trainvenv
-C:\trainvenv\Scripts\python.exe -m pip install ultralytics
+C:\trainvenv\Scripts\python.exe -m pip install ultralytics onnx onnxslim onnxruntime
 ```
+
+`services.training.TRAINING_REQUIREMENTS` is the single source of truth for that
+list; `INSTALL_HINT` is the command the app shows.
 
 Then point the app at it — Operations ▸ Models & signals stores the path in
 `preferences.json` (`training_python`), or set it from source:

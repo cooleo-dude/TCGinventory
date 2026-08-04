@@ -39,9 +39,15 @@ _BOX_PLACES = 5
 
 # The interpreter that has ultralytics installed. Stored as a preference because
 # it is a property of the machine, not of the app: the frozen exe can't train in
-# its own process (torch is ~2 GB and deliberately unbundled), so it drives a
+# its own process (torch is unbundled by design), so it drives a
 # training venv the user creates once.
 TRAINING_PYTHON_PREF = "training_python"
+
+# What a training interpreter needs. onnx/onnxslim/onnxruntime are *not* part of
+# a plain `pip install ultralytics` (they sit behind its export-base extra), and
+# without them a run trains for minutes and then fails at the ONNX export.
+TRAINING_REQUIREMENTS = ("ultralytics", "onnx", "onnxslim", "onnxruntime")
+INSTALL_HINT = "pip install " + " ".join(TRAINING_REQUIREMENTS)
 
 WORKER_FILENAME = "yolo_train_worker.py"
 RESULT_PREFIX = "TCGI_RESULT "
@@ -315,7 +321,7 @@ def probe_training_env(python: str | None = None) -> TrainingEnv:
             False,
             None,
             "ultralytics is not installed in this interpreter â€” "
-            "pip install ultralytics (~2 GB, one time).",
+            f"{INSTALL_HINT} (~280 MB, one time).",
         )
     lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
     version = lines[-1] if lines else ""
