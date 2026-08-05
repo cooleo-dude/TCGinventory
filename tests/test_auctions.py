@@ -718,7 +718,7 @@ def test_card_columns_are_ordered_identity_printing_money_links(app):
     view.deleteLater()
 
 
-def test_name_column_absorbs_the_slack_so_nothing_is_cut_off(app):
+def test_identity_columns_absorb_the_slack_so_nothing_is_cut_off(app):
     """Regression: fixed widths summed to more than the pane, so the right-hand
     columns fell off and the horizontal scrollbar ate the ＋ row."""
     from tcginventory.ui.views import auctions as auc
@@ -746,6 +746,62 @@ def test_name_column_absorbs_the_slack_so_nothing_is_cut_off(app):
     app.processEvents()
     view._fit_card_columns()
     assert table.columnWidth(auc._NAME_COL) == auc._NAME_MIN
+    for col, (floor, _cap, _share) in auc._FLEX_COLS.items():
+        assert table.columnWidth(col) == floor, auc._CARD_HEADERS[col]
+    view.deleteLater()
+
+
+def test_spare_width_is_shared_with_set_and_number(app):
+    """Name used to take every spare pixel — roughly 345px on a maximised
+    window, near triple the longest name typed, while Set truncated at 108px.
+    The three identity fields now split the surplus."""
+    from tcginventory.ui.views import auctions as auc
+
+    view = _view(app)
+    view._add_card_row()
+    table = view._card_table
+    table.resize(960, 220)
+    app.processEvents()
+    view._fit_card_columns()
+
+    name = table.columnWidth(auc._NAME_COL)
+    card_set = table.columnWidth(auc._SET_COL)
+    number = table.columnWidth(auc._CARD_HEADERS.index("#"))
+    floors = {col: f for col, (f, _c, _s) in auc._FLEX_COLS.items()}
+
+    # Every one of them grew, and Name no longer swallows the pane: what it
+    # gained is smaller than what Set and # gained together.
+    assert card_set > floors[auc._SET_COL]
+    assert number > floors[auc._CARD_HEADERS.index("#")]
+    gained_by_name = name - floors[auc._NAME_COL]
+    gained_by_rest = (card_set - floors[auc._SET_COL]) + (
+        number - floors[auc._CARD_HEADERS.index("#")]
+    )
+    assert 0 < gained_by_name < gained_by_rest
+    assert card_set > name  # set names run longest, so Set ends up widest
+
+
+def test_a_very_wide_pane_caps_name_and_number_and_gives_set_the_rest(app):
+    """Ceilings stop Name and # from ballooning past anything they could hold;
+    Set is the sink, so the table still ends flush with the pane."""
+    from tcginventory.ui.views import auctions as auc
+
+    view = _view(app)
+    view._add_card_row()
+    table = view._card_table
+    table.resize(1400, 220)
+    app.processEvents()
+    view._fit_card_columns()
+
+    assert table.columnWidth(auc._NAME_COL) == auc._FLEX_COLS[auc._NAME_COL][1]
+    num_col = auc._CARD_HEADERS.index("#")
+    assert table.columnWidth(num_col) == auc._FLEX_COLS[num_col][1]
+    total = sum(
+        table.columnWidth(c)
+        for c in range(table.columnCount())
+        if not table.isColumnHidden(c)
+    )
+    assert total == table.viewport().width()
     view.deleteLater()
 
 

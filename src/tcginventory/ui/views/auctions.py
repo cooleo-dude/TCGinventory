@@ -193,9 +193,24 @@ _PRINTING_COL = _CARD_HEADERS.index("Printing")
 # the line edits and spin boxes are free to be narrower, since their content
 # scrolls.
 _CARD_WIDTHS = [0, 108, 52, 76, 56, 116, 80, 40, 56, 60, 28]
-# Name still fits its placeholder at this width, and it's the floor that keeps
-# everything on screen when the Printing column is showing too.
-_NAME_MIN = 120
+# The three identity columns share the spare width; every other column is fixed.
+# Name used to absorb all of it alone, which left it around 345px on a maximised
+# window — nearly triple the longest name anyone types — while Set truncated
+# ordinary set names at 108px. The shares below come from what these fields
+# actually hold, measured across the collection: 95% of names render under
+# 122px, set names under 174px and numbers under 85px, but the long tail is far
+# longer for Set ("Garchomp vs Charizard SP Deck Kit (Charizard)", 273px) and
+# for # ("SWSH291/SWSH307", 127px) than for Name, so they take the bigger cuts.
+#          column -> (floor, ceiling, share of the surplus)
+_FLEX_COLS = {
+    _CARD_HEADERS.index("Name"): (120, 260, 0.25),
+    # Set has no ceiling: it's also where any leftover lands, and its content
+    # runs longest, so extra room there is never wasted.
+    _CARD_HEADERS.index("Set"): (108, None, 0.43),
+    _CARD_HEADERS.index("#"): (52, 145, 0.32),
+}
+_SET_COL = _CARD_HEADERS.index("Set")
+_NAME_MIN = _FLEX_COLS[_NAME_COL][0]  # the floor that keeps the row on screen
 
 _UNSET = object()  # sentinel: history not supplied -> open the default DB
 _THUMB_BORDER = theme.DARK.line2  # neutral thumbnail frame
@@ -1770,12 +1785,14 @@ class AuctionsView(QWidget):
     # -- column fitting -----------------------------------------------------
 
     def _fit_card_columns(self) -> None:
-        """Hold every column at its tuned width and let **Name** take the rest.
+        """Hold the fixed columns at their tuned widths and split the rest
+        between **Name**, **Set** and **#** by :data:`_FLEX_COLS`.
 
         The card table used to carry fixed widths that added up to more than the
         pane: the last columns fell off the right edge, a horizontal scrollbar
-        appeared and ate the row holding ＋. Sizing Name from what's left means
-        the table fills the pane exactly at any width.
+        appeared and ate the row holding ＋. Sizing the identity columns from
+        what's left means the table fills the pane exactly at any width, and
+        sharing that space three ways keeps Name from hoarding it.
         """
         table = getattr(self, "_card_table", None)
         if table is None:
@@ -1786,13 +1803,26 @@ class AuctionsView(QWidget):
             return
         if available <= 1:
             return
-        used = 0
+        fixed = 0
         for col, width in enumerate(_CARD_WIDTHS):
-            if col == _NAME_COL or table.isColumnHidden(col):
+            if col in _FLEX_COLS or table.isColumnHidden(col):
                 continue
             table.setColumnWidth(col, width)
-            used += width
-        table.setColumnWidth(_NAME_COL, max(_NAME_MIN, available - used))
+            fixed += width
+
+        floors = sum(floor for floor, _cap, _share in _FLEX_COLS.values())
+        # Below the floors the row simply doesn't fit; the columns stay at their
+        # minimums and the table scrolls, exactly as it did before.
+        surplus = max(0, available - fixed - floors)
+        widths = {}
+        for col, (floor, cap, share) in _FLEX_COLS.items():
+            width = floor + round(surplus * share)
+            widths[col] = width if cap is None else min(cap, width)
+        # Rounding and the ceilings can leave a few pixels over; Set takes them
+        # so the table still ends flush with the pane.
+        widths[_SET_COL] += max(0, available - fixed - sum(widths.values()))
+        for col, width in widths.items():
+            table.setColumnWidth(col, width)
 
     def _sync_printing_column(self) -> None:
         """Show the Printing column only while some row has printings to pick.
