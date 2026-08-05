@@ -573,6 +573,13 @@ class OperationsView(QWidget):
             "catalog.update_jp": lambda: self._update_catalog("JP"),
             "shows.refresh": lambda: self._task("shows.refresh", _refresh_shows),
             "vision.reindex": lambda: self._task("vision.reindex", _reindex_corpus),
+            "models.training_env": lambda: self._task(
+                "models.training_env", _setup_training_env
+            ),
+            "models.detector.train": lambda: self._task(
+                "models.detector.train", _train_detector
+            ),
+            "models.condition.train": self._train_condition,
             "db.integrity_check": lambda: self._task(
                 "db.integrity_check", _integrity_check
             ),
@@ -801,6 +808,31 @@ class OperationsView(QWidget):
 
     # -- toggle -------------------------------------------------------------
 
+    def _train_condition(self) -> None:
+        """The grader has no training path yet — say what's missing, plainly."""
+        from tcginventory.data.vision import VisionRepository, open_vision
+        from tcginventory.services import operations as ops_mod
+
+        graded = 0
+        try:
+            conn = open_vision()
+            try:
+                graded = len(VisionRepository(conn).condition_regions())
+            finally:
+                conn.close()
+        except Exception:
+            graded = 0
+        QMessageBox.information(
+            self,
+            ops_mod.BY_ID["models.condition.train"].title,
+            (
+                f"Not available yet.\n\nThe grader learns from labelled card "
+                f"backs, and there are {graded:,} of them. Photograph card backs "
+                "in Recognition's card-backs mode and grade them; this becomes "
+                "available once there are enough to train on."
+            ),
+        )
+
     def _toggle_auto_updates(self) -> None:
         from tcginventory import scheduling
 
@@ -855,6 +887,89 @@ def _refresh_shows(conn) -> str:
     if summary.errors:
         text += f" ({len(summary.errors)} state(s) failed)"
     return text
+
+
+def _setup_training_env(_conn) -> str:
+    """Build the environment that trains the models, with a Python found on this
+    machine (a frozen build ships no interpreter of its own).
+
+    Runs in a worker thread: creating the virtualenv and downloading ~280 MB of
+    packages both take minutes.
+    """
+    import subprocess
+
+    from tcginventory.services import training, trainingenv
+
+    found = trainingenv.discover_interpreters()
+    if not found:
+        raise RuntimeError(trainingenv.NO_PYTHON_HINT)
+    interpreter = found[0]
+    for label, argv in trainingenv.bootstrap_steps(interpreter):
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
+            raise RuntimeError(f"{label} failed: {' '.join(tail)[:300]}")
+
+    # Validate what we built, and record it so status reads stay subprocess-free.
+    env = training.probe_training_env(str(trainingenv.env_python()))
+    if not env.ready:
+        raise RuntimeError(f"Environment built but not usable: {env.detail}")
+    training.remember_training_env(env)
+    return f"{env.detail} · {interpreter.label}"
+
+
+def _train_detector(_conn) -> str:
+    """Train the card detector: export the corpus, drive the worker, record it."""
+    import subprocess
+
+    from tcginventory.data.vision import (
+        ModelRunRepository,
+        VisionRepository,
+        open_vision,
+    )
+    from tcginventory.services import detector, training
+
+    env = training.probe_training_env()
+    conn = open_vision()
+    try:
+        repo = VisionRepository(conn)
+        runs = ModelRunRepository(conn)
+        job = training.prepare_detector_training(
+            repo,
+            runs,
+            env=env,
+            dataset_dir=trainingenv_dataset_dir(),
+            out_path=detector.trained_model_destination(),
+            source="ui",
+        )
+        proc = subprocess.run(
+            job.command,
+            capture_output=True,
+            text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or "").strip().splitlines()[-2:]
+            training.fail_detector_training(job, runs, " ".join(tail)[:300])
+            raise RuntimeError(f"Training failed: {' '.join(tail)[:200]}")
+        outcome = training.complete_detector_training(
+            job, runs, worker_output=proc.stdout or ""
+        )
+        return outcome.summary
+    finally:
+        conn.close()
+
+
+def trainingenv_dataset_dir():
+    """Where the exported YOLO dataset goes — beside the corpus, not in the repo."""
+    from tcginventory import config
+
+    return config.data_dir() / "vision" / "datasets" / "detector"
 
 
 def _reindex_corpus(_conn) -> str:

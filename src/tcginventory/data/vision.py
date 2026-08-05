@@ -27,6 +27,12 @@ from tcginventory import config
 
 VISION_FILENAME = "vision.db"
 
+# Model kinds in the run log. The detector finds card boxes; the condition
+# grader scores card backs. The identifier has no kind because it needs no
+# training run at all — a labeled crop *is* its training step.
+KIND_DETECTOR = "detector"
+KIND_CONDITION = "condition"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS capture (
     id         INTEGER PRIMARY KEY,
@@ -87,11 +93,12 @@ CREATE TABLE IF NOT EXISTS region_embedding (
 );
 CREATE INDEX IF NOT EXISTS idx_region_embedding_card
     ON region_embedding(model_version, card_id);
-CREATE TABLE IF NOT EXISTS detector_run (
+CREATE TABLE IF NOT EXISTS model_run (
     id                 INTEGER PRIMARY KEY,
-    version            INTEGER,            -- model version, set when promoted
+    kind               TEXT    NOT NULL DEFAULT 'detector',  -- 'detector' | 'condition'
+    version            INTEGER,            -- model version *within its kind*
     status             TEXT    NOT NULL,   -- 'running' | 'ok' | 'failed'
-    source             TEXT    NOT NULL,   -- 'manual' (Operations) | 'scheduled'
+    source             TEXT    NOT NULL,   -- 'ui' (Operations) | 'cli' | 'scheduled'
     started_at         TEXT    NOT NULL,
     finished_at        TEXT,
     -- the corpus snapshot it trained on (so a model can be called stale)
@@ -113,6 +120,7 @@ CREATE TABLE IF NOT EXISTS detector_run (
     precision          REAL,
     recall             REAL,
     best_epoch         INTEGER,
+    metrics_json       TEXT,               -- kind-specific extras (confusion matrix…)
     -- what it produced
     artifact_path      TEXT,
     artifact_sha256    TEXT,
@@ -121,10 +129,10 @@ CREATE TABLE IF NOT EXISTS detector_run (
     notes              TEXT,               -- summary, or the error on failure
     created_at         TEXT    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_detector_run_started
-    ON detector_run(started_at DESC);
-CREATE TABLE IF NOT EXISTS detector_epoch (
-    run_id    INTEGER NOT NULL REFERENCES detector_run(id) ON DELETE CASCADE,
+CREATE INDEX IF NOT EXISTS idx_model_run_kind
+    ON model_run(kind, started_at DESC);
+CREATE TABLE IF NOT EXISTS model_epoch (
+    run_id    INTEGER NOT NULL REFERENCES model_run(id) ON DELETE CASCADE,
     epoch     INTEGER NOT NULL,
     map50     REAL,
     map50_95  REAL,
@@ -154,6 +162,7 @@ def open_vision(path: str | Path | None = None) -> sqlite3.Connection:
     _reset_legacy(conn)
     conn.executescript(_SCHEMA)
     _ensure_columns(conn)
+    _migrate_run_log(conn)
     return conn
 
 
@@ -164,6 +173,40 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE image ADD COLUMN side TEXT")
     if "pair_group" not in cols:
         conn.execute("ALTER TABLE image ADD COLUMN pair_group INTEGER")
+
+
+def _migrate_run_log(conn: sqlite3.Connection) -> None:
+    """Fold the detector-only run log into ``model_run`` (2026-08-04).
+
+    ``detector_run``/``detector_epoch`` were superseded by kind-tagged tables once
+    a second model (the condition grader) came into view. Rows are carried over
+    rather than dropped — there were none anywhere when this shipped, but a log
+    that quietly loses history would be a poor thing to own.
+    """
+    have = {
+        r[0]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('detector_run', 'detector_epoch')"
+        )
+    }
+    if not have:
+        return
+    if "detector_run" in have:
+        old = [r[1] for r in conn.execute("PRAGMA table_info(detector_run)")]
+        new = [r[1] for r in conn.execute("PRAGMA table_info(model_run)")]
+        shared = [c for c in old if c in new]
+        cols = ", ".join(shared)
+        conn.execute(
+            f"INSERT INTO model_run (kind, {cols}) "  # noqa: S608 - names from PRAGMA
+            f"SELECT 'detector', {cols} FROM detector_run"
+        )
+    if "detector_epoch" in have:
+        conn.execute("INSERT INTO model_epoch SELECT * FROM detector_epoch")
+    conn.executescript(
+        "DROP TABLE IF EXISTS detector_epoch; DROP TABLE IF EXISTS detector_run;"
+    )
+    conn.commit()
 
 
 def _reset_legacy(conn: sqlite3.Connection) -> None:
@@ -492,14 +535,17 @@ class VisionRepository:
         return series
 
 
-class DetectorRunRepository:
-    """The detector's training log (``detector_run`` + ``detector_epoch``).
+class ModelRunRepository:
+    """The model training log (``model_run`` + ``model_epoch``).
 
     One row per training attempt, holding what it trained on, how, how it scored,
     and what it produced — so the Operations window can state the current model's
     version and provenance, say whether the corpus has moved on since, and chart
     accuracy across runs. Mirrors ``OperationRunRepository`` in the ledger DB, but
     lives here because it describes the vision corpus.
+
+    Rows are tagged by ``kind`` (:data:`KIND_DETECTOR` / :data:`KIND_CONDITION`);
+    versions run **per kind**, so "detector v2" and "condition v2" are unrelated.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
@@ -508,6 +554,7 @@ class DetectorRunRepository:
     def start(
         self,
         *,
+        kind: str = KIND_DETECTOR,
         source: str = "manual",
         corpus_images: int = 0,
         corpus_boxes: int = 0,
@@ -528,11 +575,12 @@ class DetectorRunRepository:
         stamp = now or _now()
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO detector_run (status, source, started_at, "
+                "INSERT INTO model_run (kind, status, source, started_at, "
                 "corpus_images, corpus_boxes, corpus_cards, corpus_fingerprint, "
                 "base_weights, epochs, imgsz, val_frac, split_seed, created_at) "
-                "VALUES ('running',?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES (?,'running',?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
+                    kind,
                     source,
                     stamp,
                     corpus_images,
@@ -564,16 +612,18 @@ class DetectorRunRepository:
         artifact_path: str | None = None,
         artifact_sha256: str | None = None,
         artifact_bytes: int | None = None,
+        metrics_json: str | None = None,
         notes: str | None = None,
         now: str | None = None,
     ) -> None:
         """Close a run with its outcome. Promotion is a separate step."""
         with self.conn:
             self.conn.execute(
-                "UPDATE detector_run SET status = ?, finished_at = ?, "
+                "UPDATE model_run SET status = ?, finished_at = ?, "
                 "train_images = ?, val_images = ?, map50 = ?, map50_95 = ?, "
                 "precision = ?, recall = ?, best_epoch = ?, artifact_path = ?, "
-                "artifact_sha256 = ?, artifact_bytes = ?, notes = ? WHERE id = ?",
+                "artifact_sha256 = ?, artifact_bytes = ?, metrics_json = ?, "
+                "notes = ? WHERE id = ?",
                 (
                     status,
                     now or _now(),
@@ -587,6 +637,7 @@ class DetectorRunRepository:
                     artifact_path,
                     artifact_sha256,
                     artifact_bytes,
+                    metrics_json,
                     notes,
                     run_id,
                 ),
@@ -612,7 +663,7 @@ class DetectorRunRepository:
             return 0
         with self.conn:
             self.conn.executemany(
-                "INSERT OR REPLACE INTO detector_epoch (run_id, epoch, map50, "
+                "INSERT OR REPLACE INTO model_epoch (run_id, epoch, map50, "
                 "map50_95, precision, recall, box_loss, cls_loss) "
                 "VALUES (?,?,?,?,?,?,?,?)",
                 payload,
@@ -622,16 +673,21 @@ class DetectorRunRepository:
     def promote(self, run_id: int) -> int:
         """Mark a run's artifact as the model in use; returns its new version.
 
-        Versions are a simple incrementing series, so "detector v3" in the UI
-        always means the third model that was actually put to work.
+        Versions increment **within a kind**, so "detector v3" always means the
+        third detector actually put to work, regardless of condition runs.
         """
+        kind_row = self.conn.execute(
+            "SELECT kind FROM model_run WHERE id = ?", (run_id,)
+        ).fetchone()
+        kind = kind_row["kind"] if kind_row else KIND_DETECTOR
         row = self.conn.execute(
-            "SELECT COALESCE(MAX(version), 0) AS v FROM detector_run"
+            "SELECT COALESCE(MAX(version), 0) AS v FROM model_run WHERE kind = ?",
+            (kind,),
         ).fetchone()
         version = int(row["v"]) + 1
         with self.conn:
             self.conn.execute(
-                "UPDATE detector_run SET promoted = 1, version = ? WHERE id = ?",
+                "UPDATE model_run SET promoted = 1, version = ? WHERE id = ?",
                 (version, run_id),
             )
         return version
@@ -640,41 +696,50 @@ class DetectorRunRepository:
 
     def get(self, run_id: int) -> sqlite3.Row | None:
         return self.conn.execute(
-            "SELECT * FROM detector_run WHERE id = ?", (run_id,)
+            "SELECT * FROM model_run WHERE id = ?", (run_id,)
         ).fetchone()
 
-    def recent(self, limit: int = 20) -> list[sqlite3.Row]:
-        """Newest runs first — the training history list."""
+    def recent(self, kind: str | None = None, limit: int = 20) -> list[sqlite3.Row]:
+        """Newest runs first — the training history. ``kind`` None means all."""
+        if kind is None:
+            return self.conn.execute(
+                "SELECT * FROM model_run ORDER BY started_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
         return self.conn.execute(
-            "SELECT * FROM detector_run ORDER BY started_at DESC, id DESC LIMIT ?",
-            (limit,),
+            "SELECT * FROM model_run WHERE kind = ? "
+            "ORDER BY started_at DESC, id DESC LIMIT ?",
+            (kind, limit),
         ).fetchall()
 
-    def last_run(self) -> sqlite3.Row | None:
-        """The most recent attempt, whatever its outcome."""
-        rows = self.recent(limit=1)
+    def last_run(self, kind: str | None = None) -> sqlite3.Row | None:
+        """The most recent attempt of a kind, whatever its outcome."""
+        rows = self.recent(kind, limit=1)
         return rows[0] if rows else None
 
-    def current_model(self) -> sqlite3.Row | None:
-        """The promoted run behind the model in use (highest version)."""
+    def current_model(self, kind: str = KIND_DETECTOR) -> sqlite3.Row | None:
+        """The promoted run behind the model in use (top version of a kind)."""
         return self.conn.execute(
-            "SELECT * FROM detector_run WHERE promoted = 1 "
-            "ORDER BY version DESC, id DESC LIMIT 1"
+            "SELECT * FROM model_run WHERE promoted = 1 AND kind = ? "
+            "ORDER BY version DESC, id DESC LIMIT 1",
+            (kind,),
         ).fetchone()
 
     def epochs(self, run_id: int) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT * FROM detector_epoch WHERE run_id = ? ORDER BY epoch",
+            "SELECT * FROM model_epoch WHERE run_id = ? ORDER BY epoch",
             (run_id,),
         ).fetchall()
 
-    def accuracy_series(self, limit: int = 20) -> list[tuple[int, float]]:
-        """(version, map50_95) for promoted models, oldest first — the accuracy
-        trend the Operations panel charts."""
+    def accuracy_series(
+        self, kind: str = KIND_DETECTOR, limit: int = 20
+    ) -> list[tuple[int, float]]:
+        """(version, map50_95) for promoted models of a kind, oldest first — the
+        accuracy trend the Operations panel charts."""
         rows = self.conn.execute(
-            "SELECT version, map50_95 FROM detector_run "
-            "WHERE promoted = 1 AND map50_95 IS NOT NULL "
+            "SELECT version, map50_95 FROM model_run "
+            "WHERE promoted = 1 AND kind = ? AND map50_95 IS NOT NULL "
             "ORDER BY version DESC LIMIT ?",
-            (limit,),
+            (kind, limit),
         ).fetchall()
         return [(int(r["version"]), float(r["map50_95"])) for r in reversed(rows)]

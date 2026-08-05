@@ -186,12 +186,17 @@ def test_background_operation_declines_an_in_memory_database(app, seeded_conn):
     view.deleteLater()
 
 
-def test_only_groups_with_operations_get_a_heading(app, seeded_conn):
-    """The reserved 'models' group holds its place in the registry without putting
-    an empty section on screen."""
+def test_only_groups_with_operations_get_a_heading(app, seeded_conn, monkeypatch):
+    """A group renders exactly when it has operations — so a group can be reserved
+    in the registry without putting an empty section on screen."""
     from PySide6.QtWidgets import QLabel
 
     from tcginventory.ui.views.operations import OperationsView
+
+    # Every shipped group now has entries, so hold the property with a reserved one.
+    monkeypatch.setattr(
+        ops, "GROUPS", (*ops.GROUPS, ops.Group("reserved", "Nothing here yet"))
+    )
 
     view = OperationsView(seeded_conn)
     headings = {
@@ -201,7 +206,8 @@ def test_only_groups_with_operations_get_a_heading(app, seeded_conn):
     }
 
     assert "BRING DATA IN" in headings and "PRICES & CARD DATABASE" in headings
-    assert "MODELS & SIGNALS" not in headings  # reserved, empty, so not rendered
+    assert "MODELS & SIGNALS" in headings  # populated by the training entries
+    assert "NOTHING HERE YET" not in headings  # empty → no section
     for group in ops.GROUPS:
         rendered = group.label.upper() in headings
         assert rendered == bool(ops.in_group(group.id)), group.id

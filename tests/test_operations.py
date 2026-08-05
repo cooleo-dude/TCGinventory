@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from tcginventory.data.repositories import (
     CardCatalogRepository,
     OperationRunRepository,
@@ -35,11 +37,21 @@ def test_registry_is_internally_consistent():
     assert sum(1 for op in ops.OPERATIONS if op.primary) <= 1
 
 
-def test_models_group_is_reserved_but_empty():
-    """Space is held for the coming model metrics/triggers; nothing renders until
-    the first entry lands (the view skips empty groups)."""
+def test_models_group_holds_the_recognition_training_entries():
+    """The reserved group is now populated: an environment set-up step and one
+    training trigger per model kind that *has* a training run (the identifier
+    doesn't — a labelled crop is its training step, so it gets no Train button)."""
     assert any(g.id == "models" for g in ops.GROUPS)
-    assert ops.in_group("models") == []
+    assert [op.id for op in ops.in_group("models")] == [
+        "models.training_env",
+        "models.detector.train",
+        "models.condition.train",
+    ]
+    # Both trainers report their age, so a model left alone reads as stale.
+    for op_id in ("models.detector.train", "models.condition.train"):
+        op = ops.BY_ID[op_id]
+        assert op.caption == "Last trained"
+        assert op.stale_after_days == 14
 
 
 def test_run_log_records_last_run_and_prunes(conn):
@@ -240,3 +252,178 @@ def test_when_renders_recent_stamps_readably():
     assert ops.when(_iso(0)).startswith("today")
     assert ops.when(_iso(1.2)).startswith("yesterday")
     assert ops.when(_iso(40))[:2] == "20"  # falls back to the date
+
+
+# -- Models & signals statuses ----------------------------------------------
+
+
+@pytest.fixture()
+def vision_db(tmp_path, monkeypatch):
+    """A real vision.db on disk, since the model statuses open it by path."""
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from tcginventory.data.vision import (
+        ModelRunRepository,
+        VisionRepository,
+        open_vision,
+    )
+
+    conn = open_vision()
+    yield VisionRepository(conn), ModelRunRepository(conn)
+    conn.close()
+
+
+def _labelled_scene(repo, tmp_path, boxes=2):
+    from PIL import Image
+
+    from tcginventory.data.vision import CardLabel
+
+    scene = tmp_path / "scene.png"
+    Image.new("RGB", (200, 140), color=(180, 180, 180)).save(scene)
+    cap = repo.add_capture(source="manual")
+    img = repo.add_image(cap, "sha1", str(scene), "front")
+    for i in range(boxes):
+        repo.add_region(
+            img, i + 1, (0.1 * i, 0.1, 0.2, 0.5), None, CardLabel(card_id=f"c{i}")
+        )
+
+
+def test_detector_status_never_trained_lists_what_is_waiting(conn, vision_db, tmp_path):
+    repo, _runs = vision_db
+    _labelled_scene(repo, tmp_path, boxes=3)
+    status = ops.status_for(conn, ops.BY_ID["models.detector.train"])
+    assert status.state == ops.NEVER
+    assert "never" in status.value and "3 boxes" in status.value
+
+
+def test_detector_status_reports_version_age_and_metrics(conn, vision_db, tmp_path):
+    from datetime import datetime, timezone
+
+    repo, runs = vision_db
+    _labelled_scene(repo, tmp_path, boxes=2)
+    from tcginventory.services import training
+
+    snap = training.corpus_snapshot(repo)
+    run_id = runs.start(
+        corpus_images=snap.images,
+        corpus_boxes=snap.boxes,
+        corpus_cards=snap.cards,
+        corpus_fingerprint=snap.fingerprint,
+    )
+    fresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    runs.finish(run_id, map50=0.6, map50_95=0.31, now=fresh)
+    runs.promote(run_id)
+
+    status = ops.status_for(conn, ops.BY_ID["models.detector.train"])
+    assert status.state == ops.READY  # trained on exactly this corpus, and recent
+    assert status.value.startswith("v1 · ")
+    assert "mAP50-95 0.310" in status.value
+    assert "Trained on 1 images / 2 boxes" in (status.detail or "")
+
+
+def test_a_model_older_than_a_fortnight_reads_as_stale(conn, vision_db, tmp_path):
+    """The marker the Regions/Conditions sections are read for: left alone too
+    long, a model warns even when the corpus hasn't changed."""
+    from datetime import datetime, timedelta, timezone
+
+    repo, runs = vision_db
+    _labelled_scene(repo, tmp_path, boxes=2)
+    from tcginventory.services import training
+
+    snap = training.corpus_snapshot(repo)
+    run_id = runs.start(
+        corpus_images=snap.images,
+        corpus_boxes=snap.boxes,
+        corpus_cards=snap.cards,
+        corpus_fingerprint=snap.fingerprint,
+    )
+    old = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat(
+        timespec="seconds"
+    )
+    runs.finish(run_id, map50_95=0.31, now=old)
+    runs.promote(run_id)
+
+    status = ops.status_for(conn, ops.BY_ID["models.detector.train"])
+    assert status.state == ops.STALE  # 20 days > the 14-day window
+    assert ops.BY_ID["models.detector.train"].stale_after_days == 14
+
+
+def test_new_labels_make_a_current_model_stale(conn, vision_db, tmp_path):
+    from datetime import datetime, timezone
+
+    repo, runs = vision_db
+    _labelled_scene(repo, tmp_path, boxes=2)
+    from tcginventory.services import training
+
+    snap = training.corpus_snapshot(repo)
+    run_id = runs.start(
+        corpus_images=snap.images,
+        corpus_boxes=snap.boxes,
+        corpus_cards=snap.cards,
+        corpus_fingerprint=snap.fingerprint,
+    )
+    runs.finish(
+        run_id,
+        map50_95=0.31,
+        now=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    )
+    runs.promote(run_id)
+    assert ops.status_for(conn, ops.BY_ID["models.detector.train"]).state == ops.READY
+
+    (tmp_path / "second").mkdir()
+    _labelled_scene(repo, tmp_path / "second", boxes=4)  # more labels land
+    status = ops.status_for(conn, ops.BY_ID["models.detector.train"])
+    assert status.state == ops.STALE
+    assert "New since" in (status.detail or "")
+
+
+def test_condition_status_says_it_needs_card_backs(conn, vision_db, tmp_path):
+    repo, _runs = vision_db
+    _labelled_scene(repo, tmp_path, boxes=2)  # fronts only
+    status = ops.status_for(conn, ops.BY_ID["models.condition.train"])
+    assert status.state == ops.NEVER
+    assert "no card backs labelled yet" in status.value
+    assert "card-backs mode" in (status.detail or "")
+
+
+def test_training_env_status_warns_when_no_python_is_found(conn, monkeypatch, tmp_path):
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from tcginventory.services import trainingenv
+
+    monkeypatch.setattr(trainingenv, "discover_interpreters", lambda: [])
+    status = ops.status_for(conn, ops.BY_ID["models.training_env"])
+    assert status.state == ops.OFF
+    assert "no suitable Python detected" in status.value
+    assert "Install Python 3.10 or newer" in (status.detail or "")
+
+
+def test_training_env_status_names_the_interpreter_it_would_use(
+    conn, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from tcginventory.services import trainingenv
+
+    monkeypatch.setattr(
+        trainingenv,
+        "discover_interpreters",
+        lambda: [trainingenv.Interpreter(r"C:\py\python.exe", (3, 12), "registry")],
+    )
+    status = ops.status_for(conn, ops.BY_ID["models.training_env"])
+    assert status.state == ops.NEVER
+    assert "Python 3.12" in status.value
+    assert "280 MB" in (status.detail or "")
+
+
+def test_training_env_status_reports_a_recorded_environment(
+    conn, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from tcginventory.services import training
+
+    fake = tmp_path / "python.exe"
+    fake.write_bytes(b"")
+    training.remember_training_env(
+        training.TrainingEnv(str(fake), True, "8.4.115", "ultralytics 8.4.115")
+    )
+    status = ops.status_for(conn, ops.BY_ID["models.training_env"])
+    assert status.state == ops.READY
+    assert "8.4.115" in status.value

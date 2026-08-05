@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tcginventory.data.vision import KIND_CONDITION, KIND_DETECTOR
+
 # ---------------------------------------------------------------------------
 # the catalogue
 # ---------------------------------------------------------------------------
@@ -210,6 +212,53 @@ OPERATIONS: tuple[Operation, ...] = (
         icon="scan-line",
         kind=KIND_BACKGROUND,
         caption="Corpus",
+    ),
+    # -- Models & signals ---------------------------------------------------
+    Operation(
+        id="models.training_env",
+        group="models",
+        title="Set up model training",
+        blurb=(
+            "Builds the environment that trains the recognition models: finds a "
+            "Python on this machine, creates a private virtualenv in your data "
+            "folder and installs the training stack (~280 MB). One time, then "
+            "training is a single click."
+        ),
+        verb="Set up",
+        icon="sliders-horizontal",
+        kind=KIND_BACKGROUND,
+        caption="Training env",
+    ),
+    Operation(
+        id="models.detector.train",
+        group="models",
+        title="Train the card detector (regions)",
+        blurb=(
+            "Teaches the detector where cards are in a photo, from every box you "
+            "have drawn in Recognition. It replaces the model in use only if it "
+            "scores better, and everything about the run is kept: what it trained "
+            "on, how it scored, and the model it produced."
+        ),
+        verb="Train",
+        icon="scan-line",
+        kind=KIND_BACKGROUND,
+        caption="Last trained",
+        stale_after_days=14,
+    ),
+    Operation(
+        id="models.condition.train",
+        group="models",
+        title="Train the condition grader",
+        blurb=(
+            "Grades card wear (NM → DMG) from photos of card backs. It learns from "
+            "backs you have labelled in Recognition's card-backs mode, so it needs "
+            "those before it can train at all."
+        ),
+        verb="Train",
+        icon="image",
+        kind=KIND_BACKGROUND,
+        caption="Last trained",
+        stale_after_days=14,
     ),
     Operation(
         id="db.integrity_check",
@@ -445,6 +494,34 @@ def status_for(conn, op: Operation, *, history_conn=None) -> Status:
             STALE if not row["ok"] else _staleness(op, row["started_at"]),
         )
 
+    if op.id == "models.training_env":
+        from tcginventory.services import training as training_svc
+        from tcginventory.services import trainingenv
+
+        env = training_svc.training_env_summary()
+        if env.ready:
+            return Status(env.detail, READY, detail=env.python)
+        found = trainingenv.discover_interpreters()
+        if not found:
+            # No interpreter anywhere: the one case the app cannot fix itself,
+            # since a frozen build ships no python.exe to make a virtualenv with.
+            return Status(
+                "no suitable Python detected", OFF, detail=trainingenv.NO_PYTHON_HINT
+            )
+        detail = (
+            f"Will use {found[0].label} — {found[0].path}. "
+            "About 280 MB of downloads, once."
+        )
+        if trainingenv.is_bootstrapped():
+            return Status("set up, but incomplete", STALE, detail=detail)
+        return Status(f"not set up · {found[0].label} found", NEVER, detail=detail)
+
+    if op.id == "models.detector.train":
+        return _model_status(op, KIND_DETECTOR)
+
+    if op.id == "models.condition.train":
+        return _model_status(op, KIND_CONDITION)
+
     if op.id == "vision.reindex":
         captures, regions, exemplars = corpus_facts()
         if not regions:
@@ -490,6 +567,93 @@ def status_for(conn, op: Operation, *, history_conn=None) -> Status:
     # point of a window on the full-backup export.
     state = _staleness(op, row["started_at"]) if op.stale_after_days else READY
     return Status(value, STALE if not row["ok"] else state, detail=summary)
+
+
+def _model_status(op: Operation, kind: str) -> Status:
+    """One recognition model as a tile: version, provenance, and how old it is.
+
+    The value line always carries **when it was last trained** — the marker the
+    Regions and Conditions sections are read for — and the state turns STALE
+    either because the corpus has moved on or because the model is older than
+    ``stale_after_days``. Best-effort: the vision DB is optional, so any failure
+    reads as "never" rather than breaking the window.
+    """
+    try:
+        from tcginventory.data.vision import ModelRunRepository, VisionRepository
+        from tcginventory.services import training as training_svc
+
+        conn = _open_vision()
+        if conn is None:
+            return Status("unavailable", NEVER)
+        try:
+            repo = VisionRepository(conn)
+            runs = ModelRunRepository(conn)
+            if kind == KIND_CONDITION:
+                graded = len(repo.condition_regions())
+                current = runs.current_model(kind)
+                if current is None:
+                    if not graded:
+                        return Status(
+                            "never · no card backs labelled yet",
+                            NEVER,
+                            detail=(
+                                "Label card backs in Recognition's card-backs mode; "
+                                "the grader trains on those."
+                            ),
+                        )
+                    return Status(f"never · {graded:,} graded backs ready", NEVER)
+                return Status(
+                    f"v{current['version']} · {when(current['finished_at'])} · "
+                    f"{graded:,} graded backs",
+                    _staleness(op, current["finished_at"]),
+                )
+
+            status = training_svc.detector_status(repo, runs)
+            corpus = f"{status.corpus.images:,} images / {status.corpus.boxes:,} boxes"
+            if status.never_trained:
+                state = NEVER if status.corpus.trainable else NEVER
+                detail = (
+                    f"{corpus} ready to train on."
+                    if status.corpus.trainable
+                    else "Draw and save boxes in Recognition first."
+                )
+                return Status(f"never · {corpus} ready", state, detail=detail)
+            age = _staleness(op, status.trained_at)
+            state = STALE if (status.stale or age == STALE) else READY
+            value = f"v{status.version} · {when(status.trained_at)}"
+            if status.map50_95 is not None:
+                value += f" · mAP50-95 {status.map50_95:.3f}"
+            trained_on = status.trained_on
+            detail = (
+                f"Trained on {trained_on.images:,} images / {trained_on.boxes:,} boxes"
+                f" / {trained_on.cards:,} cards. Corpus now: {corpus}."
+                if trained_on
+                else None
+            )
+            if status.stale and detail:
+                detail += (
+                    f" New since: {status.new_images:,} images, "
+                    f"{status.new_boxes:,} boxes."
+                )
+            if not status.installed and detail:
+                detail += " The model file is missing — re-train to restore it."
+            return Status(value, state, detail=detail)
+        finally:
+            conn.close()
+    except Exception:  # pragma: no cover - the vision DB is optional
+        return Status("unavailable", NEVER)
+
+
+def _open_vision():
+    """The vision DB, or None when it isn't there yet."""
+    from tcginventory.data.vision import open_vision, vision_path
+
+    try:
+        if not vision_path().exists():
+            return None
+        return open_vision()
+    except Exception:  # pragma: no cover - unreadable/locked file
+        return None
 
 
 def _history_facts(history_conn=None) -> tuple[str | None, int]:

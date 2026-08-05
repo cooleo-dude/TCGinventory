@@ -14,7 +14,7 @@ import pytest
 
 from tcginventory.data.vision import (
     CardLabel,
-    DetectorRunRepository,
+    ModelRunRepository,
     VisionRepository,
     open_vision,
 )
@@ -30,7 +30,7 @@ def repo():
 
 @pytest.fixture()
 def runs(repo):
-    return DetectorRunRepository(repo.conn)
+    return ModelRunRepository(repo.conn)
 
 
 def _capture(repo, boxes, *, card_ids=("cel-4",), now="2026-08-01T00:00:00+00:00"):
@@ -353,7 +353,7 @@ def test_prepare_logs_the_run_and_builds_the_command(
 def test_a_full_run_records_metrics_and_promotes(
     repo, runs, ready_env, stub_worker, tmp_path
 ):
-    """End to end through a real subprocess: prepare â†’ run â†’ complete."""
+    """End to end through a real subprocess: prepare → run → complete."""
     import subprocess
 
     _scene_capture(repo, tmp_path)
@@ -444,7 +444,7 @@ def test_probe_reports_an_interpreter_without_ultralytics():
     import sys
 
     env = training.probe_training_env(sys.executable)
-    # This venv deliberately has no ultralytics â€” that's the message users see.
+    # This venv deliberately has no ultralytics — that's the message users see.
     assert not env.ready
     assert "ultralytics" in env.detail
 

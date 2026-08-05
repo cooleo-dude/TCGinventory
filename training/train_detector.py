@@ -32,7 +32,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from tcginventory.data.vision import (  # noqa: E402
-    DetectorRunRepository,
+    ModelRunRepository,
     VisionRepository,
     open_vision,
 )
@@ -87,7 +87,7 @@ def main(argv=None) -> int:
 
     conn = open_vision(args.vision_db) if args.vision_db else open_vision()
     repo = VisionRepository(conn)
-    runs = DetectorRunRepository(conn)
+    runs = ModelRunRepository(conn)
     try:
         job = training.prepare_detector_training(
             repo,

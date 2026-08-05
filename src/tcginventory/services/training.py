@@ -29,7 +29,11 @@ from importlib import resources
 from pathlib import Path
 
 from tcginventory import config
-from tcginventory.data.vision import DetectorRunRepository, VisionRepository
+from tcginventory.data.vision import (
+    KIND_DETECTOR,
+    ModelRunRepository,
+    VisionRepository,
+)
 from tcginventory.services import detector
 from tcginventory.services.detector_dataset import export_yolo_dataset
 
@@ -42,6 +46,9 @@ _BOX_PLACES = 5
 # its own process (torch is unbundled by design), so it drives a
 # training venv the user creates once.
 TRAINING_PYTHON_PREF = "training_python"
+# What probe_training_env() found when the environment was last validated, so
+# the Operations window can report readiness without importing torch to ask.
+TRAINING_VERSION_PREF = "training_env_version"
 
 # What a training interpreter needs. onnx/onnxslim/onnxruntime are *not* part of
 # a plain `pip install ultralytics` (they sit behind its export-base extra), and
@@ -92,6 +99,21 @@ class DetectorStatus:
         return self.version is None
 
     @property
+    def age_days(self) -> float | None:
+        """Days since the model in use finished training, if one ever did."""
+        if not self.trained_at:
+            return None
+        from datetime import datetime, timezone
+
+        try:
+            stamp = datetime.fromisoformat(self.trained_at)
+        except ValueError:
+            return None
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - stamp).total_seconds() / 86400
+
+    @property
     def stale(self) -> bool:
         """True when the corpus has changed since the model was trained."""
         if self.trained_on is None:
@@ -134,13 +156,13 @@ def corpus_snapshot(repo: VisionRepository) -> CorpusSnapshot:
 
 
 def detector_status(
-    repo: VisionRepository, runs: DetectorRunRepository | None = None
+    repo: VisionRepository, runs: ModelRunRepository | None = None
 ) -> DetectorStatus:
     """Assemble the detector's current state for display."""
-    runs = runs or DetectorRunRepository(repo.conn)
+    runs = runs or ModelRunRepository(repo.conn)
     now = corpus_snapshot(repo)
-    current = runs.current_model()
-    last = runs.last_run()
+    current = runs.current_model(KIND_DETECTOR)
+    last = runs.last_run(KIND_DETECTOR)
     model = detector.yolo_model_path()
 
     trained_on = None
@@ -244,7 +266,7 @@ def best_epoch(epochs: list[dict], key: str = "map50_95") -> dict | None:
 
 
 class TrainingUnavailable(RuntimeError):
-    """Training can't start â€” no data, no interpreter, or no worker script."""
+    """Training can't start — no data, no interpreter, or no worker script."""
 
 
 @dataclass(frozen=True)
@@ -262,7 +284,7 @@ class TrainingEnv:
 
 
 def worker_script() -> Path | None:
-    """Locate the training worker â€” bundled beside the package when frozen, in the
+    """Locate the training worker — bundled beside the package when frozen, in the
     repo's ``training/`` directory when running from source."""
     try:
         res = resources.files("tcginventory") / "training" / WORKER_FILENAME
@@ -288,6 +310,35 @@ def set_training_python(path: str | None) -> None:
     config.set_pref(TRAINING_PYTHON_PREF, str(path) if path else None)
 
 
+def remember_training_env(env: TrainingEnv) -> None:
+    """Record a validated environment so later reads are free."""
+    set_training_python(env.python)
+    config.set_pref(TRAINING_VERSION_PREF, env.version if env.ok else None)
+
+
+def training_env_summary() -> TrainingEnv:
+    """The saved environment, read from preferences only — **no subprocess**.
+
+    :func:`probe_training_env` is the truth, but it imports ultralytics in the
+    candidate interpreter (seconds, once torch is installed), which is far too slow
+    for a status refresh. This trusts what setup recorded and only checks that the
+    interpreter is still on disk.
+    """
+    path = training_python()
+    if not path:
+        return TrainingEnv(
+            None, False, None, "not set up — no training interpreter recorded"
+        )
+    if not Path(path).is_file():
+        return TrainingEnv(
+            path, False, None, f"the recorded interpreter is gone: {path}"
+        )
+    version = config.get_pref(TRAINING_VERSION_PREF)
+    if not version:
+        return TrainingEnv(path, False, None, "recorded, but never validated")
+    return TrainingEnv(path, True, str(version), f"ultralytics {version}")
+
+
 def probe_training_env(python: str | None = None) -> TrainingEnv:
     """Ask an interpreter whether it can train, without importing torch here.
 
@@ -301,7 +352,7 @@ def probe_training_env(python: str | None = None) -> TrainingEnv:
         candidate = sys.executable
     if not candidate:
         return TrainingEnv(
-            None, False, None, "No training interpreter set â€” choose one to train."
+            None, False, None, "No training interpreter set — choose one to train."
         )
     if not Path(candidate).is_file():
         return TrainingEnv(candidate, False, None, f"Not found: {candidate}")
@@ -320,7 +371,7 @@ def probe_training_env(python: str | None = None) -> TrainingEnv:
             candidate,
             False,
             None,
-            "ultralytics is not installed in this interpreter â€” "
+            "ultralytics is not installed in this interpreter — "
             f"{INSTALL_HINT} (~280 MB, one time).",
         )
     lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
@@ -344,7 +395,7 @@ class TrainingJob:
 
 def prepare_detector_training(
     repo: VisionRepository,
-    runs: DetectorRunRepository,
+    runs: ModelRunRepository,
     *,
     env: TrainingEnv,
     dataset_dir: str | Path,
@@ -363,7 +414,7 @@ def prepare_detector_training(
     calls :func:`complete_detector_training` or :func:`fail_detector_training`.
 
     Raises :class:`TrainingUnavailable` when there's nothing to train on or
-    nothing to train with â€” checked *before* a run is logged, so the history
+    nothing to train with — checked *before* a run is logged, so the history
     doesn't fill up with attempts that never started.
     """
     if not env.ready:
@@ -375,7 +426,7 @@ def prepare_detector_training(
     snapshot = corpus_snapshot(repo)
     if not snapshot.trainable:
         raise TrainingUnavailable(
-            "No labeled boxes yet â€” draw and save boxes in the Recognition window."
+            "No labeled boxes yet — draw and save boxes in the Recognition window."
         )
 
     summary = export_yolo_dataset(repo, dataset_dir, val_frac=val_frac, seed=seed)
@@ -387,6 +438,7 @@ def prepare_detector_training(
 
     out = Path(out_path)
     run_id = runs.start(
+        kind=KIND_DETECTOR,
         source=source,
         corpus_images=snapshot.images,
         corpus_boxes=snapshot.boxes,
@@ -454,7 +506,7 @@ class TrainingOutcome:
 
 def complete_detector_training(
     job: TrainingJob,
-    runs: DetectorRunRepository,
+    runs: ModelRunRepository,
     *,
     worker_output: str = "",
     promote_margin: float = 0.0,
@@ -472,7 +524,7 @@ def complete_detector_training(
         runs.add_epochs(job.run_id, epochs)
     best = best_epoch(epochs) or {}
 
-    incumbent = runs.current_model()
+    incumbent = runs.current_model(KIND_DETECTOR)
     incumbent_score = incumbent["map50_95"] if incumbent else None
 
     runs.finish(
@@ -498,10 +550,10 @@ def complete_detector_training(
     if promote:
         summary = f"Trained detector v{version}"
         if best.get("map50_95") is not None:
-            summary += f" â€” mAP50-95 {best['map50_95']:.3f}"
+            summary += f" — mAP50-95 {best['map50_95']:.3f}"
     else:
         summary = (
-            f"Not promoted â€” mAP50-95 {best.get('map50_95')} does not beat the "
+            f"Not promoted — mAP50-95 {best.get('map50_95')} does not beat the "
             f"model in use ({incumbent_score})"
         )
     return TrainingOutcome(
@@ -516,7 +568,7 @@ def complete_detector_training(
 
 
 def fail_detector_training(
-    job: TrainingJob, runs: DetectorRunRepository, reason: str
+    job: TrainingJob, runs: ModelRunRepository, reason: str
 ) -> None:
     """Close a run that died, was cancelled, or never produced a model."""
     runs.finish(job.run_id, status="failed", notes=(reason or "")[:500])

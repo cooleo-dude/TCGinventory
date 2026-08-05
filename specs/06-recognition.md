@@ -131,7 +131,10 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   **Operations** window ("Models & signals" group) and executed by
   `training/train_detector.py` outside the frozen app, because ultralytics/torch
   are deliberately not shipped.
-  - **`detector_run` + `detector_epoch` (vision.db)** log every attempt: the
+  - **`model_run` + `model_epoch` (vision.db)** log every attempt, tagged by
+    **`kind`** (`detector` | `condition`) with versions running per kind, plus a
+    `metrics_json` column for the metrics one kind has and the other doesn't
+    (a confusion matrix means nothing to a box detector). Each row holds: the
     corpus snapshot it trained on (images / boxes / cards + a **fingerprint** of
     the exact (image, box) set), the split, the hyperparameters, the scores
     (mAP50, mAP50-95, precision, recall, best epoch), the artifact (path,
@@ -147,20 +150,28 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   - **Operations shows** the current version and its provenance ("trained on 20
     images / 88 boxes", stale when the corpus has moved on), the last run's
     accuracy, the per-run accuracy trend, and the **Train** trigger.
-  - **Next, agreed 2026-08-04 — two open pieces:**
-    1. **Build the Operations fields** — the `models.detector.train` entry in the
-       reserved `models` group plus the panel described above (version,
-       provenance, stale pill, metrics, accuracy trend, run history including
-       failures). The data is all there; only the UI is missing.
-    2. **Decide how the condition model is generated.** Today the framework only
-       trains a **detector**. Condition has a heuristic
-       (`services/condition.py`), a `condition_regions()` feed of (back-side
-       crop, grade) pairs and an untried `training/train_condition.py` scaffold,
-       but no defined path from corpus → model → installed artifact, and the run
-       log is detector-shaped: a second model kind needs either a sibling table
-       or a `kind` column on `detector_run`. The identifier has the same gap for
-       its optional ArcFace fine-tune (its exemplar path needs no training, so
-       it's less urgent).
+  - **Operations ▸ Models & signals (done 2026-08-04)** — three tiles:
+    - **Set up model training** discovers a Python on the machine (py launcher,
+      registry, PATH), builds `<data_dir>/training-env` and installs the training
+      stack into it, then records what it validated so status reads never shell
+      out. When no interpreter is found the tile states that plainly — a frozen
+      build ships no `python.exe`, so this is the one case it cannot fix itself.
+    - **Train the card detector (regions)** runs the whole orchestration in a
+      worker thread. Its value line is the **last-trained marker**: version, when,
+      and mAP50-95, with the corpus it trained on in the tooltip.
+    - **Train the condition grader** is registered and reports its own
+      last-trained marker and how many graded backs exist, but explains that the
+      training path isn't defined yet rather than pretending to run.
+    - Both trainers carry `stale_after_days=14`, so a model left alone for more
+      than a fortnight reads **Stale** even when the corpus hasn't moved; a corpus
+      that *has* moved shows Stale immediately, with "new since" in the tooltip.
+  - **Next:** decide how the condition grader is actually produced. The data is
+    further along than assumed — the corpus already holds **9 back-side images and
+    33 graded back regions** (NM 58 / MP 2 / HP 2 / LP 1 / DMG 3 across all
+    regions), so this is no longer blocked on photographing backs, only on
+    choosing the model and its metrics (accuracy, macro-F1, confusion matrix, and
+    mean ordinal grade distance — being one grade out matters far less than three).
+
 - **M-V2** — learning from the ingested corpus. **Crop-exemplar retrieval ✅
   done (usable now):** every labeled region is embedded and stored
   (`region_embedding`), and `Recognizer.suggest` scores each card by its best
