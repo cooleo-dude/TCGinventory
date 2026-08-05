@@ -45,6 +45,7 @@ def test_each_recognition_model_has_its_own_section():
     """
     assert [op.id for op in ops.in_group("training_env")] == [
         "models.training_env",
+        "models.training_env_gpu",
         "models.training_env_remove",
     ]
     assert [op.id for op in ops.in_group("model_regions")] == ["models.detector.train"]
@@ -573,3 +574,149 @@ def test_remove_env_refuses_anything_that_is_not_the_environment(tmp_path):
 
     with pytest.raises(RuntimeError, match="Not a training environment"):
         trainingenv.remove_env(tmp_path / trainingenv.ENV_DIRNAME)  # absent
+
+
+# -- choosing between a CPU and a GPU environment ----------------------------
+
+
+def _gpu(vram=16376):
+    from tcginventory.services.trainingenv import Gpu
+
+    return Gpu("NVIDIA GeForce RTX 4070 Ti SUPER", vram, "591.86", "8.9")
+
+
+def _installed(monkeypatch, tmp_path, flavour):
+    """Pretend an environment of ``flavour`` is built and validated."""
+    from tcginventory.services import training
+
+    fake = tmp_path / "python.exe"
+    fake.write_bytes(b"")
+    training.remember_training_env(
+        training.TrainingEnv(str(fake), True, "8.4.115", "ultralytics 8.4.115")
+    )
+    training.remember_training_flavour(flavour)
+
+
+def test_gpu_tile_is_dead_without_a_card(conn, monkeypatch, tmp_path):
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from tcginventory.services import trainingenv
+
+    monkeypatch.setattr(trainingenv, "detect_gpu", lambda: None)
+    status = ops.status_for(conn, ops.BY_ID["models.training_env_gpu"])
+    assert status.state == ops.OFF
+    assert status.actionable is False  # the tile greys its button
+    assert "no suitable GPU detected" in status.value
+    assert "NVIDIA" in (status.detail or "")
+
+
+def test_gpu_tile_is_dead_when_the_card_is_too_small(conn, monkeypatch, tmp_path):
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from tcginventory.services import trainingenv
+
+    monkeypatch.setattr(trainingenv, "detect_gpu", lambda: _gpu(vram=2048))
+    status = ops.status_for(conn, ops.BY_ID["models.training_env_gpu"])
+    assert status.state == ops.OFF and status.actionable is False
+    assert "too little memory" in status.value
+
+
+def test_gpu_tile_offers_a_fresh_build_when_nothing_is_installed(
+    conn, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from tcginventory.services import trainingenv
+
+    monkeypatch.setattr(trainingenv, "detect_gpu", lambda: _gpu())
+    status = ops.status_for(conn, ops.BY_ID["models.training_env_gpu"])
+    assert status.state == ops.NEVER and status.actionable
+    assert "ready to build" in status.value
+    assert status.verb is None  # the registry's "Set up with GPU" stands
+
+
+def test_each_tile_offers_the_other_flavour(conn, monkeypatch, tmp_path):
+    """The pair describe one environment from opposite sides: whichever is
+    installed has nothing to do, and the other offers to switch."""
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from tcginventory.services import trainingenv
+
+    monkeypatch.setattr(trainingenv, "detect_gpu", lambda: _gpu())
+
+    _installed(monkeypatch, tmp_path, trainingenv.FLAVOUR_CPU)
+    cpu = ops.status_for(conn, ops.BY_ID["models.training_env"])
+    gpu = ops.status_for(conn, ops.BY_ID["models.training_env_gpu"])
+    assert cpu.actionable is False  # already the installed flavour
+    assert gpu.actionable and gpu.verb == "Switch to GPU environment"
+
+    _installed(monkeypatch, tmp_path, trainingenv.FLAVOUR_GPU)
+    cpu = ops.status_for(conn, ops.BY_ID["models.training_env"])
+    gpu = ops.status_for(conn, ops.BY_ID["models.training_env_gpu"])
+    assert cpu.actionable and cpu.verb == "Switch to CPU environment"
+    assert gpu.actionable is False
+    assert "in use" in gpu.value
+
+
+def test_an_environment_from_before_gpu_support_reads_as_cpu(
+    conn, monkeypatch, tmp_path
+):
+    """Regression: a recorded environment carries no flavour until it is rebuilt,
+    and treating that as "nothing installed" would tell users to set up again."""
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from tcginventory.services import training, trainingenv
+
+    monkeypatch.setattr(trainingenv, "detect_gpu", lambda: _gpu())
+    _installed(monkeypatch, tmp_path, trainingenv.FLAVOUR_CPU)
+    training.remember_training_flavour(None)  # as an older install would be
+
+    assert training.training_env_flavour() is None
+    cpu = ops.status_for(conn, ops.BY_ID["models.training_env"])
+    assert cpu.state == ops.READY and cpu.actionable is False
+    assert ops.status_for(conn, ops.BY_ID["models.training_env_gpu"]).verb == (
+        "Switch to GPU environment"
+    )
+
+
+def test_the_gpu_build_installs_cuda_torch_before_ultralytics():
+    """Order matters: ultralytics first would pull the CPU wheels and then find its
+    dependency satisfied, leaving a CPU environment wearing a GPU label."""
+    from tcginventory.services import trainingenv
+
+    steps = trainingenv.bootstrap_steps("py.exe", flavour=trainingenv.FLAVOUR_GPU)
+    commands = [" ".join(argv) for _label, argv in steps]
+    assert "venv" in commands[0]
+    assert trainingenv.CUDA_INDEX in commands[1] and "torch" in commands[1]
+    assert "ultralytics" in commands[2]
+    assert "ultralytics" not in commands[1]  # nothing pulls torch early
+
+    cpu = trainingenv.bootstrap_steps("py.exe", flavour=trainingenv.FLAVOUR_CPU)
+    assert len(cpu) == 2  # no CUDA step at all
+    assert trainingenv.CUDA_INDEX not in " ".join(cpu[1][1])
+
+
+def test_detect_gpu_reads_nvidia_smi(monkeypatch):
+    import subprocess
+
+    from tcginventory.services import trainingenv
+
+    class Fake:
+        returncode = 0
+        stdout = (
+            "NVIDIA GeForce GTX 1650, 4096, 555.00, 7.5\n"
+            "NVIDIA GeForce RTX 4070 Ti SUPER, 16376, 591.86, 8.9\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: Fake())
+    gpu = trainingenv.detect_gpu()
+    assert gpu is not None
+    assert gpu.vram_mb == 16376  # the biggest card wins
+    assert gpu.usable and "4070" in gpu.label
+
+
+def test_detect_gpu_is_none_without_the_driver(monkeypatch):
+    import subprocess
+
+    from tcginventory.services import trainingenv
+
+    def boom(*a, **k):
+        raise FileNotFoundError("nvidia-smi")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert trainingenv.detect_gpu() is None

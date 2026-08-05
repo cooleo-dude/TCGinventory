@@ -234,6 +234,7 @@ def test_each_model_gets_its_own_section(app, seeded_conn):
     # And nothing shares a section with an unrelated job any more.
     assert [op.id for op in ops.in_group("training_env")] == [
         "models.training_env",
+        "models.training_env_gpu",
         "models.training_env_remove",
     ]
     assert [op.id for op in ops.in_group("model_regions")] == ["models.detector.train"]

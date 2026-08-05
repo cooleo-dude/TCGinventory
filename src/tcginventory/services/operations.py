@@ -235,6 +235,21 @@ OPERATIONS: tuple[Operation, ...] = (
         caption="Training env",
     ),
     Operation(
+        id="models.training_env_gpu",
+        group="training_env",
+        title="Set up training on the GPU",
+        blurb=(
+            "Builds the same environment against a CUDA build of torch, so training "
+            "runs on your graphics card instead of the processor — the difference "
+            "between minutes and hours on a real corpus. Needs an NVIDIA card with "
+            "its driver installed; the download is larger, around 2.5 GB."
+        ),
+        verb="Set up with GPU",
+        icon="sparkles",
+        kind=KIND_BACKGROUND,
+        caption="Accelerator",
+    ),
+    Operation(
         id="models.training_env_remove",
         group="training_env",
         title="Remove the training environment",
@@ -352,6 +367,9 @@ class Status:
     # environment is already built, or there is nothing to remove. The tile
     # greys its button out and explains why from ``detail``.
     actionable: bool = True
+    # Overrides the button label when what the operation *does* depends on the
+    # current state ("Set up" vs "Switch to GPU environment").
+    verb: str | None = None
 
 
 def _parse(stamp: str | None) -> datetime | None:
@@ -519,38 +537,8 @@ def status_for(conn, op: Operation, *, history_conn=None) -> Status:
             STALE if not row["ok"] else _staleness(op, row["started_at"]),
         )
 
-    if op.id == "models.training_env":
-        from tcginventory.services import training as training_svc
-        from tcginventory.services import trainingenv
-
-        env = training_svc.training_env_summary()
-        if env.ready:
-            # Built and validated: there is nothing left for this button to do.
-            # (A half-built one falls through and stays clickable — re-running is
-            # how you finish it, and the alternative is a dead end.)
-            return Status(
-                env.detail,
-                READY,
-                detail=(
-                    f"Already set up at {env.python} — remove the environment "
-                    "first if you want to rebuild it."
-                ),
-                actionable=False,
-            )
-        found = trainingenv.discover_interpreters()
-        if not found:
-            # No interpreter anywhere: the one case the app cannot fix itself,
-            # since a frozen build ships no python.exe to make a virtualenv with.
-            return Status(
-                "no suitable Python detected", OFF, detail=trainingenv.NO_PYTHON_HINT
-            )
-        detail = (
-            f"Will use {found[0].label} — {found[0].path}. "
-            "About 280 MB of downloads, once."
-        )
-        if trainingenv.is_bootstrapped():
-            return Status("set up, but incomplete", STALE, detail=detail)
-        return Status(f"not set up · {found[0].label} found", NEVER, detail=detail)
+    if op.id in ("models.training_env", "models.training_env_gpu"):
+        return _training_env_status(op)
 
     if op.id == "models.training_env_remove":
         from tcginventory.services import trainingenv
@@ -623,6 +611,109 @@ def status_for(conn, op: Operation, *, history_conn=None) -> Status:
     # point of a window on the full-backup export.
     state = _staleness(op, row["started_at"]) if op.stale_after_days else READY
     return Status(value, STALE if not row["ok"] else state, detail=summary)
+
+
+def _training_env_status(op: Operation) -> Status:
+    """The environment pair: build one, or swap the one you have for the other.
+
+    The two tiles describe the same environment from opposite sides, so each reads
+    the *installed* flavour and offers the other. Whichever flavour is in place is
+    the tile that has nothing to do.
+    """
+    from tcginventory.services import training as training_svc
+    from tcginventory.services import trainingenv
+
+    wants_gpu = op.id == "models.training_env_gpu"
+    gpu = trainingenv.detect_gpu()
+    env = training_svc.training_env_summary()
+    # An environment built before GPU support carries no recorded flavour, and
+    # CPU is the only thing it could have been.
+    installed = (
+        (training_svc.training_env_flavour() or trainingenv.FLAVOUR_CPU)
+        if env.ready
+        else None
+    )
+
+    if wants_gpu:
+        if gpu is None:
+            return Status(
+                "no suitable GPU detected",
+                OFF,
+                actionable=False,
+                detail=(
+                    "Training on the GPU needs an NVIDIA card with its driver "
+                    "installed. Nothing that nvidia-smi can see is present, so the "
+                    "processor is the only option here."
+                ),
+            )
+        if not gpu.usable:
+            return Status(
+                f"{gpu.label} — too little memory",
+                OFF,
+                actionable=False,
+                detail=(
+                    f"{gpu.name} reports {gpu.vram_mb:,} MB; training wants at least "
+                    f"{trainingenv.MIN_VRAM_MB:,} MB to be worth the trouble."
+                ),
+            )
+        if installed == trainingenv.FLAVOUR_GPU:
+            return Status(
+                f"in use · {gpu.label}",
+                READY,
+                actionable=False,
+                detail=f"Training already runs on {gpu.name}.",
+            )
+        if installed == trainingenv.FLAVOUR_CPU:
+            return Status(
+                f"available · {gpu.label}",
+                STALE,
+                verb="Switch to GPU environment",
+                detail=(
+                    f"Rebuilds the environment against CUDA so training uses "
+                    f"{gpu.name}. Downloads about 2.5 GB and replaces what is "
+                    "installed now; nothing else is touched."
+                ),
+            )
+        return Status(
+            f"ready to build · {gpu.label}",
+            NEVER,
+            detail=f"Will build against CUDA for {gpu.name}. About 2.5 GB, once.",
+        )
+
+    # The CPU tile.
+    if installed == trainingenv.FLAVOUR_CPU:
+        return Status(
+            env.detail,
+            READY,
+            actionable=False,
+            detail=(
+                f"Already set up at {env.python} — remove the environment first if "
+                "you want to rebuild it."
+            ),
+        )
+    if installed == trainingenv.FLAVOUR_GPU:
+        return Status(
+            env.detail,
+            READY,
+            verb="Switch to CPU environment",
+            detail=(
+                "Rebuilds the environment against the CPU build of torch. Smaller "
+                "on disk, and the only option if the card is needed elsewhere."
+            ),
+        )
+    found = trainingenv.discover_interpreters()
+    if not found:
+        # No interpreter anywhere: the one case the app cannot fix itself, since a
+        # frozen build ships no python.exe to make a virtualenv with.
+        return Status(
+            "no suitable Python detected", OFF, detail=trainingenv.NO_PYTHON_HINT
+        )
+    detail = (
+        f"Will use {found[0].label} — {found[0].path}. About 280 MB of downloads, once."
+    )
+    if trainingenv.is_bootstrapped():
+        return Status("set up, but incomplete", STALE, detail=detail)
+    return Status(f"not set up · {found[0].label} found", NEVER, detail=detail)
 
 
 def _model_status(op: Operation, kind: str) -> Status:

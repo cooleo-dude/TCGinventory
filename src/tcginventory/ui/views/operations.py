@@ -380,6 +380,11 @@ class _Tile(QFrame):
         box.addWidget(self.bar)
 
     def show_status(self, status: ops.Status) -> None:
+        # A status can rename the button when the action depends on the state
+        # ("Set up" becomes "Switch to CPU environment" once a GPU one exists).
+        self._verb = status.verb or self.op.verb
+        if self.op.kind != ops.KIND_TOGGLE:
+            self.button.setText(self._verb)
         self._value.setText(status.value)
         self._value.setToolTip(status.detail or "")
         self._pill.setText(
@@ -417,7 +422,7 @@ class _Tile(QFrame):
             self._pill.setObjectName("pill_running")
             self._repolish()
         else:
-            self.button.setText(self.op.verb or "On")
+            self.button.setText(getattr(self, "_verb", None) or self.op.verb or "On")
 
     def _repolish(self) -> None:
         for widget in (self, self._pill, self.button):
@@ -711,8 +716,11 @@ class OperationsView(QWidget):
             "catalog.update_jp": lambda: self._update_catalog("JP"),
             "shows.refresh": lambda: self._task("shows.refresh", _refresh_shows),
             "vision.reindex": lambda: self._task("vision.reindex", _reindex_corpus),
-            "models.training_env": lambda: self._task(
-                "models.training_env", _setup_training_env
+            "models.training_env": lambda: self._setup_env(
+                "models.training_env", "cpu"
+            ),
+            "models.training_env_gpu": lambda: self._setup_env(
+                "models.training_env_gpu", "gpu"
             ),
             "models.training_env_remove": self._remove_training_env,
             "models.detector.train": lambda: self._task(
@@ -969,6 +977,36 @@ class OperationsView(QWidget):
             return
         self._task(op.id, _remove_training_env)
 
+    def _setup_env(self, op_id: str, flavour: str) -> None:
+        """Build the training environment, or swap the installed one for the other
+        flavour. Swapping asks first: it throws away a working install and pulls
+        the replacement down again."""
+        from tcginventory.services import training, trainingenv
+
+        installed = (
+            training.training_env_flavour()
+            if training.training_env_summary().ready
+            else None
+        )
+        if installed and installed != flavour:
+            other = "GPU" if flavour == trainingenv.FLAVOUR_GPU else "CPU"
+            size = (
+                "about 2.5 GB" if flavour == trainingenv.FLAVOUR_GPU else "about 280 MB"
+            )
+            if (
+                QMessageBox.question(
+                    self,
+                    f"Switch to the {other} environment?",
+                    f"This removes the {installed.upper()} environment and builds the "
+                    f"{other} one in its place, downloading {size}.\n\nTrained "
+                    "models, the labelled corpus and the training history are all "
+                    "kept.",
+                )
+                != QMessageBox.Yes
+            ):
+                return
+        self._task(op_id, lambda conn, f=flavour: _build_training_env(conn, f))
+
     def _train_condition(self) -> None:
         """Train the condition grader, or explain exactly what the corpus lacks.
 
@@ -1064,12 +1102,12 @@ def _refresh_shows(conn) -> str:
     return text
 
 
-def _setup_training_env(_conn) -> str:
-    """Build the environment that trains the models, with a Python found on this
-    machine (a frozen build ships no interpreter of its own).
+def _build_training_env(_conn, flavour: str = "cpu") -> str:
+    """Build (or rebuild) the training environment in the requested flavour.
 
-    Runs in a worker thread: creating the virtualenv and downloading ~280 MB of
-    packages both take minutes.
+    Runs in a worker thread: creating the virtualenv and downloading the stack take
+    minutes. An existing environment is removed first, so switching flavours can't
+    leave two torch builds fighting over the same site-packages.
     """
     import subprocess
 
@@ -1079,7 +1117,13 @@ def _setup_training_env(_conn) -> str:
     if not found:
         raise RuntimeError(trainingenv.NO_PYTHON_HINT)
     interpreter = found[0]
-    for label, argv in trainingenv.bootstrap_steps(interpreter):
+    if flavour == trainingenv.FLAVOUR_GPU and trainingenv.detect_gpu() is None:
+        raise RuntimeError("No NVIDIA GPU is visible to nvidia-smi on this machine.")
+
+    if trainingenv.is_bootstrapped():
+        trainingenv.remove_env()
+
+    for label, argv in trainingenv.bootstrap_steps(interpreter, flavour=flavour):
         proc = subprocess.run(
             argv,
             capture_output=True,
@@ -1090,12 +1134,19 @@ def _setup_training_env(_conn) -> str:
             tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
             raise RuntimeError(f"{label} failed: {' '.join(tail)[:300]}")
 
-    # Validate what we built, and record it so status reads stay subprocess-free.
+    # Validate what was built, and record what torch can *actually* do — an install
+    # can quietly fall back to CPU wheels.
     env = training.probe_training_env(str(trainingenv.env_python()))
     if not env.ready:
         raise RuntimeError(f"Environment built but not usable: {env.detail}")
+    built, described = trainingenv.probe_flavour(trainingenv.env_python())
     training.remember_training_env(env)
-    return f"{env.detail} · {interpreter.label}"
+    training.remember_training_flavour(built)
+    if flavour == trainingenv.FLAVOUR_GPU and built != trainingenv.FLAVOUR_GPU:
+        raise RuntimeError(
+            f"Installed, but the GPU is not usable from it — {described}"
+        )
+    return f"{env.detail} · {described}"
 
 
 def _remove_training_env(_conn) -> str:

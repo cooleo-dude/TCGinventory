@@ -32,11 +32,80 @@ from tcginventory.services.training import TRAINING_REQUIREMENTS
 # Training needs a reasonably current interpreter; the app itself requires 3.10+.
 MIN_VERSION = (3, 10)
 ENV_DIRNAME = "training-env"
+
+# Which flavour of the stack an environment holds. The difference is torch: the
+# default wheels on Windows are CPU-only, and a CUDA build has to be asked for by
+# index. Everything else in the environment is identical.
+FLAVOUR_CPU = "cpu"
+FLAVOUR_GPU = "gpu"
+
+# CUDA wheels are forward compatible with newer drivers, so one channel covers
+# every card recent enough to be worth training on.
+CUDA_CHANNEL = "cu124"
+CUDA_INDEX = f"https://download.pytorch.org/whl/{CUDA_CHANNEL}"
+MIN_VRAM_MB = 4096  # below this a fine-tune will thrash rather than run
 NO_PYTHON_HINT = (
     "No suitable Python was detected on this machine. Install Python 3.10 or newer "
     "(python.org, or `winget install Python.Python.3.12`), then run this again."
 )
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+@dataclass(frozen=True)
+class Gpu:
+    """A CUDA device this machine could train on."""
+
+    name: str
+    vram_mb: int
+    driver: str
+    compute: str
+
+    @property
+    def usable(self) -> bool:
+        return self.vram_mb >= MIN_VRAM_MB
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} · {self.vram_mb / 1024:.0f} GB"
+
+
+def detect_gpu() -> Gpu | None:
+    """The best CUDA device ``nvidia-smi`` reports, or None.
+
+    ``nvidia-smi`` ships with the NVIDIA driver, so its presence is also the
+    evidence that a driver is installed — which is what actually matters, since a
+    card with no driver cannot be trained on. AMD and Intel GPUs are not detected
+    on purpose: torch's Windows wheels are CUDA-only.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total,driver_version,compute_cap",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            creationflags=_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    best: Gpu | None = None
+    for line in (proc.stdout or "").splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 4:
+            continue
+        try:
+            vram = int(float(parts[1]))
+        except ValueError:
+            continue
+        found = Gpu(parts[0], vram, parts[2], parts[3])
+        if best is None or found.vram_mb > best.vram_mb:
+            best = found
+    return best
 
 
 @dataclass(frozen=True)
@@ -310,26 +379,84 @@ def remove_env(directory: Path | None = None) -> int:
 
 
 def bootstrap_steps(
-    interpreter: Interpreter | str, directory: Path | None = None
+    interpreter: Interpreter | str,
+    directory: Path | None = None,
+    flavour: str = FLAVOUR_CPU,
 ) -> list[tuple[str, list[str]]]:
     """The commands that build the training environment, as (label, argv) pairs.
 
-    Two steps, both long enough to deserve a progress line of their own: create
-    the virtualenv, then install the training stack (~280 MB) into it.
+    For the GPU flavour the CUDA build of torch is installed **first**, from
+    PyTorch's own index; installing ultralytics first would pull the CPU wheels and
+    then find its dependency already satisfied, leaving a CPU environment wearing a
+    GPU label.
     """
     base = str(getattr(interpreter, "path", interpreter))
     target = directory or env_dir()
-    return [
-        ("Creating the training environment…", [base, "-m", "venv", str(target)]),
+    python = str(env_python(target))
+    steps = [("Creating the training environment…", [base, "-m", "venv", str(target)])]
+    if flavour == FLAVOUR_GPU:
+        steps.append(
+            (
+                f"Installing CUDA torch ({CUDA_CHANNEL}) — this is the big one…",
+                [
+                    python,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    "--index-url",
+                    CUDA_INDEX,
+                    "torch",
+                    "torchvision",
+                ],
+            )
+        )
+    steps.append(
         (
-            "Installing ultralytics and its dependencies (~280 MB)…",
+            "Installing ultralytics and its dependencies…",
             [
-                str(env_python(target)),
+                python,
                 "-m",
                 "pip",
                 "install",
                 "--disable-pip-version-check",
                 *TRAINING_REQUIREMENTS,
             ],
-        ),
-    ]
+        )
+    )
+    return steps
+
+
+def probe_flavour(python: str | Path) -> tuple[str, str]:
+    """Ask an environment what it actually got: (flavour, a line to show).
+
+    Reports what torch *can do*, not what was asked for — an install can silently
+    fall back to CPU wheels, and a GPU environment that cannot see the card is a
+    CPU environment with extra steps.
+    """
+    script = (
+        "import torch;"
+        "print(torch.__version__, torch.version.cuda,"
+        " torch.cuda.is_available(),"
+        " torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"
+    )
+    try:
+        proc = subprocess.run(
+            [str(python), "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            creationflags=_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:  # pragma: no cover
+        return FLAVOUR_CPU, f"could not ask torch: {exc}"
+    if proc.returncode != 0:
+        return FLAVOUR_CPU, "torch is not installed in this environment"
+    parts = (proc.stdout or "").strip().split(maxsplit=3)
+    if len(parts) < 3:  # pragma: no cover - unexpected torch output
+        return FLAVOUR_CPU, "torch reported nothing useful"
+    version, cuda, available = parts[0], parts[1], parts[2] == "True"
+    device = parts[3] if len(parts) > 3 else "-"
+    if available:
+        return FLAVOUR_GPU, f"torch {version} · CUDA {cuda} · {device}"
+    return FLAVOUR_CPU, f"torch {version} · CPU only"

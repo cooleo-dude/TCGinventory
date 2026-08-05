@@ -49,6 +49,9 @@ TRAINING_PYTHON_PREF = "training_python"
 # What probe_training_env() found when the environment was last validated, so
 # the Operations window can report readiness without importing torch to ask.
 TRAINING_VERSION_PREF = "training_env_version"
+# Which torch build the environment holds: "cpu" or "gpu", as *probed* after
+# installing rather than as requested.
+TRAINING_FLAVOUR_PREF = "training_env_flavour"
 
 # What a training interpreter needs. onnx/onnxslim/onnxruntime are *not* part of
 # a plain `pip install ultralytics` (they sit behind its export-base extra), and
@@ -320,6 +323,16 @@ def forget_training_env() -> None:
     """Drop the recorded interpreter and version — the environment is gone."""
     set_training_python(None)
     config.set_pref(TRAINING_VERSION_PREF, None)
+
+
+def training_env_flavour() -> str | None:
+    """The installed environment's torch build, as recorded at setup."""
+    value = config.get_pref(TRAINING_FLAVOUR_PREF)
+    return str(value) if value else None
+
+
+def remember_training_flavour(flavour: str | None) -> None:
+    config.set_pref(TRAINING_FLAVOUR_PREF, flavour)
 
 
 def training_env_summary() -> TrainingEnv:
