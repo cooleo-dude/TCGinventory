@@ -327,6 +327,46 @@ class _DividerLine(QGraphicsLineItem):
         return super().itemChange(change, value)
 
 
+class _ElidedLabel(QLabel):
+    """A single-line label that elides instead of widening its row.
+
+    A segment's "set · #number" line is as long as the set name, and a plain
+    QLabel reports that whole string as its minimum width. That minimum
+    propagated out through the row, the holder, the scroll area and the splitter
+    until the Recognition view itself could not be made narrower — the panel ran
+    off the screen. Reporting an ignored width instead anchors the panel: the
+    layout decides how much room this line gets, and the full text stays
+    available as the tooltip.
+    """
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__("", parent)
+        self._full = ""
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(0)
+        self.setText(text)  # so text set at construction elides too
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt override)
+        self._full = text or ""
+        self._elide()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        shown = self.fontMetrics().elidedText(
+            self._full, Qt.ElideRight, max(0, self.width())
+        )
+        if shown != super().text():  # guard against a relayout loop
+            super().setText(shown)
+        # A tooltip only where it adds something: when the text is cut short.
+        self.setToolTip(self._full if shown != self._full else "")
+
+
 class _SegRow(QFrame):
     """A segment card row that reports hover enter/leave for cross-highlighting."""
 
@@ -488,6 +528,16 @@ class _SuggestBox(QComboBox):
         self._box = box
         self._name_field = name_field
         self._labels: list[CardLabel | None] = [None]
+        # A combo sizes itself to its longest item by default, and these items
+        # carry "name · set (94%)" — enough to push the whole panel off screen.
+        # Bound it on both sides: never wider than the cap, never narrower than a
+        # usable control (an ignored size policy let the layout collapse it to
+        # nothing). The popup is widened separately, so the full ranked labels
+        # stay readable where they actually matter.
+        self.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(12)
+        self.setMinimumWidth(120)
+        self.setMaximumWidth(190)
         self.addItem("— suggest —")
         self.setEnabled(False)
         self.activated.connect(self._on_activated)
@@ -512,6 +562,17 @@ class _SuggestBox(QComboBox):
             self.setEnabled(True)
         self.setCurrentIndex(0)
         self.blockSignals(False)
+        self._widen_popup()
+
+    def _widen_popup(self) -> None:
+        """Let the drop-down be as wide as its longest guess, even though the
+        closed combo stays narrow — the ranked labels are the whole point."""
+        metrics = self.fontMetrics()
+        widest = max(
+            (metrics.horizontalAdvance(self.itemText(i)) for i in range(self.count())),
+            default=0,
+        )
+        self.view().setMinimumWidth(widest + 36)  # text + scrollbar and padding
 
     def _on_activated(self, index: int) -> None:
         if 0 <= index < len(self._labels) and self._labels[index] is not None:
@@ -703,7 +764,9 @@ class RecognitionView(QWidget):
         titles.setSpacing(2)
         title = QLabel("Recognition")
         title.setObjectName("recogTitle")
-        sub = QLabel(
+        # Elided for the same reason as the segment meta line: a fixed sentence
+        # of prose was the single biggest floor under the window's width.
+        sub = _ElidedLabel(
             "Draw a box around each card, label it from the catalog, and save the "
             "regions your detector trains on."
         )
@@ -1693,7 +1756,7 @@ class RecognitionView(QWidget):
         badge.setFixedSize(22, 22)
         badge.setAlignment(Qt.AlignCenter)
 
-        meta = QLabel()
+        meta = _ElidedLabel()
         meta.setObjectName("segMeta")
         name = _NameField(
             self._conn,
