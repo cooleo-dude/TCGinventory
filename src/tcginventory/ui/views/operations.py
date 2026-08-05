@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -42,6 +43,32 @@ from tcginventory.ui import icons, theme
 
 _COLUMNS = 2  # tiles per row (a "wide" tile spans both)
 _WIDE = {"backup.database", "automation.daily_prices"}
+
+# A line under each heading, so a section says what it is for rather than
+# leaving the tiles to imply it.
+_SECTION_NOTES = {
+    "data_in": "Spreadsheets in — cards you own, or purchases with their cost basis.",
+    "data_out": (
+        "Copies you can keep: readable exports, and the backup a restore reads."
+    ),
+    "prices": "What your cards are worth, and the history behind the trends.",
+    "reference": "The card database and show listings everything else looks up.",
+    "automation": "What runs on its own, with the app closed.",
+    "training_env": (
+        "The Python environment that trains the models. Built once, and removable."
+    ),
+    "model_regions": (
+        "Finds where the cards are in a photo. Trains on the boxes you draw."
+    ),
+    "model_condition": (
+        "Grades wear from both faces of a card. Trains on the grades you set."
+    ),
+    "model_identity": (
+        "Names a card from its picture. Needs no training — a labelled crop "
+        "is the training."
+    ),
+    "maintenance": "Checks and housekeeping for the database itself.",
+}
 
 
 def _mono(size: float, bold: bool = False) -> QFont:
@@ -218,6 +245,70 @@ class _MarketSweepWorker(QThread):
 # ---------------------------------------------------------------------------
 
 
+class _Section(QFrame):
+    """One titled group of operations, in a frame of its own.
+
+    The screen used to run title-grid-title-grid with nothing between, so a heading
+    read as loose text above a field of tiles rather than as the top of a section.
+    Each section now carries its own surface, a heading, a one-line summary of what
+    the section is for, and a rule under it, which is also what makes the in-page
+    navigator's jumps land somewhere legible.
+    """
+
+    def __init__(self, group: ops.Group, blurb: str = "") -> None:
+        super().__init__()
+        self.group = group
+        self.setObjectName("opSection")
+        box = QVBoxLayout(self)
+        box.setContentsMargins(15, 13, 15, 15)
+        box.setSpacing(10)
+
+        head = QVBoxLayout()
+        head.setSpacing(2)
+        title = QLabel(group.label)
+        title.setObjectName("opSectionTitle")
+        head.addWidget(title)
+        if blurb:
+            note = QLabel(blurb)
+            note.setObjectName("opSectionNote")
+            note.setWordWrap(True)
+            head.addWidget(note)
+        box.addLayout(head)
+
+        rule = QFrame()
+        rule.setObjectName("opRule")
+        rule.setFixedHeight(1)
+        box.addWidget(rule)
+
+        self.grid = QGridLayout()
+        self.grid.setSpacing(11)
+        box.addLayout(self.grid)
+
+
+class _SectionNav(QListWidget):
+    """The list of sections down the left: click to jump, and it follows scrolling."""
+
+    def __init__(self, on_pick) -> None:
+        super().__init__()
+        self.setObjectName("opNav")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setFixedWidth(210)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.currentRowChanged.connect(on_pick)
+
+    def show_current(self, row: int) -> None:
+        """Highlight a row without treating it as a click."""
+        if row == self.currentRow() or not (0 <= row < self.count()):
+            return
+        self.blockSignals(True)
+        try:
+            self.setCurrentRow(row)
+        finally:
+            self.blockSignals(False)
+
+
 class _Tile(QFrame):
     """One operation, as the window presents it: what it does, when it last ran,
     and the control that runs it."""
@@ -362,8 +453,8 @@ class OperationsView(QWidget):
         title = QLabel("Operations")
         title.setObjectName("pageTitle")
         sub = QLabel(
-            "Everything that maintains the ledger — bring data in, get it out, "
-            "and keep prices and the card database current."
+            "Everything that maintains the app — bring data in, get it out, keep "
+            "prices and the card database current, and train the recognition models."
         )
         sub.setObjectName("opSub")
         heading = QVBoxLayout()
@@ -389,32 +480,34 @@ class OperationsView(QWidget):
         self._system_row.setSpacing(18)
         col.addWidget(self._system)
 
-        # A group with no operations renders nothing at all — that is what keeps
-        # the reserved "models" group free until its first entry lands.
+        # A group with no operations renders nothing at all — that is what keeps a
+        # reserved group free until its first entry lands.
+        self._sections: list[_Section] = []
         for group in ops.GROUPS:
             members = ops.in_group(group.id)
             if not members:
                 continue
-            col.addWidget(_eyebrow(group.label))
-            grid = QGridLayout()
-            grid.setSpacing(11)
+            section = _Section(group, _SECTION_NOTES.get(group.id, ""))
             row = column = 0
+            # A lone tile spans the section rather than leaving a column empty.
+            solo = len(members) == 1
             for op in members:
                 tile = _Tile(op, self._run)
                 self._tiles[op.id] = tile
-                if op.id in _WIDE:
+                if solo or op.id in _WIDE:
                     if column:
                         row, column = row + 1, 0
-                    grid.addWidget(tile, row, 0, 1, _COLUMNS)
+                    section.grid.addWidget(tile, row, 0, 1, _COLUMNS)
                     row, column = row + 1, 0
                 else:
-                    grid.addWidget(tile, row, column)
+                    section.grid.addWidget(tile, row, column)
                     column += 1
                     if column >= _COLUMNS:
                         row, column = row + 1, 0
             for c in range(_COLUMNS):
-                grid.setColumnStretch(c, 1)
-            col.addLayout(grid)
+                section.grid.setColumnStretch(c, 1)
+            col.addWidget(section)
+            self._sections.append(section)
 
         self._activity = QFrame()
         self._activity.setObjectName("opActivity")
@@ -424,15 +517,52 @@ class OperationsView(QWidget):
         col.addWidget(self._activity)
         col.addStretch(1)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setWidget(body)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(scroll)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setWidget(body)
+
+        # The navigator: ten sections is more than a screenful, so the screen needs
+        # a way to get to one without hunting. It also tracks where you are.
+        self._nav = _SectionNav(self._jump_to_section)
+        for section in self._sections:
+            self._nav.addItem(section.group.label)
+        self._scroll.verticalScrollBar().valueChanged.connect(self._follow_scroll)
+        self._nav.show_current(0)
+
+        nav_column = QVBoxLayout()
+        nav_column.setContentsMargins(12, 16, 0, 16)
+        nav_column.setSpacing(8)
+        nav_column.addWidget(_eyebrow("On this screen"))
+        nav_column.addWidget(self._nav, 1)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addLayout(nav_column)
+        row.addWidget(self._scroll, 1)
 
         self.refresh()
+
+    # -- the in-page navigator ----------------------------------------------
+
+    def _jump_to_section(self, row: int) -> None:
+        """Scroll a section's heading to the top of the view."""
+        if not (0 <= row < len(self._sections)):
+            return
+        section = self._sections[row]
+        bar = self._scroll.verticalScrollBar()
+        bar.setValue(max(0, section.y() - 8))
+
+    def _follow_scroll(self, value: int) -> None:
+        """Keep the navigator on whichever section is at the top of the view."""
+        current = 0
+        for index, section in enumerate(self._sections):
+            if section.y() - 24 <= value:
+                current = index
+            else:
+                break
+        self._nav.show_current(current)
 
     # -- rendering ----------------------------------------------------------
 
@@ -1128,6 +1258,23 @@ def _qss(t: theme.Tokens) -> str:
 
     #opSystem, #opActivity {{ background: {t.surface}; border: 1px solid {t.line};
         border-radius: 14px; }}
+
+    /* A section is a surface of its own, so a heading reads as the top of
+       something rather than as loose text above a field of tiles. */
+    #opSection {{ background: {t.surface}; border: 1px solid {t.line};
+        border-radius: 14px; }}
+    #opSectionTitle {{ color: {t.ink}; font-size: 15px; font-weight: 700;
+        letter-spacing: .2px; }}
+    #opSectionNote {{ color: {t.ink3}; font-size: 11.5px; }}
+    #opRule {{ background: {t.line}; border: none; }}
+
+    /* The in-page navigator: quiet until you are on a section or hovering one. */
+    #opNav {{ background: transparent; border: none; outline: none; }}
+    #opNav::item {{ color: {t.ink3}; font-size: 12px; padding: 6px 10px;
+        border-radius: 8px; border-left: 2px solid transparent; }}
+    #opNav::item:hover {{ color: {t.ink}; background: {t.surface2}; }}
+    #opNav::item:selected {{ color: {t.accent_ink}; background: {t.surface2};
+        border-left: 2px solid {t.accent}; }}
     #opDigest {{ background: {t.surface}; border: 1px solid {t.line};
         border-left: 3px solid {t.accent}; border-radius: 12px; }}
     #opDigest[bad="true"] {{ border-left-color: {t.warn}; }}

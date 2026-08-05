@@ -37,16 +37,21 @@ class Group:
     label: str
 
 
-# Display order of the sections. ``models`` is **reserved** for the coming model
-# metrics/triggers work: a group with no operations renders nothing, so it costs
-# nothing until its first entry lands (see docs/decisions.md, 2026-08-04).
+# Display order of the sections, and the order of the in-page navigator beside
+# them. Each section is about **one** thing: the three recognition models are
+# separate concerns with separate data and separate metrics, and the environment
+# that trains them is machine setup rather than a model at all.
 GROUPS: tuple[Group, ...] = (
     Group("data_in", "Bring data in"),
     Group("data_out", "Get data out"),
-    Group("prices", "Prices & card database"),
+    Group("prices", "Prices"),
+    Group("reference", "Reference data"),
     Group("automation", "Automation"),
+    Group("training_env", "Model training environment"),
+    Group("model_regions", "Region detection model"),
+    Group("model_condition", "Condition model"),
+    Group("model_identity", "Card identity model"),
     Group("maintenance", "Maintenance & diagnostics"),
-    Group("models", "Models & signals"),
 )
 
 
@@ -95,7 +100,7 @@ OPERATIONS: tuple[Operation, ...] = (
     ),
     Operation(
         id="shows.refresh",
-        group="data_in",
+        group="reference",
         title="Refresh card shows",
         blurb=(
             "Re-scrape upcoming shows for the states you follow, so the Calendar "
@@ -175,7 +180,7 @@ OPERATIONS: tuple[Operation, ...] = (
     ),
     Operation(
         id="catalog.update_en",
-        group="prices",
+        group="reference",
         title="Update card database (English)",
         blurb=(
             "Pull the reference catalog: names, sets, collector numbers and art "
@@ -188,7 +193,7 @@ OPERATIONS: tuple[Operation, ...] = (
     ),
     Operation(
         id="catalog.update_jp",
-        group="prices",
+        group="reference",
         title="Update card database (Japanese)",
         blurb=(
             "The same pull for the Japanese market, with English and romaji names "
@@ -201,7 +206,7 @@ OPERATIONS: tuple[Operation, ...] = (
     ),
     Operation(
         id="vision.reindex",
-        group="maintenance",
+        group="model_identity",
         title="Re-index the recognition corpus",
         blurb=(
             "Re-embed every labelled card crop so photo autofill matches against "
@@ -216,7 +221,7 @@ OPERATIONS: tuple[Operation, ...] = (
     # -- Models & signals ---------------------------------------------------
     Operation(
         id="models.training_env",
-        group="models",
+        group="training_env",
         title="Set up model training",
         blurb=(
             "Builds the environment that trains the recognition models: finds a "
@@ -231,7 +236,7 @@ OPERATIONS: tuple[Operation, ...] = (
     ),
     Operation(
         id="models.training_env_remove",
-        group="models",
+        group="training_env",
         title="Remove the training environment",
         blurb=(
             "Deletes the training virtualenv and reclaims its disk space. Your "
@@ -246,7 +251,7 @@ OPERATIONS: tuple[Operation, ...] = (
     ),
     Operation(
         id="models.detector.train",
-        group="models",
+        group="model_regions",
         title="Train the card detector (regions)",
         blurb=(
             "Teaches the detector where cards are in a photo, from every box you "
@@ -262,7 +267,7 @@ OPERATIONS: tuple[Operation, ...] = (
     ),
     Operation(
         id="models.condition.train",
-        group="models",
+        group="model_condition",
         title="Train the condition grader",
         blurb=(
             "Grades card wear (NM → DMG) from both faces of a card — one grade per "

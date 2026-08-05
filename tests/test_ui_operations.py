@@ -186,31 +186,120 @@ def test_background_operation_declines_an_in_memory_database(app, seeded_conn):
     view.deleteLater()
 
 
-def test_only_groups_with_operations_get_a_heading(app, seeded_conn, monkeypatch):
-    """A group renders exactly when it has operations — so a group can be reserved
-    in the registry without putting an empty section on screen."""
+def _section_titles(view):
     from PySide6.QtWidgets import QLabel
 
+    return [
+        label.text()
+        for label in view.findChildren(QLabel)
+        if label.objectName() == "opSectionTitle"
+    ]
+
+
+def test_only_groups_with_operations_get_a_section(app, seeded_conn, monkeypatch):
+    """A group renders exactly when it has operations — so a group can be reserved
+    in the registry without putting an empty section on screen."""
     from tcginventory.ui.views.operations import OperationsView
 
-    # Every shipped group now has entries, so hold the property with a reserved one.
+    # Every shipped group has entries, so hold the property with a reserved one.
     monkeypatch.setattr(
         ops, "GROUPS", (*ops.GROUPS, ops.Group("reserved", "Nothing here yet"))
     )
 
     view = OperationsView(seeded_conn)
-    headings = {
-        label.text()
-        for label in view.findChildren(QLabel)
-        if label.objectName() == "opEyebrow"
-    }
+    titles = _section_titles(view)
 
-    assert "BRING DATA IN" in headings and "PRICES & CARD DATABASE" in headings
-    assert "MODELS & SIGNALS" in headings  # populated by the training entries
-    assert "NOTHING HERE YET" not in headings  # empty → no section
+    assert "Bring data in" in titles
+    assert "Nothing here yet" not in titles  # empty → no section at all
     for group in ops.GROUPS:
-        rendered = group.label.upper() in headings
-        assert rendered == bool(ops.in_group(group.id)), group.id
+        assert (group.label in titles) == bool(ops.in_group(group.id)), group.id
+    view.deleteLater()
+
+
+def test_each_model_gets_its_own_section(app, seeded_conn):
+    """The three models are separate concerns with separate data and metrics, and
+    the environment that trains them is machine setup rather than a model."""
+    from tcginventory.ui.views.operations import OperationsView
+
+    view = OperationsView(seeded_conn)
+    titles = _section_titles(view)
+    for label in (
+        "Model training environment",
+        "Region detection model",
+        "Condition model",
+        "Card identity model",
+    ):
+        assert label in titles, label
+
+    # And nothing shares a section with an unrelated job any more.
+    assert [op.id for op in ops.in_group("training_env")] == [
+        "models.training_env",
+        "models.training_env_remove",
+    ]
+    assert [op.id for op in ops.in_group("model_regions")] == ["models.detector.train"]
+    assert [op.id for op in ops.in_group("model_condition")] == [
+        "models.condition.train"
+    ]
+    assert [op.id for op in ops.in_group("model_identity")] == ["vision.reindex"]
+    view.deleteLater()
+
+
+def test_every_section_carries_a_heading_and_a_note(app, seeded_conn):
+    """A section says what it is for, rather than leaving the tiles to imply it."""
+    from tcginventory.ui.views.operations import _SECTION_NOTES, OperationsView
+
+    view = OperationsView(seeded_conn)
+    assert len(view._sections) == len(_section_titles(view))
+    for section in view._sections:
+        assert _SECTION_NOTES.get(section.group.id), section.group.id
+    view.deleteLater()
+
+
+def test_the_navigator_lists_the_sections_and_jumps_to_them(app, seeded_conn):
+    from tcginventory.ui.views.operations import OperationsView
+
+    view = OperationsView(seeded_conn)
+    view.resize(1200, 700)
+    view.show()
+    app.processEvents()
+
+    assert view._nav.count() == len(view._sections)
+    assert [view._nav.item(i).text() for i in range(view._nav.count())] == [
+        s.group.label for s in view._sections
+    ]
+
+    bar = view._scroll.verticalScrollBar()
+    middle = len(view._sections) // 2
+    view._nav.setCurrentRow(middle)  # a click on the navigator
+    app.processEvents()
+    assert bar.value() > 0  # it actually moved
+    # That section's heading is now at the top of the viewport, near enough.
+    assert abs(view._sections[middle].y() - bar.value()) <= 12
+
+    # The final section sits inside the last viewport, so "jump to it" can only
+    # scroll to the end — not a failure, just how far there is to go.
+    view._nav.setCurrentRow(len(view._sections) - 1)
+    app.processEvents()
+    assert bar.value() == bar.maximum()
+    view.close()
+    view.deleteLater()
+
+
+def test_the_navigator_follows_scrolling(app, seeded_conn):
+    """Scrolling down moves the highlight, without that counting as a click."""
+    from tcginventory.ui.views.operations import OperationsView
+
+    view = OperationsView(seeded_conn)
+    view.resize(1200, 700)
+    view.show()
+    app.processEvents()
+    assert view._nav.currentRow() == 0
+
+    third = view._sections[2]
+    view._scroll.verticalScrollBar().setValue(third.y())
+    app.processEvents()
+    assert view._nav.currentRow() == 2
+    view.close()
     view.deleteLater()
 
 

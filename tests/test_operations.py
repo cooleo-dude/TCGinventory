@@ -38,18 +38,20 @@ def test_registry_is_internally_consistent():
     assert sum(1 for op in ops.OPERATIONS if op.primary) <= 1
 
 
-def test_models_group_holds_the_recognition_training_entries():
-    """The reserved group is now populated: the environment set-up step and its
-    matching teardown, then one training trigger per model kind that *has* a
-    training run (the identifier doesn't — a labelled crop is its training step,
-    so it gets no Train button)."""
-    assert any(g.id == "models" for g in ops.GROUPS)
-    assert [op.id for op in ops.in_group("models")] == [
+def test_each_recognition_model_has_its_own_section():
+    """One section per concern: the environment that trains the models is machine
+    setup, and the three models have separate data, metrics and lifecycles. The
+    identifier gets no Train button at all — a labelled crop is its training step.
+    """
+    assert [op.id for op in ops.in_group("training_env")] == [
         "models.training_env",
         "models.training_env_remove",
-        "models.detector.train",
-        "models.condition.train",
     ]
+    assert [op.id for op in ops.in_group("model_regions")] == ["models.detector.train"]
+    assert [op.id for op in ops.in_group("model_condition")] == [
+        "models.condition.train"
+    ]
+    assert [op.id for op in ops.in_group("model_identity")] == ["vision.reindex"]
     # Both trainers report their age, so a model left alone reads as stale.
     for op_id in ("models.detector.train", "models.condition.train"):
         op = ops.BY_ID[op_id]
@@ -169,14 +171,30 @@ def test_activity_names_operations_and_marks_failures(conn):
     assert lines[1][2] is True
 
 
-def test_maintenance_and_shows_operations_are_registered():
-    """The hub carries more than the old File menu: shows, corpus and DB health."""
+def test_sections_do_not_mix_unrelated_jobs():
+    """Regrouped 2026-08-05: a card-show scrape is reference data rather than a CSV
+    import, prices and the card database are different subjects, and re-indexing the
+    corpus is the identity model's upkeep rather than database hygiene."""
     assert {op.id for op in ops.in_group("maintenance")} == {
-        "vision.reindex",
         "db.integrity_check",
         "db.vacuum",
     }
-    assert "shows.refresh" in {op.id for op in ops.in_group("data_in")}
+    assert {op.id for op in ops.in_group("data_in")} == {
+        "import.items",
+        "import.purchases",
+    }
+    assert {op.id for op in ops.in_group("prices")} == {
+        "prices.refresh",
+        "prices.market_sweep",
+    }
+    assert {op.id for op in ops.in_group("reference")} == {
+        "shows.refresh",
+        "catalog.update_en",
+        "catalog.update_jp",
+    }
+    # Every operation still lands in a declared section.
+    known = {g.id for g in ops.GROUPS}
+    assert all(op.group in known for op in ops.OPERATIONS)
 
 
 def test_shows_status_counts_what_is_stored(conn):
