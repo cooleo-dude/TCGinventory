@@ -25,6 +25,7 @@ def _variants(cents: int, url: str) -> list[CardVariant]:
     """One base printing — the shape PriceLookupWorker emits for a plain card."""
     return [CardVariant("Base", url, cents, True)]
 
+
 # ---------------------------------------------------------------------------
 # max-bid math
 # ---------------------------------------------------------------------------
@@ -663,13 +664,149 @@ def test_add_button_is_the_bottom_card_row(app):
     def add_is_last() -> bool:
         t = view._card_table
         w = t.cellWidget(t.rowCount() - 1, 0)
-        return isinstance(w, QPushButton) and w.text() == "＋"
+        return isinstance(w, QPushButton) and not w.icon().isNull()
 
-    assert view._card_table.rowCount() == 1  # just the ＋ add-row
+    assert view._card_table.rowCount() == 1  # just the add-row
     assert add_is_last()
     view._add_card_row()
     assert view._card_table.rowCount() == 2  # 1 card + add-row
     assert add_is_last()
+    view.deleteLater()
+
+
+def test_add_button_cannot_be_clipped_by_button_padding(app):
+    """Regression: it was a "＋" *label*, and the app stylesheet's 14px of side
+    padding left ~4px for the glyph inside a 32px cell — so it rendered as a
+    sliver. An icon has no text to clip."""
+    view = _view(app)
+    table = view._card_table
+    add = table.cellWidget(table.rowCount() - 1, 0)
+
+    assert add.text() == "" and not add.icon().isNull()
+    assert add.width() >= add.iconSize().width()
+    view.deleteLater()
+
+
+def test_card_columns_are_ordered_identity_printing_money_links(app):
+    """Cond / Holo / Printing sit together: the three fields that decide *which*
+    printing a row is."""
+    from tcginventory.ui.views import auctions as auc
+
+    assert auc._CARD_HEADERS == [
+        "Name",
+        "Set",
+        "#",
+        "Cond",
+        "Holo",
+        "Printing",
+        "Market",
+        "Qty",
+        "TCG",
+        "eBay",
+        "",
+    ]
+    # widgets() is placed by index, so it must track the headers exactly.
+    view = _view(app)
+    row = view._add_card_row()
+    assert len(row.widgets()) == len(auc._CARD_HEADERS) - 1  # last col is delete
+    assert row.widgets()[3] is row.condition
+    assert row.widgets()[4] is row.holo
+    assert row.widgets()[5] is row.printing
+    table = view._card_table
+    for col, widget in enumerate(row.widgets()):
+        assert table.cellWidget(0, col) is widget, auc._CARD_HEADERS[col]
+    view.deleteLater()
+
+
+def test_name_column_absorbs_the_slack_so_nothing_is_cut_off(app):
+    """Regression: fixed widths summed to more than the pane, so the right-hand
+    columns fell off and the horizontal scrollbar ate the ＋ row."""
+    from tcginventory.ui.views import auctions as auc
+
+    view = _view(app)
+    view._add_card_row()
+    table = view._card_table
+
+    def total() -> int:
+        return sum(
+            table.columnWidth(c)
+            for c in range(table.columnCount())
+            if not table.isColumnHidden(c)
+        )
+
+    table.resize(900, 220)  # a pane with room to spare
+    app.processEvents()  # the viewport only recomputes on the event pass
+    view._fit_card_columns()
+    assert total() == table.viewport().width()  # fills it exactly: no dead space
+    assert table.columnWidth(auc._NAME_COL) > auc._NAME_MIN
+
+    # Squeezed narrower than the columns need, Name stops at its floor rather
+    # than collapsing — scrolling is better than an unusable name field.
+    table.resize(420, 220)
+    app.processEvents()
+    view._fit_card_columns()
+    assert table.columnWidth(auc._NAME_COL) == auc._NAME_MIN
+    view.deleteLater()
+
+
+def test_printing_column_appears_only_when_a_row_has_printings(app):
+    from tcginventory.ui.views import auctions as auc
+
+    class _Variant:
+        def __init__(self, label):
+            self.label, self.tcgplayer_url, self.price_cents = label, None, 500
+
+    view = _view(app)
+    row = view._add_card_row()
+    assert view._card_table.isColumnHidden(auc._PRINTING_COL)
+
+    row.set_variants([_Variant("Normal"), _Variant("Reverse Holofoil")])
+    view._sync_printing_column()
+    assert not view._card_table.isColumnHidden(auc._PRINTING_COL)
+
+    # A single printing is no choice at all, so the column goes away again.
+    row.set_variants([_Variant("Normal")])
+    view._sync_printing_column()
+    assert view._card_table.isColumnHidden(auc._PRINTING_COL)
+    view.deleteLater()
+
+
+def test_holo_round_trips_through_a_saved_card(app):
+    from tcginventory.domain.enums import HoloPattern
+    from tcginventory.ui.views import auctions as auc
+
+    view = _view(app)
+    row = view._add_card_row()
+    row.name.setText("Charizard ex")
+    assert row.holo.currentData() == HoloPattern.NON_HOLO.value  # sane default
+
+    auc._select(row.holo, HoloPattern.REVERSE_HOLO.value)
+    card = row.to_card()
+    assert card.holo_pattern == HoloPattern.REVERSE_HOLO.value
+
+    restored = view._add_card_row()
+    restored.set_card(card)
+    assert restored.holo.currentData() == HoloPattern.REVERSE_HOLO.value
+    view.deleteLater()
+
+
+def test_holo_survives_a_save_and_reload(app):
+    """It reaches the exported purchase, so it has to persist with the auction."""
+    from tcginventory.domain.enums import HoloPattern
+    from tcginventory.ui.views import auctions as auc
+
+    view = _view(app)
+    row = view._add_card_row()
+    row.name.setText("Charizard ex")
+    auc._select(row.holo, HoloPattern.HOLO.value)
+    view._title.setText("holo lot")
+    view._save()
+
+    saved = view._repo.list_all()[0]
+    assert saved.cards[0].holo_pattern == HoloPattern.HOLO.value
+
+    view._load_auction(saved.id)
+    assert view._rows[0].holo.currentData() == HoloPattern.HOLO.value
     view.deleteLater()
 
 

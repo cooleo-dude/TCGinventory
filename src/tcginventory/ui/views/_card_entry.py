@@ -79,13 +79,19 @@ class PriceLookupWorker(QThread):
         try:
             provider = TcgcsvProvider()
             variants = provider.variants_for_card(
-                self._set, self._number, self._name,
-                category=self._category, set_code=self._set_code,
+                self._set,
+                self._number,
+                self._name,
+                category=self._category,
+                set_code=self._set_code,
             )
             if not variants:  # suffix-strip / single-product fallback
                 result = provider.price_for_card(
-                    self._set, self._number, self._name,
-                    category=self._category, set_code=self._set_code,
+                    self._set,
+                    self._number,
+                    self._name,
+                    category=self._category,
+                    set_code=self._set_code,
                 )
                 if result:
                     variants = [CardVariant("Base", result[1], result[0], True)]
@@ -221,6 +227,15 @@ class CardEntryMixin:
         cell = getattr(self, "_printing_cell", None)
         if cell is not None:
             cell.setVisible(show)
+
+    def has_printings(self) -> bool:
+        """Whether this card offers a real choice of printing (>1 product).
+
+        The flag, not the widget's visibility: a combo inside a window that was
+        never shown reports invisible regardless, so a host laying out a Printing
+        *column* has to ask this instead.
+        """
+        return len(getattr(self, "_variants", [])) > 1
 
     def _on_printing_changed(self, *_args) -> None:
         variant = self.printing.currentData()

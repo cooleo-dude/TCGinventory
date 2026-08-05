@@ -169,10 +169,33 @@ def _select(combo: QComboBox, value: str | None) -> None:
         combo.setCurrentIndex(idx)
 
 
+def _value_of(field) -> str | None:
+    """The ``.value`` of an enum field, or the string it already is.
+
+    Recognition and the ledger hand over enums; a stored auction card holds the
+    value strings. Both reach the same combos.
+    """
+    return getattr(field, "value", field)
+
+
+# Card-row columns. Identity first (Name … #), then the three fields that decide
+# *which printing* this is (Cond / Holo / Printing), then money, then the links.
 _CARD_HEADERS = [
-    "Name", "Set", "#", "Cond", "Market", "Qty", "TCGplayer", "eBay", "Printing", ""
+    "Name", "Set", "#", "Cond", "Holo", "Printing",
+    "Market", "Qty", "TCG", "eBay", "",
 ]
-_CARD_WIDTHS = [190, 140, 66, 64, 90, 46, 96, 66, 104, 30]
+_NAME_COL = 0
+_PRINTING_COL = _CARD_HEADERS.index("Printing")
+# Every column but Name is fixed; Name absorbs whatever is left so the table
+# always fills its pane exactly — no dead space on the right, and no horizontal
+# scrollbar stealing the row that holds the add button. The combo and button
+# columns are sized from their own sizeHints (they elide or clip their text);
+# the line edits and spin boxes are free to be narrower, since their content
+# scrolls.
+_CARD_WIDTHS = [0, 108, 52, 76, 56, 116, 80, 40, 56, 60, 28]
+# Name still fits its placeholder at this width, and it's the floor that keeps
+# everything on screen when the Printing column is showing too.
+_NAME_MIN = 120
 
 _UNSET = object()  # sentinel: history not supplied -> open the default DB
 _THUMB_BORDER = theme.DARK.line2  # neutral thumbnail frame
@@ -371,6 +394,11 @@ class _AuctionCardRow(CardEntryMixin):
         self.condition = _combo(Condition)
         _select(self.condition, Condition.NM.value)
         self.condition.currentIndexChanged.connect(lambda *_: on_change())
+        # Holo sits beside Cond and Printing: together they decide which printing
+        # of the card this row is, and it carries through to the exported item.
+        self.holo = _combo(HoloPattern)
+        _select(self.holo, HoloPattern.NON_HOLO.value)
+        self.holo.currentIndexChanged.connect(lambda *_: on_change())
         self.market = _money_spin()
         self.market.valueChanged.connect(self._on_market_changed)
         self.qty = QSpinBox()
@@ -378,8 +406,10 @@ class _AuctionCardRow(CardEntryMixin):
         self.qty.setMaximum(9999)
         self.qty.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.qty.valueChanged.connect(lambda *_: on_change())
-        # TCGplayer link button — enabled once a product URL is resolved.
-        self.tcg_btn = QPushButton("TCGplayer")
+        # TCGplayer link button — enabled once a product URL is resolved. Short
+        # labels (the header carries the rest) so the columns stay narrow enough
+        # for Name to have real room; the tooltips say what they open.
+        self.tcg_btn = QPushButton("TCG")
         self.tcg_btn.setEnabled(False)
         self.tcg_btn.setToolTip("Open this card on TCGplayer")
         self.tcg_btn.clicked.connect(self._open_tcgplayer)
@@ -402,16 +432,18 @@ class _AuctionCardRow(CardEntryMixin):
         self._setting_market = False
 
     def widgets(self) -> list[QWidget]:
+        """In column order — the table places these by index (see _CARD_HEADERS)."""
         return [
             self.name,
             self.set,
             self.number,
             self.condition,
+            self.holo,
+            self.printing,
             self.market,
             self.qty,
             self.tcg_btn,
             self.ebay_btn,
-            self.printing,
         ]
 
     def _apply_variant(self, variant) -> None:
@@ -488,6 +520,8 @@ class _AuctionCardRow(CardEntryMixin):
         self.number.setText(card.number or "")
         if card.condition:
             _select(self.condition, card.condition)
+        if card.holo_pattern:
+            _select(self.holo, card.holo_pattern)
         self._setting_market = True
         self.market.setValue(card.market_value_cents / 100)
         self._setting_market = False
@@ -517,6 +551,7 @@ class _AuctionCardRow(CardEntryMixin):
             number=self.number.text().strip() or None,
             language=self._language,
             condition=self.condition.currentData(),
+            holo_pattern=self.holo.currentData(),
             quantity=self.qty.value(),
             market_value_cents=round(self.market.value() * 100),
             image_url=self._image_url,
@@ -1271,6 +1306,7 @@ class AuctionsView(QWidget):
     def _on_view_resized(self) -> None:
         self._render_page()  # width change may alter cards-per-page
         self._fit_split_to_cards()
+        self._fit_card_columns()  # Name absorbs the new width
 
     def _on_splitter_moved(self, *_args) -> None:
         # A user drag (not our own setSizes) pins the split — stop auto-fitting.
@@ -1535,6 +1571,12 @@ class AuctionsView(QWidget):
         self._card_table = QTableWidget(0, len(_CARD_HEADERS))
         self._card_table.setHorizontalHeaderLabels(_CARD_HEADERS)
         _tidy(self._card_table, _CARD_WIDTHS)
+        # Printing only exists for cards with more than one TCGplayer product, so
+        # the column stays hidden until a row actually has a choice to offer.
+        self._card_table.setColumnHidden(_PRINTING_COL, True)
+        # Room for the header, a few cards and the ＋ row — the button used to be
+        # clipped whenever the pane got short.
+        self._card_table.setMinimumHeight(172)
         self._install_card_add_row()
 
         self._auto_detect = QCheckBox("Auto Detect Card")
@@ -1700,19 +1742,69 @@ class AuctionsView(QWidget):
         )
         self._rows.append(row)
         row.name.setFocus()
+        self._fit_card_columns()  # a new row can bring the v-scrollbar in
         self._update_breakdown()
         return row
 
     def _install_card_add_row(self) -> None:
-        """Put the ＋ button in a bottom row of the table so it sits directly
-        under the last card (and scrolls with the rows)."""
-        add = QPushButton("＋")
-        add.setFixedWidth(32)
+        """Put the add button in a bottom row of the table so it sits directly
+        under the last card (and scrolls with the rows).
+
+        An icon button, not a "＋" label: the app stylesheet gives every
+        QPushButton 14px of side padding, which clipped the glyph to a sliver
+        inside a narrow cell. It also matches the row's delete button.
+        """
+        t = theme.active()
+        add = _IconButton("plus", t.ink3, t.accent_ink, size=15)
+        add.setFixedSize(30, 26)
         add.setToolTip("Add a card in this auction")
+        add.setStyleSheet(
+            "QPushButton{background:transparent;border:none;border-radius:6px;}"
+            f"QPushButton:hover{{background:{t.surface2};}}"
+        )
         add.clicked.connect(self._add_card_row)
         r = self._card_table.rowCount()
         self._card_table.insertRow(r)
         self._card_table.setCellWidget(r, 0, add)
+
+    # -- column fitting -----------------------------------------------------
+
+    def _fit_card_columns(self) -> None:
+        """Hold every column at its tuned width and let **Name** take the rest.
+
+        The card table used to carry fixed widths that added up to more than the
+        pane: the last columns fell off the right edge, a horizontal scrollbar
+        appeared and ate the row holding ＋. Sizing Name from what's left means
+        the table fills the pane exactly at any width.
+        """
+        table = getattr(self, "_card_table", None)
+        if table is None:
+            return
+        try:
+            available = table.viewport().width()
+        except RuntimeError:  # torn down mid-resize
+            return
+        if available <= 1:
+            return
+        used = 0
+        for col, width in enumerate(_CARD_WIDTHS):
+            if col == _NAME_COL or table.isColumnHidden(col):
+                continue
+            table.setColumnWidth(col, width)
+            used += width
+        table.setColumnWidth(_NAME_COL, max(_NAME_MIN, available - used))
+
+    def _sync_printing_column(self) -> None:
+        """Show the Printing column only while some row has printings to pick.
+
+        Asks each row whether it *has* printings rather than whether its combo is
+        visible — a widget in an unshown window reports invisible either way.
+        """
+        table = self._card_table
+        hidden = not any(row.has_printings() for row in self._rows)
+        if table.isColumnHidden(_PRINTING_COL) != hidden:
+            table.setColumnHidden(_PRINTING_COL, hidden)
+            self._fit_card_columns()
 
     def _delete_button(self, row: _AuctionCardRow) -> QPushButton:
         t = theme.active()
@@ -1731,6 +1823,8 @@ class AuctionsView(QWidget):
             index = self._rows.index(row)
             self._rows.remove(row)
             self._card_table.removeRow(index)
+        self._sync_printing_column()
+        self._fit_card_columns()
         self._update_breakdown()
         self._refresh_gallery()
 
@@ -1884,6 +1978,7 @@ class AuctionsView(QWidget):
         if not row.market_is_manual:
             row.set_market_cents(base.price_cents)
         row.set_variants(variants)  # offer the printing picker when >1 product
+        self._sync_printing_column()  # …and reveal its column when it appears
         self._update_breakdown()
 
     # -- breakdown / save / load --------------------------------------------
@@ -2022,6 +2117,8 @@ class AuctionsView(QWidget):
                     row.number.setText(card.card_number)
             if card.condition:
                 _select(row.condition, card.condition)
+            if getattr(card, "holo_pattern", None):
+                _select(row.holo, _value_of(card.holo_pattern))
             row.qty.setValue(max(1, card.quantity))
         self._update_breakdown()
         self._refresh_gallery()
@@ -2060,4 +2157,5 @@ def _tidy(table: QTableWidget, widths: list[int]) -> None:
     header.setSectionResizeMode(QHeaderView.Interactive)
     header.setMinimumSectionSize(22)
     for col, width in enumerate(widths):
-        table.setColumnWidth(col, width)
+        if width:
+            table.setColumnWidth(col, width)
