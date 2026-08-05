@@ -167,6 +167,27 @@ def main() -> int:
     log.info("Data directory: %s", data_dir)
     log.info("Database path: %s", config.db_path())
 
+    # Qt comes up first now, so the startup screen can cover the work below —
+    # building the workspace is about two seconds on a real collection, and it
+    # used to be two seconds of nothing. Imported lazily all the same, so headless
+    # tooling (tests, the scheduled refresh) never needs a display.
+    from PySide6.QtWidgets import QApplication
+
+    from tcginventory.ui.assets import app_icon
+    from tcginventory.ui.main_window import NAV_ITEMS, MainWindow
+    from tcginventory.ui.splash import StartupSplash
+    from tcginventory.ui.theme import apply_theme
+
+    app = QApplication(sys.argv)
+    app.setApplicationName(config.APP_NAME)
+    apply_theme(app)  # Ember Duo: Fusion + IBM Plex + palette/QSS
+    app.setWindowIcon(app_icon())
+
+    # One step per view, plus the startup backup ("opening the ledger" is the
+    # state the screen comes up in, not a step of its own).
+    splash = StartupSplash(total_steps=len(NAV_ITEMS) + 1)
+    splash.begin("Opening the ledger…")
+
     # Open the DB and run any pending migrations on startup (F-DA-7). The
     # connection stays open for the app's lifetime; the views read from it.
     from tcginventory.data.db import open_database
@@ -193,6 +214,7 @@ def main() -> int:
 
     # Automatic timestamped backup on startup (F-DA-6); never blocks launch.
     if conn.execute("SELECT COUNT(*) FROM item").fetchone()[0] > 0:
+        splash.step("Writing a startup backup…")
         try:
             from tcginventory.data.backup import auto_backup, timestamp_for_filename
 
@@ -220,20 +242,14 @@ def main() -> int:
         except Exception:
             log.exception("Collection-value recording failed (continuing)")
 
-    # Imported lazily so headless tooling (tests, tools) can import this module
-    # without requiring a Qt display or the PySide6 dependency at import time.
-    from PySide6.QtWidgets import QApplication
-
-    from tcginventory.ui.assets import app_icon
-    from tcginventory.ui.main_window import MainWindow
-    from tcginventory.ui.theme import apply_theme
-
-    app = QApplication(sys.argv)
-    app.setApplicationName(config.APP_NAME)
-    apply_theme(app)  # Neon Slate: Fusion + IBM Plex + palette/QSS
-    app.setWindowIcon(app_icon())
-    window = MainWindow(conn)
-    window.show()
+    # Each view names itself on the splash as it's built, which is also what
+    # keeps the screen painting: they're all built on this thread.
+    try:
+        window = MainWindow(conn, progress=lambda name: splash.step(f"Loading {name}…"))
+    except Exception:
+        splash.close()  # never leave a splash hanging over a failure
+        raise
+    splash.finish(window)
     try:
         return app.exec()
     finally:

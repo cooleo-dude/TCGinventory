@@ -103,7 +103,7 @@ class _MascotLabel(QLabel):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, conn: sqlite3.Connection | None = None) -> None:
+    def __init__(self, conn: sqlite3.Connection | None = None, progress=None) -> None:
         super().__init__()
         # Standalone/tests: fall back to a fresh in-memory database.
         if conn is None:
@@ -116,36 +116,52 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(app_icon())
         self.resize(1280, 960)  # taller so the half-height calendar fits tall cells
 
-        self._dashboard = DashboardView(conn)
-        self._transaction = TransactionView(conn)
-        self._inventory = InventoryView(conn)
-        self._history = HistoryView(conn)
-        self._price_lookup = PriceLookupView(conn)
+        # Building the ten views is the two seconds of startup, spread fairly
+        # evenly across them. ``progress(name)`` is called before each one so the
+        # splash can name it and repaint; nothing here changes without it.
+        def announce(name: str) -> None:
+            if progress is not None:
+                progress(name)
+
         # Watched auctions live in their own file; mirror the main DB's storage
         # nature so an in-memory app (tests) doesn't touch the real auctions.db.
-        self._auctions = AuctionsView(
-            conn, auctions_conn=open_auctions(None if self._db_file else ":memory:")
+        builders = (
+            ("Dashboard", lambda: DashboardView(conn)),
+            ("Transaction", lambda: TransactionView(conn)),
+            ("Inventory", lambda: InventoryView(conn)),
+            ("History", lambda: HistoryView(conn)),
+            ("Calendar", lambda: CalendarView(conn)),
+            ("Price Lookup", lambda: PriceLookupView(conn)),
+            (
+                "eBay Auctions",
+                lambda: AuctionsView(
+                    conn,
+                    auctions_conn=open_auctions(None if self._db_file else ":memory:"),
+                ),
+            ),
+            ("Recognition", lambda: RecognitionView(conn, prewarm=True)),
+            ("Market", lambda: MarketView(conn)),
+            ("Operations", lambda: OperationsView(conn)),
         )
-
-        self._calendar = CalendarView(conn)
-        self._recognition = RecognitionView(conn, prewarm=True)
-        self._market = MarketView(conn)
-        self._operations = OperationsView(conn)
-        # Stack order must match NAV_ITEMS.
+        # Built (and stacked) in NAV_ITEMS order — the nav indexes into the stack.
         self._stack = QStackedWidget()
-        for view in (
-            self._dashboard,
-            self._transaction,
-            self._inventory,
-            self._history,
-            self._calendar,
-            self._price_lookup,
-            self._auctions,
-            self._recognition,
-            self._market,
-            self._operations,
-        ):
+        views: dict[str, QWidget] = {}
+        for name, build in builders:
+            announce(name)
+            view = build()
+            views[name] = view
             self._stack.addWidget(view)
+
+        self._dashboard = views["Dashboard"]
+        self._transaction = views["Transaction"]
+        self._inventory = views["Inventory"]
+        self._history = views["History"]
+        self._calendar = views["Calendar"]
+        self._price_lookup = views["Price Lookup"]
+        self._auctions = views["eBay Auctions"]
+        self._recognition = views["Recognition"]
+        self._market = views["Market"]
+        self._operations = views["Operations"]
 
         # Refresh-on-demand: every view is pre-built and refreshed once on first
         # visit; a screen only re-refreshes when the data behind it has actually
