@@ -520,11 +520,16 @@ class _SuggestBox(QComboBox):
 
 class _ConditionBox(QComboBox):
     """Per-box condition picker; writes the wear grade to the box so the saved
-    corpus region records each card's condition."""
+    corpus region records each card's condition.
 
-    def __init__(self, box: _Box) -> None:
+    A card is one object with two faces, so an edit here is announced through
+    ``on_change`` and mirrored onto the paired box on the other side.
+    """
+
+    def __init__(self, box: _Box, on_change=None) -> None:
         super().__init__()
         self._box = box
+        self._on_change = on_change  # (box, value) -> None
         self.addItem("—", None)
         for cond in Condition:
             if cond is Condition.SEALED:
@@ -538,11 +543,20 @@ class _ConditionBox(QComboBox):
 
     def _on_changed(self, *_args) -> None:
         self._box.condition = self.currentData()
+        if self._on_change is not None:
+            self._on_change(self._box, self._box.condition)
 
     def set_condition(self, value: str | None) -> None:
+        """Show ``value`` without announcing it — used when mirroring an edit
+        made on the other face, so the two don't bounce updates at each other."""
         pos = self.findData(value)
         if pos >= 0:
-            self.setCurrentIndex(pos)
+            self.blockSignals(True)
+            try:
+                self.setCurrentIndex(pos)
+            finally:
+                self.blockSignals(False)
+            self._box.condition = value
 
 
 class _PairRail(QWidget):
@@ -1712,7 +1726,7 @@ class RecognitionView(QWidget):
         r2.addWidget(suggest)
         # Condition picker on every card so the corpus records its grade — not
         # just on card backs. "Assess condition" still auto-fills it on backs.
-        cond = _ConditionBox(box)
+        cond = _ConditionBox(box, on_change=self._on_condition_edited)
         cond.setObjectName("segCond")
         cond.setToolTip("Condition / wear grade for this card (saved to the corpus)")
         self._condition_boxes[box.number] = cond
@@ -1895,6 +1909,44 @@ class RecognitionView(QWidget):
         self._rebuild_strip()
         self._strip.setCurrentRow(insert_at)
 
+    def _paired_session(self, session: _Session) -> _Session | None:
+        """The other face of ``session``'s card set, if one has been added."""
+        if session.pair_id is None:
+            return None
+        for other in self._sessions:
+            if other is not session and other.pair_id == session.pair_id:
+                return other
+        return None
+
+    def _on_condition_edited(self, box: _Box, value: str | None) -> None:
+        """Mirror a condition onto the same card's other face.
+
+        One physical card has one condition, so grading it from either side means
+        the same thing. Whichever face was edited last wins, and the paired box is
+        updated in place — including its picker when that face is on screen.
+        """
+        if not (0 <= self._current < len(self._sessions)):
+            return
+        other = self._paired_session(self._sessions[self._current])
+        if other is None:
+            return
+        for candidate in other.boxes:
+            if candidate.number == box.number:
+                if candidate.condition != value:
+                    candidate.condition = value
+                    self._sync_condition_widget(other, candidate, value)
+                break
+
+    def _sync_condition_widget(
+        self, session: _Session, box: _Box, value: str | None
+    ) -> None:
+        """Refresh the paired picker when its face happens to be displayed."""
+        if 0 <= self._current < len(self._sessions):
+            if self._sessions[self._current] is session:
+                combo = self._condition_boxes.get(box.number)
+                if combo is not None:
+                    combo.set_condition(value)
+
     def _ensure_assessor(self):
         if self._assessor is None:
             from tcginventory.services.condition import build_condition_assessor
@@ -1924,6 +1976,7 @@ class RecognitionView(QWidget):
                     crop = self._crop_for(full, box, session)
                     est = cond.assess_condition(crop, assessor)
                     box.condition = est.condition.value
+                    self._on_condition_edited(box, box.condition)
                     combo = self._condition_boxes.get(box.number)
                     if combo is not None:
                         combo.set_condition(box.condition)
