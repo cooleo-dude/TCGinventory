@@ -7,10 +7,11 @@ params that narrow a product to a specific listing — ``Language``, ``Printing`
     /product/84586/…?page=1&Language=English&Printing=Unlimited&Condition=Lightly+Played
 
 :func:`product_url` layers those params on from the item's own fields so an
-opened link lands on the most specific listing. Unknown fields are omitted
-rather than guessed (over-constraining would show an empty result). Works for
-any card-like object — the ledger ``Item`` (enum fields) or an ``AuctionCard``
-(``.value`` strings) — by normalising each field to its string value.
+opened link lands on the most specific listing. Unknown *and default* fields are
+omitted rather than guessed — over-constraining shows an empty result, which is
+worse than landing on the product page. Works for any card-like object — the
+ledger ``Item`` (enum fields) or an ``AuctionCard`` (``.value`` strings) — by
+normalising each field to its string value.
 """
 
 from __future__ import annotations
@@ -51,7 +52,15 @@ def _val(field) -> str | None:
 
 def _printing(item) -> str | None:
     """TCGplayer's Printing value — a single field conflating edition (WOTC-era)
-    and foil variant (modern)."""
+    and foil variant (modern).
+
+    Only emitted when the card states something **explicit**: a WOTC-era edition,
+    or a foil pattern the user actually chose. Plain non-holo returns None rather
+    than ``Normal``: NH is this app's default for every new card, so mapping it
+    pinned nearly every link to the Normal printing — and a product whose
+    printings are (say) only Holofoil and Reverse Holofoil then filters down to
+    nothing at all.
+    """
     edition = _val(getattr(item, "edition", None))
     holo = _val(getattr(item, "holo_pattern", None))
     if edition in ("1st Edition", "Unlimited"):
@@ -64,9 +73,7 @@ def _printing(item) -> str | None:
         return "Reverse Holofoil"
     if holo == "H":
         return "Holofoil"
-    if holo == "NH":
-        return "Normal"
-    return None
+    return None  # non-holo or unset — nothing worth narrowing by
 
 
 def _condition(item) -> str | None:

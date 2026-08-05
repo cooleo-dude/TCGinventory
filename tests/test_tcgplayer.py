@@ -29,8 +29,12 @@ def _item(url: str = _BASE, **kw) -> Item:
 
 def test_wotc_unlimited_matches_the_example():
     url = product_url(
-        _item(condition=Condition.LP, edition=Edition.UNLIMITED,
-              holo_pattern=HoloPattern.NON_HOLO, language=Language.EN)
+        _item(
+            condition=Condition.LP,
+            edition=Edition.UNLIMITED,
+            holo_pattern=HoloPattern.NON_HOLO,
+            language=Language.EN,
+        )
     )
     assert url.startswith(_BASE + "?")
     assert _params(url) == {
@@ -43,8 +47,12 @@ def test_wotc_unlimited_matches_the_example():
 
 def test_modern_reverse_holo_heavily_played():
     url = product_url(
-        _item(condition=Condition.HP, holo_pattern=HoloPattern.REVERSE_HOLO,
-              edition=Edition.NA, language=Language.EN)
+        _item(
+            condition=Condition.HP,
+            holo_pattern=HoloPattern.REVERSE_HOLO,
+            edition=Edition.NA,
+            language=Language.EN,
+        )
     )
     assert _params(url) == {
         "page": "1",
@@ -69,8 +77,13 @@ def test_first_edition_holo_combines():
 
 def test_graded_omits_condition():
     url = product_url(
-        _item(is_graded=True, grading_company=GradingCompany.PSA, grade="10",
-              condition=None, holo_pattern=HoloPattern.HOLO)
+        _item(
+            is_graded=True,
+            grading_company=GradingCompany.PSA,
+            grade="10",
+            condition=None,
+            holo_pattern=HoloPattern.HOLO,
+        )
     )
     assert "Condition" not in _params(url)
     assert _params(url)["Printing"] == "Holofoil"
@@ -81,6 +94,50 @@ def test_unknown_printing_is_omitted():
     p = _params(url)
     assert "Printing" not in p
     assert p["Condition"] == "Near Mint"
+
+
+def test_plain_non_holo_never_sends_printing_normal():
+    """Regression: NH is the default every card is created with, so mapping it to
+    ``Printing=Normal`` pinned nearly every link to the Normal printing — and a
+    product without one filters down to an empty page.
+
+    The earlier tests missed it because ``Item.holo_pattern`` defaults to None,
+    while the entry rows always set NH explicitly.
+    """
+    for kwargs in (
+        {"holo_pattern": HoloPattern.NON_HOLO},
+        {"holo_pattern": HoloPattern.NON_HOLO, "edition": Edition.NA},
+    ):
+        p = _params(product_url(_item(condition=Condition.NM, **kwargs)))
+        assert "Printing" not in p, kwargs
+        assert p["Condition"] == "Near Mint"  # the rest still narrows
+
+    # Same for the auction card's string fields — the shape the editor saves.
+    card = SimpleNamespace(
+        tcgplayer_url=_BASE,
+        condition="NM",
+        holo_pattern="NH",
+        edition="N/A",
+        language="EN",
+        is_graded=False,
+    )
+    assert "Printing" not in _params(product_url(card))
+
+
+def test_an_explicitly_chosen_printing_is_still_sent():
+    """Only the default is dropped: a foil pattern or edition the user picked is
+    real precision and stays on the link."""
+    cases = {
+        "Reverse Holofoil": {"holo_pattern": HoloPattern.REVERSE_HOLO},
+        "Holofoil": {"holo_pattern": HoloPattern.HOLO},
+        "Unlimited": {
+            "edition": Edition.UNLIMITED,
+            "holo_pattern": HoloPattern.NON_HOLO,
+        },
+        "1st Edition": {"edition": Edition.FIRST, "holo_pattern": HoloPattern.NON_HOLO},
+    }
+    for expected, kwargs in cases.items():
+        assert _params(product_url(_item(**kwargs)))["Printing"] == expected
 
 
 def test_no_stored_url_returns_none():
@@ -106,8 +163,12 @@ def test_link_for_prefers_product_then_search():
 def test_accepts_raw_string_fields_like_an_auction_card():
     # AuctionCard stores fields as .value strings, not enums.
     card = SimpleNamespace(
-        tcgplayer_url=_BASE, condition="MP", holo_pattern="RH",
-        edition="N/A", language="EN", is_graded=False,
+        tcgplayer_url=_BASE,
+        condition="MP",
+        holo_pattern="RH",
+        edition="N/A",
+        language="EN",
+        is_graded=False,
     )
     p = _params(product_url(card))
     assert p["Condition"] == "Moderately Played"
