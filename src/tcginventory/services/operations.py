@@ -265,9 +265,10 @@ OPERATIONS: tuple[Operation, ...] = (
         group="models",
         title="Train the condition grader",
         blurb=(
-            "Grades card wear (NM → DMG) from photos of card backs. It learns from "
-            "backs you have labelled in Recognition's card-backs mode, so it needs "
-            "those before it can train at all."
+            "Grades card wear (NM → DMG) from both faces of a card — one grade per "
+            "card, learned from its front and its back together, since wear shows "
+            "on the corners and edges of each. Photograph cards front and back in "
+            "Recognition and grade them to build it up."
         ),
         verb="Train",
         icon="image",
