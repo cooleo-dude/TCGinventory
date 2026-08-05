@@ -165,12 +165,17 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
     - Both trainers carry `stale_after_days=14`, so a model left alone for more
       than a fortnight reads **Stale** even when the corpus hasn't moved; a corpus
       that *has* moved shows Stale immediately, with "new since" in the tooltip.
-  - **Next:** decide how the condition grader is actually produced. The data is
-    further along than assumed — the corpus already holds **9 back-side images and
-    33 graded back regions** (NM 58 / MP 2 / HP 2 / LP 1 / DMG 3 across all
-    regions), so this is no longer blocked on photographing backs, only on
-    choosing the model and its metrics (accuracy, macro-F1, confusion matrix, and
-    mean ordinal grade distance — being one grade out matters far less than three).
+  - **Condition grader ✅ done (2026-08-05), and refusing to train.** Ordinal
+    ridge regression over named wear measurements from *both* faces
+    (`condition_features.py`), fitted in-process by `condition_train.py` — no
+    training environment, since numpy does it in milliseconds, and the artifact is
+    readable JSON coefficients rather than an ONNX. One grade per **card**: faces
+    join on `(pair_group, pair index, box number)`, a back's grade is the label and
+    the Recognition window now mirrors condition edits across faces so fronts can't
+    drift to their `NM` default. Validation is leave-one-capture-out; promotion
+    compares **mean grade distance, lower wins**. The gate needs 8+ cards per grade
+    across 3+ photos: on 44 graded cards the fit scores 14% exact / 1.52 grades off
+    against a 0.84 baseline, so the tile greys its button and says what's missing.
 
 - **M-V2** — learning from the ingested corpus. **Crop-exemplar retrieval ✅
   done (usable now):** every labeled region is embedded and stored

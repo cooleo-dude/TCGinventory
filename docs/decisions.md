@@ -4,6 +4,53 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-05 — Condition grading: one grade per card, ordinal regression, no torch
+
+- **Measured first, and it changed the plan.** The shipped whitening heuristic
+  scores **33% against 76% for always guessing NM** on the labelled backs, mean
+  1.52 grades off, and grades all DMG cards as NM. It isn't weak — it measures the
+  wrong thing: `_border_whitening` reads near-white pixels in the crop's border
+  band, which tracks *how much mat the drawn box included* and the photo's
+  lighting. Crops on a light mat scored 0.11–0.27 whitening while damaged cards on
+  a dark background scored 0.007–0.107. `LearnedConditionModel` now takes
+  precedence; the heuristic stays only as a last resort.
+- **The unit is a physical card, not a region.** A card is photographed front and
+  back, and it has one condition. Faces join on `(pair_group, which pair inside the
+  group, box number)` — `pair_group` turns out to be allocated **per session, not
+  per photo pair**, and getting that wrong collapsed 33 cards into 16.
+- **Fronts are input views, not labels.** Every front in the corpus read `NM`
+  while its paired back read MP/LP/DMG/HP, because `NM` is the default on a new
+  box. So a back's grade is the label when present, the front is a fallback, and
+  disagreements are reported rather than averaged. **The Recognition window now
+  mirrors a condition edit onto the paired face (most recent edit wins)**, so the
+  divergence cannot recur.
+- **Two normalisations before any measurement:** tighten the crop to the card, and
+  flatten exposure. Without them a model learns the photograph — the exact failure
+  the heuristic demonstrates.
+- **Ordinal regression, not five-way classification.** The scale is ordered:
+  calling an NM card LP is a near miss, DMG is a disaster. One continuous wear
+  score plus rounding shares evidence across grades instead of splitting a small
+  corpus five ways, and the headline metric is **mean grade distance**.
+- **Decision: this model does *not* use the training environment.** It is a ridge
+  regression over ~20 named measurements (`condition_features.py`), which numpy
+  fits in milliseconds, so it trains in-process as an ordinary background
+  operation — no ultralytics, no 280 MB — and its artifact is a few KB of readable
+  JSON coefficients rather than an ONNX. A coefficient like
+  `front_edge_grad_max +0.73` states what the model believes. The CNN path stays
+  open behind the same `assess()` interface for when the corpus earns it.
+- **Validation is leave-one-capture-out**, since every photo has its own lighting
+  and mat; a card must never be scored by a model that saw its own photo. Baselines
+  are measured on the same folds so the log records whether the model beat doing
+  nothing.
+- **Promotion is kind-aware:** lower mean grade distance wins, the opposite of the
+  detector's mAP, so condition cannot share `should_promote()`.
+- **Gate:** each grade needs **8+ cards across 3+ separate photos**. Counting
+  distinct photos is the part that matters — a grade seen in one photo teaches that
+  photo's background. Measured on 44 graded cards the fitted model scores 14% exact
+  and 1.52 grades off against a 0.84 baseline, i.e. **worse than guessing**, so the
+  gate refuses and the Operations tile greys its button and lists what is missing.
+  That is the framework working, not failing.
+
 ### 2026-08-04 — Detection is trained-only, and every training run is logged
 
 - **Decision (part 1):** delete the **classic-CV proposer**. Detection is now
