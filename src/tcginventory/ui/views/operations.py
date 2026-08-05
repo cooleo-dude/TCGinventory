@@ -1042,13 +1042,13 @@ class OperationsView(QWidget):
             return
         scope = ci.SCOPES[choices.index(chosen)]
         if scope != ci.SCOPE_CACHED:
-            gb = counts[scope] * 0.129
+            gb = counts[scope] * 0.129 / 1000  # ~129 KB of art per card
             if (
                 QMessageBox.question(
                     self,
                     "Index the card catalog",
                     f"This downloads art for up to {counts[scope]:,} cards — roughly "
-                    f"{gb:.1f} GB — and keeps a lossless copy of each so a future "
+                    f"{gb:.1f} GB — and keeps each one on disk so a future "
                     "model can re-learn offline.\n\nIt can be stopped and resumed; "
                     "nothing is downloaded twice. Continue?",
                 )

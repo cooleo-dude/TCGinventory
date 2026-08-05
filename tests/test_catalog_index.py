@@ -98,10 +98,12 @@ def test_scopes_select_different_slices(env):
 # -- the sweep ---------------------------------------------------------------
 
 
-def test_indexing_embeds_and_archives_losslessly(env):
+def test_indexing_keeps_the_art_in_one_place(env):
+    """The downloaded PNG *is* the archive. Re-encoding it would have cost more
+    disk in duplicates than the format saved, so nothing is copied."""
     conn, repo = env
     _catalog(conn, [("a-1", "Alpha", "S"), ("a-2", "Beta", "S")])
-    _cache_art("a-1", shade=90)
+    before = _cache_art("a-1", shade=90).read_bytes()
     _cache_art("a-2", shade=200)
 
     emb = _Embedder()
@@ -111,14 +113,13 @@ def test_indexing_embeds_and_archives_losslessly(env):
     assert summary.embedded == 2 and summary.failed == 0
     assert repo.get_embedding("a-1", emb.version) is not None
 
-    # Archived copies are lossless: the pixels survive exactly, which is what lets
-    # a future model re-embed from disk without re-downloading.
-    archived = ci.archive_path("a-1")
-    assert archived.is_file()
-    with Image.open(archived) as got, Image.open(cardimages.cache_path("a-1")) as orig:
-        assert np.array_equal(
-            np.asarray(got.convert("RGB")), np.asarray(orig.convert("RGB"))
-        )
+    # Same file, untouched, and no second copy anywhere.
+    assert ci.art_path("a-1") == cardimages.cache_path("a-1")
+    assert ci.art_path("a-1").read_bytes() == before
+    assert len(list(cardimages.cache_dir().glob("*"))) == 2
+
+    # And a re-embed can read it back without the network — the point of keeping it.
+    assert ci.source_for("a-1") is not None
 
 
 def test_a_second_run_skips_what_is_already_indexed(env):
@@ -196,19 +197,31 @@ def test_a_broken_image_does_not_end_the_sweep(env):
 # -- reclaim -----------------------------------------------------------------
 
 
-def test_reclaim_keeps_what_you_have_used_and_frees_the_rest(env):
+def test_reclaim_frees_only_what_the_sweep_fetched(env):
+    """The bargain: a sweep can be undone without losing the art you had before it,
+    the cards you labelled, or the cards you own."""
     conn, repo = env
     _catalog(
         conn,
-        [("labelled", "L", "S"), ("owned", "O", "Owned Set"), ("swept", "W", "S")],
+        [
+            ("had-before", "H", "S"),
+            ("labelled", "L", "S"),
+            ("owned", "O", "Owned Set"),
+            ("swept", "W", "S"),
+        ],
     )
+
+    # What you had before any sweep ran.
+    _cache_art("had-before")
+    ci.take_snapshot()
+
+    # What a sweep then brought in.
     for cid in ("labelled", "owned", "swept"):
         _cache_art(cid)
     ci.index_catalog(
         conn, repo, ci.SCOPE_CACHED, embedder=_Embedder(), allow_download=False
     )
 
-    # A labelled card, and a card in inventory: both must survive.
     cap = repo.add_capture(source="manual")
     img = repo.add_image(cap, "sha", "/scene.png", "front")
     repo.add_region(img, 1, (0, 0, 1, 1), None, CardLabel(card_id="labelled"))
@@ -216,34 +229,48 @@ def test_reclaim_keeps_what_you_have_used_and_frees_the_rest(env):
 
     ItemRepository(conn).add(make_item("O", set_name="Owned Set"))
 
-    # The preview cache is what "already downloaded" means, so clear it to isolate
-    # the archive: otherwise every card counts as protected.
-    for path in cardimages.cache_dir().glob("*.png"):
-        path.unlink()
-
     result = ci.reclaim(conn, repo)
-    assert result.removed == 1 and result.kept == 2
+    assert result.removed == 1 and result.kept == 3
     assert result.bytes_freed > 0
-    assert not ci.archive_path("swept").exists()
-    assert ci.archive_path("labelled").exists()
-    assert ci.archive_path("owned").exists()
+    assert not ci.art_path("swept").exists()  # only the sweep's own download goes
+    for cid in ("had-before", "labelled", "owned"):
+        assert ci.art_path(cid).exists(), cid
     # Vectors are never touched: they are the part that makes recognition work.
-    assert repo.embedding_count() == 3
+    assert repo.embedding_count() == 4
 
 
 def test_reclaim_can_be_previewed(env):
     conn, repo = env
-    _catalog(conn, [("swept", "W", "S")])
+    _catalog(conn, [("kept", "K", "S"), ("swept", "W", "S")])
+    _cache_art("kept")
+    ci.take_snapshot()
     _cache_art("swept")
     ci.index_catalog(
         conn, repo, ci.SCOPE_CACHED, embedder=_Embedder(), allow_download=False
     )
-    for path in cardimages.cache_dir().glob("*.png"):
-        path.unlink()
 
     preview = ci.reclaim(conn, repo, dry_run=True)
     assert preview.removed == 1
-    assert ci.archive_path("swept").exists()  # nothing actually deleted
+    assert ci.art_path("swept").exists()  # nothing actually deleted
+
+
+def test_the_snapshot_is_taken_once_and_survives_later_sweeps(env):
+    """After a sweep everything looks "already downloaded", so the record of what
+    predated it has to be made before the first fetch and never overwritten."""
+    conn, repo = env
+    _catalog(conn, [("first", "F", "S"), ("later", "L", "S")])
+    _cache_art("first")
+
+    ci.index_catalog(
+        conn, repo, ci.SCOPE_CACHED, embedder=_Embedder(), allow_download=False
+    )
+    assert ci.snapshot_ids() == {"first"}
+
+    _cache_art("later")
+    ci.index_catalog(
+        conn, repo, ci.SCOPE_CACHED, embedder=_Embedder(), allow_download=False
+    )
+    assert ci.snapshot_ids() == {"first"}  # the second sweep does not widen it
 
 
 # -- status ------------------------------------------------------------------
@@ -260,5 +287,5 @@ def test_status_reports_how_much_of_the_catalog_is_searchable(env):
     status = ci.index_status(conn, repo, embedder=emb)
     assert status.catalog == 4
     assert status.indexed == 2
-    assert status.archived == 2 and status.archive_bytes > 0
+    assert status.archived == 2 and status.archive_bytes > 0  # the PNG store
     assert not status.complete

@@ -7,18 +7,25 @@ a card can be recognised the first time it is seen.
 
 **Two costs, and only one of them is large.** The index — a 384-float vector per
 card — is ~82 MB for 53k cards, and a brute-force search over all of it takes about
-a millisecond, so no index structure is needed. The images are the weight: ~6.9 GB
-as downloaded. They are kept as **lossless WebP** (~5.6 GB) rather than discarded,
-because a future identifier model invalidates every vector and re-embedding from
-disk is a 30-minute job where re-downloading is not. Lossless rather than q95
-because ~5% of cards sit within 0.004 cosine of a near-identical reprint, and
-lossy compression moves a vector by about that much — noise the same size as the
-signal, precisely where the signal matters.
+a millisecond, so no index structure is needed. The art is the weight: ~6.9 GB.
+
+**The art is kept as the downloaded PNG, in one place.** Re-encoding to lossless
+WebP saved only 18% (card art is photographic, so lossless compression has little
+to work with) and would have meant storing every card twice — once as the preview
+the app already caches, once as an archive — which costs more disk than the format
+saves. Lossy was ruled out on measurement rather than taste: the median card sits
+0.19 cosine from its nearest rival, but ~5% sit within 0.004, and q95
+recompression moves a vector by about that much. That is noise the size of the
+signal exactly where reprints have to be told apart.
+
+Keeping the art at all is what makes a future identifier affordable: a new model
+invalidates every vector, and re-embedding from disk is half an hour where
+re-downloading is 7 GB.
 
 The sweep is resumable (it skips what is already embedded for the current model
-version), polite (bounded concurrency, and it never re-downloads what it has), and
-reversible: :func:`reclaim` deletes archived art that nothing depends on, keeping
-the vectors and every card you have actually used.
+version), polite (a small download pool, and it never re-fetches what it has), and
+reversible: :func:`reclaim` deletes art that nothing depends on, keeping the
+vectors and every card you had before the sweep or have used since.
 """
 
 from __future__ import annotations
@@ -45,27 +52,61 @@ SCOPE_LABELS = {
     SCOPE_ALL: "The whole catalog",
 }
 
-ARCHIVE_SUFFIX = ".webp"
+# Cards whose art was on disk before a sweep ran. Written once, at the start of
+# the first sweep: afterwards every card looks "already downloaded", so there
+# would be no way to tell what the sweep brought in and what you already had.
+SNAPSHOT_NAME = "pre_sweep_cache.json"
+
+# Small on purpose: the art comes from a free CDN, and 53k requests is already
+# a lot to ask of it.
+DOWNLOAD_WORKERS = 8
 
 
-def archive_dir() -> Path:
-    """Where the lossless art copies live — beside the corpus, not the previews."""
-    return config.data_dir() / "vision" / "catalog"
+def snapshot_path() -> Path:
+    return config.data_dir() / "vision" / SNAPSHOT_NAME
 
 
-def archive_path(card_id: str) -> Path:
-    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in card_id)
-    return archive_dir() / f"{safe}{ARCHIVE_SUFFIX}"
+def art_path(card_id: str) -> Path:
+    """Where a card's art lives. One store: the preview cache the app already
+    uses, so a swept card and a hovered card are the same file."""
+    return cardimages.cache_path(card_id)
 
 
 def source_for(card_id: str) -> Path | None:
-    """The best local copy of a card's art: the archive first, then the preview
-    cache. This is what a re-embed reads, so it must not need the network."""
-    archived = archive_path(card_id)
-    if archived.is_file():
-        return archived
-    preview = cardimages.cache_path(card_id)
-    return preview if preview.is_file() else None
+    """The local copy of a card's art, or None. This is what a re-embed reads, so
+    it must never need the network."""
+    path = art_path(card_id)
+    return path if path.is_file() else None
+
+
+def take_snapshot(*, force: bool = False) -> set[str]:
+    """Record what was cached before any sweep, so reclaim can give back only what
+    a sweep fetched. Idempotent: the first snapshot is the one that counts."""
+    import json
+
+    target = snapshot_path()
+    if target.is_file() and not force:
+        try:
+            return set(json.loads(target.read_text(encoding="utf-8")))
+        except (OSError, ValueError):  # pragma: no cover - unreadable snapshot
+            return set()
+    existing = sorted(p.stem for p in cardimages.cache_dir().glob("*.png"))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(existing), encoding="utf-8")
+    return set(existing)
+
+
+def snapshot_ids() -> set[str]:
+    """The recorded pre-sweep cache, or everything on disk if none was taken."""
+    import json
+
+    target = snapshot_path()
+    if not target.is_file():
+        return {p.stem for p in cardimages.cache_dir().glob("*.png")}
+    try:
+        return set(json.loads(target.read_text(encoding="utf-8")))
+    except (OSError, ValueError):  # pragma: no cover
+        return set()
 
 
 @dataclass
@@ -134,12 +175,20 @@ def index_catalog(
     on_progress: Callable[[IndexProgress], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
     allow_download: bool = True,
+    workers: int = DOWNLOAD_WORKERS,
 ) -> IndexSummary:
-    """Embed a scope of the catalog, archiving the art it had to fetch.
+    """Embed a scope of the catalog, fetching art it doesn't have.
 
     Skips anything already embedded for this model version, so a second run is
     cheap and an interrupted one resumes where it stopped.
+
+    Downloads run in a small pool while embedding stays on this thread: the work
+    is network-bound, and 53k sequential round trips would take hours where the
+    embedding itself takes about half of one. The pool is deliberately small — the
+    art comes from a free CDN.
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     from tcginventory.services.recognizer import get_shared_embedder
 
     embedder = embedder or get_shared_embedder()
@@ -147,24 +196,44 @@ def index_catalog(
     summary = IndexSummary(scope=scope)
     pairs = scope_card_ids(conn, scope)
     summary.considered = len(pairs)
-    archive_dir().mkdir(parents=True, exist_ok=True)
 
-    for done, (card_id, url) in enumerate(pairs, start=1):
-        if should_stop is not None and should_stop():
-            summary.stopped = True
-            break
+    # Record what was already here before anything is fetched, so a later reclaim
+    # can tell the sweep's downloads from the art you already had.
+    take_snapshot()
+
+    todo: list[tuple[str, str | None]] = []
+    for card_id, url in pairs:
         if repo.get_embedding(card_id, version) is not None:
             summary.already_indexed += 1
         else:
-            try:
-                source = source_for(card_id)
-                if source is None and allow_download and url:
-                    if cardimages.ensure_cached(card_id, url):
-                        summary.downloaded += 1
-                        source = source_for(card_id)
-                if source is None:
-                    summary.failed += 1
-                else:
+            todo.append((card_id, url))
+
+    def fetch(item: tuple[str, str | None]) -> tuple[str, Path | None, bool]:
+        card_id, url = item
+        local = source_for(card_id)
+        if local is not None:
+            return card_id, local, False
+        if not (allow_download and url):
+            return card_id, None, False
+        try:
+            got = cardimages.ensure_cached(card_id, url)
+        except Exception:  # pragma: no cover - network paths
+            return card_id, None, False
+        return card_id, (got if got and Path(got).is_file() else None), bool(got)
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for card_id, source, downloaded in pool.map(fetch, todo):
+            done += 1
+            if should_stop is not None and should_stop():
+                summary.stopped = True
+                break
+            if downloaded:
+                summary.downloaded += 1
+            if source is None:
+                summary.failed += 1
+            else:
+                try:
                     vector = embedder.embed(source)
                     repo.put_embedding(
                         card_id,
@@ -173,38 +242,21 @@ def index_catalog(
                         np.asarray(vector, dtype=np.float32).tobytes(),
                     )
                     summary.embedded += 1
-                    if _archive(card_id, source):
-                        summary.archived += 1
-            except Exception as exc:  # one bad image must not end the sweep
-                summary.failed += 1
-                if len(summary.errors) < 10:
-                    summary.errors.append(f"{card_id}: {exc}")
-        if on_progress is not None:
-            on_progress(
-                IndexProgress(
-                    done=done,
-                    total=len(pairs),
-                    card_id=card_id,
-                    downloaded=summary.downloaded,
-                    skipped=summary.already_indexed,
+                except Exception as exc:  # one bad image must not end the sweep
+                    summary.failed += 1
+                    if len(summary.errors) < 10:
+                        summary.errors.append(f"{card_id}: {exc}")
+            if on_progress is not None:
+                on_progress(
+                    IndexProgress(
+                        done=done + summary.already_indexed,
+                        total=len(pairs),
+                        card_id=card_id,
+                        downloaded=summary.downloaded,
+                        skipped=summary.already_indexed,
+                    )
                 )
-            )
     return summary
-
-
-def _archive(card_id: str, source: Path) -> bool:
-    """Keep a lossless copy so a future model can re-embed without the network."""
-    target = archive_path(card_id)
-    if target.is_file():
-        return False
-    from PIL import Image
-
-    try:
-        with Image.open(source) as im:
-            im.convert("RGB").save(target, "WEBP", lossless=True)
-    except (OSError, ValueError):
-        return False
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +272,7 @@ def protected_card_ids(conn: sqlite3.Connection, repo: VisionRepository) -> set[
     preview before any sweep ran.
     """
     protected = set(repo.labeled_card_ids())
+    protected.update(snapshot_ids())  # what you had before any sweep
     try:
         rows = conn.execute(
             "SELECT DISTINCT c.card_id FROM card_catalog c JOIN item i "
@@ -228,7 +281,6 @@ def protected_card_ids(conn: sqlite3.Connection, repo: VisionRepository) -> set[
         protected.update(r["card_id"] for r in rows)
     except sqlite3.Error:  # pragma: no cover - defensive
         pass
-    protected.update(p.stem for p in cardimages.cache_dir().glob("*.png"))
     return protected
 
 
@@ -257,7 +309,7 @@ def reclaim(
     they are 82 MB and they are the part that makes recognition work."""
     keep = set(protected) if protected is not None else protected_card_ids(conn, repo)
     result = ReclaimSummary()
-    for path in archive_dir().glob(f"*{ARCHIVE_SUFFIX}"):
+    for path in cardimages.cache_dir().glob("*.png"):
         if path.stem in keep:
             result.kept += 1
             continue
@@ -298,8 +350,8 @@ def index_status(
     ).fetchone()[0]
     archived = 0
     total_bytes = 0
-    if archive_dir().is_dir():
-        for path in archive_dir().glob(f"*{ARCHIVE_SUFFIX}"):
+    if cardimages.cache_dir().is_dir():
+        for path in cardimages.cache_dir().glob("*.png"):
             archived += 1
             try:
                 total_bytes += path.stat().st_size

@@ -212,8 +212,8 @@ OPERATIONS: tuple[Operation, ...] = (
             "Lets recognition name a card it has never seen. Until this runs, "
             "suggestions can only offer cards you have already labelled — 43 out of "
             "53,289. Choose how much to take on: art already downloaded costs "
-            "nothing, the whole catalog is a long download kept as lossless copies "
-            "so a future model can re-learn from them offline."
+            "nothing; the whole catalog is a long download, kept on disk so a "
+            "future model can re-learn from it without fetching anything again."
         ),
         verb="Index…",
         icon="database",
