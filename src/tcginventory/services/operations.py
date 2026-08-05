@@ -205,6 +205,35 @@ OPERATIONS: tuple[Operation, ...] = (
         caption="Loaded",
     ),
     Operation(
+        id="identity.index_catalog",
+        group="model_identity",
+        title="Index the card catalog",
+        blurb=(
+            "Lets recognition name a card it has never seen. Until this runs, "
+            "suggestions can only offer cards you have already labelled — 43 out of "
+            "53,289. Choose how much to take on: art already downloaded costs "
+            "nothing, the whole catalog is a long download kept as lossless copies "
+            "so a future model can re-learn from them offline."
+        ),
+        verb="Index…",
+        icon="database",
+        caption="Catalog index",
+    ),
+    Operation(
+        id="identity.reclaim",
+        group="model_identity",
+        title="Reclaim catalog art",
+        blurb=(
+            "Deletes archived card art that nothing depends on, keeping every card "
+            "you have labelled, own, or had already downloaded. The index itself "
+            "stays — it is 82 MB and it is the part that makes recognition work."
+        ),
+        verb="Reclaim",
+        icon="trash-2",
+        kind=KIND_BACKGROUND,
+        caption="Archived art",
+    ),
+    Operation(
         id="vision.reindex",
         group="model_identity",
         title="Re-index the recognition corpus",
@@ -566,6 +595,9 @@ def status_for(conn, op: Operation, *, history_conn=None) -> Status:
     if op.id == "models.condition.train":
         return _model_status(op, KIND_CONDITION)
 
+    if op.id in ("identity.index_catalog", "identity.reclaim"):
+        return _catalog_index_status(conn, op)
+
     if op.id == "vision.reindex":
         captures, regions, exemplars = corpus_facts()
         if not regions:
@@ -714,6 +746,58 @@ def _training_env_status(op: Operation) -> Status:
     if trainingenv.is_bootstrapped():
         return Status("set up, but incomplete", STALE, detail=detail)
     return Status(f"not set up · {found[0].label} found", NEVER, detail=detail)
+
+
+def _catalog_index_status(conn, op: Operation) -> Status:
+    """How much of the catalog recognition can currently reach."""
+    from tcginventory.services import catalog_index as ci
+
+    vision = _open_vision()
+    if vision is None:
+        return Status("unavailable", NEVER, actionable=False)
+    try:
+        from tcginventory.data.vision import VisionRepository
+
+        repo = VisionRepository(vision)
+        status = ci.index_status(conn, repo)
+        if op.id == "identity.reclaim":
+            if not status.archived:
+                return Status(
+                    "nothing archived yet",
+                    NEVER,
+                    actionable=False,
+                    detail="There is no catalog art to reclaim until the index runs.",
+                )
+            keep = len(ci.protected_card_ids(conn, repo))
+            return Status(
+                f"{status.archived:,} cards · {status.archive_bytes / 1e9:.2f} GB",
+                READY,
+                detail=(
+                    f"{keep:,} cards are protected — labelled, owned, or already "
+                    "downloaded before the sweep. The rest can go."
+                ),
+            )
+        if not status.indexed:
+            return Status(
+                f"not indexed · {status.catalog:,} cards available",
+                NEVER,
+                detail=(
+                    "Suggestions can only offer cards you have already labelled "
+                    "until this runs."
+                ),
+            )
+        share = 100 * status.indexed / max(1, status.catalog)
+        state = READY if status.complete else STALE
+        return Status(
+            f"{status.indexed:,} of {status.catalog:,} cards ({share:.0f}%)",
+            state,
+            detail=(
+                f"Indexed for {status.model_version}. Archived art: "
+                f"{status.archive_bytes / 1e9:.2f} GB."
+            ),
+        )
+    finally:
+        vision.close()
 
 
 def _model_status(op: Operation, kind: str) -> Status:

@@ -52,7 +52,11 @@ def test_each_recognition_model_has_its_own_section():
     assert [op.id for op in ops.in_group("model_condition")] == [
         "models.condition.train"
     ]
-    assert [op.id for op in ops.in_group("model_identity")] == ["vision.reindex"]
+    assert [op.id for op in ops.in_group("model_identity")] == [
+        "identity.index_catalog",
+        "identity.reclaim",
+        "vision.reindex",
+    ]
     # Both trainers report their age, so a model left alone reads as stale.
     for op_id in ("models.detector.train", "models.condition.train"):
         op = ops.BY_ID[op_id]

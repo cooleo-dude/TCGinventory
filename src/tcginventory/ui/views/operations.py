@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QMessageBox,
@@ -716,6 +717,10 @@ class OperationsView(QWidget):
             "catalog.update_jp": lambda: self._update_catalog("JP"),
             "shows.refresh": lambda: self._task("shows.refresh", _refresh_shows),
             "vision.reindex": lambda: self._task("vision.reindex", _reindex_corpus),
+            "identity.index_catalog": self._index_catalog,
+            "identity.reclaim": lambda: self._task(
+                "identity.reclaim", _reclaim_catalog_art
+            ),
             "models.training_env": lambda: self._setup_env(
                 "models.training_env", "cpu"
             ),
@@ -1007,6 +1012,53 @@ class OperationsView(QWidget):
                 return
         self._task(op_id, lambda conn, f=flavour: _build_training_env(conn, f))
 
+    def _index_catalog(self) -> None:
+        """Ask how much of the catalog to take on, then index it in the background.
+
+        The scopes differ by orders of magnitude — nothing, a couple of gigabytes,
+        or most of an evening — so this asks rather than assuming.
+        """
+        from tcginventory.services import catalog_index as ci
+
+        counts = {}
+        for scope in ci.SCOPES:
+            try:
+                counts[scope] = len(ci.scope_card_ids(self._conn, scope))
+            except Exception:  # pragma: no cover - catalog unavailable
+                counts[scope] = 0
+        choices = [
+            f"{ci.SCOPE_LABELS[scope]} — {counts[scope]:,} cards" for scope in ci.SCOPES
+        ]
+        chosen, ok = QInputDialog.getItem(
+            self,
+            "Index the card catalog",
+            "Recognition can only name cards it has embeddings for.\n"
+            "How much of the catalog should it learn?",
+            choices,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        scope = ci.SCOPES[choices.index(chosen)]
+        if scope != ci.SCOPE_CACHED:
+            gb = counts[scope] * 0.129
+            if (
+                QMessageBox.question(
+                    self,
+                    "Index the card catalog",
+                    f"This downloads art for up to {counts[scope]:,} cards — roughly "
+                    f"{gb:.1f} GB — and keeps a lossless copy of each so a future "
+                    "model can re-learn offline.\n\nIt can be stopped and resumed; "
+                    "nothing is downloaded twice. Continue?",
+                )
+                != QMessageBox.Yes
+            ):
+                return
+        self._task(
+            "identity.index_catalog", lambda conn, s=scope: _index_catalog_task(conn, s)
+        )
+
     def _train_condition(self) -> None:
         """Train the condition grader, or explain exactly what the corpus lacks.
 
@@ -1230,6 +1282,38 @@ def _train_condition_model(_conn) -> str:
         )
     finally:
         conn.close()
+
+
+def _index_catalog_task(conn, scope: str) -> str:
+    """Embed a scope of the catalog, then hand back unneeded art automatically."""
+    from tcginventory.data.vision import VisionRepository, open_vision
+    from tcginventory.services import catalog_index as ci
+
+    vision = open_vision()
+    try:
+        repo = VisionRepository(vision)
+        summary = ci.index_catalog(conn, repo, scope)
+        line = summary.summary
+        # Reclaim runs on its own once the sweep lands, so the disk is given back
+        # without having to remember to ask for it.
+        if summary.archived and not summary.stopped:
+            freed = ci.reclaim(conn, repo)
+            if freed.removed:
+                line += f" · reclaimed {freed.bytes_freed / 1e9:.2f} GB"
+        return line
+    finally:
+        vision.close()
+
+
+def _reclaim_catalog_art(conn) -> str:
+    from tcginventory.data.vision import VisionRepository, open_vision
+    from tcginventory.services import catalog_index as ci
+
+    vision = open_vision()
+    try:
+        return ci.reclaim(conn, VisionRepository(vision)).summary
+    finally:
+        vision.close()
 
 
 def _reindex_corpus(_conn) -> str:
