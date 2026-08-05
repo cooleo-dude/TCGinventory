@@ -316,6 +316,12 @@ def remember_training_env(env: TrainingEnv) -> None:
     config.set_pref(TRAINING_VERSION_PREF, env.version if env.ok else None)
 
 
+def forget_training_env() -> None:
+    """Drop the recorded interpreter and version — the environment is gone."""
+    set_training_python(None)
+    config.set_pref(TRAINING_VERSION_PREF, None)
+
+
 def training_env_summary() -> TrainingEnv:
     """The saved environment, read from preferences only — **no subprocess**.
 

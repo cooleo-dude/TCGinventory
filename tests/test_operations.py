@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -38,12 +39,14 @@ def test_registry_is_internally_consistent():
 
 
 def test_models_group_holds_the_recognition_training_entries():
-    """The reserved group is now populated: an environment set-up step and one
-    training trigger per model kind that *has* a training run (the identifier
-    doesn't — a labelled crop is its training step, so it gets no Train button)."""
+    """The reserved group is now populated: the environment set-up step and its
+    matching teardown, then one training trigger per model kind that *has* a
+    training run (the identifier doesn't — a labelled crop is its training step,
+    so it gets no Train button)."""
     assert any(g.id == "models" for g in ops.GROUPS)
     assert [op.id for op in ops.in_group("models")] == [
         "models.training_env",
+        "models.training_env_remove",
         "models.detector.train",
         "models.condition.train",
     ]
@@ -427,3 +430,115 @@ def test_training_env_status_reports_a_recorded_environment(
     status = ops.status_for(conn, ops.BY_ID["models.training_env"])
     assert status.state == ops.READY
     assert "8.4.115" in status.value
+    # Already built: nothing for the button to do, and it says why.
+    assert status.actionable is False
+    assert "remove the environment first" in (status.detail or "").lower()
+
+
+def _fake_env(tmp_path):
+    """A training environment on disk, laid out the way setup builds it."""
+    from tcginventory.services import trainingenv
+
+    env = tmp_path / trainingenv.ENV_DIRNAME
+    binaries = env / ("Scripts" if os.name == "nt" else "bin")
+    binaries.mkdir(parents=True)
+    python = trainingenv.env_python(env)
+    python.write_bytes(b"x" * 1024)
+    (env / "Lib").mkdir()
+    (env / "Lib" / "torch.pyd").write_bytes(b"y" * 4096)
+    return env, python
+
+
+def test_setup_stays_clickable_while_the_environment_is_incomplete(
+    conn, monkeypatch, tmp_path
+):
+    """A half-built env is repaired by running setup again — greying that out
+    would leave the user with no way forward but deletion."""
+    from tcginventory.services import trainingenv
+
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        trainingenv,
+        "discover_interpreters",
+        lambda: [trainingenv.Interpreter(r"C:\py\python.exe", (3, 12), "registry")],
+    )
+    _fake_env(tmp_path)  # exists, but nothing was ever validated
+
+    status = ops.status_for(conn, ops.BY_ID["models.training_env"])
+    assert status.state == ops.STALE
+    assert status.actionable is True
+
+
+def test_remove_tile_is_dead_until_an_environment_exists(conn, monkeypatch, tmp_path):
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    op = ops.BY_ID["models.training_env_remove"]
+
+    status = ops.status_for(conn, op)
+    assert status.state == ops.NEVER and status.actionable is False
+    assert "nothing to remove" in status.value
+
+    _fake_env(tmp_path)
+    status = ops.status_for(conn, op)
+    assert status.actionable is True
+    assert "5.0 KB" in status.value  # the 1 KB stub + the 4 KB package
+    assert "models" in (status.detail or "").lower()
+
+
+def test_removing_the_environment_keeps_models_and_forgets_the_interpreter(
+    monkeypatch, tmp_path
+):
+    from tcginventory.services import training, trainingenv
+
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    env, python = _fake_env(tmp_path)
+    training.remember_training_env(
+        training.TrainingEnv(str(python), True, "8.4.115", "ultralytics 8.4.115")
+    )
+    # The things that must survive: trained models and the labelled corpus.
+    models = tmp_path / "vision" / "models"
+    models.mkdir(parents=True)
+    (models / "card_yolo.onnx").write_bytes(b"model")
+    (tmp_path / "vision.db").write_bytes(b"corpus")
+
+    reclaimed = trainingenv.remove_env()
+
+    assert reclaimed == 5120
+    assert not env.exists()
+    assert (models / "card_yolo.onnx").read_bytes() == b"model"
+    assert (tmp_path / "vision.db").exists()
+    # The recorded interpreter pointed inside the env, so it is forgotten.
+    assert training.training_python() is None
+    assert training.training_env_summary().ready is False
+
+
+def test_removing_the_environment_keeps_a_hand_picked_interpreter(
+    monkeypatch, tmp_path
+):
+    """Someone who pointed the app at their own Python keeps that choice."""
+    from tcginventory.services import training, trainingenv
+
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    _fake_env(tmp_path)
+    outside = tmp_path / "system-python.exe"
+    outside.write_bytes(b"")
+    training.remember_training_env(
+        training.TrainingEnv(str(outside), True, "8.4.115", "ultralytics 8.4.115")
+    )
+
+    trainingenv.remove_env()
+
+    assert training.training_python() == str(outside)
+
+
+def test_remove_env_refuses_anything_that_is_not_the_environment(tmp_path):
+    """A guard on the one operation in the app that deletes a directory."""
+    from tcginventory.services import trainingenv
+
+    precious = tmp_path / "vision"
+    precious.mkdir()
+    with pytest.raises(RuntimeError, match="Not a training environment"):
+        trainingenv.remove_env(precious)
+    assert precious.exists()
+
+    with pytest.raises(RuntimeError, match="Not a training environment"):
+        trainingenv.remove_env(tmp_path / trainingenv.ENV_DIRNAME)  # absent

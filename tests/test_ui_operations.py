@@ -288,6 +288,81 @@ def test_digest_banner_appears_for_background_work_and_dismisses(
     view.deleteLater()
 
 
+def _install_fake_env(tmp_path):
+    """An environment on disk plus the recorded interpreter, as setup leaves it."""
+    from tcginventory.services import training, trainingenv
+
+    env = tmp_path / trainingenv.ENV_DIRNAME
+    (env / ("Scripts" if os.name == "nt" else "bin")).mkdir(parents=True)
+    python = trainingenv.env_python(env)
+    python.write_bytes(b"x" * 2048)
+    training.remember_training_env(
+        training.TrainingEnv(str(python), True, "8.4.115", "ultralytics 8.4.115")
+    )
+    return env
+
+
+def test_setup_button_greys_out_once_the_environment_exists(app, seeded_conn, tmp_path):
+    """Regression: 'Set up model training' stayed clickable after setup, so it
+    would happily rebuild an environment that was already there."""
+    from tcginventory.ui.views.operations import OperationsView
+
+    view = OperationsView(seeded_conn)
+    setup = view._tiles["models.training_env"]
+    remove = view._tiles["models.training_env_remove"]
+    assert not remove.button.isEnabled()  # nothing installed, nothing to remove
+
+    _install_fake_env(tmp_path)
+    view.refresh()
+
+    assert not setup.button.isEnabled()
+    assert "remove the environment first" in setup.button.toolTip().lower()
+    assert remove.button.isEnabled()  # …and its opposite comes alive
+    view.deleteLater()
+
+
+def test_removing_the_environment_revives_the_setup_button(app, seeded_conn, tmp_path):
+    """The pair flips together — finishing one refreshes its whole group."""
+    from tcginventory.services import trainingenv
+    from tcginventory.ui.views.operations import OperationsView, _remove_training_env
+
+    env = _install_fake_env(tmp_path)
+    view = OperationsView(seeded_conn)
+    assert not view._tiles["models.training_env"].button.isEnabled()
+
+    summary = _remove_training_env(seeded_conn)
+    view._log("models.training_env_remove", True, summary)
+
+    assert not env.exists()
+    assert "models kept" in summary
+    assert view._tiles["models.training_env"].button.isEnabled()
+    assert not view._tiles["models.training_env_remove"].button.isEnabled()
+    assert not trainingenv.is_bootstrapped()
+    view.deleteLater()
+
+
+def test_removing_the_environment_is_confirmed_first(
+    app, seeded_conn, tmp_path, monkeypatch
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    from tcginventory.ui.views.operations import OperationsView
+
+    env = _install_fake_env(tmp_path)
+    asked: list[str] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *a, **k: (asked.append(a[2]), QMessageBox.No)[1]),
+    )
+    view = OperationsView(seeded_conn)
+    view._run(ops.BY_ID["models.training_env_remove"])
+
+    assert env.exists()  # declined → nothing deleted
+    assert "models" in asked[0].lower() and "corpus" in asked[0].lower()
+    view.deleteLater()
+
+
 def test_file_menu_is_trimmed_to_operations_and_exit(app, seeded_conn):
     from tcginventory.ui.main_window import MainWindow
 

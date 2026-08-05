@@ -307,6 +307,14 @@ class _Tile(QFrame):
             on = status.state == ops.ON
             self.button.setChecked(on)
             self.button.setText("On" if on else "Off")
+        else:
+            # Nothing to do right now (already built, nothing to remove): grey the
+            # button and let the tooltip say why, rather than letting the click
+            # start work that would be a no-op or a mistake.
+            self.button.setEnabled(status.actionable)
+            self.button.setToolTip(
+                (status.detail or "") if not status.actionable else ""
+            )
         self._repolish()
 
     def set_running(self, running: bool) -> None:
@@ -576,6 +584,7 @@ class OperationsView(QWidget):
             "models.training_env": lambda: self._task(
                 "models.training_env", _setup_training_env
             ),
+            "models.training_env_remove": self._remove_training_env,
             "models.detector.train": lambda: self._task(
                 "models.detector.train", _train_detector
             ),
@@ -589,9 +598,14 @@ class OperationsView(QWidget):
 
     def _log(self, op_id: str, ok: bool, summary: str, *, notify: bool = False) -> None:
         ops.record(self._conn, op_id, ok=ok, summary=summary)
-        tile = self._tiles.get(op_id)
-        if tile is not None:
-            tile.show_status(ops.status_for(self._conn, tile.op))
+        # Refresh the whole group, not just this tile: operations that sit
+        # together tend to gate each other — building the training environment
+        # is exactly what makes "Remove" available, and vice versa.
+        finished = ops.BY_ID.get(op_id)
+        for tile in self._tiles.values():
+            if tile.op.id == op_id or (finished and tile.op.group == finished.group):
+                if tile.op.id not in self._workers:
+                    tile.show_status(ops.status_for(self._conn, tile.op))
         self._render_activity()
         self._render_system()
         if notify:
@@ -808,6 +822,23 @@ class OperationsView(QWidget):
 
     # -- toggle -------------------------------------------------------------
 
+    def _remove_training_env(self) -> None:
+        """Confirm first: it's a big download to rebuild, even though nothing
+        irreplaceable goes with it."""
+        from tcginventory.services import trainingenv
+
+        op = ops.BY_ID["models.training_env_remove"]
+        prompt = (
+            f"Remove the training environment?\n\n"
+            f"Deletes {trainingenv.env_dir()} and frees "
+            f"{ops.human_bytes(trainingenv.env_size())}.\n\n"
+            "Kept: your trained models, the labelled corpus, and every training "
+            "run.\n\nSetting it up again re-downloads about 280 MB."
+        )
+        if QMessageBox.question(self, op.title, prompt) != QMessageBox.Yes:
+            return
+        self._task(op.id, _remove_training_env)
+
     def _train_condition(self) -> None:
         """The grader has no training path yet — say what's missing, plainly."""
         from tcginventory.data.vision import VisionRepository, open_vision
@@ -921,6 +952,15 @@ def _setup_training_env(_conn) -> str:
         raise RuntimeError(f"Environment built but not usable: {env.detail}")
     training.remember_training_env(env)
     return f"{env.detail} · {interpreter.label}"
+
+
+def _remove_training_env(_conn) -> str:
+    """Delete the training virtualenv; models and corpus are left alone."""
+    from tcginventory.services import trainingenv
+
+    target = trainingenv.env_dir()
+    reclaimed = trainingenv.remove_env()
+    return f"removed {target} — {ops.human_bytes(reclaimed)} reclaimed, models kept"
 
 
 def _train_detector(_conn) -> str:

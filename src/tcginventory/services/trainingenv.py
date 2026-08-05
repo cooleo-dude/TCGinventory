@@ -113,9 +113,7 @@ def _from_launcher() -> list[tuple[str, tuple[int, int] | None]]:
         match = re.search(r"(?:-V:(\d+)\.(\d+))?\s*\*?\s*(\S:\\.*python\.exe)", line)
         if not match:
             continue
-        version = (
-            (int(match.group(1)), int(match.group(2))) if match.group(1) else None
-        )
+        version = (int(match.group(1)), int(match.group(2))) if match.group(1) else None
         found.append((match.group(3).strip(), version))
     return found
 
@@ -189,6 +187,53 @@ def discover_interpreters() -> list[Interpreter]:
         return (not in_venv, item.version or (0, 0))
 
     return sorted(resolved, key=rank, reverse=True)
+
+
+def env_size(directory: Path | None = None) -> int:
+    """Bytes on disk under the training environment (0 when there isn't one)."""
+    base = Path(directory or env_dir())
+    total = 0
+    if not base.is_dir():
+        return 0
+    for path in base.rglob("*"):
+        try:
+            if path.is_file() and not path.is_symlink():
+                total += path.stat().st_size
+        except OSError:  # vanished mid-walk, or unreadable — skip it
+            continue
+    return total
+
+
+def remove_env(directory: Path | None = None) -> int:
+    """Delete the training environment, returning the bytes reclaimed.
+
+    **Models are never touched.** Trained artefacts live in
+    ``<data>/vision/models`` and the corpus in ``vision.db``; this only removes
+    ``<data>/training-env``, which is nothing but an interpreter and its
+    packages, and is rebuilt by running setup again.
+
+    The recorded ``training_python`` preference is cleared only when it pointed
+    *into* the environment being removed — a user who chose their own interpreter
+    keeps that choice.
+    """
+    from tcginventory.services import training
+
+    base = Path(directory or env_dir()).resolve()
+    if base.name != ENV_DIRNAME or not base.is_dir():
+        raise RuntimeError(f"Not a training environment: {base}")
+
+    reclaimed = env_size(base)
+    shutil.rmtree(base)
+
+    recorded = training.training_python()
+    if recorded:
+        try:
+            inside = Path(recorded).resolve().is_relative_to(base)
+        except (OSError, ValueError):
+            inside = False
+        if inside:
+            training.forget_training_env()
+    return reclaimed
 
 
 def bootstrap_steps(

@@ -230,6 +230,21 @@ OPERATIONS: tuple[Operation, ...] = (
         caption="Training env",
     ),
     Operation(
+        id="models.training_env_remove",
+        group="models",
+        title="Remove the training environment",
+        blurb=(
+            "Deletes the training virtualenv and reclaims its disk space. Your "
+            "trained models, the labelled corpus and every training run are kept "
+            "— only the interpreter and its packages go. Set it up again whenever "
+            "you want to train."
+        ),
+        verb="Remove",
+        icon="trash-2",
+        kind=KIND_BACKGROUND,
+        caption="Disk use",
+    ),
+    Operation(
         id="models.detector.train",
         group="models",
         title="Train the card detector (regions)",
@@ -327,6 +342,10 @@ class Status:
     value: str  # the mono line under the caption
     state: str  # drives the pill
     detail: str | None = None  # tooltip / secondary text
+    # False when running the operation right now would be meaningless — the
+    # environment is already built, or there is nothing to remove. The tile
+    # greys its button out and explains why from ``detail``.
+    actionable: bool = True
 
 
 def _parse(stamp: str | None) -> datetime | None:
@@ -500,7 +519,18 @@ def status_for(conn, op: Operation, *, history_conn=None) -> Status:
 
         env = training_svc.training_env_summary()
         if env.ready:
-            return Status(env.detail, READY, detail=env.python)
+            # Built and validated: there is nothing left for this button to do.
+            # (A half-built one falls through and stays clickable — re-running is
+            # how you finish it, and the alternative is a dead end.)
+            return Status(
+                env.detail,
+                READY,
+                detail=(
+                    f"Already set up at {env.python} — remove the environment "
+                    "first if you want to rebuild it."
+                ),
+                actionable=False,
+            )
         found = trainingenv.discover_interpreters()
         if not found:
             # No interpreter anywhere: the one case the app cannot fix itself,
@@ -515,6 +545,26 @@ def status_for(conn, op: Operation, *, history_conn=None) -> Status:
         if trainingenv.is_bootstrapped():
             return Status("set up, but incomplete", STALE, detail=detail)
         return Status(f"not set up · {found[0].label} found", NEVER, detail=detail)
+
+    if op.id == "models.training_env_remove":
+        from tcginventory.services import trainingenv
+
+        if not trainingenv.is_bootstrapped():
+            return Status(
+                "nothing to remove",
+                NEVER,
+                detail="No training environment is installed.",
+                actionable=False,
+            )
+        size = trainingenv.env_size()
+        return Status(
+            human_bytes(size),
+            READY,
+            detail=(
+                f"Removes {trainingenv.env_dir()} only. Trained models, the "
+                "labelled corpus and the training history all stay."
+            ),
+        )
 
     if op.id == "models.detector.train":
         return _model_status(op, KIND_DETECTOR)
