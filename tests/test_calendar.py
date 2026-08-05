@@ -117,6 +117,45 @@ def test_agenda_lists_only_marked_shows_and_entries(app, conn, tmp_path, monkeyp
     view.deleteLater()
 
 
+def test_reloading_replaces_the_chips_instead_of_stacking_them(
+    app, conn, tmp_path, monkeypatch
+):
+    """Regression: chips were dropped with deleteLater alone, which only queues
+    the deletion — until the event loop ran they stayed visible children of the
+    cell, so a second render drew a fresh set on top of ghosts. Every reload
+    leaked ~89 widgets, and the month grid doubled up after any ledger change.
+    """
+    from PySide6.QtWidgets import QWidget
+
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from tcginventory.ui.views.calendar import CalendarView
+
+    repo = CardShowRepository(conn)
+    for i in range(4):
+        repo.upsert(
+            CardShow(
+                source_id=i + 1,
+                name=f"Show {i}",
+                state="NJ",
+                starts_on=f"2026-08-1{i}",
+                fetched_at="t",
+            )
+        )
+    conn.execute("INSERT INTO card_show_status(source_id,status) VALUES(1,'attending')")
+    CalendarEntryRepository(conn).add(_vac())
+    conn.commit()
+
+    view = CalendarView(conn)
+    view._year, view._month, view._states = 2026, 8, ["NJ"]
+    view.reload()
+    after_first = len(view.findChildren(QWidget))
+
+    for _ in range(3):
+        view.reload()
+    assert len(view.findChildren(QWidget)) == after_first
+    view.deleteLater()
+
+
 def test_calendar_view_flags_a_conflict(app, conn, tmp_path, monkeypatch):
     monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
     from tcginventory.ui.views.calendar import CalendarView

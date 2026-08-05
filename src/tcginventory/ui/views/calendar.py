@@ -82,6 +82,20 @@ def _qdate(iso: str) -> QDate:
     return QDate(y, m, d)
 
 
+def _discard(widget) -> None:
+    """Take a widget out of the UI *now*, then let Qt free it.
+
+    ``deleteLater`` only queues the deletion: until the event loop drains, the
+    widget is still a visible child of its parent and keeps painting at its old
+    geometry. Removing it from a layout doesn't unparent it, so a re-render
+    drew fresh chips over the stale ones — and re-rendering twice before the
+    loop ran (a refresh while hidden, then the relayout on show) stacked a
+    third set. Unparenting first is what actually removes it.
+    """
+    widget.setParent(None)
+    widget.deleteLater()
+
+
 def _db_file(conn: sqlite3.Connection) -> str | None:
     for _seq, name, file in conn.execute("PRAGMA database_list").fetchall():
         if name == "main":
@@ -286,7 +300,7 @@ class _DayCell(QFrame):
         while self._events.count():
             it = self._events.takeAt(0)
             if it.widget():
-                it.widget().deleteLater()
+                _discard(it.widget())
 
     def render(
         self,
@@ -693,7 +707,7 @@ class CalendarView(QWidget):
         while self._agenda_layout.count():
             it = self._agenda_layout.takeAt(0)
             if it.widget():
-                it.widget().deleteLater()
+                _discard(it.widget())
 
     def _render_agenda(self, shows, entries, conflict_ids: set[int]) -> None:
         self._clear_agenda()

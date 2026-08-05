@@ -117,11 +117,12 @@ class MainWindow(QMainWindow):
         self.resize(1280, 960)  # taller so the half-height calendar fits tall cells
 
         # Building the ten views is the two seconds of startup, spread fairly
-        # evenly across them. ``progress(name)`` is called before each one so the
-        # splash can name it and repaint; nothing here changes without it.
-        def announce(name: str) -> None:
+        # evenly across them. ``progress(name, phase)`` is called before each
+        # piece of work so the splash can name it and repaint; nothing here
+        # changes without it.
+        def announce(name: str, phase: str = "Loading") -> None:
             if progress is not None:
-                progress(name)
+                progress(name, phase)
 
         # Watched auctions live in their own file; mirror the main DB's storage
         # nature so an in-memory app (tests) doesn't touch the real auctions.db.
@@ -163,13 +164,14 @@ class MainWindow(QMainWindow):
         self._market = views["Market"]
         self._operations = views["Operations"]
 
-        # Refresh-on-demand: every view is pre-built and refreshed once on first
-        # visit; a screen only re-refreshes when the data behind it has actually
-        # changed. `_data_version` bumps on every mutation source (ledger edits,
-        # imports, background price/catalog sweeps); each view records the version
-        # it last refreshed at, so bouncing between unchanged screens is instant.
+        # Refresh-on-demand: a screen only re-refreshes when the data behind it
+        # has actually changed. `_data_version` bumps on every mutation source
+        # (ledger edits, imports, background price/catalog sweeps); each view
+        # records the version it last refreshed at, so bouncing between
+        # unchanged screens is instant.
         self._data_version = 0
         self._view_versions: dict[int, int] = {}
+        self._warm_views(announce)
 
         # Keep read views current as the ledger changes.
         self._transaction.posted.connect(self._on_ledger_changed)
@@ -353,6 +355,34 @@ class MainWindow(QMainWindow):
             name = NAV_ITEMS[i]
             color = t.accent if i == current else t.ink2
             self._nav.item(i).setIcon(icons.icon(NAV_ICONS[name], color, 18))
+
+    def _warm_views(self, announce) -> None:
+        """Do every view's first refresh up front, while the splash is still up.
+
+        Building a view is cheap; its first refresh is not — Inventory ~420ms,
+        History ~270ms, Market and Calendar ~140ms — and that cost used to land
+        on the first visit to each screen, as a freeze in the middle of ordinary
+        navigation. Paying it here adds about a second to a startup the user is
+        already watching a progress bar for, and every screen then opens
+        instantly for the rest of the session.
+
+        A view that fails to warm is left marked stale rather than taking the
+        whole window down: it just refreshes on first visit, exactly as before.
+        """
+        for index, name in enumerate(NAV_ITEMS):
+            announce(name, "Preparing")
+            widget = self._stack.widget(index)
+            refresh = getattr(widget, "refresh", None)
+            if callable(refresh):
+                try:
+                    refresh()
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "Pre-loading %s failed; it will refresh on first visit",
+                        name,
+                    )
+                    continue
+            self._view_versions[index] = self._data_version
 
     def _on_nav_changed(self, index: int) -> None:
         self._stack.setCurrentIndex(index)

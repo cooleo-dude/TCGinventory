@@ -183,9 +183,9 @@ def main() -> int:
     apply_theme(app)  # Ember Duo: Fusion + IBM Plex + palette/QSS
     app.setWindowIcon(app_icon())
 
-    # One step per view, plus the startup backup ("opening the ledger" is the
-    # state the screen comes up in, not a step of its own).
-    splash = StartupSplash(total_steps=len(NAV_ITEMS) + 1)
+    # Two steps per view — built, then pre-loaded — plus the startup backup
+    # ("opening the ledger" is the state the screen comes up in, not a step).
+    splash = StartupSplash(total_steps=2 * len(NAV_ITEMS) + 1)
     splash.begin("Opening the ledger…")
 
     # Open the DB and run any pending migrations on startup (F-DA-7). The
@@ -242,10 +242,13 @@ def main() -> int:
         except Exception:
             log.exception("Collection-value recording failed (continuing)")
 
-    # Each view names itself on the splash as it's built, which is also what
-    # keeps the screen painting: they're all built on this thread.
+    # Each view names itself on the splash as it's built and again as it's
+    # pre-loaded, which is also what keeps the screen painting: it all happens
+    # on this thread.
     try:
-        window = MainWindow(conn, progress=lambda name: splash.step(f"Loading {name}…"))
+        window = MainWindow(
+            conn, progress=lambda name, phase: splash.step(f"{phase} {name}…")
+        )
     except Exception:
         splash.close()  # never leave a splash hanging over a failure
         raise

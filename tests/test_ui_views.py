@@ -369,11 +369,15 @@ def test_history_mode_toggle_reuses_loaded_pages(app, seeded_conn, monkeypatch):
 
 def test_nav_refresh_is_gated_until_data_changes(app, seeded_conn):
     """Switching to an unchanged screen must not re-run its refresh; a data
-    mutation invalidates the views so the next visit refreshes once."""
-    from tcginventory.ui.main_window import MainWindow
+    mutation invalidates the views so the next visit refreshes once.
+
+    Startup pre-loads every view, so even the *first* visit is free — that's
+    what keeps navigation from stalling on a screen nobody has opened yet.
+    """
+    from tcginventory.ui.main_window import NAV_ITEMS, MainWindow
 
     window = MainWindow(seeded_conn)
-    inv_index = 2  # Inventory
+    inv_index = NAV_ITEMS.index("Inventory")
     view = window._stack.widget(inv_index)
     calls = {"n": 0}
     original = view.refresh
@@ -384,16 +388,16 @@ def test_nav_refresh_is_gated_until_data_changes(app, seeded_conn):
 
     view.refresh = counting
 
-    window._on_nav_changed(inv_index)  # first visit → refreshes
-    assert calls["n"] == 1
+    window._on_nav_changed(inv_index)  # pre-loaded at startup → nothing to do
+    assert calls["n"] == 0
     window._on_nav_changed(0)  # away…
     window._on_nav_changed(inv_index)  # …and back, nothing changed → cached
-    assert calls["n"] == 1
+    assert calls["n"] == 0
 
     window._on_nav_changed(0)  # sit on another view
     window._on_ledger_changed()  # a mutation invalidates all views
-    window._on_nav_changed(inv_index)  # revisit → refreshes exactly once more
-    assert calls["n"] == 2
+    window._on_nav_changed(inv_index)  # revisit → refreshes exactly once
+    assert calls["n"] == 1
 
     window.close()
     window.deleteLater()

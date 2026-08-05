@@ -189,19 +189,91 @@ def discover_interpreters() -> list[Interpreter]:
     return sorted(resolved, key=rank, reverse=True)
 
 
-def env_size(directory: Path | None = None) -> int:
-    """Bytes on disk under the training environment (0 when there isn't one)."""
-    base = Path(directory or env_dir())
+# path -> (fingerprint, bytes). See _size_fingerprint for what invalidates it.
+_size_cache: dict[str, tuple[tuple[tuple[str, ...], ...], int]] = {}
+
+
+def _walk_size(base: Path) -> int:
+    """Sum the file sizes under ``base`` with one syscall per directory.
+
+    ``rglob`` + ``is_file`` + ``is_symlink`` + ``stat`` cost four stat calls per
+    path — 116k of them for a training environment's ~37k files, which took
+    close to four seconds. ``scandir`` answers all of that from the data the
+    directory enumeration already returned: same total, about a tenth the time.
+    """
     total = 0
-    if not base.is_dir():
-        return 0
-    for path in base.rglob("*"):
+    stack = [str(base)]
+    while stack:
         try:
-            if path.is_file() and not path.is_symlink():
-                total += path.stat().st_size
-        except OSError:  # vanished mid-walk, or unreadable — skip it
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:  # vanished mid-walk, or unreadable
+                        continue
+        except OSError:
             continue
     return total
+
+
+def _site_packages(base: Path) -> list[Path]:
+    """Where packages land inside the environment — one cheap directory read."""
+    if os.name == "nt":
+        return [base / "Lib" / "site-packages"]
+    try:
+        return sorted((base / "lib").glob("python*/site-packages"))
+    except OSError:
+        return []
+
+
+def _size_fingerprint(base: Path) -> tuple[tuple[str, ...], ...]:
+    """What the environment looks like from the outside, cheaply.
+
+    Directory *mtimes* are no use for this on Windows: they're updated lazily,
+    so writing a file into ``site-packages`` can leave its mtime untouched — a
+    cache keyed on them reports a stale size forever. The listing is always
+    accurate, and it moves whenever packages are installed or removed, a torch
+    CPU↔GPU swap included, since the version sits in the ``.dist-info`` name.
+    Two directory reads (~0.1ms) to decide whether to walk ~37k files.
+    """
+    listings = []
+    for path in (base, *_site_packages(base)):
+        try:
+            listings.append(tuple(sorted(os.listdir(path))))
+        except OSError:
+            listings.append(())
+    return tuple(listings)
+
+
+def env_size(directory: Path | None = None, *, recount: bool = False) -> int:
+    """Bytes on disk under the training environment (0 when there isn't one).
+
+    Cached, because the Operations screen asks on every refresh and the answer
+    costs a walk of ~37k files. The cache re-checks a fingerprint of the
+    environment first, so an install or a rebuild is picked up on its own; pass
+    ``recount=True`` to force the walk regardless.
+    """
+    base = Path(directory or env_dir())
+    key = str(base)
+    if not base.is_dir():
+        _size_cache.pop(key, None)  # a removed environment can't be stale
+        return 0
+    fingerprint = _size_fingerprint(base)
+    cached = _size_cache.get(key)
+    if recount or cached is None or cached[0] != fingerprint:
+        _size_cache[key] = (fingerprint, _walk_size(base))
+    return _size_cache[key][1]
+
+
+def forget_env_size(directory: Path | None = None) -> None:
+    """Drop the cached size after something changed the environment on disk."""
+    if directory is None:
+        _size_cache.clear()
+    else:
+        _size_cache.pop(str(Path(directory)), None)
 
 
 def remove_env(directory: Path | None = None) -> int:
@@ -224,6 +296,7 @@ def remove_env(directory: Path | None = None) -> int:
 
     reclaimed = env_size(base)
     shutil.rmtree(base)
+    forget_env_size(base)
 
     recorded = training.training_python()
     if recorded:

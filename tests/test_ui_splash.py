@@ -106,13 +106,62 @@ def test_main_window_reports_every_view_in_nav_order(app, conn):
     indexes straight into the stack."""
     from tcginventory.ui.main_window import MainWindow
 
-    seen: list[str] = []
-    window = MainWindow(conn, progress=seen.append)
+    seen: list[tuple[str, str]] = []
+    window = MainWindow(conn, progress=lambda name, phase: seen.append((name, phase)))
 
-    assert seen == NAV_ITEMS
+    built = [name for name, phase in seen if phase == "Loading"]
+    prepared = [name for name, phase in seen if phase == "Preparing"]
+    assert built == NAV_ITEMS
+    assert prepared == NAV_ITEMS  # every view is pre-loaded, in the same order
     assert window._stack.count() == len(NAV_ITEMS)
     assert window._stack.widget(NAV_ITEMS.index("Operations")) is window._operations
     assert window._stack.widget(NAV_ITEMS.index("Dashboard")) is window._dashboard
+    window.close()
+
+
+def test_every_view_is_preloaded_so_navigation_never_refreshes(app, conn):
+    """The point of pre-loading: the first visit to a screen costs nothing,
+    because its refresh already happened behind the splash."""
+    from tcginventory.ui.main_window import MainWindow
+
+    window = MainWindow(conn)
+
+    # Every view is marked fresh at the current data version, which is what
+    # _on_nav_changed checks before paying for a refresh.
+    assert set(window._view_versions) == set(range(len(NAV_ITEMS)))
+    assert set(window._view_versions.values()) == {window._data_version}
+
+    refreshed: list[int] = []
+    for index in range(len(NAV_ITEMS)):
+        widget = window._stack.widget(index)
+        if hasattr(widget, "refresh"):
+            widget.refresh = lambda i=index: refreshed.append(i)
+    for index in range(len(NAV_ITEMS)):
+        window._nav.setCurrentRow(index)
+    assert refreshed == []
+    window.close()
+
+
+def test_a_view_that_fails_to_warm_does_not_stop_startup(app, conn):
+    """One broken screen must not cost the user the whole window; it is left
+    stale so it refreshes on first visit, exactly as it used to."""
+    from tcginventory.ui.main_window import MainWindow
+
+    real = MainWindow._warm_views
+
+    def warm(self, announce):
+        index = NAV_ITEMS.index("Market")
+        self._stack.widget(index).refresh = lambda: 1 / 0
+        real(self, announce)
+
+    MainWindow._warm_views = warm
+    try:
+        window = MainWindow(conn)
+    finally:
+        MainWindow._warm_views = real
+
+    assert window._stack.count() == len(NAV_ITEMS)  # the window still came up
+    assert NAV_ITEMS.index("Market") not in window._view_versions  # left stale
     window.close()
 
 
