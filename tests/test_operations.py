@@ -275,18 +275,22 @@ def vision_db(tmp_path, monkeypatch):
     conn.close()
 
 
-def _labelled_scene(repo, tmp_path, boxes=2):
+def _labelled_scene(repo, tmp_path, boxes=2, condition=None):
     from PIL import Image
 
     from tcginventory.data.vision import CardLabel
 
-    scene = tmp_path / "scene.png"
+    scene = tmp_path / f"scene{len(list(repo.conn.execute('SELECT 1 FROM image')))}.png"
     Image.new("RGB", (200, 140), color=(180, 180, 180)).save(scene)
     cap = repo.add_capture(source="manual")
-    img = repo.add_image(cap, "sha1", str(scene), "front")
+    img = repo.add_image(cap, f"sha{scene.stem}", str(scene), "front")
     for i in range(boxes):
         repo.add_region(
-            img, i + 1, (0.1 * i, 0.1, 0.2, 0.5), None, CardLabel(card_id=f"c{i}")
+            img,
+            i + 1,
+            (0.1 * i, 0.1, 0.2, 0.5),
+            None,
+            CardLabel(card_id=f"c{i}", condition=condition),
         )
 
 
@@ -379,13 +383,22 @@ def test_new_labels_make_a_current_model_stale(conn, vision_db, tmp_path):
     assert "New since" in (status.detail or "")
 
 
-def test_condition_status_says_it_needs_card_backs(conn, vision_db, tmp_path):
+def test_condition_status_counts_graded_cards_and_says_what_is_missing(
+    conn, vision_db, tmp_path
+):
+    """The grader's unit is a card, not a face — and it reports the gate, so the
+    tile can grey its button rather than start a run that can't succeed."""
     repo, _runs = vision_db
-    _labelled_scene(repo, tmp_path, boxes=2)  # fronts only
     status = ops.status_for(conn, ops.BY_ID["models.condition.train"])
     assert status.state == ops.NEVER
-    assert "no card backs labelled yet" in status.value
-    assert "card-backs mode" in (status.detail or "")
+    assert "no graded cards yet" in status.value
+    assert status.actionable is False
+
+    _labelled_scene(repo, tmp_path, boxes=2, condition="NM")
+    graded = ops.status_for(conn, ops.BY_ID["models.condition.train"])
+    assert "2 graded cards" in graded.value
+    assert graded.actionable is False  # nowhere near enough of each grade
+    assert "Still needed" in (graded.detail or "")
 
 
 def test_training_env_status_warns_when_no_python_is_found(conn, monkeypatch, tmp_path):

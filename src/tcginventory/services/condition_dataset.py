@@ -497,3 +497,21 @@ def export_condition_dataset(
         manifest=manifest,
         gate=gate,
     )
+
+
+def samples_fingerprint(samples: list[Sample]) -> str:
+    """Hash of the exact cards and grades a model trained on.
+
+    The condition analogue of the detector's corpus fingerprint: it changes when a
+    card is added, removed **or regraded**, since a regrade is precisely what should
+    make a condition model stale.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    for sample in sorted(samples, key=lambda s: s.key):
+        faces = ",".join(
+            f"{side}:{sample.faces[side].region_id}" for side in sorted(sample.faces)
+        )
+        digest.update(f"{sample.key}|{sample.grade}|{faces};".encode())
+    return digest.hexdigest()

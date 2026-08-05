@@ -639,23 +639,47 @@ def _model_status(op: Operation, kind: str) -> Status:
             repo = VisionRepository(conn)
             runs = ModelRunRepository(conn)
             if kind == KIND_CONDITION:
-                graded = len(repo.condition_regions())
+                from tcginventory.services import condition_dataset as cds
+
+                samples = cds.collect_samples(repo)
+                gate = cds.check_gate(samples)
                 current = runs.current_model(kind)
+                cards = len(samples)
                 if current is None:
-                    if not graded:
+                    if not cards:
                         return Status(
-                            "never · no card backs labelled yet",
+                            "never · no graded cards yet",
                             NEVER,
+                            actionable=False,
                             detail=(
-                                "Label card backs in Recognition's card-backs mode; "
-                                "the grader trains on those."
+                                "Photograph cards front and back in Recognition and "
+                                "grade them: the back's grade is the one that counts, "
+                                "and the grader reads it together with the front."
                             ),
                         )
-                    return Status(f"never · {graded:,} graded backs ready", NEVER)
+                    return Status(
+                        f"never · {cards:,} graded cards",
+                        NEVER,
+                        actionable=gate.ok,
+                        detail=(
+                            gate.summary
+                            if gate.ok
+                            else "Still needed — " + gate.summary
+                        ),
+                    )
+                distance = current["map50_95"]
+                value = f"v{current['version']} · {when(current['finished_at'])}"
+                if distance is not None:
+                    value += f" · {distance:.2f} grades off"
                 return Status(
-                    f"v{current['version']} · {when(current['finished_at'])} · "
-                    f"{graded:,} graded backs",
+                    value,
                     _staleness(op, current["finished_at"]),
+                    actionable=gate.ok,
+                    detail=(
+                        f"Trained on {current['corpus_cards'] or 0:,} cards; the "
+                        f"corpus now holds {cards:,}."
+                        + ("" if gate.ok else f" Still needed — {gate.summary}.")
+                    ),
                 )
 
             status = training_svc.detector_status(repo, runs)

@@ -840,29 +840,43 @@ class OperationsView(QWidget):
         self._task(op.id, _remove_training_env)
 
     def _train_condition(self) -> None:
-        """The grader has no training path yet — say what's missing, plainly."""
+        """Train the condition grader, or explain exactly what the corpus lacks.
+
+        Unlike the detector this needs no training environment — it is a ridge
+        regression over measured wear, which numpy fits in milliseconds — so it runs
+        as an ordinary background task.
+        """
         from tcginventory.data.vision import VisionRepository, open_vision
+        from tcginventory.services import condition_dataset as cds
         from tcginventory.services import operations as ops_mod
 
-        graded = 0
+        title = ops_mod.BY_ID["models.condition.train"].title
         try:
             conn = open_vision()
-            try:
-                graded = len(VisionRepository(conn).condition_regions())
-            finally:
-                conn.close()
-        except Exception:
-            graded = 0
-        QMessageBox.information(
-            self,
-            ops_mod.BY_ID["models.condition.train"].title,
-            (
-                f"Not available yet.\n\nThe grader learns from labelled card "
-                f"backs, and there are {graded:,} of them. Photograph card backs "
-                "in Recognition's card-backs mode and grade them; this becomes "
-                "available once there are enough to train on."
-            ),
-        )
+        except Exception:  # pragma: no cover - unreadable vision DB
+            QMessageBox.warning(self, title, "The recognition corpus is unavailable.")
+            return
+        try:
+            samples = cds.collect_samples(VisionRepository(conn))
+            gate = cds.check_gate(samples)
+        finally:
+            conn.close()
+
+        if not gate.ok:
+            QMessageBox.information(
+                self,
+                title,
+                "Not enough graded cards yet.\n\n"
+                "The grader reads both faces of a card — one grade per card, from "
+                "its front and its back together — and needs a fair number of each "
+                "grade, seen across several photos, before it can learn anything "
+                "honest.\n\nStill needed:\n  • "
+                + "\n  • ".join(gate.reasons)
+                + "\n\nKeep photographing cards front and back in Recognition and "
+                "grading them; this becomes available on its own.",
+            )
+            return
+        self._task("models.condition.train", _train_condition_model)
 
     def _toggle_auto_updates(self) -> None:
         from tcginventory import scheduling
@@ -1010,6 +1024,31 @@ def trainingenv_dataset_dir():
     from tcginventory import config
 
     return config.data_dir() / "vision" / "datasets" / "detector"
+
+
+def _train_condition_model(_conn) -> str:
+    """Fit the condition grader from the graded corpus and record the run."""
+    from tcginventory.data.vision import (
+        ModelRunRepository,
+        VisionRepository,
+        open_vision,
+    )
+    from tcginventory.services.condition_train import train_condition_model
+
+    conn = open_vision()
+    try:
+        repo = VisionRepository(conn)
+        result = train_condition_model(repo, ModelRunRepository(conn), source="ui")
+        if not result.ok:
+            raise RuntimeError(result.reason)
+        metrics = result.metrics
+        return (
+            f"{result.samples} cards · {metrics.accuracy:.0%} exact · "
+            f"{metrics.mean_distance:.2f} grades off "
+            f"(baseline {metrics.baseline_distance:.2f})"
+        )
+    finally:
+        conn.close()
 
 
 def _reindex_corpus(_conn) -> str:
