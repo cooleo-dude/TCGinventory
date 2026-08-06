@@ -329,6 +329,27 @@ def test_detector_status_never_trained_lists_what_is_waiting(conn, vision_db, tm
     assert "never" in status.value and "3 boxes" in status.value
 
 
+def test_an_installed_model_with_no_run_log_is_not_called_never_run(
+    conn, vision_db, tmp_path
+):
+    """Recognition proposes boxes from whatever model file is on disk, so a tile
+    reading "Never run" over a working detector contradicts the window next
+    door. It happened for real: the promotion step was skipped, leaving an
+    in-use model with no run behind it (2026-08-06)."""
+    repo, _runs = vision_db
+    _labelled_scene(repo, tmp_path, boxes=3)
+    from tcginventory.services import detector
+
+    model = detector.trained_model_destination()  # under the tmp data dir
+    model.parent.mkdir(parents=True, exist_ok=True)
+    model.write_bytes(b"onnx-model-bytes")
+
+    status = ops.status_for(conn, ops.BY_ID["models.detector.train"])
+    assert status.state == ops.READY  # not NEVER — the thing works
+    assert "installed" in status.value and "run log" in status.value
+    assert "version and accuracy are unknown" in (status.detail or "")
+
+
 def test_detector_status_reports_version_age_and_metrics(conn, vision_db, tmp_path):
     from datetime import datetime, timezone
 

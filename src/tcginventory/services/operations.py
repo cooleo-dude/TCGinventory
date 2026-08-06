@@ -950,13 +950,26 @@ def _model_status(op: Operation, kind: str) -> Status:
             status = training_svc.detector_status(repo, runs)
             corpus = f"{status.corpus.images:,} images / {status.corpus.boxes:,} boxes"
             if status.never_trained:
-                state = NEVER if status.corpus.trainable else NEVER
+                if status.installed:
+                    # A model file is on disk, and Recognition proposes boxes
+                    # from it (it looks the file up directly). Calling that
+                    # "never run" contradicts the window next door. The run log
+                    # is what's missing — say that instead.
+                    return Status(
+                        "installed · not in the run log",
+                        READY,
+                        detail=(
+                            f"{status.model_path} is in use for box proposals, but "
+                            "no training run claims it, so its version and accuracy "
+                            f"are unknown. Re-train to record them. Corpus: {corpus}."
+                        ),
+                    )
                 detail = (
                     f"{corpus} ready to train on."
                     if status.corpus.trainable
                     else "Draw and save boxes in Recognition first."
                 )
-                return Status(f"never · {corpus} ready", state, detail=detail)
+                return Status(f"never · {corpus} ready", NEVER, detail=detail)
             age = _staleness(op, status.trained_at)
             state = STALE if (status.stale or age == STALE) else READY
             value = f"v{status.version} · {when(status.trained_at)}"

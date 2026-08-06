@@ -32,6 +32,24 @@ from pathlib import Path
 RESULT_PREFIX = "TCGI_RESULT "
 
 
+def _save_dir(model, results) -> str:
+    """Where ultralytics wrote this run — its ``results.csv``, weights and plots.
+
+    Ask the *trainer*, not the metrics object. ``model.train()`` used to return
+    something carrying ``save_dir``, and ultralytics 8.4 dropped it (``DetMetrics``
+    takes only ``names`` now). A ``getattr`` default turned that into an empty
+    string, the caller then looked for the per-epoch metrics nowhere, and two
+    perfectly good detectors went unpromoted and were reported as never trained.
+    The trainer has held this attribute throughout, so it leads; the result object
+    stays as a fallback for older versions.
+    """
+    for holder in (getattr(model, "trainer", None), results):
+        value = getattr(holder, "save_dir", None)
+        if value:
+            return str(value)
+    return ""
+
+
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Train the single-class card detector.")
     p.add_argument("--data", required=True, help="path to the YOLO data.yaml")
@@ -83,7 +101,7 @@ def main(argv=None) -> int:
 
     # The caller reads results.csv out of save_dir for the per-epoch metrics.
     payload = {
-        "save_dir": str(getattr(results, "save_dir", "")),
+        "save_dir": _save_dir(model, results),
         "onnx": str(out),
         "epochs": args.epochs,
     }

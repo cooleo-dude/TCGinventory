@@ -197,14 +197,21 @@ def should_promote(
 ) -> bool:
     """Whether a new model should replace the one in use.
 
-    Compares mAP50-95. A first model always wins (nothing to lose against); a
-    candidate with no measured score never does. ``margin`` demands a real
-    improvement rather than noise.
+    Compares mAP50-95. **A first model always wins** — there is nothing to lose
+    against, and an unscored model in hand still beats no model at all. Against
+    an incumbent an unmeasured candidate never wins: with no score there is no
+    evidence it is an improvement, and the model in use is known-good.
+    ``margin`` demands a real gain rather than noise.
+
+    The order of those two rules matters. It used to be the other way round, so
+    a *first* model whose metrics could not be read lost to nothing at all: the
+    artifact was installed and in use while the run log recorded no version, and
+    the Operations window called a working detector "never run" (2026-08-06).
     """
-    if candidate is None:
-        return False
     if incumbent is None:
         return True
+    if candidate is None:
+        return False
     return candidate >= incumbent + margin
 
 
@@ -523,6 +530,25 @@ class TrainingOutcome:
     summary: str
 
 
+def results_csv_for(job: TrainingJob, save_dir: str = "") -> Path | None:
+    """This run's ``results.csv`` — where the worker says, else where we sent it.
+
+    The app picked the run directory itself (``--project <dataset>/runs --name
+    run<id>``, see :func:`prepare_detector_training`), so it can always find the
+    file on its own. Taking the worker's word for it as the *only* route is what
+    cost two real runs every one of their metrics when ultralytics moved
+    ``save_dir``: the CSV was sitting on disk the whole time, with a 0.970
+    mAP50-95 curve in it. Returns ``None`` when neither location has one.
+    """
+    bases = [Path(save_dir)] if save_dir else []
+    bases.append(job.dataset_dir / "runs" / f"run{job.run_id}")
+    for base in bases:
+        csv = base / "results.csv"
+        if csv.is_file():
+            return csv
+    return None
+
+
 def complete_detector_training(
     job: TrainingJob,
     runs: ModelRunRepository,
@@ -534,11 +560,10 @@ def complete_detector_training(
     """Record a finished run: metrics, artifact, and the promotion decision."""
     result = parse_worker_result(worker_output)
     onnx = Path(result.get("onnx") or job.out_path)
-    save_dir = result.get("save_dir") or ""
 
     epochs: list[dict] = []
-    csv_path = Path(save_dir) / "results.csv" if save_dir else None
-    if csv_path is not None and csv_path.is_file():
+    csv_path = results_csv_for(job, result.get("save_dir") or "")
+    if csv_path is not None:
         epochs = parse_results_csv(csv_path)
         runs.add_epochs(job.run_id, epochs)
     best = best_epoch(epochs) or {}
@@ -562,14 +587,23 @@ def complete_detector_training(
         notes=f"{len(epochs)} epochs recorded",
     )
 
-    promote = force_promote or should_promote(
-        best.get("map50_95"), incumbent_score, margin=promote_margin
+    # Nothing to put to work if the run produced no file, whatever it scored.
+    have_artifact = onnx.is_file()
+    promote = have_artifact and (
+        force_promote
+        or should_promote(best.get("map50_95"), incumbent_score, margin=promote_margin)
     )
     version = runs.promote(job.run_id) if promote else None
     if promote:
         summary = f"Trained detector v{version}"
         if best.get("map50_95") is not None:
             summary += f" — mAP50-95 {best['map50_95']:.3f}"
+        else:
+            # Promoted on faith: say so, because the accuracy trend will have a
+            # gap where this model's score should be.
+            summary += " — no metrics found for this run"
+    elif not have_artifact:
+        summary = "No model file was produced — nothing to promote"
     else:
         summary = (
             f"Not promoted — mAP50-95 {best.get('map50_95')} does not beat the "

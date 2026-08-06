@@ -212,6 +212,12 @@ def test_promotion_gate():
     assert training.should_promote(0.33, 0.30, margin=0.02)
 
 
+def test_an_unmeasured_first_model_still_wins():
+    """Regression: it lost to nothing at all, so a working detector stayed
+    unpromoted and Operations reported it as never trained."""
+    assert training.should_promote(None, None)
+
+
 # -- ultralytics results.csv parsing ----------------------------------------
 
 
@@ -382,6 +388,85 @@ def test_a_full_run_records_metrics_and_promotes(
 
     # The model the app will load is exactly the artifact that was recorded.
     assert Path(row["artifact_path"]).read_bytes() == b"onnx-model-bytes"
+
+
+def test_metrics_are_found_when_the_worker_reports_no_save_dir(
+    repo, runs, ready_env, stub_worker, tmp_path
+):
+    """The 2026-08-06 regression: ultralytics 8.4 dropped ``save_dir`` from what
+    ``model.train()`` returns, the worker reported an empty one, and the app read
+    no metrics at all — so a 0.970 mAP50-95 detector went unpromoted. The app
+    chose the run directory itself, so it must fall back to looking there."""
+    import json
+    import subprocess
+
+    _scene_capture(repo, tmp_path)
+    job = training.prepare_detector_training(
+        repo,
+        runs,
+        env=ready_env,
+        dataset_dir=tmp_path / "ds",
+        out_path=tmp_path / "card_yolo.onnx",
+        epochs=2,
+    )
+    proc = subprocess.run(job.command, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    blinded = "TCGI_RESULT " + json.dumps(
+        {"save_dir": "", "onnx": str(job.out_path)}  # what 8.4 produced
+    )
+
+    outcome = training.complete_detector_training(job, runs, worker_output=blinded)
+    assert outcome.epochs == 2  # read from where we told the worker to write
+    assert outcome.map50_95 == 0.34
+    assert outcome.promoted and outcome.version == 1
+
+
+def test_a_run_that_produced_no_model_file_is_not_promoted(
+    repo, runs, ready_env, stub_worker, tmp_path
+):
+    """Promotion means "this is the model in use". With no artifact there is
+    nothing to use, however the run reports itself."""
+    import subprocess
+
+    _scene_capture(repo, tmp_path)
+    job = training.prepare_detector_training(
+        repo,
+        runs,
+        env=ready_env,
+        dataset_dir=tmp_path / "ds",
+        out_path=tmp_path / "card_yolo.onnx",
+        epochs=2,
+    )
+    proc = subprocess.run(job.command, capture_output=True, text=True)
+    job.out_path.unlink()  # the export vanished / was never written
+
+    outcome = training.complete_detector_training(job, runs, worker_output=proc.stdout)
+    assert not outcome.promoted and outcome.version is None
+    assert "no model file" in outcome.summary.lower()
+    assert runs.current_model() is None
+
+
+def test_worker_takes_save_dir_from_the_trainer_not_the_metrics():
+    """The trainer has always carried ``save_dir``; the metrics object stopped
+    doing so in ultralytics 8.4. Reading the wrong one loses every metric, and
+    silently — a missing attribute defaults to "" and the caller looks nowhere."""
+    import importlib.util
+
+    path = training.worker_script()
+    spec = importlib.util.spec_from_file_location("yolo_train_worker", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class _Model:  # ultralytics 8.4: metrics carry no save_dir at all
+        class trainer:
+            save_dir = "/runs/run7"
+
+    class _Legacy:  # older ultralytics: the result object knows
+        save_dir = "/runs/old"
+
+    assert module._save_dir(_Model(), object()) == "/runs/run7"
+    assert module._save_dir(object(), _Legacy()) == "/runs/old"
+    assert module._save_dir(object(), object()) == ""  # nothing to report
 
 
 def test_a_worse_second_run_is_not_promoted(
