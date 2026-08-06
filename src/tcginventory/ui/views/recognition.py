@@ -524,12 +524,16 @@ class _SuggestBox(QComboBox):
 
     Starts as a placeholder; :meth:`set_suggestions` fills it after the recognizer
     runs. Selecting an entry copies that identity into the box and the name field.
+    Moving over an entry previews that card's art, so a ranked list can be judged
+    against the photograph by eye before committing to one of its guesses.
     """
 
-    def __init__(self, box: _Box, name_field: _NameField) -> None:
+    def __init__(self, box: _Box, name_field: _NameField, on_preview=None) -> None:
         super().__init__()
         self._box = box
         self._name_field = name_field
+        self._on_preview = on_preview  # (card_id) -> None, to preview art live
+        self._browsing = False  # the drop-down is open (see hidePopup)
         self._labels: list[CardLabel | None] = [None]
         # A combo sizes itself to its longest item by default, and these items
         # carry "name · set (94%)" — enough to push the whole panel off screen.
@@ -544,6 +548,12 @@ class _SuggestBox(QComboBox):
         self.addItem("— suggest —")
         self.setEnabled(False)
         self.activated.connect(self._on_activated)
+        # Preview each guess as it is highlighted. Unlike QCompleter's popup (see
+        # _NameField, which needs its own mouse tracking), a combo's popup makes
+        # the item under the pointer current, so `highlighted` covers hovering
+        # and arrowing alike — one signal for both ways of browsing the list.
+        self.view().setMouseTracking(True)
+        self.highlighted.connect(self._on_highlighted)
 
     def set_suggestions(self, items: list[tuple[CardLabel, float]]) -> None:
         self.blockSignals(True)
@@ -576,6 +586,38 @@ class _SuggestBox(QComboBox):
             default=0,
         )
         self.view().setMinimumWidth(widest + 36)  # text + scrollbar and padding
+
+    def _on_highlighted(self, index: int) -> None:
+        """The pointer (or the keyboard) is on a guess — show that card's art.
+
+        Index 0 is the "— pick a match —" placeholder, which carries no card;
+        opening the popup highlights it, and that must not disturb the pane.
+        """
+        if self._on_preview is None:
+            return
+        card = self._labels[index] if 0 <= index < len(self._labels) else None
+        if card is not None and card.card_id:
+            self._on_preview(card.card_id)
+
+    def showPopup(self) -> None:  # noqa: N802 (Qt override)
+        self._browsing = True
+        super().showPopup()
+
+    def hidePopup(self) -> None:  # noqa: N802 (Qt override)
+        """Closing the list without picking anything hands the pane back to this
+        row's own card, rather than leaving a browsed guess standing in for it.
+        An unlabeled row has nothing to fall back to, so the last card hovered
+        stays — the pane never blanks (the platform-wide preview convention).
+
+        Picking a guess emits ``activated`` *after* this, so the new identity
+        still wins. Only a list that was actually open restores: Qt also calls
+        this when the combo is merely disabled (as ``set_suggestions`` does),
+        which is no one browsing anything.
+        """
+        super().hidePopup()
+        was_browsing, self._browsing = self._browsing, False
+        if was_browsing and self._on_preview is not None and self._box.card.card_id:
+            self._on_preview(self._box.card.card_id)
 
     def _on_activated(self, index: int) -> None:
         if 0 <= index < len(self._labels) and self._labels[index] is not None:
@@ -1844,7 +1886,7 @@ class RecognitionView(QWidget):
         )
         self._lang_boxes[box.number] = lang
         r2.addWidget(lang)
-        suggest = _SuggestBox(box, name)
+        suggest = _SuggestBox(box, name, on_preview=self._preview_card)
         suggest.setObjectName("segSuggest")
         self._suggest_boxes[box.number] = suggest
         r2.addWidget(suggest)

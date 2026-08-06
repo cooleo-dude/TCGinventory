@@ -173,3 +173,91 @@ def test_suggestion_combo_is_bounded_on_both_sides(app, conn):
     assert combo.view().minimumWidth() > combo.maximumWidth()
     combo.deleteLater()
     field.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# hovering a ranked guess previews it
+# ---------------------------------------------------------------------------
+
+
+def _suggest_box(conn, on_preview, labeled=None):
+    from tcginventory.data.vision import CardLabel
+    from tcginventory.ui.views.recognition import _Box, _NameField, _SuggestBox
+
+    box = _Box(number=1, rect=QRectF(0, 0, 10, 10), card=labeled or CardLabel())
+    field = _NameField(conn, box)
+    combo = _SuggestBox(box, field, on_preview=on_preview)
+    combo.set_suggestions(
+        [
+            (CardLabel(card_id="sv3-125", name="Charizard ex"), 0.94),
+            (CardLabel(card_id="base1-58", name="Pikachu"), 0.71),
+        ]
+    )
+    return box, field, combo
+
+
+def test_suggestion_hover_previews_that_card(app, conn):
+    """The point of the ranked list is comparing guesses against the photo, so
+    highlighting one — by pointer or by arrow key — has to show its art."""
+    seen: list[str] = []
+    _box, field, combo = _suggest_box(conn, seen.append)
+
+    assert combo.view().hasMouseTracking()  # hover has to make an item current
+    combo.highlighted.emit(1)
+    combo.highlighted.emit(2)
+    assert seen == ["sv3-125", "base1-58"]
+
+    seen.clear()
+    combo.highlighted.emit(0)  # the "— pick a match —" placeholder
+    assert seen == []  # opening the popup must not disturb the pane
+    combo.deleteLater()
+    field.deleteLater()
+
+
+def test_closing_the_suggestions_restores_the_rows_own_card(app, conn):
+    """Browsing guesses is a detour; leaving it hands the pane back to the card
+    this row is actually labeled with."""
+    from tcginventory.data.vision import CardLabel
+
+    seen: list[str] = []
+    _box, field, combo = _suggest_box(
+        conn, seen.append, labeled=CardLabel(card_id="swsh4-25", name="Pikachu VMAX")
+    )
+
+    combo.showPopup()
+    seen.clear()  # opening highlights the placeholder row; nothing to preview
+    combo.highlighted.emit(1)
+    combo.hidePopup()
+    assert seen == ["sv3-125", "swsh4-25"]
+    combo.deleteLater()
+    field.deleteLater()
+
+
+def test_disabling_the_combo_is_not_a_browse(app, conn):
+    """Qt calls hidePopup when a combo is disabled — which ``set_suggestions``
+    does on every rescan. That must not push art at the preview pane."""
+    from tcginventory.data.vision import CardLabel
+
+    seen: list[str] = []
+    _box, field, combo = _suggest_box(
+        conn, seen.append, labeled=CardLabel(card_id="swsh4-25", name="Pikachu VMAX")
+    )
+
+    combo.set_suggestions([])  # no match in corpus → disabled → hidePopup
+    assert seen == []
+    combo.deleteLater()
+    field.deleteLater()
+
+
+def test_closing_an_unlabeled_rows_suggestions_keeps_the_last_guess(app, conn):
+    """With no identity to fall back to, the pane keeps what was last hovered
+    rather than blanking (the platform-wide preview convention)."""
+    seen: list[str] = []
+    _box, field, combo = _suggest_box(conn, seen.append)
+
+    combo.showPopup()
+    combo.highlighted.emit(2)
+    combo.hidePopup()
+    assert seen == ["base1-58"]  # nothing overwrote it on the way out
+    combo.deleteLater()
+    field.deleteLater()
