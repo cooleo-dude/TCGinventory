@@ -177,6 +177,23 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
     across 3+ photos: on 44 graded cards the fit scores 14% exact / 1.52 grades off
     against a 0.84 baseline, so the tile greys its button and says what's missing.
 
+- **Identity accuracy — benchmark + bottom-band re-rank ✅ done.** The whole
+  catalog is now indexable (`services/catalog_index.py`), which turns
+  identification from "search the 43 cards you already labelled" into an open-set
+  problem: 49,551 of 53,289 cards embedded, 2.21 GB of PNG art on disk.
+  `services/identity_eval.py` scores the identifier against that pool using the
+  labelled crops as queries, reporting top-1/top-5 and splitting failures into
+  **wrong printing** vs **wrong card** (different fixes); runs log to `model_run`
+  with `kind='identity'`. `services/identity_patches.py` then re-ranks the
+  shortlist on the strip along the bottom of the card — number, set symbol,
+  rarity — the one region where two printings of the same artwork differ. It
+  compares via **phase correlation**, because plain correlation of a fixed crop
+  needs sub-1% framing accuracy and a 2px slip erases the signal. Measured on the
+  full index: top-1 **20.7% → 44.8%**, top-5 **74.1% → 77.6%**, wrong-printing
+  **36 → 21**, wrong-card flat. Wired into `Recognizer.suggest`; `Suggestion.score`
+  stays a plain cosine and the band is reported separately as `Suggestion.band`.
+  Remaining wrong-*card* misses need a stronger encoder (the ArcFace fine-tune).
+
 - **M-V2** — learning from the ingested corpus. **Crop-exemplar retrieval ✅
   done (usable now):** every labeled region is embedded and stored
   (`region_embedding`), and `Recognizer.suggest` scores each card by its best

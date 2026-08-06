@@ -1324,3 +1324,52 @@ _Template for new entries:_
   completer/popup/hover wiring — which is why the hover-preview bug existed in one
   and not the others. Consolidate them onto one backing so behaviour is inherited,
   not re-implemented. Deferred while those four files are under concurrent edit.
+
+## 2026-08-05 — Identification Layer 0/1: a benchmark, then the bottom band
+
+- **Context:** identification searched only cards the user had already labelled
+  (43 of 53,289). Opening it to the whole catalog needed two things first: a way
+  to tell whether any change helps, and an answer to the reprint problem — a
+  global embedding sees *artwork*, and 33% of catalog cards have a same-named
+  card as their nearest neighbour.
+- **Layer 0 — `services/identity_eval.py`, built before the layers, not after.**
+  Queries are the labelled crops (real photos, known answers); the pool is the
+  live catalog index, so the number means what it says. It reports top-1 **and**
+  top-5 (a reliable shortlist is a usable product), and splits failures into
+  **wrong printing** vs **wrong card** — different fixes, and without the split a
+  layer looks useless when it fixed exactly what it aimed at. Runs are logged to
+  `model_run` with `kind='identity'` beside the detector and condition models.
+- **Full-catalog sweep:** 49,551 of 53,289 embedded, 3,738 failed (no art from
+  the source), 50,546 PNGs / **2.21 GB** on disk. That is far under the ~6.9 GB
+  estimated when lossless PNG was chosen — the source renders are ~44 KB each, so
+  the storage argument for lossy encoding was moot.
+- **Layer 1 — `services/identity_patches.py`.** Re-rank the embedding's shortlist
+  on the strip along the bottom of the card, where the collector number, set
+  symbol and rarity live. A band rather than per-era templates: placement moved
+  between eras, but the band contains all of it in every era, so no era detection
+  is needed to be correct.
+- **Phase correlation, not plain NCC — decided by measurement.** Direct
+  correlation of a fixed bottom crop needs sub-1% framing accuracy: a 2px slip in
+  a 627px canonical card, or 1% of scale error, cuts the own-vs-reprint margin
+  from 0.023 to 0.006. A translation search does *not* rescue it — the search
+  locks onto the large pale strip both printings share. Whitening the spectrum
+  discards exactly that shared low-frequency bulk and leaves the fine structure
+  that differs; same misframing, margin +0.13 to +0.46.
+- **Scores are centred on the shortlist's median** before the weight applies. The
+  absolute peak level reflects the photograph (focus, glare, framing) and moves
+  every candidate together, so only the spread carries information — and centring
+  makes the weight mean one fixed thing across queries.
+- **Measured on the full index (58 labelled crops, 49,551-card pool):** top-1
+  **20.7% → 44.8%**, top-5 **74.1% → 77.6%**, wrong-printing errors **36 → 21**
+  with wrong-card flat at 10-11. The split confirms the layer fixed what it
+  targeted rather than something incidental.
+- **Weight 0.5, not the peak.** Top-1 keeps climbing to 50% at weight 1.5, but
+  top-5 falls back *under* the baseline and wrong-*card* errors start rising —
+  the band stops breaking ties and starts overruling the embedding. 0.5 is the
+  last point where both metrics improve, and top-5 is what the UI shows.
+- **`Suggestion.score` stays a plain cosine**; the band reorders and is reported
+  separately as `Suggestion.band`, so the UI's low-confidence threshold keeps
+  meaning one thing.
+- **Still open:** the 10 wrong-*card* misses are untouched by this layer and need
+  a better encoder (Layer 3). Many wrong answers are Japanese cards outranking
+  English ones, worth a look on its own.

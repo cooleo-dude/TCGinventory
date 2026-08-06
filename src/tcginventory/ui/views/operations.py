@@ -1293,14 +1293,12 @@ def _index_catalog_task(conn, scope: str) -> str:
     try:
         repo = VisionRepository(vision)
         summary = ci.index_catalog(conn, repo, scope)
-        line = summary.summary
-        # Reclaim runs on its own once the sweep lands, so the disk is given back
-        # without having to remember to ask for it.
-        if summary.archived and not summary.stopped:
-            freed = ci.reclaim(conn, repo)
-            if freed.removed:
-                line += f" · reclaimed {freed.bytes_freed / 1e9:.2f} GB"
-        return line
+        # No reclaim here. It used to run automatically, back when the art was kept
+        # as a separate archive and the downloads were transient. With one store,
+        # reclaiming straight after a sweep would delete exactly what the sweep
+        # just fetched — and the reason for keeping it is that re-embedding for a
+        # future model reads from disk. Reclaim is the tile beside this one.
+        return summary.summary
     finally:
         vision.close()
 

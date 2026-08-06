@@ -32,6 +32,10 @@ VISION_FILENAME = "vision.db"
 # training run at all — a labeled crop *is* its training step.
 KIND_DETECTOR = "detector"
 KIND_CONDITION = "condition"
+# Identification has no training run of its own — a labelled crop is its
+# training step — but its accuracy is benchmarked, and those runs belong in the
+# same log so the three models are read the same way.
+KIND_IDENTITY = "identity"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS capture (

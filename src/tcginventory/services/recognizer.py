@@ -174,6 +174,11 @@ def prewarm() -> None:
 class Suggestion:
     card_id: str
     score: float  # cosine similarity in [-1, 1]
+    # Agreement between the query's bottom strip and this printing's, when the
+    # band re-ranker ran. It reorders suggestions but deliberately does not fold
+    # into `score`, which stays a plain cosine so the low-confidence threshold in
+    # the UI keeps meaning one thing.
+    band: float = 0.0
 
 
 class Recognizer:
@@ -193,6 +198,9 @@ class Recognizer:
         # model version or the exemplar count changes (e.g. after a save).
         self._exemplar_index: dict[str, list[np.ndarray]] | None = None
         self._exemplar_key: tuple[str, int] | None = None
+        # Bottom-strip descriptors keyed by card_id, reused across a scene's boxes
+        # so the same candidate's art is read from disk at most once per session.
+        self._band_cache: dict[str, np.ndarray] = {}
 
     @property
     def model_version(self) -> str:
@@ -202,7 +210,9 @@ class Recognizer:
     def embedder(self):
         return self._embedder
 
-    def suggest(self, image, candidates, top: int = 5) -> list[Suggestion]:
+    def suggest(
+        self, image, candidates, top: int = 5, *, rerank: bool = True
+    ) -> list[Suggestion]:
         """Top ``top`` candidate card_ids ranked by similarity to the query.
 
         ``image`` is a file path or an already-loaded PIL image (e.g. a crop of a
@@ -212,6 +222,12 @@ class Recognizer:
         **exemplars** for that card (same visual domain as the query — accurate
         and improving with ingestion), falling back to the catalog reference
         render only for cards not yet labeled.
+
+        The leaders are then re-ranked on the card's bottom strip
+        (:mod:`identity_patches`), which is what separates two printings of the
+        same artwork — the embedding cannot, and reprints are the single largest
+        source of wrong answers. Pass ``rerank=False`` to measure the embedding
+        alone.
         """
         query = self._embedder.embed(image)
         exemplars = self._exemplars_by_card(set(candidates))
@@ -230,7 +246,23 @@ class Recognizer:
             if best is not None:
                 scored.append(Suggestion(card_id, best))
         scored.sort(key=lambda s: s.score, reverse=True)
+        if rerank and len(scored) > 1:
+            scored = self._rerank_on_band(image, scored)
         return scored[:top]
+
+    def _rerank_on_band(self, image, scored: list[Suggestion]) -> list[Suggestion]:
+        """Reorder the leaders by how well their bottom strip matches the query.
+
+        Only the shortlist is touched: reading and normalising a candidate's art
+        costs milliseconds each, and the answer is almost never further down.
+        """
+        from tcginventory.services import identity_patches as ip
+
+        head, tail = scored[: ip.SHORTLIST], scored[ip.SHORTLIST :]
+        ranked = ip.rescore(
+            image, [(s.card_id, s.score) for s in head], cache=self._band_cache
+        )
+        return [Suggestion(r.card_id, r.embed, r.band) for r in ranked] + tail
 
     def _exemplars_by_card(self, candidates: set[str]) -> dict[str, list[np.ndarray]]:
         index = self._exemplar_index_for_version()
