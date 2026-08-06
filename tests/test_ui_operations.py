@@ -244,6 +244,7 @@ def test_each_model_gets_its_own_section(app, seeded_conn):
     assert [op.id for op in ops.in_group("model_identity")] == [
         "identity.index_catalog",
         "identity.reclaim",
+        "identity.fit_projection",
         "vision.reindex",
     ]
     view.deleteLater()

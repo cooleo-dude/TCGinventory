@@ -177,6 +177,18 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
     across 3+ photos: on 44 graded cards the fit scores 14% exact / 1.52 grades off
     against a 0.84 baseline, so the tile greys its button and says what's missing.
 
+- **Photo→render projection ✅ done.** Queries are photographs and the index is
+  clean renders, and the encoder handles that badly enough to invert the answer
+  (a photo sits at median cosine 0.792 from its own card's art, 0.877 from the
+  nearest wrong card's). `services/identity_projection.py` fits an orthogonal
+  Procrustes rotation from synthetic pairs — a catalog render degraded the way a
+  camera would, mapped onto its clean embedding — so no labelled photos, no torch
+  and no training environment are needed; the artifact is a 384×384 matrix in the
+  data dir, fitted by **Operations → Teach recognition what a photograph looks
+  like**. Applied only to the render comparison in `Recognizer.suggest`, never to
+  crop exemplars, which are already photographs. Full stack measured: top-1
+  **20.7% → 75.9%**, top-5 **74.1% → 84.5%**.
+
 - **Candidate pool = the indexed catalog, scoped per card ✅ done.** Suggestions
   used to rank against `labeled_card_ids()` only, so the matcher could never
   propose a card it had not already been taught. `catalog_index.candidate_pool`

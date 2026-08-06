@@ -41,7 +41,9 @@ def test_registry_is_internally_consistent():
 def test_each_recognition_model_has_its_own_section():
     """One section per concern: the environment that trains the models is machine
     setup, and the three models have separate data, metrics and lifecycles. The
-    identifier gets no Train button at all — a labelled crop is its training step.
+    identifier gets no *Train* button — a labelled crop is its training step —
+    but it does get jobs of its own, which need no training environment: indexing
+    the catalog, and fitting the photo-to-render map from catalog art alone.
     """
     assert [op.id for op in ops.in_group("training_env")] == [
         "models.training_env",
@@ -55,6 +57,7 @@ def test_each_recognition_model_has_its_own_section():
     assert [op.id for op in ops.in_group("model_identity")] == [
         "identity.index_catalog",
         "identity.reclaim",
+        "identity.fit_projection",
         "vision.reindex",
     ]
     # Both trainers report their age, so a model left alone reads as stale.

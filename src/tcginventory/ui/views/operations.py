@@ -717,6 +717,9 @@ class OperationsView(QWidget):
             "catalog.update_jp": lambda: self._update_catalog("JP"),
             "shows.refresh": lambda: self._task("shows.refresh", _refresh_shows),
             "vision.reindex": lambda: self._task("vision.reindex", _reindex_corpus),
+            "identity.fit_projection": lambda: self._task(
+                "identity.fit_projection", _fit_photo_projection
+            ),
             "identity.index_catalog": self._index_catalog,
             "identity.reclaim": lambda: self._task(
                 "identity.reclaim", _reclaim_catalog_art
@@ -1326,6 +1329,48 @@ def _reindex_corpus(_conn) -> str:
         indexed = exemplars.reindex_all(repo, get_shared_embedder(), skip_existing=True)
         total = repo.region_embedding_count()
         return f"{indexed:,} newly indexed · {total:,} exemplars in the corpus"
+    finally:
+        vision.close()
+
+
+# The fit converges well before the catalog runs out: measured, 3,000 cards
+# (6,000 pairs) reaches the same accuracy as 10,000, while a thinner fit costs
+# more top-5 than it returns. 4,000 leaves margin without a long wait.
+_PROJECTION_CARDS = 4000
+
+
+def _fit_photo_projection(conn) -> str:
+    """Learn the map from photo-domain embeddings onto catalog-render ones.
+
+    Runs on the indexed catalog alone — no labelled photos, no training
+    environment, no torch. The sample is capped because the fit converges long
+    before the catalog is exhausted and the user is waiting on it.
+    """
+    import numpy as np
+
+    from tcginventory.data.vision import VisionRepository, open_vision
+    from tcginventory.services import identity_eval as ie
+    from tcginventory.services import identity_projection as ip
+    from tcginventory.services.recognizer import get_shared_embedder
+
+    vision = open_vision()
+    try:
+        repo = VisionRepository(vision)
+        embedder = get_shared_embedder()
+        ids, bank = ie.load_pool(repo, embedder.version)
+        if not ids:
+            return "nothing indexed yet — index the card catalog first"
+        targets = {cid: bank[i] for i, cid in enumerate(ids)}
+        sample = list(ids)
+        np.random.default_rng(7).shuffle(sample)
+        rotation, result = ip.fit(repo, embedder, sample[:_PROJECTION_CARDS], targets)
+        if rotation is None:
+            return (
+                f"not enough usable art to fit ({result.pairs:,} pairs, "
+                f"{ip.MIN_PAIRS:,} needed) — index more of the catalog first"
+            )
+        ip.save(rotation)
+        return f"photo matching fitted · {result.summary}"
     finally:
         vision.close()
 

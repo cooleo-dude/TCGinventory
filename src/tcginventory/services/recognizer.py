@@ -170,6 +170,11 @@ def prewarm() -> None:
     get_shared_embedder()
 
 
+# Sentinel for a lazily-loaded artifact that may legitimately be absent, so a
+# missing one is looked for once rather than on every box.
+_UNSET: object = object()
+
+
 @dataclass(frozen=True)
 class Suggestion:
     card_id: str
@@ -201,6 +206,10 @@ class Recognizer:
         # Bottom-strip descriptors keyed by card_id, reused across a scene's boxes
         # so the same candidate's art is read from disk at most once per session.
         self._band_cache: dict[str, np.ndarray] = {}
+        # Photo-to-render map, read from disk once. _UNSET distinguishes "not
+        # looked for yet" from "looked for and absent", so a missing artifact
+        # is not re-checked on every box.
+        self._projection = _UNSET  # np.ndarray | None once resolved
 
     @property
     def model_version(self) -> str:
@@ -230,17 +239,25 @@ class Recognizer:
         alone.
         """
         query = self._embedder.embed(image)
+        # Two comparisons live here in two different domains. Crop exemplars are
+        # photographs like the query, so they are compared as they are; catalog
+        # renders are not, so the query is carried into render domain first. One
+        # projected query for everything would score the exemplars in a space
+        # they were never in.
+        as_render = self._projected(query)
         exemplars = self._exemplars_by_card(set(candidates))
         scored: list[Suggestion] = []
         for card_id in candidates:
             vectors = exemplars.get(card_id)
+            probe = query
             if not vectors:
                 ref = self._reference_vector(card_id)
                 vectors = [ref] if ref is not None else []
+                probe = as_render
             best: float | None = None
             for vec in vectors:
-                if vec.shape == query.shape:
-                    score = float(np.dot(query, vec))
+                if vec.shape == probe.shape:
+                    score = float(np.dot(probe, vec))
                     if best is None or score > best:
                         best = score
             if best is not None:
@@ -249,6 +266,14 @@ class Recognizer:
         if rerank and len(scored) > 1:
             scored = self._rerank_on_band(image, scored)
         return scored[:top]
+
+    def _projected(self, query: np.ndarray) -> np.ndarray:
+        """The query in render domain, if a photo-to-render map is installed."""
+        from tcginventory.services import identity_projection as ip
+
+        if self._projection is _UNSET:
+            self._projection = ip.load()
+        return ip.apply(query, self._projection)
 
     def _rerank_on_band(self, image, scored: list[Suggestion]) -> list[Suggestion]:
         """Reorder the leaders by how well their bottom strip matches the query.

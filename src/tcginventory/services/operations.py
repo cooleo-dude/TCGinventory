@@ -234,6 +234,22 @@ OPERATIONS: tuple[Operation, ...] = (
         caption="Archived art",
     ),
     Operation(
+        id="identity.fit_projection",
+        group="model_identity",
+        title="Teach recognition what a photograph looks like",
+        blurb=(
+            "The catalog holds clean renders; your camera does not. That gap is "
+            "large enough to invert the answer — a photo sits closer to the wrong "
+            "card's art than its own. This measures the distortion on catalog "
+            "images and corrects for it, no training environment needed."
+        ),
+        verb="Fit",
+        icon="sparkles",
+        kind=KIND_BACKGROUND,
+        caption="Photo match",
+        stale_after_days=90,
+    ),
+    Operation(
         id="vision.reindex",
         group="model_identity",
         title="Re-index the recognition corpus",

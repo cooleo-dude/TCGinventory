@@ -1416,3 +1416,57 @@ _Template for new entries:_
   exactly and for free. After scoping, only **3** wrong-printing errors remain
   while wrong-*card* errors stand at 14, so the next real lever is a better
   encoder (the ArcFace fine-tune), not OCR. OCR is demoted, not discarded.
+
+## 2026-08-06 — Identity Layer 3: carrying a photograph into render domain
+
+- **Root cause, finally measured.** A photo sits at median cosine **0.792** from
+  its own card's render but **0.877** from the nearest *wrong* card's. The
+  encoder was ordering the pool backwards; top-1 of 20.7% was never a tuning
+  problem. Queries are photographs and the index is clean renders — a domain gap,
+  not a similarity gap.
+- **The augmentation was validated before it was trusted.** Real photos sit at
+  median 0.792 from their own render; renders degraded with perspective, blur,
+  glare, exposure and a loose crop on a mat sit at 0.792 too. Only because the
+  synthetic gap matches the real one is it legitimate to train on it — and the
+  validation set stays the labelled photo crops throughout, never renders. This
+  is the same setup that produced a 99.8%/51.7% embarrassment for the language
+  probe, used the right way round.
+- **A rotation, not a free linear map.** Orthogonal Procrustes can only rotate,
+  never rescale or discard directions, so it cannot trade away the structure that
+  keeps the rest of the pool separable. Unconstrained ridge collapses: at 6,000
+  pairs it takes top-5 from 74.1% to 69.0%, and at λ=100 the ranking is destroyed
+  entirely. The constraint is doing real work, not decoration.
+- **Fit size was measured, not guessed.** 800 pairs *hurt* top-5 (83.3% → 77.8%
+  under EN scope) — the earlier read that this layer was a dead end was data
+  starvation, not a flaw. 6,000 pairs improves both metrics; 20,000 is flat
+  against 6,000. The Operations job samples 4,000 cards (8,000 pairs).
+- **Applied per domain, which is the part easy to get wrong.** `suggest` compares
+  against crop exemplars (photographs, like the query) *and* catalog renders. The
+  map is applied only to the render comparison; projecting the query for both
+  would score exemplars in a space they were never in.
+- **Measured end to end through the service path:**
+
+  | configuration | top-1 | top-5 | wrong printing / card |
+  |---|---|---|---|
+  | raw encoder | 20.7% | 74.1% | 36 / 10 |
+  | + projection | 58.6% | 82.8% | 17 / 7 |
+  | EN scope + projection | 70.7% | 81.0% | 4 / 13 |
+  | **EN scope + projection + band** | **75.9%** | **84.5%** | 6 / 8 |
+
+- **No training environment, no torch.** The artifact is a 384×384 float32 matrix
+  in the data dir, fitted in minutes from catalog art alone and applied as one
+  matmul. The ArcFace fine-tune (3c) stays available for the 8 remaining
+  wrong-card misses, but is no longer the only route to them.
+- **Honest limit:** the benchmark is 54–58 labelled crops, so a few points is a
+  couple of queries. What makes the result credible is that the mechanism was
+  measured directly (the 0.792/0.877 inversion), the fix is principled, and the
+  gain shows up on both metrics and both pool slices — not the headline number
+  alone.
+- **Side-fix, found the hard way.** The new tile named an icon (`wand-sparkles`)
+  that is not bundled. `icons.pixmap` raised `FileNotFoundError` part-way through
+  building a widget, and the symptom was not a missing glyph but an **access
+  violation in an unrelated auction test fourteen tests later** — Qt was left
+  holding a half-constructed object. `pixmap` now returns a blank pixmap for an
+  unknown name and always ends its painter, so a typo (or a stripped asset in the
+  frozen build) costs a glyph rather than a window. `tests/test_icons.py` asserts
+  every icon named in the operations registry is actually bundled.

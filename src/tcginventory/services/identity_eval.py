@@ -136,16 +136,23 @@ def evaluate(
     embedder=None,
     rerank=None,
     top_k: int = TOP_K,
+    project: bool = True,
 ) -> EvalResult:
     """Score the identifier against the corpus it is meant to recognise.
 
     ``rerank`` is the seam the later layers plug into: given the query crop and the
     ranked shortlist, it returns a reordered shortlist. Passing None measures the
     embedding alone, which is what makes each layer's contribution attributable.
+
+    ``project`` applies the installed photo-to-render map, because the app applies
+    it — a benchmark that skipped it would be scoring a configuration nobody runs.
+    Pass False to measure the raw encoder.
     """
+    from tcginventory.services import identity_projection as ip
     from tcginventory.services.recognizer import get_shared_embedder
 
     embedder = embedder or get_shared_embedder()
+    rotation = ip.load() if project else None
     version = embedder.version
     queries = collect_queries(repo, embedder)
     ids, bank = load_pool(repo, version)
@@ -161,7 +168,7 @@ def evaluate(
     for query in queries:
         if query.card_id not in index:
             continue  # the truth isn't in the index; scoring it would be noise
-        scores = bank @ query.vector
+        scores = bank @ ip.apply(query.vector, rotation)
         order = np.argsort(-scores)
         if rerank is not None:
             order = rerank(query, order, ids, scores)

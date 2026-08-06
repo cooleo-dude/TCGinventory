@@ -387,3 +387,49 @@ def test_an_empty_index_reports_nothing_rather_than_crashing(env):
     conn, repo, tmp_path = env
     result = ie.evaluate(conn, repo, embedder=_Embedder())
     assert result.queries == 0 and result.pool == 0 and result.top1 == 0.0
+
+
+def test_the_projection_applies_to_renders_but_not_to_exemplars(env):
+    """Crop exemplars are photographs like the query; catalog renders are not.
+    Projecting the query for both would score the exemplars in a space they were
+    never in, so each comparison has to happen in its own domain."""
+    from tcginventory.services import identity_projection as ip
+    from tcginventory.services.recognizer import Recognizer
+
+    _, repo, tmp_path = env
+    query_vec = np.zeros(4, dtype=np.float32)
+    query_vec[0] = 1.0
+    rotation = np.roll(np.eye(4, dtype=np.float32), 1, axis=1)  # a known turn
+    ip.save(rotation)
+
+    class _Fixed:
+        version = "fixed:v1"
+
+        def embed(self, image):
+            return query_vec
+
+    # "exemplar-card" is known from a photo; "render-card" only from catalog art.
+    scene_src = tmp_path / "corpus.png"
+    _card_image("2/2").save(scene_src)
+    cap = repo.add_capture(source="manual")
+    img = repo.add_image(cap, "sha-exemplar", str(scene_src), "front")
+    region = repo.add_region(
+        img, 1, (0.0, 0.0, 1.0, 1.0), None, CardLabel(card_id="exemplar-card")
+    )
+    repo.put_region_embedding(
+        region, "fixed:v1", "exemplar-card", 4, query_vec.tobytes()
+    )
+    turned = ip.apply(query_vec, rotation)
+    repo.put_embedding("render-card", "fixed:v1", 4, turned.tobytes())
+
+    scene = tmp_path / "q.png"
+    _card_image("1/1").save(scene)
+    rec = Recognizer(repo, embedder=_Fixed(), reference_image=lambda c: None)
+    scores = {
+        s.card_id: s.score
+        for s in rec.suggest(scene, ["exemplar-card", "render-card"], rerank=False)
+    }
+
+    # Both are perfect matches — but only if each was compared in its own domain.
+    assert scores["exemplar-card"] == pytest.approx(1.0, abs=1e-5)
+    assert scores["render-card"] == pytest.approx(1.0, abs=1e-5)

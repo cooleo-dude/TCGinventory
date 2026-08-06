@@ -16,22 +16,37 @@ from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 
-def _svg_text(name: str) -> str:
-    return (
-        resources.files("tcginventory.ui") / "assets" / "icons" / f"{name}.svg"
-    ).read_text(encoding="utf-8")
+def _svg_text(name: str) -> str | None:
+    """The icon's markup, or None when no such icon is bundled."""
+    try:
+        return (
+            resources.files("tcginventory.ui") / "assets" / "icons" / f"{name}.svg"
+        ).read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return None
 
 
 @lru_cache(maxsize=256)
 def pixmap(name: str, color: str, size: int = 18) -> QPixmap:
-    """Render Lucide icon ``name`` in ``color`` at ``size``×``size`` px."""
-    svg = _svg_text(name).replace("currentColor", color)
-    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    """Render Lucide icon ``name`` in ``color`` at ``size``×``size`` px.
+
+    An unknown name yields a blank pixmap rather than raising. A missing icon is
+    a cosmetic problem, but an exception raised part-way through building a
+    widget is not: it leaves Qt holding a half-constructed object, and the crash
+    surfaces later somewhere unrelated. A tile with no glyph is recoverable; a
+    window that cannot be built is not.
+    """
     pm = QPixmap(QSize(size, size))
     pm.fill(Qt.transparent)
+    svg = _svg_text(name)
+    if svg is None:
+        return pm
+    renderer = QSvgRenderer(QByteArray(svg.replace("currentColor", color).encode()))
     painter = QPainter(pm)
-    renderer.render(painter)
-    painter.end()
+    try:
+        renderer.render(painter)
+    finally:
+        painter.end()  # an unended painter on a QPixmap is its own crash
     return pm
 
 
