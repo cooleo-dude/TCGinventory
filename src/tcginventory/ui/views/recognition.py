@@ -107,6 +107,9 @@ class _Box:
     card: CardLabel = field(default_factory=CardLabel)
     condition: str | None = Condition.NM.value  # default Near Mint (Condition value)
     visible: bool = True  # box overlay shown on the canvas
+    # Which catalog this card is ranked against. Per box, because one photo can
+    # hold English and Japanese cards side by side. None means "all languages".
+    language: str | None = "EN"
 
 
 @dataclass
@@ -579,6 +582,48 @@ class _SuggestBox(QComboBox):
             self._name_field.apply_label(self._labels[index])
 
 
+class _LangBox(QComboBox):
+    """Per-box catalog language, and the single largest lever on suggestion
+    accuracy.
+
+    The same artwork ships in English and in Japanese, so a card's nearest
+    neighbour by picture is routinely its counterpart from the other region —
+    measured on the corpus, 42 of 46 wrong suggestions were exactly that. Reading
+    the language off the photograph was tried and does not work (a probe on the
+    embeddings scores 99.8% on catalog renders and 51.7% on real photos), so the
+    scope is stated rather than guessed.
+
+    It sits per box, not per scan, because one photo routinely holds both.
+    """
+
+    CHOICES = (("EN", "EN"), ("JP", "JP"), ("All", None))
+
+    def __init__(self, box: _Box, on_change=None) -> None:
+        super().__init__()
+        self._box = box
+        self._on_change = on_change  # (box, language) -> None
+        for label, value in self.CHOICES:
+            self.addItem(label, value)
+        pos = self.findData(box.language)
+        if pos >= 0:
+            self.setCurrentIndex(pos)
+        self.currentIndexChanged.connect(self._on_changed)
+
+    def _on_changed(self, *_args) -> None:
+        self._box.language = self.currentData()
+        if self._on_change is not None:
+            self._on_change(self._box, self._box.language)
+
+    def set_language(self, value: str | None) -> None:
+        """Show ``value`` without announcing it — used when mirroring the other
+        face, so the two don't bounce updates at each other."""
+        pos = self.findData(value)
+        if pos >= 0 and pos != self.currentIndex():
+            blocked = self.blockSignals(True)
+            self.setCurrentIndex(pos)
+            self.blockSignals(blocked)
+
+
 class _ConditionBox(QComboBox):
     """Per-box condition picker; writes the wear grade to the box so the saved
     corpus region records each card's condition.
@@ -702,6 +747,12 @@ class RecognitionView(QWidget):
         self._proposals: dict[str, list[QGraphicsRectItem]] = {"yolo": []}
         self._yolo_detector = None  # OnnxCardDetector, lazily built
         self._condition_boxes: dict[int, _ConditionBox] = {}
+        self._lang_boxes: dict[int, _LangBox] = {}
+        # New boxes inherit the last language chosen, so a single-language
+        # scan is one change rather than one per card.
+        self._last_language: str | None = "EN"
+        # Candidate ids per language scope, built once per scan.
+        self._pool_cache: dict[object, list[str]] = {}
         self._assessor = None  # condition assessor, lazily built
         self._divider = None  # QGraphicsLineItem for the current image
         self._rotation = 0  # view rotation in degrees (landscape / portrait)
@@ -1463,7 +1514,7 @@ class RecognitionView(QWidget):
 
     def _add_box(self, rect: QRectF) -> _Box:
         """Add a box (from a drawn rubber-band) to the current image."""
-        box = _Box(number=self._next_number(), rect=rect)
+        box = _Box(number=self._next_number(), rect=rect, language=self._last_language)
         self._sessions[self._current].boxes.append(box)
         self._add_box_item(box)
         self._refresh_panel()
@@ -1709,6 +1760,7 @@ class RecognitionView(QWidget):
         self._name_fields.clear()
         self._suggest_boxes.clear()
         self._condition_boxes.clear()
+        self._lang_boxes.clear()
         self._seg_rows.clear()
         self._vis_checks.clear()
         self._hl = None
@@ -1783,6 +1835,15 @@ class RecognitionView(QWidget):
         r2.setSpacing(8)
         r2.setContentsMargins(31, 0, 0, 0)
         r2.addWidget(meta, 1)
+        lang = _LangBox(box, on_change=self._on_language_edited)
+        lang.setObjectName("segLang")
+        lang.setToolTip(
+            "Which catalog to match this card against.\n"
+            "English and Japanese releases share artwork, so narrowing this is "
+            "the biggest single improvement to the suggestions."
+        )
+        self._lang_boxes[box.number] = lang
+        r2.addWidget(lang)
         suggest = _SuggestBox(box, name)
         suggest.setObjectName("segSuggest")
         self._suggest_boxes[box.number] = suggest
@@ -1837,9 +1898,9 @@ class RecognitionView(QWidget):
             self._rec_repo = self._vision_repo
         return self._recognizer
 
-    def _candidate_pool(self) -> list[str]:
-        """Cards to rank against: the saved-region corpus plus anything already
-        labeled in the current (unsaved) session."""
+    def _labeled_ids(self) -> set[str]:
+        """Cards already taught to the matcher: the saved-region corpus plus
+        anything labeled in the current (unsaved) session."""
         ids: set[str] = set()
         if self._rec_repo is not None:
             ids.update(self._rec_repo.labeled_card_ids())
@@ -1847,7 +1908,62 @@ class RecognitionView(QWidget):
             for box in session.boxes:
                 if box.card and box.card.card_id:
                     ids.add(box.card.card_id)
-        return sorted(ids)
+        return ids
+
+    def _candidate_pool(self, language: str | None, model_version: str) -> list[str]:
+        """Cards to rank a box against: the indexed catalog, scoped to a language.
+
+        Suggestions used to run against the labeled corpus alone, which meant the
+        matcher could only ever propose a card already identified once before.
+        With the catalog indexed it ranks against the real thing; the labeled
+        cards stay in regardless of scope, since those are known-relevant and
+        carry crop exemplars photographed under the same conditions as the query.
+        """
+        from tcginventory.services import catalog_index as ci
+
+        labeled = self._labeled_ids()
+        key = (language, model_version, len(labeled))
+        cached = self._pool_cache.get(key)
+        if cached is not None:
+            return cached
+        # `_rec_repo` is only bound once a recognizer has been built, so fall back
+        # to the repo the view was handed — the pool is readable either way.
+        repo = self._rec_repo or self._vision_repo
+        pool: list[str]
+        if repo is None:
+            pool = sorted(labeled)
+        else:
+            pool = ci.candidate_pool(
+                self._conn,
+                repo,
+                model_version,
+                languages=[language] if language else None,
+                extra=labeled,
+            )
+        self._pool_cache[key] = pool
+        return pool
+
+    def _on_language_edited(self, box: _Box, value: str | None) -> None:
+        """Remember the choice for new boxes, and mirror it onto the other face.
+
+        One physical card has one language, so setting it from either side means
+        the same thing — the same rule the condition picker follows.
+        """
+        self._last_language = value
+        if not (0 <= self._current < len(self._sessions)):
+            return
+        other = self._paired_session(self._sessions[self._current])
+        if other is None:
+            return
+        for candidate in other.boxes:
+            if candidate.number == box.number:
+                if candidate.language != value:
+                    candidate.language = value
+                    if self._sessions[self._current] is other:
+                        combo = self._lang_boxes.get(candidate.number)
+                        if combo is not None:
+                            combo.set_language(value)
+                break
 
     def _crop_for(self, full, box: _Box, session: _Session):
         """Crop ``box`` out of the full-resolution image via its normalised rect."""
@@ -1899,13 +2015,18 @@ class RecognitionView(QWidget):
         except Exception as exc:  # embedder/model failed to load
             QMessageBox.warning(self, "Suggestions unavailable", str(exc))
             return
-        pool = self._candidate_pool()
-        if not pool:
+        # Each box carries its own language scope, so the pool is resolved per
+        # box rather than once for the scan — one photo can hold both catalogs.
+        self._pool_cache.clear()
+        version = recognizer.model_version
+        if not any(
+            self._candidate_pool(box.language, version) for box in session.boxes
+        ):
             QMessageBox.information(
                 self,
-                "No labeled cards yet",
-                "Suggestions rank against cards you've already labeled. Label a "
-                "few cards and save — the matcher improves as your corpus grows.",
+                "Nothing to match against",
+                "Suggestions rank against the indexed catalog. Index it from "
+                "Operations → Catalog index, or label a few cards and save.",
             )
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -1915,6 +2036,9 @@ class RecognitionView(QWidget):
                 for box in session.boxes:
                     combo = self._suggest_boxes.get(box.number)
                     if combo is None:
+                        continue
+                    pool = self._candidate_pool(box.language, version)
+                    if not pool:
                         continue
                     crop = self._crop_for(full, box, session)
                     ranked = recognizer.suggest(crop, pool, top=5)
@@ -1964,6 +2088,7 @@ class RecognitionView(QWidget):
                     rect=QRectF(b.rect),
                     card=replace(b.card),
                     condition=b.condition,  # same physical card → same condition
+                    language=b.language,  # ...and the same catalog language
                 )
             )
         insert_at = self._current + 1
@@ -2177,6 +2302,7 @@ class RecognitionView(QWidget):
         self._name_fields.clear()
         self._suggest_boxes.clear()
         self._condition_boxes.clear()
+        self._lang_boxes.clear()
         self._seg_rows.clear()
         self._hl = None
         for items in self._proposals.values():
@@ -2310,7 +2436,8 @@ def _view_qss(t: theme.Tokens) -> str:
         border-radius: 10px; padding: 3px 9px; font-size: 10px; font-weight: 700; }}
     #sideRecv {{ background: {t.accent_soft}; color: {t.accent};
         border-radius: 10px; padding: 3px 9px; font-size: 10px; font-weight: 700; }}
-    QComboBox#segSuggest, QComboBox#segCond {{ background: {t.surface};
+    QComboBox#segSuggest, QComboBox#segCond, QComboBox#segLang {{
+        background: {t.surface};
         border: 1px solid {t.line2}; border-radius: 7px; padding: 4px 7px;
         font-size: 11px; }}
     """

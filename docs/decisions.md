@@ -1373,3 +1373,46 @@ _Template for new entries:_
 - **Still open:** the 10 wrong-*card* misses are untouched by this layer and need
   a better encoder (Layer 3). Many wrong answers are Japanese cards outranking
   English ones, worth a look on its own.
+
+## 2026-08-05 — Suggestions rank against the catalog, scoped per card by language
+
+- **The bug:** Recognition's candidate pool was `labeled_card_ids()` — the matcher
+  could only ever propose a card that had already been identified once before, so
+  it was useless for the thing it exists to do. With the catalog indexed
+  (49,551 cards) the pool is now the real catalog, via
+  `catalog_index.candidate_pool`.
+- **What that exposed:** the catalog holds **27,014 Japanese cards against 22,537
+  English**, and a release shares its artwork across regions exactly. A global
+  embedding sees artwork, so an English card's nearest neighbour is routinely its
+  Japanese twin — **42 of 46 wrong answers were cross-language**, and most sat at
+  rank 2, right behind the twin.
+- **Language scoping is worth more than every scoring layer combined:**
+
+  | configuration | top-1 | top-5 |
+  |---|---|---|
+  | catalog pool, all languages | 20.7% | 74.1% |
+  | + bottom band (Layer 1) | 44.8% | 77.6% |
+  | EN scope | 67.2% | 79.3% |
+  | **EN scope + band** | **67.2%** | **84.5%** |
+
+- **Inferring the language was tried and rejected.** A linear probe over the
+  existing card embeddings scores **99.8% on held-out catalog renders and 51.7%
+  on real photographs** — worse than always guessing English. It had learned
+  properties of clean renders that do not survive photography. Trusting the
+  held-out number would have shipped something worse than a constant; this is the
+  case for benchmarking on the real query domain rather than a convenient split.
+- **So the scope is stated, not predicted** — and it lives **per box**, not per
+  scan, because one photo routinely holds both catalogs. New boxes inherit the
+  last choice (a single-language scan costs one change, not one per card), and
+  the two faces of a card share a language exactly as they share a condition.
+- **Labelled cards stay in the pool whatever the scope.** A card the user has
+  already identified is known-relevant and carries crop exemplars shot under the
+  same conditions as the query; dropping one for a scope setting would make the
+  matcher forget something it had been taught.
+- **This reverses the planned Layer 2.** Number OCR was going to be next, on the
+  reasoning that the collector number separates printings. It does — the format
+  alone is nearly a perfect region marker (93% of EN numbers are bare digits, 84%
+  of JP are `N/M`, and no EN card uses `N/M`) — but scoping captures that signal
+  exactly and for free. After scoping, only **3** wrong-printing errors remain
+  while wrong-*card* errors stand at 14, so the next real lever is a better
+  encoder (the ArcFace fine-tune), not OCR. OCR is demoted, not discarded.

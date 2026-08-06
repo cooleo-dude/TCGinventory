@@ -31,7 +31,7 @@ vectors and every card you had before the sweep or have used since.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -164,6 +164,53 @@ def scope_card_ids(
         # No network: only what is already on disk, from either location.
         pairs = [(cid, url) for cid, url in pairs if source_for(cid) is not None]
     return pairs
+
+
+def candidate_pool(
+    conn: sqlite3.Connection,
+    repo: VisionRepository,
+    model_version: str,
+    *,
+    languages: Sequence[str] | None = None,
+    extra: Iterable[str] = (),
+) -> list[str]:
+    """Every indexed card the identifier should rank against.
+
+    ``languages`` narrows the pool, and on a mixed catalog that matters more than
+    any scoring change. Measured on the corpus: the same artwork is released in
+    English and in Japanese, so an English card's nearest neighbour is routinely
+    its Japanese twin — 42 of 46 wrong answers were cross-language. Restricting
+    the pool to the languages actually being photographed took top-1 from 20.7% to
+    67.2%, which is more than every scoring layer combined.
+
+    Inferring the language from the picture was tried and rejected: a linear probe
+    on the card embeddings separates the two at 99.8% on catalog renders but 51.7%
+    on photographs — worse than a constant guess. The scope is a stated preference
+    rather than a prediction because that is the part we can actually be right
+    about.
+
+    ``extra`` is always kept regardless of language: cards the user has already
+    labelled are known-relevant, and dropping one because of a scope setting would
+    make the identifier forget something it had been taught.
+    """
+    rows = repo.conn.execute(
+        "SELECT card_id FROM card_embedding WHERE model_version = ?",
+        (model_version,),
+    ).fetchall()
+    indexed = {r["card_id"] for r in rows}
+    if not indexed:
+        return sorted(set(extra))
+
+    wanted = {code.strip().upper() for code in languages or () if code and code.strip()}
+    if wanted:
+        allowed = {
+            r["card_id"]
+            for r in conn.execute("SELECT card_id, language FROM card_catalog")
+            if (r["language"] or "").strip().upper() in wanted
+        }
+        indexed &= allowed
+    indexed.update(cid for cid in extra if cid)
+    return sorted(indexed)
 
 
 def index_catalog(

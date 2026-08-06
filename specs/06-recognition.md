@@ -177,6 +177,19 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
     across 3+ photos: on 44 graded cards the fit scores 14% exact / 1.52 grades off
     against a 0.84 baseline, so the tile greys its button and says what's missing.
 
+- **Candidate pool = the indexed catalog, scoped per card ✅ done.** Suggestions
+  used to rank against `labeled_card_ids()` only, so the matcher could never
+  propose a card it had not already been taught. `catalog_index.candidate_pool`
+  now serves the indexed catalog, filtered by a **per-box language** picker in
+  Segments (`_LangBox`, EN / JP / All). Per box because one photo holds both
+  catalogs; new boxes inherit the last choice, and a card's two faces share a
+  language as they share a condition. Labelled cards stay in the pool whatever
+  the scope. This is the largest single accuracy lever measured — English scope
+  takes top-1 from 20.7% to 67.2% — because English and Japanese releases share
+  artwork and 42 of 46 wrong answers were cross-language. The scope is **stated,
+  not inferred**: a probe predicting language from the embedding scores 99.8% on
+  catalog renders but 51.7% on photographs.
+
 - **Identity accuracy — benchmark + bottom-band re-rank ✅ done.** The whole
   catalog is now indexable (`services/catalog_index.py`), which turns
   identification from "search the 43 cards you already labelled" into an open-set

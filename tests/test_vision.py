@@ -69,10 +69,18 @@ def test_corpus_summary_rows_counts_and_growth(repo):
 
     rows = repo.capture_rows()
     assert [r["id"] for r in rows] == [c1, c2]  # oldest first
-    assert (rows[0]["source"], rows[0]["images"], rows[0]["regions"], rows[0][
-        "labeled"]) == ("transaction", 1, 2, 1)  # 1 of 2 boxes carries an identity
-    assert (rows[1]["source"], rows[1]["note"], rows[1]["images"], rows[1][
-        "labeled"]) == ("listing", "binder", 2, 1)
+    assert (
+        rows[0]["source"],
+        rows[0]["images"],
+        rows[0]["regions"],
+        rows[0]["labeled"],
+    ) == ("transaction", 1, 2, 1)  # 1 of 2 boxes carries an identity
+    assert (
+        rows[1]["source"],
+        rows[1]["note"],
+        rows[1]["images"],
+        rows[1]["labeled"],
+    ) == ("listing", "binder", 2, 1)
 
     by_cap: dict[int, list[str]] = {}
     for row in repo.capture_cards():
@@ -260,6 +268,9 @@ def _catalog_conn():
 class _FakeRecognizer:
     """Returns canned rankings, restricted to the given candidate pool."""
 
+    # The view reads this to pick the right slice of the catalog index.
+    model_version = "test:v1"
+
     def __init__(self, ranked):
         self._ranked = ranked  # list[(card_id, score)]
 
@@ -356,7 +367,9 @@ def test_condition_set_while_labeling_saves_to_corpus(app, _quiet, tmp_path):
     migrate(conn)
     vrepo = VisionRepository(open_vision(":memory:"))
     view = RecognitionView(
-        conn, vision_repo=vrepo, vision_dir=tmp_path,
+        conn,
+        vision_repo=vrepo,
+        vision_dir=tmp_path,
         recognizer=_pixel_recognizer(vrepo),
     )
     view._mode.setCurrentIndex(1)  # listing — a plain front image
@@ -416,7 +429,9 @@ def test_export_counts_a_front_back_pair_once(app, _quiet, tmp_path):
     migrate(conn)
     vrepo = VisionRepository(open_vision(":memory:"))
     view = RecognitionView(
-        conn, vision_repo=vrepo, vision_dir=tmp_path,
+        conn,
+        vision_repo=vrepo,
+        vision_dir=tmp_path,
         recognizer=_pixel_recognizer(vrepo),
     )
     view._mode.setCurrentIndex(1)
@@ -442,7 +457,9 @@ def test_add_new_image_slot_then_fill(app, _quiet, tmp_path):
     migrate(conn)
     vrepo = VisionRepository(open_vision(":memory:"))
     view = RecognitionView(
-        conn, vision_repo=vrepo, vision_dir=tmp_path,
+        conn,
+        vision_repo=vrepo,
+        vision_dir=tmp_path,
         recognizer=_pixel_recognizer(vrepo),
     )
     view._mode.setCurrentIndex(1)
@@ -569,7 +586,11 @@ def test_detector_proposals_overlay_then_accept_into_boxes(
     view.deleteLater()
 
 
-def test_suggestions_notify_when_no_labeled_corpus(app, monkeypatch, tmp_path):
+def test_suggestions_notify_when_there_is_nothing_to_match_against(
+    app, monkeypatch, tmp_path
+):
+    """Neither an indexed catalog nor a labelled card: say so rather than
+    silently returning nothing."""
     from PySide6.QtCore import QRectF
     from PySide6.QtWidgets import QMessageBox
 
@@ -590,10 +611,10 @@ def test_suggestions_notify_when_no_labeled_corpus(app, monkeypatch, tmp_path):
     )
     view._mode.setCurrentIndex(1)
     view.add_image_paths([_png(tmp_path / "scene.png", 200, 100)])
-    box = view._add_box(QRectF(10, 10, 40, 60))  # unlabeled → pool stays empty
+    box = view._add_box(QRectF(10, 10, 40, 60))  # unlabeled, catalog unindexed
 
     view._run_suggestions()
 
-    assert calls  # the user was told the corpus is empty
+    assert calls  # the user was told there is nothing to rank against
     assert not view._suggest_boxes[box.number].isEnabled()  # nothing suggested
     view.deleteLater()

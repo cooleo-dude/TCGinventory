@@ -289,3 +289,113 @@ def test_status_reports_how_much_of_the_catalog_is_searchable(env):
     assert status.indexed == 2
     assert status.archived == 2 and status.archive_bytes > 0  # the PNG store
     assert not status.complete
+
+
+# -- the candidate pool ------------------------------------------------------
+
+
+def _bilingual(conn):
+    """An English catalog and a Japanese one, as the real app holds both."""
+    CardCatalogRepository(conn).replace_for_language(
+        [
+            CatalogCard(
+                card_id="en-1",
+                name="Charizard",
+                set_id="s",
+                set_name="Base",
+                number="4",
+                image_small="https://example.invalid/en-1.png",
+            ),
+            CatalogCard(
+                card_id="en-2",
+                name="Blastoise",
+                set_id="s",
+                set_name="Base",
+                number="2",
+                image_small="https://example.invalid/en-2.png",
+            ),
+        ],
+        "EN",
+        "2026-08-05T00:00:00+00:00",
+    )
+    CardCatalogRepository(conn).replace_for_language(
+        [
+            CatalogCard(
+                card_id="jp-1",
+                name="Charizard",
+                set_id="s",
+                set_name="Base JP",
+                number="004/102",
+                image_small="https://example.invalid/jp-1.png",
+                language="JP",
+            ),
+        ],
+        "JP",
+        "2026-08-05T00:00:00+00:00",
+    )
+
+
+def _index(repo, card_ids, version="test:v1"):
+    for i, cid in enumerate(card_ids):
+        vec = np.full(4, i + 1, dtype=np.float32)
+        repo.put_embedding(cid, version, vec.size, vec.tobytes())
+
+
+def test_the_pool_is_what_has_been_indexed(env):
+    conn, repo = env
+    _bilingual(conn)
+    _index(repo, ["en-1", "jp-1"])  # en-2 never indexed
+
+    assert ci.candidate_pool(conn, repo, "test:v1") == ["en-1", "jp-1"]
+
+
+def test_the_pool_can_be_scoped_to_a_language(env):
+    """The single largest accuracy lever: an English card's nearest neighbour is
+    routinely its Japanese twin, and the two share artwork exactly."""
+    conn, repo = env
+    _bilingual(conn)
+    _index(repo, ["en-1", "en-2", "jp-1"])
+
+    assert ci.candidate_pool(conn, repo, "test:v1", languages=["EN"]) == [
+        "en-1",
+        "en-2",
+    ]
+    assert ci.candidate_pool(conn, repo, "test:v1", languages=["JP"]) == ["jp-1"]
+    both = ci.candidate_pool(conn, repo, "test:v1", languages=["EN", "JP"])
+    assert both == ["en-1", "en-2", "jp-1"]
+
+
+def test_language_scoping_is_case_and_blank_tolerant(env):
+    conn, repo = env
+    _bilingual(conn)
+    _index(repo, ["en-1", "jp-1"])
+
+    assert ci.candidate_pool(conn, repo, "test:v1", languages=[" en "]) == ["en-1"]
+    # An empty scope means "no preference", not "nothing".
+    assert ci.candidate_pool(conn, repo, "test:v1", languages=[]) == ["en-1", "jp-1"]
+
+
+def test_labelled_cards_survive_the_language_scope(env):
+    """A card the user has already taught us is known-relevant; a scope setting
+    must not make the identifier forget it."""
+    conn, repo = env
+    _bilingual(conn)
+    _index(repo, ["en-1", "jp-1"])
+
+    pool = ci.candidate_pool(conn, repo, "test:v1", languages=["EN"], extra=["jp-1"])
+    assert pool == ["en-1", "jp-1"]
+
+
+def test_an_unindexed_catalog_still_offers_the_labelled_cards(env):
+    conn, repo = env
+    _bilingual(conn)
+    assert ci.candidate_pool(conn, repo, "test:v1", extra=["en-1"]) == ["en-1"]
+
+
+def test_the_pool_ignores_other_model_versions(env):
+    conn, repo = env
+    _bilingual(conn)
+    _index(repo, ["en-1"], version="old:v0")
+    _index(repo, ["en-2"], version="test:v1")
+
+    assert ci.candidate_pool(conn, repo, "test:v1") == ["en-2"]
