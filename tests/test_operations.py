@@ -58,6 +58,7 @@ def test_each_recognition_model_has_its_own_section():
         "identity.index_catalog",
         "identity.reclaim",
         "identity.fit_projection",
+        "identity.forget_projection",
         "vision.reindex",
     ]
     # Both trainers report their age, so a model left alone reads as stale.

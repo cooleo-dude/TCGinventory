@@ -245,6 +245,7 @@ def test_each_model_gets_its_own_section(app, seeded_conn):
         "identity.index_catalog",
         "identity.reclaim",
         "identity.fit_projection",
+        "identity.forget_projection",
         "vision.reindex",
     ]
     view.deleteLater()

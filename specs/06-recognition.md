@@ -184,10 +184,19 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
   Procrustes rotation from synthetic pairs — a catalog render degraded the way a
   camera would, mapped onto its clean embedding — so no labelled photos, no torch
   and no training environment are needed; the artifact is a 384×384 matrix in the
-  data dir, fitted by **Operations → Teach recognition what a photograph looks
-  like**. Applied only to the render comparison in `Recognizer.suggest`, never to
-  crop exemplars, which are already photographs. Full stack measured: top-1
-  **20.7% → 75.9%**, top-5 **74.1% → 84.5%**.
+  data dir, fitted by **Operations → Fit photo matching** and revertible with
+  **Remove photo matching**. Applied only to the render comparison in
+  `Recognizer.suggest`, never to crop exemplars, which are already photographs.
+  It also learns from the **labelled corpus** — a crop you photographed against
+  the art of the card you named — weighted (`CORPUS_WEIGHT`) so a few dozen real
+  pairs count against thousands of synthetic ones without drowning or dominating;
+  backs are excluded, since every card back is identical. Because those pairs are
+  also the benchmark's queries, accuracy is reported by `cross_validate`, holding
+  out a whole capture session at a time, and logged to `model_run`
+  (`kind='identity'`, `source='projection'`) so the tile shows when it was fitted
+  and what it scored — the same treatment the trained models get. Held-out top-1
+  **20.6% → 66.7%**; full stack with scope + band, top-1 **20.7% → 75.9%**,
+  top-5 **74.1% → 84.5%**.
 
 - **Candidate pool = the indexed catalog, scoped per card ✅ done.** Suggestions
   used to rank against `labeled_card_ids()` only, so the matcher could never

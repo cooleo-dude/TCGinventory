@@ -1470,3 +1470,51 @@ _Template for new entries:_
   unknown name and always ends its painter, so a typo (or a stripped asset in the
   frozen build) costs a glyph rather than a window. `tests/test_icons.py` asserts
   every icon named in the operations registry is actually bundled.
+
+## 2026-08-06 — The photo map is a model, so it is reported like one
+
+- **Prompted by a fair question:** why is "fit photo matching" treated
+  differently from the detector and condition models? It is learned from data and
+  it changes accuracy — calling it a maintenance job was underselling it.
+- **What actually distinguishes it** (all three are learned): it needs no
+  training environment (closed-form SVD, in-process), it does not invalidate the
+  catalog index, and it cannot diverge. That last pair matters most — a real
+  fine-tune produces `identifier_finetuned.onnx`, which flips the embedder
+  version and orphans all 49,551 indexed embeddings, costing a ~68-minute
+  re-sweep. The projection is applied to the query at search time, so installing
+  or reverting it is free.
+- **What was genuinely inconsistent, and is now fixed:** it logs to `model_run`
+  (`kind='identity'`, `source='projection'`) like everything else, the tile
+  states when it was fitted and what it scored, it has a stale window, and
+  **Remove photo matching** reverts it. Renamed from "Teach recognition what a
+  photograph looks like" to **Fit photo matching** — the old name described the
+  effect and hid that it fits a model, which is exactly what caused the question.
+- **It now learns from the labelled corpus too**, at the user's suggestion, and
+  the corpus pairs are strictly better data: a crop actually photographed against
+  the art of the card it was labelled as — the real relationship rather than an
+  imitation. Backs are excluded, since every card back is identical and pairing
+  one with a specific card's front art teaches the map nonsense.
+- **Which forces held-out evaluation.** The corpus pairs *are* the benchmark's
+  queries, so training on them makes the usual number meaningless.
+  `cross_validate` holds out a whole **capture session** at a time, not a single
+  crop — two photos from one session share lighting, mat and camera, so a
+  per-crop split would leave near-copies of the held-out card in the training
+  half.
+- **Weight chosen by that measurement, and my guess was wrong** (I had picked
+  40):
+
+  | corpus weight | held-out top-1 | top-5 |
+  |---|---|---|
+  | 0 (synthetic only) | 58.6% | 81.0% |
+  | **10** | **63.8%** | **82.8%** |
+  | 40 | 60.3% | 79.3% |
+  | 400 | 55.2% | 70.7% |
+
+  Real pairs are worth +5.2 top-1, and they cannot carry the fit: a few dozen do
+  not constrain a 384×384 rotation, so leaning harder trades away the breadth the
+  synthetic pairs give. Expect the weight to want raising as the corpus grows.
+- **Caveat stated plainly:** the weight was selected on the same leave-one-out
+  that reports it, over 58 pairs. The monotone shape either side of the peak is
+  what makes it credible, not the peak itself.
+- Shipped fit (4,000 cards + 63 corpus pairs): held-out top-1 **20.6% → 66.7%**,
+  top-5 **76.2% → 82.5%**.

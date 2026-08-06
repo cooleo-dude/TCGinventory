@@ -16,6 +16,7 @@ refresh, catalog pull, market sweep); the window now only hosts the screen.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime
 
@@ -65,8 +66,8 @@ _SECTION_NOTES = {
         "Grades wear from both faces of a card. Trains on the grades you set."
     ),
     "model_identity": (
-        "Names a card from its picture. Needs no training — a labelled crop "
-        "is the training."
+        "Names a card from its picture. Learns from every crop you label, with "
+        "no training environment to install."
     ),
     "maintenance": "Checks and housekeeping for the database itself.",
 }
@@ -720,6 +721,9 @@ class OperationsView(QWidget):
             "identity.fit_projection": lambda: self._task(
                 "identity.fit_projection", _fit_photo_projection
             ),
+            "identity.forget_projection": lambda: self._task(
+                "identity.forget_projection", _forget_photo_projection
+            ),
             "identity.index_catalog": self._index_catalog,
             "identity.reclaim": lambda: self._task(
                 "identity.reclaim", _reclaim_catalog_art
@@ -1340,15 +1344,22 @@ _PROJECTION_CARDS = 4000
 
 
 def _fit_photo_projection(conn) -> str:
-    """Learn the map from photo-domain embeddings onto catalog-render ones.
+    """Fit the map from photo-domain embeddings onto catalog-render ones.
 
-    Runs on the indexed catalog alone — no labelled photos, no training
-    environment, no torch. The sample is capped because the fit converges long
-    before the catalog is exhausted and the user is waiting on it.
+    Two sources of truth: catalog art degraded to look photographed (broad, but
+    an imitation) and the crops you have actually labelled (few, but the real
+    thing). Logged as a model run like the trained models, with **held-out**
+    accuracy — the corpus pairs are also the benchmark's queries, so an in-sample
+    score would flatter itself.
     """
     import numpy as np
 
-    from tcginventory.data.vision import VisionRepository, open_vision
+    from tcginventory.data.vision import (
+        KIND_IDENTITY,
+        ModelRunRepository,
+        VisionRepository,
+        open_vision,
+    )
     from tcginventory.services import identity_eval as ie
     from tcginventory.services import identity_projection as ip
     from tcginventory.services.recognizer import get_shared_embedder
@@ -1356,6 +1367,7 @@ def _fit_photo_projection(conn) -> str:
     vision = open_vision()
     try:
         repo = VisionRepository(vision)
+        runs = ModelRunRepository(vision)
         embedder = get_shared_embedder()
         ids, bank = ie.load_pool(repo, embedder.version)
         if not ids:
@@ -1363,16 +1375,60 @@ def _fit_photo_projection(conn) -> str:
         targets = {cid: bank[i] for i, cid in enumerate(ids)}
         sample = list(ids)
         np.random.default_rng(7).shuffle(sample)
-        rotation, result = ip.fit(repo, embedder, sample[:_PROJECTION_CARDS], targets)
-        if rotation is None:
-            return (
-                f"not enough usable art to fit ({result.pairs:,} pairs, "
-                f"{ip.MIN_PAIRS:,} needed) — index more of the catalog first"
+
+        run_id = runs.start(
+            kind=KIND_IDENTITY,
+            source="projection",
+            corpus_cards=len(ids),
+            base_weights=embedder.version,
+        )
+        try:
+            pairs_x, pairs_y, cards = ip.synthetic_pairs(
+                repo, embedder, sample[:_PROJECTION_CARDS], targets
             )
-        ip.save(rotation)
-        return f"photo matching fitted · {result.summary}"
+            if pairs_x is None:
+                runs.finish(run_id, status="skipped", notes="not enough usable art")
+                return (
+                    "not enough usable art to fit — index more of the catalog first"
+                )
+            corpus = ip.corpus_pairs(repo, embedder.version, targets)
+            report = ip.cross_validate(conn, repo, embedder, (pairs_x, pairs_y))
+            rotation, result = ip.fit_rotation(
+                (pairs_x, pairs_y), (corpus[0], corpus[1]), cards=cards
+            )
+            ip.save(rotation)
+        except Exception as exc:  # the run log should not lose a failure
+            runs.finish(run_id, status="failed", notes=str(exc)[:400])
+            raise
+
+        note = result.summary
+        if report is not None:
+            runs.finish(
+                run_id,
+                status="ok",
+                map50=report.fitted_top1,
+                map50_95=report.fitted_top5,
+                precision=report.baseline_top1,
+                recall=report.baseline_top5,
+                metrics_json=json.dumps(report.__dict__),
+                notes=f"{result.summary} · {report.summary}",
+            )
+            return f"photo matching fitted · {report.summary}"
+        runs.finish(run_id, status="ok", notes=note)
+        return f"photo matching fitted · {note}"
     finally:
         vision.close()
+
+
+def _forget_photo_projection(_conn) -> str:
+    """Remove the fitted map, putting identification back on the raw encoder."""
+    from tcginventory.services import identity_projection as ip
+
+    path = ip.matrix_path()
+    if not path.is_file():
+        return "no photo matching was fitted"
+    path.unlink()
+    return "photo matching removed — suggestions use the encoder as-is"
 
 
 def _integrity_check(conn) -> str:

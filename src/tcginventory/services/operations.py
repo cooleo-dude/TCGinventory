@@ -236,18 +236,32 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation(
         id="identity.fit_projection",
         group="model_identity",
-        title="Teach recognition what a photograph looks like",
+        title="Fit photo matching",
         blurb=(
-            "The catalog holds clean renders; your camera does not. That gap is "
-            "large enough to invert the answer — a photo sits closer to the wrong "
-            "card's art than its own. This measures the distortion on catalog "
-            "images and corrects for it, no training environment needed."
+            "The catalog holds clean renders; your camera does not, and the gap "
+            "is wide enough to invert the answer — a photo lands closer to the "
+            "wrong card's art than its own. Learns the correction from catalog "
+            "images plus the cards you have labelled. No training environment."
         ),
         verb="Fit",
         icon="sparkles",
         kind=KIND_BACKGROUND,
-        caption="Photo match",
+        caption="Last fitted",
         stale_after_days=90,
+    ),
+    Operation(
+        id="identity.forget_projection",
+        group="model_identity",
+        title="Remove photo matching",
+        blurb=(
+            "Drops the fitted correction and ranks on the raw model again. The "
+            "catalog index is untouched, so this costs nothing to undo — fit it "
+            "again whenever."
+        ),
+        verb="Remove",
+        icon="trash-2",
+        kind=KIND_BACKGROUND,
+        caption="Photo match",
     ),
     Operation(
         id="vision.reindex",
@@ -614,6 +628,9 @@ def status_for(conn, op: Operation, *, history_conn=None) -> Status:
     if op.id in ("identity.index_catalog", "identity.reclaim"):
         return _catalog_index_status(conn, op)
 
+    if op.id in ("identity.fit_projection", "identity.forget_projection"):
+        return _projection_status(op)
+
     if op.id == "vision.reindex":
         captures, regions, exemplars = corpus_facts()
         if not regions:
@@ -814,6 +831,57 @@ def _catalog_index_status(conn, op: Operation) -> Status:
         )
     finally:
         vision.close()
+
+
+def _projection_status(op: Operation) -> Status:
+    """The photo-matching map, reported like the models it sits beside.
+
+    It is a learned artifact, so it states the same things they do: when it was
+    fitted, what it was fitted on, and what it scored. The score is **held-out**
+    — fitting uses the labelled crops, which are also the benchmark's queries, so
+    an in-sample number would only be marking its own homework.
+    """
+    from tcginventory.services import identity_projection as ip
+
+    installed = ip.matrix_path().is_file()
+    removing = op.id == "identity.forget_projection"
+    if removing and not installed:
+        return Status("not fitted", NEVER, actionable=False)
+
+    try:
+        from tcginventory.data.vision import KIND_IDENTITY, ModelRunRepository
+
+        conn = _open_vision()
+        if conn is None:
+            return Status("unavailable", NEVER)
+        try:
+            rows = [
+                row
+                for row in ModelRunRepository(conn).recent(KIND_IDENTITY, limit=40)
+                if row["source"] == "projection" and row["status"] == "ok"
+            ]
+        finally:
+            conn.close()
+    except Exception:  # pragma: no cover - vision DB optional
+        rows = []
+
+    if not installed:
+        return Status("never fitted", NEVER)
+    if not rows:
+        return Status("fitted", READY)
+
+    row = rows[0]
+    value = when(row["started_at"])
+    if row["map50"] is not None and row["precision"] is not None:
+        value += (
+            f" · top-1 {row['precision']:.0%} → {row['map50']:.0%}"
+            if row["map50"] != row["precision"]
+            else f" · top-1 {row['map50']:.0%}"
+        )
+    if removing:
+        return Status(value, READY, detail=row["notes"])
+    state = _staleness(op, row["started_at"]) if op.stale_after_days else READY
+    return Status(value, state, detail=row["notes"])
 
 
 def _model_status(op: Operation, kind: str) -> Status:
