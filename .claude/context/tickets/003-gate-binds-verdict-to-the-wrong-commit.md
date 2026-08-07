@@ -43,11 +43,34 @@ Combined, the gate's real guarantee today is: *somebody recorded a verdict while
 standing on this commit*. That is much weaker than it looks, and it fails
 **open** — the merge proceeds — which is the worst direction for a gate to fail.
 
+## A third hole in the same patterns: the guard false-positives
+
+Found while filing this very ticket. `GUARDED` (`.claude/hooks/review_gate.py:42`)
+matches `\bgh\b[^\n]*\bpr\b[^\n]*\bmerge\b` against the **whole command string**,
+with no anchoring and `[^\n]*` spanning freely. So this was blocked:
+
+```
+gh pr create ... --body "... opens the gate for merging any other ..."
+```
+
+A `gh pr create` whose body happens to contain the word "merge" is treated as a
+merge. Nothing was being merged. The workaround is `--body-file`, which keeps the
+prose out of the command string — but a guard you route around is a guard that
+teaches people to route around it.
+
+The same looseness cuts the other way: `gh pr merge` split across a shell
+variable, or invoked as `hub`/the API, is not matched at all. **The pattern is
+simultaneously too broad and too narrow**, which is what happens when a security
+boundary is a substring search over a command line.
+
+Fixing this belongs with the rest of this ticket: the patterns have to be
+rewritten anyway to capture the PR number.
+
 ## Area of impact
 
 | File | Line | What changes |
 |---|---|---|
-| `.claude/hooks/review_gate.py` | 42-45 | `GUARDED` patterns must also capture the PR number from the command |
+| `.claude/hooks/review_gate.py` | 42-45 | `GUARDED` patterns: capture the PR number, and stop matching `gh pr create` whose body mentions merging |
 | `.claude/hooks/review_gate.py` | 73-113 | `hook()` resolves the target of the merge instead of reading local `HEAD` |
 | `.claude/hooks/review_gate.py` | 119-171 | `cmd_record` binds to the PR head sha, not local `HEAD` |
 | `.claude/skills/sdd-ticket/SKILL.md`, `.claude/skills/sdd-release/SKILL.md` | — | the recorded panel instructions if the command shape changes |
@@ -97,7 +120,8 @@ standing on this commit*. That is much weaker than it looks, and it fails
 4. `hook()` matches ref → recorded verdict → head sha.
 5. Negative tests, per `CHECKER-NEEDS-NEGATIVE-TEST`: a verdict for PR #8 must
    **not** open a merge of PR #9; a verdict whose head sha no longer matches the
-   PR must block; a `ticket-close` must still bind to `HEAD`.
+   PR must block; a `ticket-close` must still bind to `HEAD`; and
+   `gh pr create --body "...merging..."` must **not** be guarded.
 
 ## Verification
 
@@ -117,9 +141,10 @@ one — but it is a judgement about how much friction the gate is allowed to add
 
 ## Notes
 
-- Found by using the gate on a real release, not by reading it. The same is true
-  of the `**` scope bug fixed in PR #8; both were invisible failures in the
-  dispatch and admission machinery rather than in any critic.
+- All three holes were found by *using* the gate, not reading it — as was the
+  `**` scope bug fixed in PR #8. Every one was in the dispatch and admission
+  machinery rather than in any critic. The critics have been the reliable part;
+  the plumbing around them has not.
 - Worth doing **before** the gate is trusted for anything consequential. Right
   now two tickets and one release have passed through it, all reviewed by a human
   who knew its limits.
