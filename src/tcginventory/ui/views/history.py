@@ -537,15 +537,6 @@ def _empty_state(glyph: str, title: str, body: str, action: str) -> tuple:
     return box, text, button
 
 
-def _db_file_of(conn: sqlite3.Connection) -> str | None:
-    try:
-        row = conn.execute("PRAGMA database_list").fetchone()
-    except sqlite3.Error:
-        return None
-    path = row[2] if row else ""
-    return path or None
-
-
 def _kpi_tile(caption: str) -> tuple[QFrame, QLabel]:
     """A dashboard-style summary tile; returns (frame, value_label)."""
     t = theme.active()

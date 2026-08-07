@@ -103,12 +103,3 @@ class AuditAction(str, Enum):
     EDIT = "edit"
     VOID = "void"
     DELETE = "delete"  # permanent hard-delete of a mistaken entry (owner-initiated)
-
-
-class ShowStatus(str, Enum):
-    """User's attendance status for a card show (Dashboard calendar)."""
-
-    DENIED = "denied"  # red
-    PENDING = "pending"  # orange
-    ATTENDING = "attending"  # green
-    WALKING = "walking"  # blue

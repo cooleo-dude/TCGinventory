@@ -346,13 +346,6 @@ class LotRepository:
         ).fetchone()
         return row["n"]
 
-    def skus_for_item(self, item_id: int) -> list[str]:
-        rows = self.conn.execute(
-            "SELECT DISTINCT sku FROM lot WHERE item_id = ? AND sku IS NOT NULL",
-            (item_id,),
-        ).fetchall()
-        return [r["sku"] for r in rows]
-
     def update(self, lot: Lot) -> Lot:
         if lot.id is None:
             raise ValueError("cannot update a lot without an id")
@@ -964,13 +957,6 @@ class CardCatalogRepository:
         """
         self.conn.execute("DELETE FROM card_catalog WHERE language = ?", (language,))
         self._insert_many(cards, updated_at)
-
-    def all_names(self) -> list[str]:
-        """Every distinct card name (for a name-autocomplete model)."""
-        rows = self.conn.execute(
-            "SELECT DISTINCT name FROM card_catalog ORDER BY name"
-        ).fetchall()
-        return [r["name"] for r in rows]
 
     def distinct_names(self, prefix: str, limit: int = 20) -> list[str]:
         """Distinct card names starting with ``prefix`` (case-insensitive)."""

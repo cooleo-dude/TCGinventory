@@ -17,7 +17,6 @@ refresh, catalog pull, market sweep); the window now only hosts the screen.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
 
 from PySide6.QtCore import QSize, Qt, QThread, Signal
 from PySide6.QtGui import QDesktopServices, QFont
@@ -1004,10 +1003,6 @@ def _short(path: str) -> str:
 
     parts = Path(path).parts
     return str(Path(*parts[-2:])) if len(parts) > 2 else str(path)
-
-
-def _stamp() -> str:
-    return datetime.now().strftime("%H:%M")
 
 
 def _qss(t: theme.Tokens) -> str:

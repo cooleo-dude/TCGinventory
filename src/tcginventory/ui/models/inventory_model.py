@@ -321,7 +321,7 @@ class InventoryTableModel(QAbstractTableModel):
     def set_trends(self, trends: dict[int, Trend]) -> None:
         """Attach per-item trends (computed off the UI thread) and repaint the
         Trend column in place — no model reset, so selection/scroll are kept."""
-        self._trends = trends or {}
+        self._trends = trends
         if self._rows:
             top = self.index(0, TREND_COL)
             bottom = self.index(len(self._rows) - 1, TREND_COL)
