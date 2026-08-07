@@ -10,6 +10,7 @@ a table can be tiny on disk and still dominate a refresh.
     perf.py profile <View>                   cProfile one view's build and refresh
     perf.py plans                            EXPLAIN QUERY PLAN over the big tables
     perf.py capabilities                     what is available without a new dependency
+    perf.py candidates                       every mechanism choice site (research pass)
     perf.py all                              latency + memory + storage
 
 Never opens the live database. ``latency``/``memory``/``profile``/``plans`` copy
@@ -32,7 +33,12 @@ import tempfile
 import time
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[3]
+# .claude/skills/optimization-sweep/scripts/perf.py -> four levels up is the repo.
+# This read parents[3] (the .claude directory) until 2026-08-07; the resulting
+# sys.path entry pointed at nothing, which went unnoticed because the venv's
+# editable install already resolves `tcginventory`. `candidates` scans the tree
+# directly, so it found zero files and surfaced the bug.
+REPO = Path(__file__).resolve().parents[4]
 SRC = REPO / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
@@ -603,6 +609,109 @@ def cmd_plans(args) -> None:
         )
 
 
+# Mechanism-bearing patterns for the research pass. Each is a *place where a
+# choice was made* — a dtype, a format, a traversal, a library — not a defect.
+# Most hits are correct as they stand; the pass exists to give each one a
+# verdict, so silence about a location is the thing to avoid, not a hit.
+PATTERNS: list[tuple[str, str, str]] = [
+    (
+        "stored dtype / binary format",
+        r"float32|float16|\.tobytes\(|frombuffer|astype\(",
+        "narrowing precision or avoiding a copy changes bytes on disk and in RAM",
+    ),
+    (
+        "image format written",
+        r"\.save\(|\.png\"|\.png'|\bPNG\b|WEBP|JPEG",
+        "both Pillow and Qt must handle the format — see capabilities",
+    ),
+    (
+        "filesystem traversal",
+        r"os\.walk\(|\.rglob\(|\.glob\(|os\.scandir\(|\.iterdir\(|os\.listdir\(",
+        "a walk over the ~50k image cache or the training env is seconds, not ms",
+    ),
+    (
+        "subprocess",
+        r"subprocess\.(run|Popen|check_output)\(",
+        "process spawn on a UI path; cache the answer or move it off-thread",
+    ),
+    (
+        "full materialisation",
+        r"\.fetchall\(\)",
+        "fine on ledger tables; on the 23k/49k/224k-row tables consider streaming",
+    ),
+    (
+        "exact-arithmetic stdlib",
+        r"\bfrom statistics import|\bstatistics\.|\bDecimal\(|\bFraction\(",
+        "statistics uses Fraction arithmetic — ~10x slower than longhand on ints",
+    ),
+    (
+        "Qt model",
+        r"class \w+\((QAbstractTableModel|QAbstractItemModel|QAbstractListModel)\)",
+        "count roles before caching; the sort role is usually the whole cost",
+    ),
+    (
+        "network call",
+        r"httpx\.(get|post|stream|Client)",
+        "must not sit on a path a user waits on",
+    ),
+    (
+        "append-only table",
+        r"INSERT INTO (price_snapshot|catalog_price_snapshot|audit_log|operation_run)",
+        "nothing prunes these; retention is a product decision, surface it",
+    ),
+    (
+        "regex compiled at call time",
+        r"re\.(search|match|sub|findall)\(",
+        "hoist the pattern to module scope when it is in a loop",
+    ),
+]
+
+
+def cmd_candidates(args) -> None:
+    """Every location where a mechanism choice was made — an inventory, not a
+    list of defects.
+
+    The grounded pass is ranked by cost; the research pass is judged by coverage,
+    and coverage needs an enumeration that does not depend on what anyone
+    remembered to look at.
+    """
+    import re
+
+    root = REPO / "src" / "tcginventory"
+    files = sorted(root.rglob("*.py"))
+    print(f"scanning {len(files)} files under {root.relative_to(REPO)}\n")
+
+    total = 0
+    for label, pattern, why in PATTERNS:
+        rx = re.compile(pattern)
+        hits: list[str] = []
+        for path in files:
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:  # pragma: no cover
+                continue
+            for number, line in enumerate(lines, 1):
+                if rx.search(line):
+                    rel = path.relative_to(REPO).as_posix()
+                    hits.append(f"{rel}:{number}")
+        total += len(hits)
+        print(f"== {label}  ({len(hits)})")
+        print(f"   {why}")
+        shown = hits if args.all else hits[: args.limit]
+        for hit in shown:
+            print(f"     {hit}")
+        if len(hits) > len(shown):
+            print(f"     … {len(hits) - len(shown)} more (--all to list every one)")
+        print()
+
+    print(f"{total} locations across {len(PATTERNS)} categories.")
+    print(
+        "Give EVERY location a verdict — better / equal / none / declined — and\n"
+        "check references/declined.md before proposing any of them. Reporting only\n"
+        "the wins leaves the next sweep to rediscover the dead ends."
+    )
+
+
 def cmd_capabilities(args) -> None:
     """What this app can already do without a new dependency.
 
@@ -721,6 +830,13 @@ def main() -> None:
     sub.add_parser(
         "capabilities", help="what is available without a new dependency"
     ).set_defaults(func=cmd_capabilities)
+
+    candidates = sub.add_parser(
+        "candidates", help="every location a mechanism choice was made (research pass)"
+    )
+    candidates.add_argument("--limit", type=int, default=12)
+    candidates.add_argument("--all", action="store_true")
+    candidates.set_defaults(func=cmd_candidates)
     sub.add_parser("all", help="latency + memory + storage").set_defaults(func=cmd_all)
 
     profile = sub.add_parser("profile", help="cProfile one view")

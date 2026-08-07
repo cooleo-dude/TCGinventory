@@ -10,6 +10,13 @@ allowed-tools: [Read, Grep, Glob, Bash, PowerShell, Edit, Write, WebSearch, WebF
 Scope: **$ARGUMENTS** — if that is empty, sweep the whole platform, in the order
 the harness ranks things.
 
+**Two passes, and both are mandatory.** Steps 1–6 are the *grounded* pass: fix
+what measures badly, ranked by the harness. **Step 7 is the research pass, it
+runs at the end of every sweep, and it runs even when nothing measured badly** —
+it asks whether there is a more effective way to do what the code already does,
+across *every* location, not just the slow ones. A sweep that stops after Step 6
+is half a sweep.
+
 Three axes, because they disagree with each other and a sweep that watches only
 one will miss the biggest item in the repo:
 
@@ -38,6 +45,7 @@ it measured small is as valuable as fixing one that measured large.
 | `CLAUDE.md` | The non-negotiable architecture rules. They outrank every idea below. |
 | `specs/02-data-model.md` | The money and schema invariants. |
 | `references/baseline.md` (next to this file) | What was measured on 2026-08-07 and how. Read it before running anything — it will stop you rediscovering settled facts. |
+| `references/declined.md` (next to this file) | Every variant the user has turned down, and every one measurement rejected. Read it **before proposing anything**, in either pass. |
 | `docs/decisions.md`, newest first | Several performance ADRs. Something that looks slow is often a decision. |
 
 Interpreter and tools (Windows is primary; both given):
@@ -128,13 +136,17 @@ aimed at the wrong one.
 - A `SCAN` over a table under ~20,000 rows. The harness marks these; say so and
   move on.
 
-**Standing decisions — do not propose these, in a finding or in prose:**
+**Declined already — do not propose these again.** The full list, with dates and
+reopening conditions, is **`references/declined.md`**; read it before proposing
+anything, in this pass or in Step 7. The standing ones:
 
 - **Lazy view construction.** Yes, `main_window.py:132-158` builds all eleven
-  views eagerly and that is ~2 s of startup. It is out of scope by decision. Do
-  not raise it.
-- **A performance-regression test.** Out of scope by decision. The suite runs
-  `-n auto`; a timing assertion in it would be flaky. Results go in the ADR.
+  views eagerly and that is ~1.2 s of startup. Declined by the user. Do not
+  raise it.
+- **Recognition's 112 MB prewarm** and the **2.2 GB PNG cache** (~1.2 GB
+  recoverable as WebP). Both measured, both declined by the user.
+- **A performance-regression test.** Declined. The suite runs `-n auto`; a
+  timing assertion in it would be flaky. Results go in the ADR.
 - Vectorising, batching or reordering anything in `services/allocation.py` or
   `services/transactions.py`. They cost ~0.3 ms and they are the money path.
 
@@ -282,30 +294,143 @@ recommendation to the user, not an autonomous edit.
 
 ---
 
-## Step 4 — Research: finding a better mechanism
+## Step 4 — Report before editing
 
-Step 3 covers the shapes already seen here. When a target is not one of them,
-the job changes from *recognition* to *research*: find a better way to do the
-thing, and prove it. This half has the same discipline as the first — **research
-ends in a measured prototype, never in an opinion.** A mechanism you have not run
-against real data is a hypothesis, and this skill does not report hypotheses as
-findings.
+Write the findings down before changing anything. Every line carries a real
+`file:line` you have read and a real number you have measured:
 
-### 4a. First, check the question is still open
+```
+LATENCY
+  <file>:<line> — <what> costs <N> ms of <total> ms in <operation>
+                  fix: <one line>            expected: <N> ms -> <M> ms
 
-Three greps, in this order. Most "why doesn't it just…" ideas in this repo were
-considered and written down:
+MEMORY
+  <file>:<line> — <what> holds <N> MB resident, isolated in a fresh process
+
+STORAGE
+  <path or table> — <N> MB across <N> rows/files
+                    fix: <one line>          measured saving: <N> MB
+
+MEASURED AND NOT WORTH IT   (say this out loud — it is half the value)
+  <file>:<line> — looks like <shape>, measures <N> ms. No change.
+
+FLAGGED — needs your call, not applied
+  <file>:<line> — <why it is a judgement call>
+```
+
+---
+
+## Step 5 — Apply
+
+Apply, one edit at a time, re-measuring after each:
+
+- Memoising a derived value in a Qt model or delegate
+- Hoisting a repeated call or a loop-invariant query
+- Caching a probe whose inputs have not changed
+- Moving blocking work behind `TaskWorker`
+- Adding or dropping an index, as a new numbered migration
+- Batching N single-row queries into one
+
+Flag, never apply on your own:
+
+- Anything touching money, FIFO, or the basis split — `services/allocation.py`,
+  `services/transactions.py`, `domain/`
+- Any change to stored precision, including the embedding dtype
+- An image-format change to the 50k-file cache (it needs a migration plan)
+- Retention or pruning policy on any table
+- `PRAGMA synchronous` — it trades durability, so it is the user's call
+- Anything whose only justification is that it looks inefficient
+
+After each edit, re-read the surrounding lines to confirm the structure held.
+
+---
+
+## Step 6 — Verify
+
+```powershell
+.\.venv\Scripts\ruff.exe format .
+.\.venv\Scripts\ruff.exe check .
+$env:QT_QPA_PLATFORM = "offscreen"; .\.venv\Scripts\python.exe -m pytest
+```
+
+Then **re-run the harness** and put the before/after side by side. An
+optimization with no after-number is not finished.
+
+Two failures are especially informative: `tests/test_headless.py` means a Qt
+import reached `domain/` or `services/`, and `tests/test_app_map.py` means you
+moved something `.claude/context/app-map.json` still claims — fix the map in the
+same change.
+
+Fix and re-run, up to three attempts. If a failure survives that, revert the edit
+that caused it and move it to *Flagged*.
+
+---
+
+## Step 7 — The research pass (always, and last)
+
+Steps 1–6 fix what measured badly. **This step asks a different question, and it
+runs at the end of every sweep whether or not anything measured badly:**
+
+> Is there a more effective way to do what this code already does?
+
+Not "what is slow" — *what could be done better*. A function that costs 12 ms
+doing something a stored column would answer in 0.1 ms is a finding here even
+though it will never top a profile. The grounded pass is driven by the harness's
+ranking; this pass is driven by **coverage**. Work the locations, all of them,
+and record a verdict for each — including "nothing better available", which is a
+result and stops the next sweep re-deriving it.
+
+The discipline from Step 1 still binds: **a mechanism is not reported until a
+spike has run it against real staged data.** A mechanism you have not run is a
+hypothesis, and this skill does not report hypotheses as findings.
+
+### 7a. Read the declined register first — this is not optional
+
+`references/declined.md` records every variant and approach the user has turned
+down, and every one that measurement rejected. **Read it before you enumerate
+anything.** Re-proposing something already declined wastes the user's attention
+and erodes the value of the whole pass.
+
+Each entry says what would have to change for it to be worth raising again. That
+condition is the only thing that reopens it — and if you believe one has been
+met, say which and why, do not just re-propose.
+
+Then the three greps, for anything the register does not cover:
 
 ```
 Grep: <topic>  in docs/decisions.md    # settled? read the ADR before proposing
-Grep: <topic>  in specs/05-roadmap.md  # already on the backlog? say so, don't re-propose
+Grep: <topic>  in specs/05-roadmap.md  # already on the backlog? say so
 Grep: <topic>  in src/tcginventory/    # already half-built somewhere?
 ```
 
-`docs/decisions.md` is the important one. Proposing something an ADR explicitly
-rejected — with reasons you have not read — is worse than proposing nothing.
+### 7b. Enumerate the locations — coverage, not ranking
 
-### 4b. Know what is already paid for
+```powershell
+.\.venv\Scripts\python.exe .claude\skills\optimization-sweep\scripts\perf.py candidates
+```
+
+That prints every site in `src/tcginventory/` matching a mechanism-bearing
+pattern — stored dtypes, image formats, filesystem walks, subprocess calls,
+`fetchall()` on big tables, exact-arithmetic stdlib, Qt models, network calls,
+retention-free tables. It is an inventory, **not** a list of defects; most
+entries are correct as they stand.
+
+Walk it and give **every** location one of four verdicts:
+
+| verdict | meaning |
+|---|---|
+| `better` | a mechanism exists, spiked, with numbers — write it up (7h) |
+| `equal` | an alternative exists and measured no better — record it, it is a permanent result |
+| `none` | nothing better available given the constraints |
+| `declined` | already in the register — name the entry, do not re-litigate |
+
+A pass that reports only the `better` ones is not finished. The `none` and
+`equal` verdicts are what make the *next* sweep cheap.
+
+If `candidates` misses a category you find by hand, add the pattern to
+`PATTERNS` in `perf.py` in the same change.
+
+### 7c. Know what is already paid for
 
 ```powershell
 .\.venv\Scripts\python.exe .claude\skills\optimization-sweep\scripts\perf.py capabilities
@@ -325,13 +450,13 @@ list:
 - **Image formats are a two-sided constraint.** Pillow writes WebP, JPEG *and
   AVIF*; Qt reads PNG, JPEG and WebP but **cannot read AVIF or JPEG-XL**. A
   format is only usable if both sides handle it — AVIF would give smaller files
-  the UI cannot display. This is exactly the kind of trap that a benchmark
-  comparing compression ratios alone will walk straight into.
+  the UI cannot display. Exactly the trap a benchmark comparing compression
+  ratios alone walks into.
 
-### 4c. The three in-repo questions
+### 7d. The three in-repo questions
 
-Ask these before looking outward. Each has precedent here and none adds a
-dependency, so each is cheap to try and cheap to revert.
+Ask these of each location before looking outward. Each has precedent here and
+none adds a dependency, so each is cheap to try and cheap to revert.
 
 **1. Can the result be cached?** — the most common answer.
 
@@ -339,13 +464,15 @@ dependency, so each is cheap to try and cheap to revert.
 |---|---|---|
 | `functools.lru_cache` on a pure function | inputs repeat within a run | — |
 | module-level memo with an explicit invalidator | a probe whose inputs rarely change | `services/training.py`'s cached probes |
+| a memo persisted to disk | the answer survives a restart and the walk to rebuild it does not | `trainingenv.env_size` |
 | `QPixmapCache` | decoded images | `ui/thumbcache.py` (ADR 2026-08-04) |
 | on-disk cache keyed by id | expensive to fetch, cheap to store | `services/cardimages.py` (ADR 2026-07-14) |
 | a stored column | derived from data that changes on write | `catalog_price_latest` |
 
 The hard part is never the cache, it is the invalidation. Say in the proposal
 what makes the entry stale and who clears it. A cache with no answer to that is
-a bug with better latency.
+a bug with better latency. Then measure what it holds — a cache whose footprint
+you have not measured is half a finding.
 
 **2. Can it move off the UI thread?** `ui/views/_worker.py`'s `TaskWorker(db_path,
 task)` runs `task(conn) -> sentence` with its own connection — the repo standard
@@ -365,6 +492,7 @@ thread that made it — hence the separate connection.
 | an **expression** index | you filter on `lower(x)` or a computed form |
 | a composite index | you filter on A and sort by B — column order matters |
 | `GROUP BY` / aggregate | a Python loop is summing rows |
+| a window function | a per-group "latest" or running total done in Python |
 | one query with `IN (…)` or a join | N single-row lookups in a loop |
 | `executemany` in one transaction | N inserts, each currently its own commit |
 | FTS5 | a `LIKE '%…%'` scan over a large text column |
@@ -383,9 +511,9 @@ one, `name = ? COLLATE NOCASE` the other. Both are live. Collation and `DESC`
 are part of the key and `PRAGMA index_info` reports neither; read
 `PRAGMA index_xinfo` and confirm with a plan before touching anything.
 
-### 4d. Mechanism repertoire for the other two axes
+### 7e. Mechanism repertoire for the other two axes
 
-**Memory.**  Do not materialise what you can stream — a generator or a
+**Memory.** Do not materialise what you can stream — a generator or a
 `fetchmany` loop instead of `fetchall` on the 49k/224k-row tables. `__slots__` on
 a dataclass instantiated per row. `array`/`memoryview` instead of a list of
 Python floats. numpy views instead of copies (`astype` always copies; in-place
@@ -393,28 +521,36 @@ ops do not). Load a model lazily on first real use rather than prewarming it.
 For a Qt model over a large table, `canFetchMore`/`fetchMore` populates
 incrementally instead of holding every row.
 
-**Storage.**  Narrow the dtype (float32 → float16 → int8) when accuracy is
+**Storage.** Narrow the dtype (float32 → float16 → int8) when accuracy is
 *measured* to survive. Change container format when both writer and reader
 support it. Content-address duplicates rather than storing them twice. Move a
 large re-derivable BLOB out of the ledger so it stops being backed up. Add a
-retention policy to an append-only table. Drop a redundant index. Note that
-`VACUUM` only helps when `PRAGMA freelist_count` is non-zero — today it is zero
-in all four databases.
+retention policy to an append-only table. Drop a redundant index. `VACUUM` only
+helps when `PRAGMA freelist_count` is non-zero — today it is zero in all four
+databases.
 
-**Latency in Qt.**  Compute display values once in `set_rows()` and index into
-them from `data()`. `dataChanged` over a column beats `beginResetModel` (which
-loses selection and scroll — see `set_trends` in `inventory_model.py`).
-`setUniformRowHeights` on a tree with fixed rows. Keep delegate `paint()` free of
-allocation. Batch signal emissions rather than emitting per row.
+**Latency in Qt.** Answer the sort role before anything else and cache it per
+`(row, column)`. `dataChanged` over a column beats `beginResetModel` (which
+loses selection and scroll — see `set_trends` in `inventory_model.py`). Compare
+plain ints, not wrapped C++ enums. `setUniformRowHeights` on a tree with fixed
+rows. Keep delegate `paint()` free of allocation. Batch signal emissions rather
+than emitting per row.
 
-### 4e. Going outward
+**Pure Python.** `statistics.mean`/`pstdev`/`median` use exact `Fraction`
+arithmetic — correct, and 10× slower than longhand on short lists of ints.
+Hoist loop-invariant work out of the loop. Sort once and walk with a pointer
+instead of re-scanning. Precompute a cumulative series and `bisect` it instead
+of re-summing a prefix.
 
-Only when 4c and 4d are exhausted. Then a candidate must pass **all** of these,
-and the proposal must say so explicitly for each:
+### 7f. Going outward
+
+Only when 7d and 7e are exhausted for that location. Then a candidate must pass
+**all** of these, and the write-up must say so explicitly for each:
 
 1. **Packaging.** A new runtime dependency has to survive
    `packaging/tcginventory.spec` (`hiddenimports`), boot inside the frozen
-   onedir build, and fit the ~125 MB exe budget. State the added size.
+   onedir build, and fit the exe budget (~300 MB today, mostly the bundled
+   ONNX model). State the added size.
 2. **Offline.** No new network call on a path a user waits on. The app has no
    external price feeds in V1 by design.
 3. **Layer.** `domain/` and `services/` are Qt-free; `tests/test_headless.py`
@@ -424,16 +560,16 @@ and the proposal must say so explicitly for each:
 5. **Maintenance.** One person maintains this app offline. A dependency that
    needs pinning, patching or a build step costs more than it saves.
 
-When you do search, search for the *mechanism*, not the endorsement — "how does
-X work / what does it cost", not "best library for X". Prefer primary sources:
-the SQLite documentation, Qt class documentation, a library's own changelog.
-Treat benchmark blog posts as leads, never as evidence: none of them ran against
+Search for the *mechanism*, not the endorsement — "how does X work / what does
+it cost", not "best library for X". Prefer primary sources: the SQLite
+documentation, Qt class documentation, a library's own changelog. Treat
+benchmark blog posts as leads, never as evidence: none of them ran against
 53,289 catalog rows on this machine, and you can.
 
 A stdlib or already-present answer that looks worse on paper usually wins here
 once packaging is priced in.
 
-### 4f. The spike — the part that makes it research
+### 7g. The spike — the part that makes it research
 
 Before proposing any mechanism, build the smallest thing that measures it,
 against **real staged data**, and report the number. Write the spike in the
@@ -463,7 +599,6 @@ A worked example, run against the staged 53,289-row catalog: replacing **300
 single-row lookups** with one `IN (…)` query measured **1.35 ms → 0.35 ms**. A
 3.8× speedup — and one millisecond. That is the whole discipline in one result:
 the mechanism was genuinely better, and shipping it would have been a waste.
-Write the number down and move on.
 
 Rules for a spike:
 
@@ -475,99 +610,42 @@ Rules for a spike:
   report that you could not and mark the finding blocked.
 - Delete the spike when done. It is evidence, not code.
 
-### 4g. Writing it up
+### 7h. Report, and record every decline
 
 A research finding is reported as a mechanism proposal, not a suggestion:
 
 ```
 MECHANISM  <name>
-  problem     <file:line>, costs <measured> on <axis>
-  mechanism   <what it is, in one sentence>
+  location    <file:line>
+  today       <what the code does now, and what it costs>
+  mechanism   <the alternative, in one sentence>
   spike       <what you ran, on what data, sample size>
   result      <before> -> <after>, measured
   cost        <accuracy / packaging / migration / write-time cost, or "none">
+  verdict     better | equal | none
   blocked by  <what must be decided or measured before it can ship, or "nothing">
 ```
 
-If the spike came out flat or worse, report it exactly the same way with the
-real numbers. A mechanism ruled out by measurement is a permanent result and
-belongs in the ADR — it stops the next sweep spending its budget there.
+Then a one-line coverage table for every other location `candidates` printed,
+with its verdict. Short is fine — `services/foo.py:120 — none (already a single
+aggregate)`. That table is the deliverable as much as the proposals are.
 
----
+**When the user declines a proposal, append it to `references/declined.md`
+before doing anything else.** One entry, with: what was proposed, the date, who
+declined it (user decision vs. measurement), the reason if given, and the
+condition that would make it worth raising again. A decline that is not written
+down will be re-proposed by the next sweep, which is the single most annoying
+thing this skill can do.
 
-## Step 5 — Report before editing
-
-Write the findings down before changing anything. Every line carries a real
-`file:line` you have read and a real number you have measured:
-
-```
-LATENCY
-  <file>:<line> — <what> costs <N> ms of <total> ms in <operation>
-                  fix: <one line>            expected: <N> ms -> <M> ms
-
-MEMORY
-  <file>:<line> — <what> holds <N> MB resident, isolated in a fresh process
-
-STORAGE
-  <path or table> — <N> MB across <N> rows/files
-                    fix: <one line>          measured saving: <N> MB
-
-MEASURED AND NOT WORTH IT   (say this out loud — it is half the value)
-  <file>:<line> — looks like <shape>, measures <N> ms. No change.
-
-FLAGGED — needs your call, not applied
-  <file>:<line> — <why it is a judgement call>
-```
-
----
-
-## Step 6 — Apply
-
-Apply, one edit at a time, re-measuring after each:
-
-- Memoising a derived value in a Qt model or delegate
-- Hoisting a repeated call or a loop-invariant query
-- Caching a probe whose inputs have not changed
-- Moving blocking work behind `TaskWorker`
-- Adding or dropping an index, as a new numbered migration
-- Batching N single-row queries into one
-
-Flag, never apply on your own:
-
-- Anything touching money, FIFO, or the basis split — `services/allocation.py`,
-  `services/transactions.py`, `domain/`
-- Any change to stored precision, including the embedding dtype
-- An image-format change to the 50k-file cache (it needs a migration plan)
-- Retention or pruning policy on any table
-- `PRAGMA synchronous` — it trades durability, so it is the user's call
-- Anything whose only justification is that it looks inefficient
-
-After each edit, re-read the surrounding lines to confirm the structure held.
-
----
-
-## Step 7 — Verify
-
-```powershell
-.\.venv\Scripts\ruff.exe format .
-.\.venv\Scripts\ruff.exe check .
-$env:QT_QPA_PLATFORM = "offscreen"; .\.venv\Scripts\python.exe -m pytest
-```
-
-Then **re-run the harness** and put the before/after side by side. An
-optimization with no after-number is not finished.
-
-Two failures are especially informative: `tests/test_headless.py` means a Qt
-import reached `domain/` or `services/`, and `tests/test_app_map.py` means you
-moved something `.claude/context/app-map.json` still claims — fix the map in the
-same change.
-
-Fix and re-run, up to three attempts. If a failure survives that, revert the edit
-that caused it and move it to *Flagged*.
+The same applies to a mechanism that measured flat or worse — record it in the
+register and in `docs/decisions.md`. A dead end proven with numbers is a
+permanent asset.
 
 ---
 
 ## Step 8 — Return
+
+**From the grounded pass (Steps 1–6):**
 
 - Latency: before → after per fix, and the new total
 - Memory: before → after resident
@@ -576,8 +654,17 @@ that caused it and move it to *Flagged*.
 - Flagged: `file:line` each, one line of reasoning
 - `ruff check` and `pytest` results, stated plainly, including failures
 
-If nothing measured badly: *"Measured; nothing is worth changing."* That is a
-complete and successful sweep.
+**From the research pass (Step 7) — always present, even when it found nothing:**
+
+- Each `MECHANISM` block, in the 7h format
+- The coverage table: every location `candidates` printed, with its verdict
+- Anything newly written to `references/declined.md`
+
+If nothing measured badly and research found nothing better:
+*"Measured; nothing is worth changing, and nothing better is available."* That
+is a complete and successful sweep — but it is only credible with the coverage
+table behind it. **A sweep that reports no research section is unfinished, not
+clean.**
 
 Do not commit. Per this repo's workflow the user reviews, commits to `main`, and
 rebuilds the exe. If the sweep found something significant, offer an ADR entry
@@ -587,3 +674,8 @@ verdict was "no change".
 **If the baseline in `references/baseline.md` no longer matches what the harness
 prints, update that file in the same change.** A stale baseline is how the next
 sweep gets confidently misdirected.
+
+**And if the user declines anything you proposed, write it into
+`references/declined.md` before you close out** — what it was, the date, that it
+was a user decision, and what would make it worth raising again. That file is
+the only thing stopping the next sweep from proposing it all over again.
