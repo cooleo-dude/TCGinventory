@@ -144,3 +144,36 @@ For open-ended "how should we model X" questions, discuss tradeoffs in prose and
 give a recommendation — don't force a multiple-choice pick-list. Reserve
 pick-lists for crisp, mutually-exclusive choices (framework, per-lot vs
 per-item). Record significant decisions in `docs/decisions.md`.
+
+## Cost discipline
+
+Agents are the expensive part of this repo, and they are expensive in a way that
+is invisible while it is happening. On 2026-08-07 a two-file thread-lifetime fix
+cost roughly 560k tokens in critic agents alone, and about two thirds of that
+bought nothing.
+
+**The critic panel runs once, on a finished branch.** A verdict is bound to a
+sha, so every push discards a completed panel. Land every fix, push, confirm you
+are done editing, *then* dispatch. If a `revise` forces another commit, batch all
+outstanding fixes into it and re-judge **only the lanes whose files changed** —
+`review_gate.py record --inherit <sha>` carries the rest forward. See
+[`/sdd-ticket`](.claude/skills/sdd-ticket/SKILL.md) § The review gate.
+
+**Critics read; they do not rebuild.** Each is capped at 12 tool calls and told
+not to run the suite, build a worktree or launch the app — the author did that
+before dispatching. Every real finding the panel has produced came from reading
+code. If something can only be settled by running it, that is a `revise` naming
+the experiment, not the agent doing it.
+
+**Match the tier to the diff.** `tcgi-mini-critic` covers all four lenses in one
+spawn for anything under ~150 changed lines with no migration and no money path.
+Four independent agents are for changes that earn them.
+
+**Read what you need, not what you might need.** A dossier's file list is a map,
+not a reading list — `history.py` is 1,750 lines and reading it whole twice cost
+more than the feature did. Prefer the class and the methods a gotcha names.
+
+The economy here is not "use fewer agents"; it is **don't pay twice for the same
+judgement**. A panel that catches a real regression is worth what it costs — the
+one on 2026-08-07 caught a genuine one. Running it three times over an unchanged
+diff is not.

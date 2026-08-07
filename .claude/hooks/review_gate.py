@@ -116,6 +116,34 @@ def hook() -> int:
 # ---- record / show / clear -------------------------------------------------
 
 
+def inherited(args, judged: dict[str, str]) -> dict[str, str]:
+    """Lanes carried forward from an earlier panel on the same PR.
+
+    Re-judging a lane whose files did not change is the most expensive thing this
+    gate causes: a verdict is bound to a sha, so every push discards a completed
+    panel. When only some lanes are dirty the author re-dispatches those and
+    carries the rest.
+
+    Two conditions stop that being a loophole. A lane may only be carried within
+    one ``ref``, so a review of PR #6 can never green a lane of PR #9; and a lane
+    judged this round always wins, so inheriting can supply a missing verdict but
+    never overwrite a fresh one. The artifact records what was carried and from
+    where, because an inheritance nobody can audit is not a verdict.
+    """
+    if not getattr(args, "inherit", None):
+        return {}
+    path = verdict_path(args.inherit)
+    if not path.is_file():
+        raise SystemExit(f"--inherit {args.inherit}: no verdict on record for it")
+    prior = json.loads(path.read_text(encoding="utf-8"))
+    if str(prior.get("ref")) != str(args.ref):
+        raise SystemExit(
+            f"--inherit {args.inherit}: recorded for ref {prior.get('ref')!r}, not "
+            f"{args.ref!r} — a lane may only be carried forward within one PR"
+        )
+    return {k: v for k, v in prior.get("verdicts", {}).items() if k not in judged}
+
+
 def cmd_record(args) -> int:
     verdicts: dict[str, str] = {}
     for raw in args.verdict:
@@ -123,6 +151,8 @@ def cmd_record(args) -> int:
         if value not in VALID:
             raise SystemExit(f"{raw!r}: verdict must be one of {sorted(VALID)}")
         verdicts[lane] = value
+    carried = inherited(args, verdicts)
+    verdicts = {**carried, **verdicts}  # a lane judged this round always wins
     missing = {"invariants", "risk", "test"} - set(verdicts)
     if missing:
         raise SystemExit(f"missing verdict for: {', '.join(sorted(missing))}")
@@ -159,6 +189,9 @@ def cmd_record(args) -> int:
                 "ref": args.ref,
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "verdicts": verdicts,
+                "inherited": (
+                    {"from": args.inherit, "lanes": sorted(carried)} if carried else {}
+                ),
                 "findings": [str(p) for p in args.findings],
             },
             indent=2,
@@ -167,6 +200,8 @@ def cmd_record(args) -> int:
     )
     blocked = [k for k, v in verdicts.items() if v in BLOCKING]
     state = f"BLOCKED on {', '.join(blocked)}" if blocked else "clear"
+    if carried:
+        state += f", carried {', '.join(sorted(carried))} from {args.inherit}"
     print(f"  recorded {sha}  {args.scope} {args.ref}  — {state}")
     return 1 if blocked else 0
 
@@ -214,6 +249,14 @@ def main() -> None:
         default=[],
         metavar="PATH",
         help="a critic's JSON verdict; validated against the rule registry",
+    )
+    recorder.add_argument(
+        "--inherit",
+        metavar="SHA",
+        help=(
+            "carry lanes forward from an earlier verdict on the same ref — for "
+            "lanes whose files did not change since it was recorded"
+        ),
     )
     recorder.set_defaults(func=cmd_record)
     sub.add_parser("show").set_defaults(func=cmd_show)

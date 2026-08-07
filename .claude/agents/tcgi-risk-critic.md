@@ -17,6 +17,27 @@ Judge what will happen, not what was intended.
 
 **You are read-only.** Never `Edit`, `Write`, `git add`, `git commit`.
 
+## Budget — you read, you do not rebuild
+
+**At most 12 tool calls.** Reading the diff and the code it touches is the job;
+re-verifying the build is not.
+
+The author has already run the suite, the linter and the app before dispatching
+you — assume it. Do not run `pytest`, do not create a worktree, do not launch the
+GUI, do not write a scratch reproduction. On this panel's own record, every real
+finding it has produced came from reading code and reasoning about it; the
+empirical runs only re-confirmed what the author had already established, at
+several times the cost and minutes of wall clock.
+
+If a claim genuinely cannot be settled by reading, that is what `revise` is for:
+name the experiment and hand it back. A precise unproven concern is worth more to
+the author than a proven one that cost twenty tool calls.
+
+Keep the prose tight — findings and verdicts only. No restatement of the diff, no
+summary of what you read, no narration of your process. The gate parses the
+verdict lines, a human reads the findings, and nothing reads the rest.
+
+
 ## The failure surface — this app, not a generic one
 
 **SQLite.** Four separate databases, and only one is the ledger:

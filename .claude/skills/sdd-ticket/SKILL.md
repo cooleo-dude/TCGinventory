@@ -79,14 +79,29 @@ panel.** This is enforced, not advised: `.claude/hooks/review_gate.py` runs as a
 `PreToolUse` hook and blocks `gh pr merge` and `ticket.py close` when there is no
 green verdict recorded for the current `HEAD`.
 
-Dispatch the panel with the Agent tool, handing each critic the diff and nothing
-else — they judge the change, never your account of it:
+### Dispatch it once, on a finished branch
+
+**The panel is the most expensive thing in this repo. Run it last.** A verdict is
+bound to a sha, so every push throws away a completed panel: on 2026-08-07 a PR
+was reviewed three times — twelve agents, ~560k tokens — because the author kept
+pushing between rounds. The code under review never changed after the first.
+
+So before you dispatch anything: land every fix, push, and confirm the branch is
+one you intend not to touch again. `git status` clean, branch pushed, suite green.
+A panel dispatched on a branch you are still editing is a panel you will pay for
+twice.
+
+Dispatch with the Agent tool, handing each critic the diff and nothing else —
+they judge the change, never your account of it:
 
 | when | dispatch |
 |---|---|
 | default | `tcgi-invariant-critic`, `tcgi-risk-critic`, `tcgi-test-critic` in parallel |
 | the diff touches `ui/` | add `tcgi-ui-critic` |
-| <=2 files, no migration, no money path, no `ui/` | `tcgi-mini-critic` alone |
+| <=150 changed lines, no migration, no money path | `tcgi-mini-critic` alone |
+
+The small-diff tier is sized by **lines, not directories** — this is a desktop
+app, so almost everything touches `ui/`, and a tier that excluded it never fired.
 
 Each ends in a verdict line. Record them:
 
@@ -94,10 +109,28 @@ Each ends in a verdict line. Record them:
 python .claude/hooks/review_gate.py record --scope pr-merge --ref <n>     --verdict invariants=pass --verdict risk=pass --verdict test=pass
 ```
 
+### Re-running: only the lanes that got dirty
+
 `revise` is a note to answer, not a failure. **`block` stops the gate** — fix the
-findings, commit, and re-run the panel. Verdicts are bound to a sha, so a new
-commit reopens the gate deliberately: the panel judged something that is no
-longer what would merge.
+findings, commit, and re-run. Verdicts are bound to a sha, so a new commit
+reopens the gate deliberately: the panel judged something that is no longer what
+would merge.
+
+When you do have to push again, **batch every outstanding fix into one commit**,
+then re-dispatch **only the lanes whose files changed** and carry the rest
+forward:
+
+```bash
+# risk asked for a change in ui/views/inventory.py; nothing else moved
+python .claude/hooks/review_gate.py record --scope pr-merge --ref 6     --verdict risk=pass --inherit <sha of the previous panel>
+```
+
+`--inherit` copies the lanes you did not re-judge from an earlier verdict on the
+**same ref** — never across PRs, and never over a lane you judged this round. The
+artifact records which lanes were carried and from where, so the inheritance is
+auditable rather than invisible. Re-judging a lane whose files did not change is
+pure cost: a documentation-only follow-up commit does not need four agents to
+re-read the same `src/` diff.
 
 Relay every finding to the user. A panel whose findings you summarise away is a
 panel that did nothing.

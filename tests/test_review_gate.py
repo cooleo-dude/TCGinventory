@@ -1,0 +1,198 @@
+"""The review gate has to fail closed, and `--inherit` must not become a loophole.
+
+There were no tests for `review_gate.py` at all until this file: the gate was
+verified by hand with piped JSON that lived only in a transcript. It is the thing
+standing between an unreviewed diff and `main`, so it gets the same treatment as
+the rule registry — including the negative cases, per `CHECKER-NEEDS-NEGATIVE-TEST`.
+
+`--inherit` exists to stop the panel being re-run over lanes whose files did not
+change. That saves most of the cost of a second round, and it would be worth
+nothing if it let a verdict leak across pull requests.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import io
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / ".claude/hooks/review_gate.py"
+
+
+@pytest.fixture(scope="module")
+def gate():
+    spec = importlib.util.spec_from_file_location("_review_gate", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["_review_gate"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture()
+def reviews(gate, tmp_path, monkeypatch):
+    """Point the gate at a scratch reviews directory and a fixed HEAD."""
+    monkeypatch.setattr(gate, "REVIEWS", tmp_path)
+    monkeypatch.setattr(gate, "head", lambda: "cafe123")
+    return tmp_path
+
+
+def _args(**over):
+    base = dict(scope="pr-merge", ref="6", verdict=[], findings=[], inherit=None)
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def _record(gate, expect: int = 0, **over) -> dict:
+    """Record, then read back the artifact for whatever HEAD is now.
+
+    `cmd_record` returns 1 when a lane blocks, so the expected code is explicit —
+    and the artifact is keyed on the *current* head, not the one an earlier call
+    happened to use.
+    """
+    assert gate.cmd_record(_args(**over)) == expect
+    return json.loads(
+        (gate.REVIEWS / f"{gate.head()}.json").read_text(encoding="utf-8")
+    )
+
+
+GREEN = ["invariants=pass", "risk=pass", "test=pass"]
+
+
+# -- what the gate guards ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command, scope",
+    [
+        ("gh pr merge 6 --squash", "pr-merge"),
+        ("python .claude/skills/sdd-ticket/scripts/ticket.py close 3", "ticket-close"),
+        ("git status", None),
+        ("gh pr view 6 --json state", None),
+    ],
+)
+def test_guarded_scope_matches_what_it_should(gate, command, scope):
+    assert gate.guarded_scope(command) == scope
+
+
+def test_hook_blocks_when_no_verdict_is_on_record(gate, reviews, monkeypatch):
+    """The gate must fail closed — no artifact means no merge."""
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "gh pr merge 6"},
+                }
+            )
+        ),
+    )
+    assert gate.hook() == 2
+
+
+def test_hook_blocks_on_a_blocking_verdict(gate, reviews, monkeypatch):
+    _record(gate, expect=1, verdict=["invariants=pass", "risk=block", "test=pass"])
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "gh pr merge 6"},
+                }
+            )
+        ),
+    )
+    assert gate.hook() == 2
+
+
+def test_hook_opens_on_a_clear_verdict(gate, reviews, monkeypatch):
+    _record(gate, verdict=GREEN)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "gh pr merge 6"},
+                }
+            )
+        ),
+    )
+    assert gate.hook() == 0
+
+
+def test_a_revise_does_not_block(gate, reviews):
+    """`revise` is a note the author answers, not a failure."""
+    record = _record(gate, verdict=["invariants=pass", "risk=revise", "test=revise"])
+    assert record["verdicts"]["risk"] == "revise"
+
+
+def test_every_required_lane_must_be_present(gate, reviews):
+    with pytest.raises(SystemExit):
+        gate.cmd_record(_args(verdict=["invariants=pass", "risk=pass"]))
+
+
+# -- --inherit ---------------------------------------------------------------
+
+
+def test_inherit_carries_the_lanes_that_were_not_rejudged(gate, reviews, monkeypatch):
+    _record(gate, verdict=[*GREEN, "ui=pass"])  # the first, full panel
+    monkeypatch.setattr(gate, "head", lambda: "beef456")  # a new commit
+
+    record = _record(gate, verdict=["risk=pass"], inherit="cafe123")
+    assert record["verdicts"] == {
+        "invariants": "pass",
+        "risk": "pass",
+        "test": "pass",
+        "ui": "pass",
+    }
+    assert record["inherited"] == {
+        "from": "cafe123",
+        "lanes": ["invariants", "test", "ui"],
+    }
+
+
+def test_a_lane_judged_this_round_wins_over_the_inherited_one(
+    gate, reviews, monkeypatch
+):
+    _record(gate, verdict=["invariants=pass", "risk=pass", "test=pass"])
+    monkeypatch.setattr(gate, "head", lambda: "beef456")
+
+    record = _record(gate, expect=1, verdict=["risk=block"], inherit="cafe123")
+    assert record["verdicts"]["risk"] == "block"  # not the inherited `pass`
+
+
+def test_inherit_refuses_to_cross_pull_requests(gate, reviews, monkeypatch):
+    """The hole this must not open: a green panel for one PR greening another."""
+    _record(gate, verdict=GREEN, ref="6")
+    monkeypatch.setattr(gate, "head", lambda: "beef456")
+
+    with pytest.raises(SystemExit, match="only be carried forward within one PR"):
+        gate.cmd_record(_args(ref="9", verdict=["risk=pass"], inherit="cafe123"))
+
+
+def test_inherit_refuses_a_sha_with_no_verdict(gate, reviews):
+    with pytest.raises(SystemExit, match="no verdict on record"):
+        gate.cmd_record(_args(verdict=["risk=pass"], inherit="0000000"))
+
+
+def test_inherit_cannot_conjure_a_missing_lane(gate, reviews, monkeypatch):
+    """Carrying forward a partial panel still has to satisfy every lane."""
+    _record(gate, verdict=GREEN)
+    (reviews / "cafe123.json").write_text(
+        json.dumps({"ref": "6", "verdicts": {"invariants": "pass"}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(gate, "head", lambda: "beef456")
+
+    with pytest.raises(SystemExit, match="missing verdict"):
+        gate.cmd_record(_args(verdict=["risk=pass"], inherit="cafe123"))
