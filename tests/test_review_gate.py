@@ -43,7 +43,9 @@ def reviews(gate, tmp_path, monkeypatch):
 
 
 def _args(**over):
-    base = dict(scope="pr-merge", ref="6", verdict=[], findings=[], inherit=None)
+    base = dict(
+        scope="pr-merge", ref="6", verdict=[], findings=[], inherit=None, paths=[]
+    )
     base.update(over)
     return SimpleNamespace(**base)
 
@@ -140,6 +142,50 @@ def test_a_revise_does_not_block(gate, reviews):
 def test_every_required_lane_must_be_present(gate, reviews):
     with pytest.raises(SystemExit):
         gate.cmd_record(_args(verdict=["invariants=pass", "risk=pass"]))
+
+
+# -- lanes the registry puts out of scope ------------------------------------
+
+
+def test_a_docs_only_diff_needs_no_critic_at_all(gate, reviews):
+    """The whole point: nothing in `.claude/` or `docs/` can violate a rule in
+    any required lane, so the panel is `n/a` across the board and costs nothing.
+    """
+    record = _record(gate, paths=["docs/decisions.md", "CLAUDE.md"])
+    assert record["verdicts"] == {
+        "invariants": "n/a",
+        "risk": "n/a",
+        "test": "n/a",
+    }
+
+
+def test_a_lane_in_scope_still_demands_a_real_verdict(gate, reviews):
+    """The negative case — `--paths` must not become a way to skip a live lane.
+
+    `tests/**/*.py` is in scope for the test lane, so a diff touching it cannot
+    be recorded without one.
+    """
+    with pytest.raises(SystemExit, match="missing verdict"):
+        gate.cmd_record(_args(paths=["tests/test_ui_views.py"]))
+
+
+def test_out_of_scope_never_overwrites_a_real_verdict(gate, reviews):
+    record = _record(
+        gate, expect=1, paths=["docs/decisions.md"], verdict=["risk=block"]
+    )
+    assert record["verdicts"]["risk"] == "block"  # judged, not n/a
+
+
+def test_no_paths_means_the_full_panel_as_before(gate, reviews):
+    """Omitting `--paths` must not weaken the gate."""
+    with pytest.raises(SystemExit, match="missing verdict"):
+        gate.cmd_record(_args(verdict=["invariants=pass"]))
+
+
+def test_an_unreadable_registry_demands_the_full_panel(gate, reviews, monkeypatch):
+    """Fail closed: if scope cannot be computed, assume every lane is live."""
+    monkeypatch.setattr(gate, "REPO", reviews)  # no rules.py under here
+    assert gate.out_of_scope(["docs/decisions.md"]) == set()
 
 
 # -- --inherit ---------------------------------------------------------------

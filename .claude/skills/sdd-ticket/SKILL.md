@@ -91,19 +91,40 @@ one you intend not to touch again. `git status` clean, branch pushed, suite gree
 A panel dispatched on a branch you are still editing is a panel you will pay for
 twice.
 
-Dispatch with the Agent tool, handing each critic the diff and nothing else —
-they judge the change, never your account of it:
+### Ask the registry who to dispatch — never guess
 
-| when | dispatch |
-|---|---|
-| default | `tcgi-invariant-critic`, `tcgi-risk-critic`, `tcgi-test-critic` in parallel |
-| the diff touches `ui/` | add `tcgi-ui-critic` |
-| <=150 changed lines, no migration, no money path | `tcgi-mini-critic` alone |
+**A critic spawn costs ~26k tokens before it judges anything**, so the question
+is not "which critics by default" but "which lanes can this diff even violate".
+The registry answers that for free:
 
-The small-diff tier is sized by **lines, not directories** — this is a desktop
-app, so almost everything touches `ui/`, and a tier that excluded it never fired.
+```bash
+git diff --name-only origin/main...HEAD          # the changed files
+python .claude/hooks/rules.py scope <those files>
+```
 
-Each ends in a verdict line. Record them:
+It prints the rules in play per lane and a `dispatch:` line. **Spawn exactly what
+that line names — no more.** If it says *no rules in scope*, spawn **nothing**: a
+docs- or tooling-only PR has no lane to judge, and three agents discovering that
+is ~80k tokens for an answer a script already gave you.
+
+Then record with `--paths`, so lanes the registry ruled out are logged `n/a`
+rather than left missing:
+
+```bash
+python .claude/hooks/review_gate.py record --scope pr-merge --ref <n>     --paths $(git diff --name-only origin/main...HEAD)     --verdict risk=pass --verdict test=pass
+```
+
+Two refinements once you know who to spawn:
+
+- **Small diffs get one agent, not three.** At **≤150 changed lines** with no
+  migration and no money path, `tcgi-mini-critic` covers all four lenses in one
+  spawn. The tier is sized by **lines, not directories** — this is a desktop app,
+  so almost everything touches `ui/`, and a tier that excluded it never fired.
+- **Hand each critic the rule ids `scope` printed for its lane.** It saves them
+  re-deriving what you already computed, which is a real slice of that 26k floor.
+
+Hand them the diff and nothing else — they judge the change, never your account
+of it. Each ends in a verdict line. Record them:
 
 ```bash
 python .claude/hooks/review_gate.py record --scope pr-merge --ref <n>     --verdict invariants=pass --verdict risk=pass --verdict test=pass

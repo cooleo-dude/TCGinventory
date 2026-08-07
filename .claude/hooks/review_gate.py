@@ -34,9 +34,11 @@ REPO = Path(__file__).resolve().parents[2]
 REVIEWS = REPO / ".claude" / "context" / "reviews"
 
 # A verdict of `revise` is not a failure — it is a note the author answers.
-# Only `block` stops the gate.
+# Only `block` stops the gate. `n/a` is a lane the rule registry says this diff
+# cannot violate: recorded so the panel's coverage stays legible, never spawned.
 BLOCKING = {"block"}
-VALID = {"pass", "revise", "block"}
+VALID = {"pass", "revise", "block", "n/a"}
+REQUIRED = {"invariants", "risk", "test"}
 
 # What the gate guards. Matched against the command text of a Bash/PowerShell call.
 GUARDED = (
@@ -116,6 +118,37 @@ def hook() -> int:
 # ---- record / show / clear -------------------------------------------------
 
 
+def out_of_scope(paths: list[str]) -> set[str]:
+    """Required lanes the rule registry says these paths cannot violate.
+
+    The registry already knows which rules a set of files can break, so spawning
+    a critic to discover that a lane has nothing to judge is ~26k tokens spent to
+    re-derive a lookup. With no ``--paths`` given nothing is assumed out of scope,
+    so the gate stays as strict as it was.
+    """
+    if not paths:
+        return set()
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(REPO / ".claude" / "hooks" / "rules.py"),
+            "scope",
+            "--json",
+            *paths,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if done.returncode != 0:
+        return set()  # registry unreadable — demand the full panel, never less
+    try:
+        in_scope = set(json.loads(done.stdout).get("lanes", {}))
+    except (json.JSONDecodeError, ValueError):
+        return set()
+    return REQUIRED - in_scope
+
+
 def inherited(args, judged: dict[str, str]) -> dict[str, str]:
     """Lanes carried forward from an earlier panel on the same PR.
 
@@ -153,7 +186,13 @@ def cmd_record(args) -> int:
         verdicts[lane] = value
     carried = inherited(args, verdicts)
     verdicts = {**carried, **verdicts}  # a lane judged this round always wins
-    missing = {"invariants", "risk", "test"} - set(verdicts)
+    # A lane the registry says this diff cannot violate needs no critic — but it
+    # is still recorded, so the artifact shows the whole panel's coverage rather
+    # than going quiet about the lanes nobody looked at. Lanes that *are* in
+    # scope still need a real verdict below.
+    for lane in sorted(out_of_scope(args.paths) - set(verdicts)):
+        verdicts[lane] = "n/a"
+    missing = REQUIRED - set(verdicts)
     if missing:
         raise SystemExit(f"missing verdict for: {', '.join(sorted(missing))}")
 
@@ -249,6 +288,16 @@ def main() -> None:
         default=[],
         metavar="PATH",
         help="a critic's JSON verdict; validated against the rule registry",
+    )
+    recorder.add_argument(
+        "--paths",
+        nargs="+",
+        default=[],
+        metavar="PATH",
+        help=(
+            "the diff's changed files — lanes the rule registry puts out of "
+            "scope are recorded n/a instead of needing a critic"
+        ),
     )
     recorder.add_argument(
         "--inherit",

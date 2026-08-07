@@ -194,18 +194,33 @@ def cmd_list(args) -> int:
     return 0
 
 
-def cmd_scope(args) -> int:
+def lanes_in_scope(paths: list[str]) -> dict[str, list[str]]:
+    """``{lane: [rule ids]}`` for the rules these paths can actually violate.
+
+    This is what decides how many critics get spawned, so it is a function rather
+    than something each critic re-derives for itself. A lane with nothing in scope
+    has nothing to judge, and an agent spawned to discover that costs ~26k tokens
+    to reach the answer already computed here.
+    """
     data = load()
-    paths = [p.replace("\\", "/") for p in args.paths]
+    normalised = [p.replace("\\", "/") for p in paths]
     hits: dict[str, list[str]] = {}
     for rule in data["rules"]:
         if rule["id"] == "UNENUMERATED":
             continue
         for pattern in rule["scope"]:
-            matched = [p for p in paths if path_matches(p, pattern)]
-            if matched:
+            if any(path_matches(p, pattern) for p in normalised):
                 hits.setdefault(rule["lane"], []).append(rule["id"])
                 break
+    return {lane: sorted(ids) for lane, ids in hits.items()}
+
+
+def cmd_scope(args) -> int:
+    data = load()
+    hits = lanes_in_scope(args.paths)
+    if args.json:
+        print(json.dumps({"lanes": hits}, indent=2))
+        return 0
     if not hits:
         print("  no rules in scope — nothing for the panel to judge")
         return 0
@@ -305,6 +320,12 @@ def main() -> None:
     lister.set_defaults(func=cmd_list)
     scoper = sub.add_parser("scope")
     scoper.add_argument("paths", nargs="+")
+    scoper.add_argument(
+        "--json",
+        action="store_true",
+        help="machine-readable {lane: [rule ids]} — what the gate reads to decide "
+        "which critics to spawn",
+    )
     scoper.set_defaults(func=cmd_scope)
     sealer = sub.add_parser("seal")
     sealer.add_argument("--id")
