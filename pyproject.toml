@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tcginventory"
-version = "0.0.1"
+# Single source of truth: src/tcginventory/__init__.py. setuptools reads the
+# literal without importing the package, so this cannot drift from what the
+# window title, the splash and the frozen exe display.
+dynamic = ["version"]
 description = "Local desktop app for tracking a personal + business trading card inventory (Pokémon-focused)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,6 +32,9 @@ dev = [
 
 [project.gui-scripts]
 tcginventory = "tcginventory.app:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "tcginventory.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
