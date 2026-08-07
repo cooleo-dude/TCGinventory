@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 
 from PySide6.QtCore import QModelIndex, QPointF, QRectF, QSize, Qt, Signal
@@ -150,27 +151,66 @@ _NEW_IMAGE_EMPTY = (
 class _Scene(QGraphicsScene):
     """Graphics scene that draws rubber-band boxes when in draw mode."""
 
+    # Screen pixels of travel before a press on an existing box is read as
+    # drawing a new one over it rather than as a click selecting it. Measured on
+    # screen, not in the scene, so the slop doesn't change with the zoom level.
+    _DRAG_SLOP = 4
+
     def __init__(self, on_box) -> None:
         super().__init__()
         self._on_box = on_box  # (QRectF) -> None, called with a finished box
         self._draw = False
         self._origin = None
         self._rubber: QGraphicsRectItem | None = None
+        # A press in draw mode that landed on an existing box, held until the
+        # mouse either travels (draw) or is released in place (select).
+        self._pending: _BoxItem | None = None
+        self._pending_at = None
 
     def set_draw(self, on: bool) -> None:
         self._draw = on
 
+    def _box_at(self, pos: QPointF) -> _BoxItem | None:
+        """The topmost box under ``pos``, found through its badge and grips —
+        they're children of the box, so a press on one belongs to it."""
+        for item in self.items(pos):
+            node = item
+            while node is not None:
+                if isinstance(node, _BoxItem):
+                    return node if node.isVisible() else None
+                node = node.parentItem()
+        return None
+
+    def _start_rubber(self) -> None:
+        self._rubber = self.addRect(
+            QRectF(self._origin, self._origin), QPen(_BOX_PEN, 0)
+        )
+
     def mousePressEvent(self, event) -> None:
         if self._draw and event.button() == Qt.LeftButton:
             self._origin = event.scenePos()
-            self._rubber = self.addRect(
-                QRectF(self._origin, self._origin), QPen(_BOX_PEN, 0)
-            )
+            # Draw mode used to swallow every press, so a box could never be
+            # selected while drawing — and Delete, which acts on the selection,
+            # had nothing to act on. Hold a press that landed on a box instead:
+            # a click selects it, a drag still draws a new box over it.
+            box = self._box_at(self._origin)
+            if box is not None:
+                self._pending = box
+                self._pending_at = event.screenPos()
+            else:
+                self._start_rubber()
             event.accept()
             return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if self._pending is not None:
+            travel = (event.screenPos() - self._pending_at).manhattanLength()
+            if travel <= self._DRAG_SLOP:
+                event.accept()
+                return
+            self._pending = None  # it's a drag after all — draw over the box
+            self._start_rubber()
         if self._rubber is not None:
             self._rubber.setRect(QRectF(self._origin, event.scenePos()).normalized())
             event.accept()
@@ -178,6 +218,12 @@ class _Scene(QGraphicsScene):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._pending is not None:
+            box, self._pending = self._pending, None
+            self.clearSelection()
+            box.setSelected(True)
+            event.accept()
+            return
         if self._rubber is not None:
             rect = self._rubber.rect().normalized()
             self.removeItem(self._rubber)
@@ -236,13 +282,20 @@ class _BoxItem(QGraphicsRectItem):
         self._on_hover = on_hover  # (number, bool) -> None
         self._badge: QGraphicsEllipseItem | None = None
         self._handles: dict[str, _ResizeHandle] = {}
+        self._highlighted = False
+        self._hl_color = str(_BOX_PEN.name())
+        self._sel_color = str(_BOX_PEN.name())
         self.setAcceptHoverEvents(True)
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
 
-    def build_decorations(self, accent: str, accent_on: str) -> None:
+    def build_decorations(
+        self, accent: str, accent_on: str, hl_color: str, sel_color: str
+    ) -> None:
         """Attach the numbered badge and the (hidden) corner resize grips."""
+        self._hl_color = hl_color
+        self._sel_color = sel_color
         badge = QGraphicsEllipseItem(-11, -11, 22, 22, self)
         badge.setBrush(QBrush(QColor(accent)))
         badge.setPen(QPen(Qt.NoPen))
@@ -258,6 +311,31 @@ class _BoxItem(QGraphicsRectItem):
         for corner in ("tl", "tr", "bl", "br"):
             self._handles[corner] = _ResizeHandle(self, corner, accent)
         self._position_decorations()
+        self.refresh_pen()
+
+    def set_highlighted(self, on: bool) -> None:
+        self._highlighted = on
+        self.refresh_pen()
+
+    def refresh_pen(self, selected: bool | None = None) -> None:
+        """One place decides the outline, because two used to fight: hovering a
+        selected box and leaving again reset it to the resting pen and the
+        selection went invisible. Selection outranks hover, hover outranks rest.
+
+        ``selected`` is passed explicitly from ``itemChange``, where the flag has
+        not been applied yet and ``isSelected()`` still reports the old state."""
+        if selected is None:
+            selected = self.isSelected()
+        if selected:
+            color, width = self._sel_color, 4.0
+        elif self._highlighted:
+            color, width = self._hl_color, 3.5
+        else:
+            color, width = _BOX_PEN, 2.0
+        pen = QPen(QColor(color))
+        pen.setCosmetic(True)  # constant outline regardless of zoom
+        pen.setWidthF(width)
+        self.setPen(pen)
 
     def _position_decorations(self) -> None:
         r = self.rect()
@@ -301,6 +379,7 @@ class _BoxItem(QGraphicsRectItem):
         if change == QGraphicsItem.ItemSelectedChange:
             for handle in self._handles.values():
                 handle.setVisible(bool(value))
+            self.refresh_pen(bool(value))
         return super().itemChange(change, value)
 
     def hoverEnterEvent(self, event) -> None:
@@ -830,6 +909,14 @@ class RecognitionView(QWidget):
         # Ctrl+V pastes a copied image (or image file) as a new scene.
         paste_sc = QShortcut(QKeySequence.Paste, self)
         paste_sc.activated.connect(self._paste_image)
+
+        # Delete / Backspace removes the selected box. Parented to the canvas
+        # (not the window) so it fires only while the stage has focus — never
+        # while a card name or condition is being edited in the Segments panel.
+        for key in (QKeySequence.Delete, QKeySequence(Qt.Key_Backspace)):
+            box_del = QShortcut(key, self._view)
+            box_del.setContext(Qt.WidgetWithChildrenShortcut)
+            box_del.activated.connect(self._delete_selected)
 
         # Warm the (heavy) identity model on a background thread so the first
         # Suggest / Transaction-autofill doesn't freeze on the model load. Uses a
@@ -1565,28 +1652,53 @@ class RecognitionView(QWidget):
     def _add_box_item(self, box: _Box) -> None:
         t = theme.active()
         item = _BoxItem(box.rect, box.number, self._on_box_hover)
-        pen = QPen(QColor(_BOX_PEN))
-        pen.setCosmetic(True)  # constant 2px outline regardless of zoom
-        pen.setWidthF(2.0)
-        item.setPen(pen)
         item.setBrush(QBrush(_BOX_FILL))
         item.setData(0, box.number)
         item.setVisible(box.visible)
         self._scene.addItem(item)  # the box (and its badge/grips) must join the scene
-        item.build_decorations(t.accent, t.accent_on)
+        # build_decorations sets the resting pen; hover and selection restyle it.
+        item.build_decorations(t.accent, t.accent_on, t.accent_ink, t.info)
         self._items[box.number] = item
 
     def _delete_selected(self) -> None:
-        session = self._sessions[self._current] if self._current >= 0 else None
-        if session is None:
+        """Delete whatever is selected on the stage (toolbar, stage trash, Del)."""
+        numbers = [
+            n
+            for n in (item.data(0) for item in self._scene.selectedItems())
+            if n is not None
+        ]
+        if not numbers:
+            # Silence here read as "Delete is broken" — say what's missing.
+            QMessageBox.information(
+                self,
+                "No box selected",
+                "Click a box on the image first — the selected box turns blue and "
+                "grows corner grips — then Delete removes it.\n\nYou can also "
+                "delete a card from its row in the Segments panel.",
+            )
             return
-        for item in list(self._scene.selectedItems()):
-            number = item.data(0)
-            if number is None:
-                continue
-            session.boxes = [b for b in session.boxes if b.number != number]
-            self._items.pop(number, None)
-            self._scene.removeItem(item)
+        self._delete_boxes(numbers)
+
+    def _delete_box(self, number: int) -> None:
+        """Delete one box by number — the Segments row's trash button, which
+        needs no mode and no selection."""
+        self._delete_boxes([number])
+
+    def _delete_boxes(self, numbers: Iterable[int]) -> None:
+        """Drop boxes from the session model and the scene.
+
+        Survivors keep their numbers. A card's front and back join on
+        (pair_group, box number), so closing the gap after a delete would
+        silently re-pair every card past it (ADR 2026-08-05)."""
+        if not (0 <= self._current < len(self._sessions)):
+            return
+        session = self._sessions[self._current]
+        drop = set(numbers)
+        session.boxes = [b for b in session.boxes if b.number not in drop]
+        for number in drop:
+            item = self._items.pop(number, None)
+            if item is not None:
+                self._scene.removeItem(item)
         self._refresh_panel()
 
     def _set_draw(self, on: bool) -> None:
@@ -1639,13 +1751,9 @@ class RecognitionView(QWidget):
     def _apply_highlight(self, number: int | None, on: bool) -> None:
         if number is None:
             return
-        t = theme.active()
         item = self._items.get(number)
         if item is not None:
-            pen = QPen(QColor(t.accent_ink if on else _BOX_PEN))
-            pen.setCosmetic(True)
-            pen.setWidthF(3.5 if on else 2.0)
-            item.setPen(pen)
+            item.set_highlighted(on)
             item.setZValue(1 if on else 0)
         row = self._seg_rows.get(number)
         if row is not None:
@@ -1870,6 +1978,17 @@ class RecognitionView(QWidget):
             chip.setObjectName("sideGive" if side == "give" else "sideRecv")
             chip.setAlignment(Qt.AlignCenter)
             r1.addWidget(chip)
+        # Deleting from the row needs no draw/select mode and no scene selection,
+        # which is the whole reason the stage's Delete felt unreachable.
+        remove = QPushButton()
+        remove.setObjectName("segDel")
+        remove.setIcon(icons.icon("trash-2", theme.active().ink3, 14))
+        remove.setIconSize(QSize(14, 14))
+        remove.setFixedSize(22, 22)
+        remove.setCursor(Qt.PointingHandCursor)
+        remove.setToolTip(f"Delete box {box.number}")
+        remove.clicked.connect(lambda _=False, n=box.number: self._delete_box(n))
+        r1.addWidget(remove)
         v.addLayout(r1)
 
         # bottom line: set·number meta + suggestion + condition picker
@@ -2427,6 +2546,9 @@ def _view_qss(t: theme.Tokens) -> str:
     QPushButton#thumbDel {{ background: transparent; border: none;
         border-radius: 5px; }}
     QPushButton#thumbDel:hover {{ background: {t.neg_soft}; }}
+    QPushButton#segDel {{ background: transparent; border: none;
+        border-radius: 5px; }}
+    QPushButton#segDel:hover {{ background: {t.neg_soft}; }}
 
     #zoneBar {{ background: {t.surface}; border: none;
         border-bottom: 1px solid {t.line};

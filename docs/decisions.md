@@ -4,6 +4,44 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-07 — Recognition: a mode trap, not a broken Delete
+
+- **The delete handler was always correct; nothing could reach it.** Both delete
+  controls act on `QGraphicsScene.selectedItems()`, and `_Scene.mousePressEvent`
+  accepted *every* left press while draw mode was on to start a rubber band —
+  so a click on an existing box never reached Qt's selection handling. Draw mode
+  is deliberately persistent across images, which means the state you are in
+  right after drawing boxes is exactly the state where no box can be selected.
+  Delete then ran against an empty selection and silently did nothing.
+- **A press on a box is held, not swallowed.** In draw mode a press that lands on
+  an existing box is deferred: released in place it selects, moved more than 4px
+  it draws a new box over the old one. The slop is measured in **screen** pixels,
+  not scene pixels — a scene-space threshold changes meaning with the zoom, and
+  on a 4000px photo fitted to an 800px view any jitter would read as a drag.
+  The alternative was single-shot draw (auto-return to Select after each box),
+  rejected because you normally draw eight boxes in a row and re-arming each time
+  costs more than it saves.
+- **One place owns the box outline.** Selection and hover both wrote the pen, and
+  hover-out reset it to the resting pen — so brushing the cursor over a selected
+  box made the selection invisible while it was still selected. `_BoxItem.refresh_pen`
+  now resolves it: selection (`info`) outranks hover (`accent_ink`) outranks rest
+  (`accent`). It takes the new state explicitly because during `ItemSelectedChange`
+  the flag is not applied yet and `isSelected()` still reports the old value.
+- **Two more ways to delete, because one invisible way is none.** Delete/Backspace
+  is bound to the canvas — parented to the view with `WidgetWithChildrenShortcut`
+  so it cannot fire while a card name is being typed in the Segments panel — and
+  every segment row grew a trash button, which needs no mode and no selection.
+  An empty-selection Delete now says what to do instead of no-opping.
+- **Survivors keep their numbers.** A card's front and back join on `(pair_group,
+  box number)` (ADR 2026-08-05), so closing the gap left by a delete would
+  silently re-pair every card past it. Deleting box 2 of 3 leaves `[1, 3]` and the
+  next box drawn is 4.
+- Boxes are only persisted by an explicit Save, which writes a fresh capture and
+  then clears the session — so deletion is purely in-memory. No service, no
+  repository, no migration.
+
+---
+
 ### 2026-08-05 — Condition grading: one grade per card, ordinal regression, no torch
 
 - **Measured first, and it changed the plan.** The shipped whitening heuristic

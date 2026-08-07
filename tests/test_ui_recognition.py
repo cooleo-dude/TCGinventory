@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QRectF  # noqa: E402
+from PySide6.QtCore import QRectF, Qt  # noqa: E402
 from PySide6.QtGui import QStandardItem  # noqa: E402
 
 
@@ -243,3 +243,168 @@ def test_closing_an_unlabeled_rows_suggestions_keeps_the_last_guess(app, conn):
     assert seen == ["base1-58"]  # nothing overwrote it on the way out
     combo.deleteLater()
     field.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# deleting a box — the stage's Delete only ever acted on the scene selection,
+# and draw mode swallowed every click, so nothing could be selected to delete
+# ---------------------------------------------------------------------------
+
+
+def _staged(conn, tmp_path, *rects):
+    """A Recognition window with one image and a box per rect."""
+    from PIL import Image
+    from PySide6.QtTest import QTest
+
+    from tcginventory.ui.views.recognition import RecognitionView
+
+    scene = tmp_path / "scene.png"
+    Image.new("RGB", (400, 300), "white").save(scene)
+
+    view = RecognitionView(conn, prewarm=False)
+    view.resize(1200, 800)
+    view.show()
+    QTest.qWaitForWindowExposed(view)
+    view.add_image_paths([str(scene)])
+    view._fit_view()
+    for rect in rects:
+        view._add_box(rect)
+    return view
+
+
+def _numbers(view):
+    return [b.number for b in view._sessions[view._current].boxes]
+
+
+def _click_box(view, number):
+    """Click a box through the real viewport, the way a user does."""
+    from PySide6.QtTest import QTest
+
+    item = view._items[number]
+    point = view._view.mapFromScene(item.mapToScene(item.rect().center()))
+    QTest.mouseClick(view._view.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+
+
+def test_a_box_can_be_selected_while_draw_mode_is_on(app, conn, tmp_path):
+    """Regression: draw mode accepted every press to start a rubber band, so a
+    click on an existing box never reached Qt's selection handling. Draw mode
+    persists across images, so this was the state you were in right after
+    drawing — and Delete, which acts on the selection, had nothing to act on."""
+    view = _staged(conn, tmp_path, QRectF(10, 10, 120, 140), QRectF(150, 10, 120, 140))
+    view._set_draw(True)
+
+    _click_box(view, 2)
+
+    assert [i.data(0) for i in view._scene.selectedItems()] == [2]
+    view._delete_selected()
+    assert _numbers(view) == [1]
+    view.deleteLater()
+
+
+def test_dragging_from_inside_a_box_still_draws_a_new_one(app, conn, tmp_path):
+    """The other half of that guard: overlapping cards mean you sometimes start
+    a box on top of one you already drew. A press that travels is still a draw;
+    only a press released in place is a selection."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    view = _staged(conn, tmp_path, QRectF(10, 10, 200, 200))
+    view._set_draw(True)
+    item = view._items[1]
+    start = view._view.mapFromScene(item.mapToScene(item.rect().center()))
+    end = QPoint(start.x() + 110, start.y() + 80)
+
+    QTest.mousePress(view._view.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+    QTest.mouseMove(view._view.viewport(), QPoint(start.x() + 40, start.y() + 30))
+    QTest.mouseMove(view._view.viewport(), end)
+    QTest.mouseRelease(view._view.viewport(), Qt.LeftButton, Qt.NoModifier, end)
+
+    assert _numbers(view) == [1, 2]
+    view.deleteLater()
+
+
+def test_delete_key_removes_the_selected_box(app, conn, tmp_path):
+    """There was no key binding at all — the only paths were two buttons."""
+    from PySide6.QtTest import QTest
+
+    view = _staged(conn, tmp_path, QRectF(10, 10, 120, 140), QRectF(150, 10, 120, 140))
+    _click_box(view, 1)
+
+    QTest.keyClick(view._view.viewport(), Qt.Key_Delete)
+
+    assert _numbers(view) == [2]
+    view.deleteLater()
+
+
+def test_deleting_a_box_never_renumbers_the_survivors(app, conn, tmp_path):
+    """A card's front and back join on (pair_group, box number), so closing the
+    gap left by a delete would silently re-pair every card past it. Numbers are
+    identity: the hole stays, and the next box drawn takes the next number up."""
+    view = _staged(
+        conn,
+        tmp_path,
+        QRectF(10, 10, 100, 120),
+        QRectF(120, 10, 100, 120),
+        QRectF(230, 10, 100, 120),
+    )
+
+    view._delete_box(2)
+
+    assert _numbers(view) == [1, 3]
+    view._add_box(QRectF(10, 150, 100, 120))
+    assert _numbers(view) == [1, 3, 4]  # never reuses 2
+    view.deleteLater()
+
+
+def test_each_segment_row_can_delete_its_own_card(app, conn, tmp_path):
+    """The discoverable path: no mode, no scene selection, just the row."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QPushButton
+
+    view = _staged(conn, tmp_path, QRectF(10, 10, 120, 140), QRectF(150, 10, 120, 140))
+    row = view._seg_rows[1]
+    trash = [b for b in row.findChildren(QPushButton) if b.objectName() == "segDel"]
+    assert len(trash) == 1
+
+    QTest.mouseClick(trash[0], Qt.LeftButton)
+
+    assert _numbers(view) == [2]
+    assert 1 not in view._items  # the box left the scene too, not just the model
+    view.deleteLater()
+
+
+def test_a_selected_box_stays_marked_after_a_hover_passes_over_it(app, conn, tmp_path):
+    """Selection and hover both wrote the outline, and hover-out reset it to the
+    resting pen — so selecting a box then brushing the cursor over it made the
+    selection invisible while it was still very much selected."""
+    view = _staged(conn, tmp_path, QRectF(10, 10, 120, 140), QRectF(150, 10, 120, 140))
+    item, other = view._items[1], view._items[2]
+    item.setSelected(True)
+    selected_pen = item.pen().color().name()
+    assert selected_pen != other.pen().color().name()  # visibly different at rest
+
+    view._set_highlight(1)  # hover in
+    view._set_highlight(None)  # and out again
+
+    assert item.pen().color().name() == selected_pen
+    view.deleteLater()
+
+
+def test_deleting_with_nothing_selected_explains_itself(
+    app, conn, tmp_path, monkeypatch
+):
+    """Silence here is what made Delete read as broken."""
+    from tcginventory.ui.views import recognition as mod
+
+    view = _staged(conn, tmp_path, QRectF(10, 10, 120, 140))
+    view._scene.clearSelection()
+    shown: list[str] = []
+    monkeypatch.setattr(
+        mod.QMessageBox, "information", lambda *a, **k: shown.append(a[1])
+    )
+
+    view._delete_selected()
+
+    assert shown == ["No box selected"]
+    assert _numbers(view) == [1]  # and nothing was removed
+    view.deleteLater()
