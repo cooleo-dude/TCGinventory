@@ -231,8 +231,14 @@ _METRIC_COLUMNS = {
     "metrics/mAP50-95(B)": "map50_95",
     "metrics/precision(B)": "precision",
     "metrics/recall(B)": "recall",
+    # Validation figures: ultralytics does not validate on every epoch, and
+    # repeats the previous row's values on the ones it skips, so these come in
+    # duplicate pairs. Kept because they are the metrics the model is judged on.
     "val/box_loss": "box_loss",
     "val/cls_loss": "cls_loss",
+    # Training loss, which does move every epoch — the honest curve to plot.
+    "train/box_loss": "train_box_loss",
+    "train/cls_loss": "train_cls_loss",
 }
 
 

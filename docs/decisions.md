@@ -1518,3 +1518,31 @@ _Template for new entries:_
   what makes it credible, not the peak itself.
 - Shipped fit (4,000 cards + 63 corpus pairs): held-out top-1 **20.6% → 66.7%**,
   top-5 **76.2% → 82.5%**.
+
+## 2026-08-06 — Models becomes its own destination; the loss curve becomes real
+
+- **Decided:** the four model groups (training environment, region, condition,
+  identity) **move out of Operations entirely**, with no pointers left behind.
+  Operations keeps ledger work — imports, exports, prices, reference data,
+  automation, maintenance. Models is the ML subsystem: what is served, what it
+  scores, how to train it, and what the corpus is feeding.
+- **Nav icon:** Lucide `cpu`, added to `ui/assets/icons`. It reads as the machine
+  side of the app at 18px, and collides with nothing already in the set
+  (`sliders-horizontal` is Operations, `scan-line` Recognition, `package`
+  Inventory).
+- **The stair-stepped loss curve was not our bug.** I had guessed an off-by-one
+  in `parse_results_csv`; the parser is faithful, and so is `add_epochs`. The
+  duplication is in **ultralytics' own `results.csv`**: it does not validate on
+  every epoch and repeats the previous row's `val/*` figures on the ones it
+  skips, so run #4's 100 epochs hold only 51 distinct validation values, in
+  pairs. `train/box_loss` moves every epoch — 100 distinct values over the same
+  run.
+- **No config fixes it**: ultralytics 8.4.115 exposes no `val_period`, and
+  `val=True` already. So the fix is on our side and is better anyway — record
+  the **training** loss beside the validation loss. `model_epoch` gains
+  `train_box_loss` / `train_cls_loss` (added by `_ensure_columns`, so existing
+  vision DBs gain them on open), and `_METRIC_COLUMNS` maps `train/*` to them.
+  Future runs carry an honest per-epoch curve; the validation figures stay,
+  because they are what the model is judged on.
+- **Existing rows are left alone** — the data was never wrong, only partial, and
+  the CSVs are still on disk if a backfill is ever wanted.

@@ -142,8 +142,10 @@ CREATE TABLE IF NOT EXISTS model_epoch (
     map50_95  REAL,
     precision REAL,
     recall    REAL,
-    box_loss  REAL,
+    box_loss  REAL,          -- validation loss, as ultralytics reports it
     cls_loss  REAL,
+    train_box_loss REAL,     -- training loss: moves every epoch (see _ensure_columns)
+    train_cls_loss REAL,
     PRIMARY KEY (run_id, epoch)
 );
 """
@@ -177,6 +179,17 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE image ADD COLUMN side TEXT")
     if "pair_group" not in cols:
         conn.execute("ALTER TABLE image ADD COLUMN pair_group INTEGER")
+
+    # The *training* loss, recorded per epoch (2026-08-06). The validation
+    # columns above are what ultralytics reports, and it does not validate on
+    # every epoch — it repeats the previous row's figures on the epochs it skips,
+    # so a curve drawn from them is a stair of duplicate pairs rather than a
+    # curve. `train/box_loss` moves every epoch, so it is the honest loss.
+    epoch_cols = {r[1] for r in conn.execute("PRAGMA table_info(model_epoch)")}
+    if "train_box_loss" not in epoch_cols:
+        conn.execute("ALTER TABLE model_epoch ADD COLUMN train_box_loss REAL")
+    if "train_cls_loss" not in epoch_cols:
+        conn.execute("ALTER TABLE model_epoch ADD COLUMN train_cls_loss REAL")
 
 
 def _migrate_run_log(conn: sqlite3.Connection) -> None:
@@ -660,6 +673,8 @@ class ModelRunRepository:
                 r.get("recall"),
                 r.get("box_loss"),
                 r.get("cls_loss"),
+                r.get("train_box_loss"),
+                r.get("train_cls_loss"),
             )
             for r in rows
         ]
@@ -668,8 +683,9 @@ class ModelRunRepository:
         with self.conn:
             self.conn.executemany(
                 "INSERT OR REPLACE INTO model_epoch (run_id, epoch, map50, "
-                "map50_95, precision, recall, box_loss, cls_loss) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+                "map50_95, precision, recall, box_loss, cls_loss, "
+                "train_box_loss, train_cls_loss) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 payload,
             )
         return len(payload)

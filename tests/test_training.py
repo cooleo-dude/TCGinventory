@@ -141,7 +141,52 @@ def test_epoch_curve_and_best_epoch(runs):
     assert runs.add_epochs(run_id, rows) == 3
     stored = runs.epochs(run_id)
     assert [r["epoch"] for r in stored] == [1, 2, 3]
-    assert training.best_epoch(rows)["epoch"] == 2  # not the last one
+    assert training.best_epoch(rows)["epoch"] == 2
+
+
+def test_both_losses_survive_the_round_trip(runs):
+    """The plot needs the training loss, so it has to reach the database."""
+    run_id = runs.start()
+    runs.add_epochs(
+        run_id,
+        [
+            {
+                "epoch": 1,
+                "box_loss": 0.43,
+                "cls_loss": 2.4,
+                "train_box_loss": 1.22,
+                "train_cls_loss": 2.67,
+            }
+        ],
+    )
+    row = runs.epochs(run_id)[0]
+    assert row["box_loss"] == 0.43 and row["train_box_loss"] == 1.22
+    assert row["cls_loss"] == 2.4 and row["train_cls_loss"] == 2.67
+
+
+def test_an_older_database_gains_the_training_loss_columns(tmp_path):
+    """The columns arrived after runs already existed, so opening an old vision
+    DB has to add them rather than fail."""
+    import sqlite3
+
+    from tcginventory.data import vision as v
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "CREATE TABLE model_run (id INTEGER PRIMARY KEY, kind TEXT, status TEXT,"
+        " source TEXT, started_at TEXT, created_at TEXT);"
+        "CREATE TABLE model_epoch (run_id INTEGER, epoch INTEGER, map50 REAL,"
+        " map50_95 REAL, precision REAL, recall REAL, box_loss REAL,"
+        " cls_loss REAL, PRIMARY KEY (run_id, epoch));"
+    )
+    conn.commit()
+    conn.close()
+
+    reopened = v.open_vision(path)
+    cols = {r[1] for r in reopened.execute("PRAGMA table_info(model_epoch)")}
+    assert {"train_box_loss", "train_cls_loss"} <= cols
+    reopened.close()  # not the last one
 
 
 def test_accuracy_series_tracks_promoted_models_oldest_first(runs):
@@ -234,8 +279,42 @@ def test_parse_results_csv(tmp_path):
     assert [r["epoch"] for r in rows] == [1, 2]
     assert rows[1]["map50_95"] == 0.31
     assert rows[1]["precision"] == 0.72
-    assert rows[1]["box_loss"] == 1.15  # the val loss, not train
+    assert rows[1]["box_loss"] == 1.15  # the val loss...
+    assert rows[1]["train_box_loss"] == 1.2  # ...kept apart from the train loss
     assert training.best_epoch(rows)["epoch"] == 2
+
+
+def test_the_training_loss_is_recorded_because_the_val_loss_stair_steps():
+    """ultralytics does not validate on every epoch — it repeats the previous
+    row's val figures on the ones it skips, so a curve drawn from `val/*` is a
+    stair of duplicate pairs. `train/*` moves every epoch, so both are stored and
+    the honest one is available to plot."""
+    import csv
+    import io
+
+    # Shaped exactly like a real results.csv: val repeats, train does not.
+    text = (
+        "epoch,train/box_loss,train/cls_loss,metrics/mAP50(B),val/box_loss\n"
+        "1,1.22,2.67,0.47,0.43\n"
+        "2,1.13,2.61,0.45,0.48\n"
+        "3,1.08,2.58,0.45,0.48\n"
+        "4,1.17,2.65,0.37,0.52\n"
+        "5,1.09,2.71,0.37,0.52\n"
+    )
+    assert len(list(csv.DictReader(io.StringIO(text)))) == 5
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "results.csv"
+        path.write_text(text, encoding="utf-8")
+        rows = training.parse_results_csv(path)
+
+    val = [r["box_loss"] for r in rows]
+    train = [r["train_box_loss"] for r in rows]
+    assert len(set(val)) == 3, "the val column really does repeat"
+    assert len(set(train)) == 5, "the train column moves every epoch"
+    assert [r["train_cls_loss"] for r in rows][0] == 2.67
 
 
 def test_parse_results_csv_tolerates_unknown_columns(tmp_path):
