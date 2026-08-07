@@ -13,13 +13,6 @@ from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def repo():
-    conn = open_vision(":memory:")
-    yield VisionRepository(conn)
-    conn.close()
-
-
 def test_add_region_stores_box_and_label(repo):
     capture_id = repo.add_capture(source="transaction")
     image_id = repo.add_image(capture_id, "sha", "/x.png", width=200, height=100)
@@ -132,13 +125,6 @@ def test_export_yolo_dataset_writes_images_labels_and_yaml(repo, tmp_path):
 
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
 
 
 @pytest.fixture()

@@ -20,13 +20,6 @@ from tcginventory.services.transactions import (  # noqa: E402
 )
 
 
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
 def _seed(conn, *, tcg="https://tcgplayer.com/x", ebay="https://ebay.com/y"):
     item = Item(
         name="Charizard",

@@ -26,13 +26,6 @@ from tcginventory.data.vision import VisionRepository, open_vision  # noqa: E402
 from tcginventory.domain.models import CatalogCard  # noqa: E402
 
 
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
 @pytest.fixture(autouse=True)
 def _quiet(monkeypatch, tmp_path):
     from PySide6.QtWidgets import QMessageBox

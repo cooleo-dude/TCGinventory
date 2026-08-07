@@ -14,13 +14,6 @@ from tcginventory.data.migrator import migrate  # noqa: E402
 from tcginventory.services.reporting import MoverRow  # noqa: E402
 
 
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
 def _rows(n: int) -> list[MoverRow]:
     return [
         MoverRow(

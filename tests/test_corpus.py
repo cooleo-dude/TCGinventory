@@ -3,19 +3,11 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 from PIL import Image
 
-from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
+from tcginventory.data.vision import CardLabel
 from tcginventory.services import corpus
 from tcginventory.services.recognizer import PixelEmbedder
-
-
-@pytest.fixture()
-def repo():
-    conn = open_vision(":memory:")
-    yield VisionRepository(conn)
-    conn.close()
 
 
 def _scene(path):

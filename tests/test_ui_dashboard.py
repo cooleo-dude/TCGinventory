@@ -17,13 +17,6 @@ from tcginventory.domain.models import PriceSnapshot  # noqa: E402
 from tcginventory.services.transactions import TransactionService  # noqa: E402
 
 
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
 def _line_names(view) -> set[str]:
     return {
         s.name()

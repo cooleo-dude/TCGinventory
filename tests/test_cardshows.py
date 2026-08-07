@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-
-import pytest
 
 from tcginventory.data.repositories import CardShowRepository
 from tcginventory.domain.models import CardShow
@@ -89,15 +86,6 @@ def test_repo_list_between(conn):
     assert {s.source_id for s in only_14th} == {28222, 20227}
 
 
-@pytest.fixture()
-def app():
-    pytest.importorskip("PySide6")
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
 def test_status_persists_across_refresh(conn):
     svc = CardShowService(conn, fetch_html=lambda url: _nj_html())
     svc.refresh(["NJ"], today="2026-01-01")
@@ -130,8 +118,12 @@ def test_shows_view_status_button_marks_show(app, conn, tmp_path, monkeypatch):
     repo = CardShowRepository(conn)
     repo.upsert(
         CardShow(
-            source_id=5, name="Show A", state="NJ", starts_on="2026-07-14",
-            detail_url="https://x", fetched_at="t",
+            source_id=5,
+            name="Show A",
+            state="NJ",
+            starts_on="2026-07-14",
+            detail_url="https://x",
+            fetched_at="t",
         )
     )
     conn.commit()
@@ -160,12 +152,24 @@ def test_shows_view_marked_panel_and_filters(app, conn, tmp_path, monkeypatch):
 
     repo = CardShowRepository(conn)
     repo.upsert(
-        CardShow(source_id=1, name="Going", state="NJ", starts_on="2026-07-14",
-                 detail_url="https://x", fetched_at="t")
+        CardShow(
+            source_id=1,
+            name="Going",
+            state="NJ",
+            starts_on="2026-07-14",
+            detail_url="https://x",
+            fetched_at="t",
+        )
     )
     repo.upsert(
-        CardShow(source_id=2, name="Maybe", state="NJ", starts_on="2026-07-15",
-                 detail_url="https://y", fetched_at="t")
+        CardShow(
+            source_id=2,
+            name="Maybe",
+            state="NJ",
+            starts_on="2026-07-15",
+            detail_url="https://y",
+            fetched_at="t",
+        )
     )
     repo.set_status(1, "attending")
     repo.set_status(2, "denied")

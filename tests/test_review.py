@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
-import pytest
-
 from tcginventory.data.repositories import ItemRepository, PriceSnapshotRepository
 from tcginventory.domain.enums import Category, Intent
 from tcginventory.domain.models import Item
@@ -126,15 +122,6 @@ def test_inventory_row_reviewed_uses_manual_value_without_polling(conn):
     (row,) = InventoryService(conn).inventory_rows()
     assert row.review is True
     assert row.current_price_cents == 3000  # manual value, no poll required
-
-
-@pytest.fixture()
-def app():
-    pytest.importorskip("PySide6")
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
 
 
 def test_view_manual_price_and_unmark(app, conn):

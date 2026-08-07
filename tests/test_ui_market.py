@@ -14,13 +14,6 @@ from tcginventory.data.repositories import CardCatalogRepository  # noqa: E402
 from tcginventory.domain.models import CatalogCard  # noqa: E402
 
 
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
 class _FakeHistory:
     def __init__(self, by_card):
         self._by_card = by_card  # card_id -> list[(as_of, cents)]
@@ -37,12 +30,24 @@ def _seed(conn):
     CardCatalogRepository(conn).replace_all(
         [
             # No image_small → CardImagePane won't spawn a fetch thread in tests.
-            CatalogCard(card_id="sv9-1", name="Pikachu", set_id="sv9",
-                        set_name="Journey Together", set_code="JTG", number="1",
-                        language="EN"),
-            CatalogCard(card_id="cel-5", name="Charizard", set_id="cel",
-                        set_name="Celebrations", set_code="CEL", number="4",
-                        language="EN"),
+            CatalogCard(
+                card_id="sv9-1",
+                name="Pikachu",
+                set_id="sv9",
+                set_name="Journey Together",
+                set_code="JTG",
+                number="1",
+                language="EN",
+            ),
+            CatalogCard(
+                card_id="cel-5",
+                name="Charizard",
+                set_id="cel",
+                set_name="Celebrations",
+                set_code="CEL",
+                number="4",
+                language="EN",
+            ),
         ],
         "t",
     )
@@ -74,10 +79,12 @@ def test_shuttle_tag_and_untag(app, conn):
 
     _seed(conn)
     view = PriceLookupView(conn)
-    view._history = _FakeHistory({
-        "sv9-1": [("2026-06-01", 500), ("2026-07-01", 750)],
-        "cel-5": [("2026-06-01", 9000), ("2026-07-01", 12000)],
-    })
+    view._history = _FakeHistory(
+        {
+            "sv9-1": [("2026-06-01", 500), ("2026-07-01", 750)],
+            "cel-5": [("2026-06-01", 9000), ("2026-07-01", 12000)],
+        }
+    )
 
     view._search.setText("Pikachu")
     view._tag("sv9-1")  # move Pikachu → tagged
@@ -102,10 +109,12 @@ def test_click_off_drops_untagged_preview_line(app, conn):
 
     _seed(conn)
     view = PriceLookupView(conn)
-    view._history = _FakeHistory({
-        "sv9-1": [("2026-06-01", 500), ("2026-07-01", 750)],
-        "cel-5": [("2026-06-01", 9000), ("2026-07-01", 12000)],
-    })
+    view._history = _FakeHistory(
+        {
+            "sv9-1": [("2026-06-01", 500), ("2026-07-01", 750)],
+            "cel-5": [("2026-06-01", 9000), ("2026-07-01", 12000)],
+        }
+    )
     # Tag one card, preview another → two lines.
     view._search.setText("Charizard")
     view._tag("cel-5")
@@ -122,10 +131,12 @@ def test_click_off_drops_untagged_preview_line(app, conn):
 def test_overlay_chart_forward_fills_and_single_point(app):
     from tcginventory.ui.views.market import _overlay_chart
 
-    multi = _overlay_chart([
-        ("A", [("2026-06-01", 500), ("2026-07-01", 750)], "#cc241d"),
-        ("B", [("2026-07-01", 900)], "#458588"),  # single pt → synthesised vertex
-    ])
+    multi = _overlay_chart(
+        [
+            ("A", [("2026-06-01", 500), ("2026-07-01", 750)], "#cc241d"),
+            ("B", [("2026-07-01", 900)], "#458588"),  # single pt → synthesised vertex
+        ]
+    )
     lines = multi.series()
     assert len(lines) == 2
     assert all(s.count() >= 2 for s in lines)

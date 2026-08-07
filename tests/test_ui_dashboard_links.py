@@ -16,13 +16,6 @@ from tcginventory.services.reporting import MoverRow, SellerRow  # noqa: E402
 from tcginventory.services.transactions import TransactionService  # noqa: E402
 
 
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
 def _mover(item_id: int) -> MoverRow:
     return MoverRow(
         item_id=item_id,

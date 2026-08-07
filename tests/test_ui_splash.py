@@ -9,24 +9,7 @@ import pytest
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from tcginventory.data.db import connect  # noqa: E402
-from tcginventory.data.migrator import migrate  # noqa: E402
 from tcginventory.ui.main_window import NAV_ITEMS  # noqa: E402
-
-
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
-@pytest.fixture()
-def conn():
-    c = connect(":memory:")
-    migrate(c)
-    yield c
-    c.close()
 
 
 def test_steps_name_the_work_and_fill_the_bar(app):

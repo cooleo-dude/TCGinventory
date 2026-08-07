@@ -47,12 +47,19 @@ def test_calendar_entry_crud_and_overlap(conn):
 def test_find_conflicts_only_flags_busy_shows_inside_a_span():
     entries = [_vac()]  # Aug 12–16
     shows = [
-        CardShow(source_id=1, name="A", state="DE", starts_on="2026-08-16",
-                 status="attending"),  # inside + busy → conflict
-        CardShow(source_id=2, name="B", state="PA", starts_on="2026-08-14",
-                 status="pending"),  # inside but not "busy" → no conflict
-        CardShow(source_id=3, name="C", state="NJ", starts_on="2026-08-20",
-                 status="walking"),  # busy but outside the span → no conflict
+        CardShow(
+            source_id=1,
+            name="A",
+            state="DE",
+            starts_on="2026-08-16",
+            status="attending",
+        ),  # inside + busy → conflict
+        CardShow(
+            source_id=2, name="B", state="PA", starts_on="2026-08-14", status="pending"
+        ),  # inside but not "busy" → no conflict
+        CardShow(
+            source_id=3, name="C", state="NJ", starts_on="2026-08-20", status="walking"
+        ),  # busy but outside the span → no conflict
     ]
     ids, dates = find_conflicts(shows, entries)
     assert ids == {1}
@@ -62,8 +69,12 @@ def test_find_conflicts_only_flags_busy_shows_inside_a_span():
 def test_calendar_service_entry_lifecycle(conn):
     svc = CalendarService(conn)
     e = svc.add_entry(
-        CalendarEntry(title="Dentist", kind="obligation",
-                      starts_on="2026-08-21", ends_on="2026-08-21")
+        CalendarEntry(
+            title="Dentist",
+            kind="obligation",
+            starts_on="2026-08-21",
+            ends_on="2026-08-21",
+        )
     )
     assert [x.title for x in svc.entries_overlapping("2026-08-01", "2026-08-31")] == [
         "Dentist"
@@ -78,13 +89,6 @@ pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
 def _agenda_texts(view) -> list[str]:
     from PySide6.QtWidgets import QLabel
 
@@ -96,10 +100,24 @@ def test_agenda_lists_only_marked_shows_and_entries(app, conn, tmp_path, monkeyp
     from tcginventory.ui.views.calendar import CalendarView
 
     repo = CardShowRepository(conn)
-    repo.upsert(CardShow(source_id=1, name="Marked Show", state="NJ",
-                         starts_on="2026-08-10", fetched_at="t"))
-    repo.upsert(CardShow(source_id=2, name="Unmarked Show", state="NJ",
-                         starts_on="2026-08-11", fetched_at="t"))
+    repo.upsert(
+        CardShow(
+            source_id=1,
+            name="Marked Show",
+            state="NJ",
+            starts_on="2026-08-10",
+            fetched_at="t",
+        )
+    )
+    repo.upsert(
+        CardShow(
+            source_id=2,
+            name="Unmarked Show",
+            state="NJ",
+            starts_on="2026-08-11",
+            fetched_at="t",
+        )
+    )
     conn.execute("INSERT INTO card_show_status(source_id,status) VALUES(1,'walking')")
     CalendarEntryRepository(conn).add(
         _vac(title="Personal Note", start="2026-08-12", end="2026-08-12")
@@ -161,8 +179,13 @@ def test_calendar_view_flags_a_conflict(app, conn, tmp_path, monkeypatch):
     from tcginventory.ui.views.calendar import CalendarView
 
     CardShowRepository(conn).upsert(
-        CardShow(source_id=1, name="Delaware TCG Meet", state="NJ",
-                 starts_on="2026-08-16", fetched_at="t")
+        CardShow(
+            source_id=1,
+            name="Delaware TCG Meet",
+            state="NJ",
+            starts_on="2026-08-16",
+            fetched_at="t",
+        )
     )
     conn.execute("INSERT INTO card_show_status(source_id,status) VALUES(1,'attending')")
     CalendarEntryRepository(conn).add(_vac())  # Aug 12–16 covers the show

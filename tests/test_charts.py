@@ -20,13 +20,6 @@ from PySide6.QtCore import QPointF, Qt  # noqa: E402
 from tcginventory.ui.charts import HoverChartView  # noqa: E402
 
 
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
 def test_interp_y_between_and_out_of_range():
     pts = [QPointF(0, 10), QPointF(10, 20), QPointF(20, 20)]
     assert HoverChartView._interp_y(pts, 5) == 15  # halfway on the first segment

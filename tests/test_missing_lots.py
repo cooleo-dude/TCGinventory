@@ -6,19 +6,7 @@ import pytest
 
 from conftest import buy, sell
 from tcginventory.services.exceptions import InsufficientQuantityError
-from tcginventory.services.inventory import InventoryService
 from tcginventory.services.reporting import ReportingService
-from tcginventory.services.transactions import TransactionService
-
-
-@pytest.fixture()
-def svc(conn):
-    return TransactionService(conn)
-
-
-@pytest.fixture()
-def inv(conn):
-    return InventoryService(conn)
 
 
 def test_missing_lot_impairment_and_reversal(svc, inv, conn):

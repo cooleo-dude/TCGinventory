@@ -18,13 +18,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from tcginventory.ui import icons  # noqa: E402
 
 
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
 def test_a_known_icon_renders(app):
     pm = icons.pixmap("database", "#ff8800", 18)
     assert not pm.isNull() and pm.size().width() == 18

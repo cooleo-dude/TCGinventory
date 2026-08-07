@@ -995,6 +995,15 @@ class AuctionsView(QWidget):
         self._price_workers: list[PriceLookupWorker] = []
         self._edit_id: int | None = None
         self._inference_pipeline = None  # lazily built (image -> [Detection])
+        # Owned by the view, so closing it cancels a pending fit. A bare
+        # QTimer.singleShot outlives its target and fires against widgets Qt
+        # has already deleted; it also coalesces a burst of resizes into one.
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.timeout.connect(self._fit_split_to_cards)
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.timeout.connect(self._on_view_resized)
         self._ended_ids: set[int] = set()  # which auctions were ended last refresh
         self._cards: list[_AuctionCard] = []  # all auction cards, in order
         self._page = 0  # current watchlist page (one row of cards per page)
@@ -1217,7 +1226,7 @@ class AuctionsView(QWidget):
         self._update_tiles(now)
         self._shown_key = None  # force a re-render of the visible page
         self._render_page()
-        QTimer.singleShot(0, self._fit_split_to_cards)
+        self._fit_timer.start(0)
 
     def _add_auction_card(self, auction: Auction) -> None:
         # Built for every auction (so the tick can update all countdowns), but
@@ -1316,7 +1325,7 @@ class AuctionsView(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         super().resizeEvent(event)
-        QTimer.singleShot(0, self._on_view_resized)
+        self._resize_timer.start(0)
 
     def _on_view_resized(self) -> None:
         self._render_page()  # width change may alter cards-per-page

@@ -144,13 +144,6 @@ pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
 class _FakeHistory:
     def __init__(self, prices):
         self._prices = prices  # card_id -> cents

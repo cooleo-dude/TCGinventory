@@ -24,13 +24,6 @@ from tcginventory.ui import completer_popup  # noqa: E402
 from tcginventory.ui.completer_popup import show_fitted  # noqa: E402
 
 
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
 def _field(app, labels, *, width=80):
     """A narrow QLineEdit wired to a completer exactly like the real entry rows:
     setCompleter first, then our own textEdited slot that opens the popup."""

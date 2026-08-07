@@ -9,12 +9,6 @@ from tcginventory.data.repositories import ItemRepository, PriceSnapshotReposito
 from tcginventory.domain.enums import Intent
 from tcginventory.domain.models import PriceSnapshot
 from tcginventory.services.reporting import ReportingService
-from tcginventory.services.transactions import TransactionService
-
-
-@pytest.fixture()
-def svc(conn):
-    return TransactionService(conn)
 
 
 @pytest.fixture()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import os
 import sys
 
 import pytest
@@ -59,6 +60,67 @@ def conn():
     migrate(c)
     yield c
     c.close()
+
+
+# ---------------------------------------------------------------------------
+# Setup more than one file needs. It did not used to live here: files grew
+# their own copies instead, and the suite ended up carrying 25 identical
+# ``app`` fixtures, five identical ``conn`` fixtures *shadowing* the one above
+# (so an edit here reached none of them), and the same ``repo`` / ``svc`` /
+# ``inv`` / ``seeded_conn`` bodies over and over. Identical copies do not stay
+# identical. Qt and vision imports stay inside the fixtures, so the
+# pure-Python service tests never pay for PySide6.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def app():
+    """The one QApplication for the process.
+
+    Qt permits a single instance, so this was always shared in practice even
+    while each file declared its own function-scoped copy; session scope just
+    says so. Under xdist each worker is its own process and gets its own.
+    """
+    pytest.importorskip("PySide6")
+    # Must be set before the first QApplication; harmless if already headless.
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture()
+def seeded_conn():
+    """A migrated database carrying the demo dataset."""
+    from tcginventory.data.seed import seed_demo
+
+    c = connect(":memory:")
+    migrate(c)
+    seed_demo(c)
+    yield c
+    c.close()
+
+
+@pytest.fixture()
+def repo():
+    """A VisionRepository over an in-memory vision database."""
+    from tcginventory.data.vision import VisionRepository, open_vision
+
+    c = open_vision(":memory:")
+    yield VisionRepository(c)
+    c.close()
+
+
+@pytest.fixture()
+def svc(conn):
+    return TransactionService(conn)
+
+
+@pytest.fixture()
+def inv(conn):
+    from tcginventory.services.inventory import InventoryService
+
+    return InventoryService(conn)
 
 
 def make_item(name: str, **overrides) -> Item:

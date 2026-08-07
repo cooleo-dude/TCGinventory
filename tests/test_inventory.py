@@ -2,22 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-
 from conftest import buy, sell
 from tcginventory.domain.enums import Intent
-from tcginventory.services.inventory import InventoryService
-from tcginventory.services.transactions import TransactionService
-
-
-@pytest.fixture()
-def svc(conn):
-    return TransactionService(conn)
-
-
-@pytest.fixture()
-def inv(conn):
-    return InventoryService(conn)
 
 
 def test_inventory_row_sold_price(svc, inv):

@@ -14,13 +14,6 @@ pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
 def _scene(path, w=200, h=100):
     Image.new("RGB", (w, h), "white").save(path)
     return str(path)

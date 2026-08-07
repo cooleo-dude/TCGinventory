@@ -995,6 +995,14 @@ class DashboardView(QWidget):
         scroll.setWidget(page)
         self._scroll = scroll
 
+        # Owned by the view, so destroying the view cancels a pending fit. A
+        # bare QTimer.singleShot outlives its target: the callback still fires
+        # on the next event-loop turn and touches widgets Qt has already
+        # deleted. It also coalesces a burst of resize events into one fit.
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.timeout.connect(self._fit_highlight_boxes)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(scroll)
@@ -1003,7 +1011,7 @@ class DashboardView(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         super().resizeEvent(event)
-        QTimer.singleShot(0, self._fit_highlight_boxes)
+        self._fit_timer.start(0)
 
     def _fit_highlight_boxes(self) -> None:
         """Let each highlights box default to filling the space down to the
@@ -1140,7 +1148,7 @@ class DashboardView(QWidget):
             self._note.setText("")
 
         # Default each highlights box to fill the space down to the screen bottom.
-        QTimer.singleShot(0, self._fit_highlight_boxes)
+        self._fit_timer.start(0)
 
     def _build_chart(
         self,

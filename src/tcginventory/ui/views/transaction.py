@@ -889,6 +889,12 @@ class TransactionView(QWidget):
         self._price_workers: list[PriceLookupWorker] = []
         self._edit_id: int | None = None
         self._inference_pipeline = None  # lazily built (image -> [Detection])
+        # Owned by the view, so closing it cancels a pending sync. A bare
+        # QTimer.singleShot outlives its target and fires against widgets Qt
+        # has already deleted; it also coalesces a burst of resizes into one.
+        self._header_timer = QTimer(self)
+        self._header_timer.setSingleShot(True)
+        self._header_timer.timeout.connect(self._sync_header_widths)
         # Docked preview panes flanking the board: the left one previews the You
         # side, the right one the Them side. Each shows the hovered/selected card
         # (persisting on leave) above a cascading fan of that side's cards.
@@ -1119,7 +1125,7 @@ class TransactionView(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        QTimer.singleShot(0, self._sync_header_widths)
+        self._header_timer.start(0)
 
     # -- the two sides ------------------------------------------------------
 
@@ -1628,7 +1634,7 @@ class TransactionView(QWidget):
         self._refresh_cascades()
         # Adding/removing rows can change the panel widths; re-lock the header
         # groups once the layout has settled.
-        QTimer.singleShot(0, self._sync_header_widths)
+        self._header_timer.start(0)
         preview = self._service.preview(self.build_request())
         ttype = preview.inferred_type.value if preview.inferred_type else None
         self._badge.setText((ttype or "—").upper())

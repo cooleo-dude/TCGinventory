@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
+from tcginventory.data.vision import CardLabel
 from tcginventory.services.recognizer import (
     PixelEmbedder,
     Recognizer,
@@ -17,13 +17,6 @@ try:
     import onnxruntime as _ort
 except Exception:  # pragma: no cover
     _ort = None
-
-
-@pytest.fixture()
-def repo():
-    conn = open_vision(":memory:")
-    yield VisionRepository(conn)
-    conn.close()
 
 
 def _pattern_png(path, seed: int, size=64):

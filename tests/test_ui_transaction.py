@@ -13,8 +13,6 @@ import pytest
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from tcginventory.data.db import connect  # noqa: E402
-from tcginventory.data.migrator import migrate  # noqa: E402
 from tcginventory.data.repositories import (  # noqa: E402
     ItemRepository,
     LotRepository,
@@ -29,21 +27,6 @@ from tcginventory.domain.models import Item  # noqa: E402
 from tcginventory.services.inventory import InventoryService  # noqa: E402
 from tcginventory.services.reporting import ReportingService  # noqa: E402
 from tcginventory.services.transactions import IncomingCard, OutgoingCard  # noqa: E402
-
-
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
-@pytest.fixture()
-def conn():
-    c = connect(":memory:")
-    migrate(c)
-    yield c
-    c.close()
 
 
 @pytest.fixture(autouse=True)
@@ -492,7 +475,8 @@ def test_receive_row_printing_picker(app, conn):
     row.set_variants(variants)
     assert not row._printing_cell.isHidden()
     assert [row.printing.itemText(i) for i in range(row.printing.count())] == [
-        "Base", "Pokemon Center Exclusive",
+        "Base",
+        "Pokemon Center Exclusive",
     ]
 
     # Choosing the exclusive re-links the URL and market price.

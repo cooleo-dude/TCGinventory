@@ -17,23 +17,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from tcginventory.data.db import connect  # noqa: E402
 from tcginventory.data.migrator import migrate  # noqa: E402
 from tcginventory.data.repositories import ItemRepository  # noqa: E402
-from tcginventory.data.seed import seed_demo  # noqa: E402
-
-
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
-@pytest.fixture()
-def seeded_conn():
-    conn = connect(":memory:")
-    migrate(conn)
-    seed_demo(conn)
-    yield conn
-    conn.close()
 
 
 @pytest.fixture(autouse=True)

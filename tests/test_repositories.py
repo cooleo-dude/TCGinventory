@@ -6,8 +6,6 @@ import sqlite3
 
 import pytest
 
-from tcginventory.data.db import connect
-from tcginventory.data.migrator import migrate
 from tcginventory.data.repositories import (
     AuditLogRepository,
     ItemRepository,
@@ -37,14 +35,6 @@ from tcginventory.domain.models import (
     Transaction,
     TransactionLine,
 )
-
-
-@pytest.fixture()
-def conn():
-    c = connect(":memory:")
-    migrate(c)
-    yield c
-    c.close()
 
 
 def _raw_item(name="Charizard VMAX", **overrides) -> Item:
@@ -139,9 +129,7 @@ def test_item_round_trips_holo_and_edition(conn):
 
 def test_holo_and_edition_are_part_of_identity(conn):
     repo = ItemRepository(conn)
-    base = repo.add(
-        _raw_item(holo_pattern=HoloPattern.HOLO, edition=Edition.UNLIMITED)
-    )
+    base = repo.add(_raw_item(holo_pattern=HoloPattern.HOLO, edition=Edition.UNLIMITED))
     # Same holo + edition → matches.
     same = _raw_item(holo_pattern=HoloPattern.HOLO, edition=Edition.UNLIMITED)
     assert repo.find_by_identity(same).id == base.id

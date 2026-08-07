@@ -11,23 +11,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tcginventory.data.db import connect  # noqa: E402
 from tcginventory.data.migrator import migrate  # noqa: E402
-from tcginventory.data.seed import seed_demo  # noqa: E402
-
-
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
-@pytest.fixture()
-def seeded_conn():
-    conn = connect(":memory:")
-    migrate(conn)
-    seed_demo(conn)
-    yield conn
-    conn.close()
 
 
 def test_inventory_view_populates(app, seeded_conn):
@@ -52,9 +35,11 @@ def test_inventory_trend_column_renders_arrows(app, seeded_conn):
     model.set_rows(InventoryService(seeded_conn).inventory_rows())
     item_id = model.row_at(0).item.id
     # A strong up-trend → green up-arrows scaling with magnitude.
-    model.set_trends({
-        item_id: Trend("up", 12.0, 40.0, 3, 30, 30),
-    })
+    model.set_trends(
+        {
+            item_id: Trend("up", 12.0, 40.0, 3, 30, 30),
+        }
+    )
     from tcginventory.ui import theme
 
     idx = model.index(0, TREND_COL)

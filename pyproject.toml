@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-xdist>=3.5",
     "ruff>=0.5",
     "pyinstaller>=6.0",
 ]
@@ -45,7 +46,12 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# Parallel by default: the suite is ~640 mostly-independent tests and takes
+# ~49s serially, ~9s across workers. ``--dist loadfile`` keeps a file's tests
+# on one worker, which matters here — the Qt views carry module-level state,
+# and it avoids re-importing PySide6/numpy in every worker for every file.
+# Running one file while iterating? ``-n0`` turns it off (450ms vs 2s).
+addopts = "-q -n auto --dist loadfile"
 
 [tool.ruff]
 line-length = 88

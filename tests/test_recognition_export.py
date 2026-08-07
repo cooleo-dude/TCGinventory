@@ -12,26 +12,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QRectF, Qt  # noqa: E402
 
 from tcginventory.data.auctions import open_auctions  # noqa: E402
-from tcginventory.data.db import connect  # noqa: E402
-from tcginventory.data.migrator import migrate  # noqa: E402
 from tcginventory.data.vision import CardLabel  # noqa: E402
 from tcginventory.domain.enums import Category  # noqa: E402
 from tcginventory.domain.models import Item  # noqa: E402
-
-
-@pytest.fixture()
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    return QApplication.instance() or QApplication([])
-
-
-@pytest.fixture()
-def conn():
-    c = connect(":memory:")
-    migrate(c)
-    yield c
-    c.close()
 
 
 @pytest.fixture(autouse=True)
