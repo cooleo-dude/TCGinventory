@@ -82,8 +82,9 @@ def test_guarded_scope_matches_what_it_should(gate, command, scope):
     assert gate.guarded_scope(command) == scope
 
 
-def test_hook_blocks_when_no_verdict_is_on_record(gate, reviews, monkeypatch):
-    """The gate must fail closed — no artifact means no merge."""
+def test_no_panel_on_record_does_not_block(gate, reviews, monkeypatch):
+    """The critics are opt-in — they cost ~26k tokens a spawn, so a merge with no
+    panel is a normal merge, not a violation."""
     monkeypatch.setattr(
         sys,
         "stdin",
@@ -96,10 +97,12 @@ def test_hook_blocks_when_no_verdict_is_on_record(gate, reviews, monkeypatch):
             )
         ),
     )
-    assert gate.hook() == 2
+    assert gate.hook() == 0
 
 
-def test_hook_blocks_on_a_blocking_verdict(gate, reviews, monkeypatch):
+def test_a_panel_you_ran_cannot_be_ignored(gate, reviews, monkeypatch):
+    """The half the gate still enforces: critics that were actually run and said
+    `block` stop the merge. Opt-in to run them, not opt-in to obey them."""
     _record(gate, expect=1, verdict=["invariants=pass", "risk=block", "test=pass"])
     monkeypatch.setattr(
         sys,

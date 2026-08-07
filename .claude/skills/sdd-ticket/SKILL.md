@@ -74,12 +74,23 @@ is what the *rejected alternatives* section is for, and it is not optional.
 
 ## The review gate
 
-**A ticket cannot be closed and a PR cannot be merged without a green critic
-panel.** This is enforced, not advised: `.claude/hooks/review_gate.py` runs as a
-`PreToolUse` hook and blocks `gh pr merge` and `ticket.py close` when there is no
-green verdict recorded for the current `HEAD`.
+**The critic panel is opt-in. Do not dispatch it unless the user asks.**
 
-### Dispatch it once, on a finished branch
+A spawn costs ~26k tokens before it judges anything, so critics run when someone
+says *"run the critics"* (or names one) — not on every merge, and not because a
+diff looks important. Merging and closing tickets proceed normally without them.
+
+What `.claude/hooks/review_gate.py` still enforces, as a `PreToolUse` hook, is the
+other half: **a panel that was run cannot be quietly ignored.** No verdict on
+record → the merge proceeds. A recorded `block` → the merge stops until the
+finding is fixed and committed, or the objection is cleared deliberately
+(`review_gate.py clear`). Opting in to run the critics is not opting in to obey
+them selectively.
+
+If you think a change warrants review, *say so and let the user decide* — a
+sentence recommending it costs nothing; four agents cost ~100k.
+
+### When you are asked to run it: once, on a finished branch
 
 **The panel is the most expensive thing in this repo. Run it last.** A verdict is
 bound to a sha, so every push throws away a completed panel: on 2026-08-07 a PR

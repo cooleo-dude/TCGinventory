@@ -1,23 +1,29 @@
-"""Review gate — no merge and no ticket close without a green critic panel.
+"""Review gate — a panel you ran cannot be quietly ignored.
+
+**The critic panel is opt-in.** It costs roughly 26k tokens per agent spawned, so
+it runs when someone asks for it — "run the critics" before a merge — and not
+otherwise. A merge with no panel on record proceeds untouched.
+
+What this gate still guarantees is the other half: once critics *have* judged the
+commit you are about to merge, a `block` stops it. Running the panel and merging
+over its objection takes a deliberate act (`clear`, or another commit), not
+silence.
 
 Two jobs in one file:
 
-* **hook mode** (no arguments, JSON on stdin): a `PreToolUse` hook. If the tool
-  call is a PR merge or a ticket close, it demands a fresh green verdict for the
-  current `HEAD` and blocks the call when there is not one.
+* **hook mode** (no arguments, JSON on stdin): a `PreToolUse` hook. On a PR merge
+  or a ticket close it looks for a verdict for the current `HEAD`; no verdict is
+  fine, a blocking verdict is not.
 * **`record`**: how the panel's verdicts get written, after the agents have run.
 
-The agents cannot trigger themselves — they are definitions the Agent tool
-dispatches. This is the piece that makes "the panel runs before a merge" a fact
-rather than a habit.
-
     review_gate.py record --scope pr-merge --ref 4 \
-        --verdict invariants=pass --verdict risk=pass --verdict test=pass
+        --paths $(git diff --name-only origin/main...HEAD) \
+        --verdict risk=pass --verdict test=pass
     review_gate.py show
     review_gate.py clear
 
-A verdict is bound to a commit sha. Push another commit and the gate reopens,
-because the panel judged something that is no longer what would merge.
+A verdict is bound to a commit sha. Push another commit and any objection stops
+applying, because the panel judged something that is no longer what would merge.
 """
 
 from __future__ import annotations
@@ -89,26 +95,20 @@ def hook() -> int:
     sha = head()
     path = verdict_path(sha)
     if not path.is_file():
-        print(
-            f"BLOCKED: {scope} at {sha} has no review on record.\n"
-            f"Dispatch the critic panel first — tcgi-invariant-critic, "
-            f"tcgi-risk-critic and tcgi-test-critic (plus tcgi-ui-critic if the "
-            f"diff touches ui/), or tcgi-mini-critic for a small diff — then:\n"
-            f"  python .claude/hooks/review_gate.py record --scope {scope} "
-            f"--ref <n> --verdict invariants=pass --verdict risk=pass "
-            f"--verdict test=pass\n"
-            f"See .claude/agents/ for what each critic judges.",
-            file=sys.stderr,
-        )
-        return 2
+        # No panel was run, and that is allowed. The critics are opt-in — they
+        # cost ~26k tokens per spawn, so they run when someone asks for them, not
+        # on every merge. What this hook still enforces is that a panel you *did*
+        # run cannot be ignored: see below.
+        return 0
 
     record = json.loads(path.read_text(encoding="utf-8"))
     blocked = [k for k, v in record.get("verdicts", {}).items() if v in BLOCKING]
     if blocked:
         print(
-            f"BLOCKED: the panel returned `block` on {', '.join(sorted(blocked))} "
-            f"for {sha}.\nFix the findings, commit, and re-run the panel — the "
-            f"verdict is bound to the sha, so a new commit reopens the gate.",
+            f"BLOCKED: critics were run on {sha} and returned `block` on "
+            f"{', '.join(sorted(blocked))}.\nFix the findings and commit — the "
+            f"verdict is bound to the sha, so a new commit clears the objection. "
+            f"To merge over it deliberately: review_gate.py clear.",
             file=sys.stderr,
         )
         return 2
