@@ -59,9 +59,7 @@ def backup_price_history(
     cutoff = (date.today() - timedelta(days=months * 31)).isoformat()
     trimmed = sqlite3.connect(str(dest))
     try:
-        trimmed.execute(
-            "DELETE FROM catalog_price_snapshot WHERE as_of < ?", (cutoff,)
-        )
+        trimmed.execute("DELETE FROM catalog_price_snapshot WHERE as_of < ?", (cutoff,))
         trimmed.commit()
         trimmed.execute("VACUUM")
     finally:

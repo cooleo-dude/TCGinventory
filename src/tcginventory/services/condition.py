@@ -199,9 +199,7 @@ class LearnedConditionModel:
             condition=Condition(self.grades[index]),
             # The worst corner/edge whitening actually measured — a real number
             # here, unlike the ONNX path which has none to report.
-            whitening=max(
-                measured["corner_white_max"], measured["edge_white_max"]
-            ),
+            whitening=max(measured["corner_white_max"], measured["edge_white_max"]),
             confidence=confidence,
         )
 

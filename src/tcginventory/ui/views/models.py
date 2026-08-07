@@ -865,9 +865,7 @@ class ModelsView(QWidget):
                     f"{_pct(detector.served_fitness)} — it was refused under the "
                     "old comparison, which weighed box tightness above finding "
                     "cards. Training again will promote it.",
-                    _button(
-                        "Retrain and promote", self._train_detector, primary=True
-                    ),
+                    _button("Retrain and promote", self._train_detector, primary=True),
                     tone="warn",
                 )
             )

@@ -55,9 +55,7 @@ class BidBreakdown:
     bids: dict[int, int]  # pct -> max bid cents
 
 
-def breakdown(
-    value_cents: int, shipping_cents: int, tax_rate_bps: int
-) -> BidBreakdown:
+def breakdown(value_cents: int, shipping_cents: int, tax_rate_bps: int) -> BidBreakdown:
     """Compute the full 70/80/90/100% max-bid breakdown."""
     return BidBreakdown(
         value_cents=value_cents,

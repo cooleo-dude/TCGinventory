@@ -165,9 +165,7 @@ class TrendService:
     def card_id_for(self, item) -> str | None:
         key = (item.name, item.set_name, item.card_number)
         if key not in self._card_ids:
-            hit = self._catalog.image_for(
-                item.name, item.set_name, item.card_number
-            )
+            hit = self._catalog.image_for(item.name, item.set_name, item.card_number)
             self._card_ids[key] = hit[0] if hit else None
         return self._card_ids[key]
 

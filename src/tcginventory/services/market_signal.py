@@ -131,20 +131,12 @@ class MarketSignalService:
             units_sold = (s["units"] if s else 0) or 0
 
             sell_through = units_sold / units_acq if units_acq else None
-            avg_days = (
-                s["days_weighted"] / s["units"]
-                if s and s["units"]
-                else None
-            )
+            avg_days = s["days_weighted"] / s["units"] if s and s["units"] else None
             realized_pct = (
-                s["realized"] / s["sold_cost"] * 100.0
-                if s and s["sold_cost"]
-                else None
+                s["realized"] / s["sold_cost"] * 100.0 if s and s["sold_cost"] else None
             )
             price = item.market_value_cents
-            onhand_avg_cost = (
-                acq["onhand_cost"] / onhand if onhand else None
-            )
+            onhand_avg_cost = acq["onhand_cost"] / onhand if onhand else None
             unrealized_pct = (
                 (price - onhand_avg_cost) / onhand_avg_cost * 100.0
                 if price is not None and onhand_avg_cost
@@ -169,9 +161,7 @@ class MarketSignalService:
                 )
             )
 
-        out.sort(
-            key=lambda m: (m.sell_through or 0.0, m.units_sold), reverse=True
-        )
+        out.sort(key=lambda m: (m.sell_through or 0.0, m.units_sold), reverse=True)
         return out[:limit] if limit is not None else out
 
     def overview(self, signals: list[MarketSignal] | None = None) -> MarketOverview:

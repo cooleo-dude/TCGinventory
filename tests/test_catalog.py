@@ -6,26 +6,42 @@ from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.services.catalog import update_catalog, update_catalog_ja
 
 # tcgcsv category 85 ("Pokemon Japan") shape.
-_JA_GROUPS = {"results": [{"groupId": 24711, "name": "M5: Abyss Eye",
-                           "abbreviation": "M5"}]}
+_JA_GROUPS = {
+    "results": [{"groupId": 24711, "name": "M5: Abyss Eye", "abbreviation": "M5"}]
+}
 _JA_PRODUCTS = {
     "results": [
-        {"productId": 694993, "name": "Energy Switch",
-         "imageUrl": "https://tcgplayer-cdn.tcgplayer.com/product/694993_200w.jpg",
-         "extendedData": [{"name": "Number", "value": "103/081"},
-                          {"name": "Rarity", "value": "Super Rare"}]},
+        {
+            "productId": 694993,
+            "name": "Energy Switch",
+            "imageUrl": "https://tcgplayer-cdn.tcgplayer.com/product/694993_200w.jpg",
+            "extendedData": [
+                {"name": "Number", "value": "103/081"},
+                {"name": "Rarity", "value": "Super Rare"},
+            ],
+        },
         # tcgcsv embeds the number to disambiguate same-named cards; the pull
         # must strip that "- <number>" segment (suffix form)…
-        {"productId": 694994, "name": "Mega Darkrai ex - 046/081",
-         "imageUrl": "https://x/694994.jpg",
-         "extendedData": [{"name": "Number", "value": "046/081"}]},
+        {
+            "productId": 694994,
+            "name": "Mega Darkrai ex - 046/081",
+            "imageUrl": "https://x/694994.jpg",
+            "extendedData": [{"name": "Number", "value": "046/081"}],
+        },
         # …and mid-name form, keeping the trailing variant label.
-        {"productId": 694995, "name": "Landorus - 398/742 (Mirror Holo)",
-         "imageUrl": "https://x/694995.jpg",
-         "extendedData": [{"name": "Number", "value": "398/742"}]},
+        {
+            "productId": 694995,
+            "name": "Landorus - 398/742 (Mirror Holo)",
+            "imageUrl": "https://x/694995.jpg",
+            "extendedData": [{"name": "Number", "value": "398/742"}],
+        },
         # A sealed product (no collector Number) must be skipped.
-        {"productId": 999, "name": "Abyss Eye Booster Box",
-         "imageUrl": "https://x/999.jpg", "extendedData": []},
+        {
+            "productId": 999,
+            "name": "Abyss Eye Booster Box",
+            "imageUrl": "https://x/999.jpg",
+            "extendedData": [],
+        },
     ]
 }
 
@@ -42,19 +58,29 @@ def _fake_ja_fetch(url: str):
 # the Darkness", 1998): its cards carry per-card mechanic fields instead.
 def _fake_ja_vintage_fetch(url: str):
     if url.endswith("/85/groups"):
-        return {"results": [{"groupId": 23726,
-                             "name": "Challenge from the Darkness"}]}
+        return {"results": [{"groupId": 23726, "name": "Challenge from the Darkness"}]}
     if url.endswith("/85/23726/products"):
-        return {"results": [
-            {"productId": 575335, "name": "Giovanni's Machamp",
-             "imageUrl": "https://x/gm.jpg",
-             "extendedData": [{"name": "CardType", "value": "Fighting"},
-                              {"name": "HP", "value": "90"},
-                              {"name": "Stage", "value": "Stage 2"}]},
-            # Sealed product: no Number and no card fields → skipped.
-            {"productId": 888, "name": "Challenge Starter Deck",
-             "imageUrl": "https://x/d.jpg", "extendedData": []},
-        ]}
+        return {
+            "results": [
+                {
+                    "productId": 575335,
+                    "name": "Giovanni's Machamp",
+                    "imageUrl": "https://x/gm.jpg",
+                    "extendedData": [
+                        {"name": "CardType", "value": "Fighting"},
+                        {"name": "HP", "value": "90"},
+                        {"name": "Stage", "value": "Stage 2"},
+                    ],
+                },
+                # Sealed product: no Number and no card fields → skipped.
+                {
+                    "productId": 888,
+                    "name": "Challenge Starter Deck",
+                    "imageUrl": "https://x/d.jpg",
+                    "extendedData": [],
+                },
+            ]
+        }
     raise AssertionError(f"unexpected url: {url}")
 
 
@@ -66,6 +92,7 @@ def test_update_catalog_ja_imports_numberless_vintage_cards(conn):
     assert gm.language == "JP"
     assert gm.number is None  # tcgcsv has no collector number for this set
 
+
 # TCGdex shape: a brief /sets index + a /sets/{id} detail carrying the full card
 # list (id, localId, name, image). Numbers are zero-padded there ("001").
 _SETS = [
@@ -74,18 +101,28 @@ _SETS = [
 ]
 _SET_DETAIL = {
     "sv9": {
-        "id": "sv9", "name": "Journey Together",
+        "id": "sv9",
+        "name": "Journey Together",
         "abbreviation": {"official": "JTG"},
         "cardCount": {"official": 159, "total": 159},
         "cards": [
-            {"id": "sv9-163", "localId": "163", "name": "Iono's Kilowattrel",
-             "image": "https://assets.tcgdex.net/en/sv/sv9/163"},
-            {"id": "sv9-1", "localId": "001", "name": "Pikachu",
-             "image": "https://assets.tcgdex.net/en/sv/sv9/001"},
+            {
+                "id": "sv9-163",
+                "localId": "163",
+                "name": "Iono's Kilowattrel",
+                "image": "https://assets.tcgdex.net/en/sv/sv9/163",
+            },
+            {
+                "id": "sv9-1",
+                "localId": "001",
+                "name": "Pikachu",
+                "image": "https://assets.tcgdex.net/en/sv/sv9/001",
+            },
         ],
     },
     "cel25": {
-        "id": "cel25", "name": "Celebrations",
+        "id": "cel25",
+        "name": "Celebrations",
         "abbreviation": {"official": "CEL"},
         "cardCount": {"official": 25, "total": 25},
         "cards": [
@@ -150,8 +187,11 @@ def test_search_enriches_with_set_and_number(conn):
     assert repo.search("Kilowattrel")[0].name == "Iono's Kilowattrel"
 
     # Tokens work in ANY order, and the number may be bare (no denominator).
-    for q in ("Pikachu Celebrations 5", "Pikachu 5 Celebrations",
-              "5 Celebrations Pikachu"):
+    for q in (
+        "Pikachu Celebrations 5",
+        "Pikachu 5 Celebrations",
+        "5 Celebrations Pikachu",
+    ):
         (hit,) = repo.search(q)
         assert (hit.set_name, hit.number) == ("Celebrations", "5"), q
 
@@ -161,10 +201,20 @@ def test_search_matches_lettered_number_prefix(conn):
 
     CardCatalogRepository(conn).replace_all(
         [
-            CatalogCard(card_id="a", name="Falinks", set_id="s1",
-                        set_name="Shining Fates Shiny Vault", number="SV074"),
-            CatalogCard(card_id="b", name="Falinks", set_id="s2",
-                        set_name="Rebel Clash", number="109"),
+            CatalogCard(
+                card_id="a",
+                name="Falinks",
+                set_id="s1",
+                set_name="Shining Fates Shiny Vault",
+                number="SV074",
+            ),
+            CatalogCard(
+                card_id="b",
+                name="Falinks",
+                set_id="s2",
+                set_name="Rebel Clash",
+                number="109",
+            ),
         ],
         "t",
     )
@@ -182,8 +232,9 @@ def test_full_number_combines_number_with_set_total():
     from tcginventory.domain.models import CatalogCard
 
     def card(number, total):
-        return CatalogCard(card_id="x", name="n", set_id="s", number=number,
-                           printed_total=total)
+        return CatalogCard(
+            card_id="x", name="n", set_id="s", number=number, printed_total=total
+        )
 
     # plain numerator → numeric denominator; lettered numerator keeps its prefix.
     assert card("124", 142).full_number == "124/142"
@@ -263,11 +314,24 @@ def test_update_catalog_keeps_catalog_when_source_unreachable(conn):
 def test_update_catalog_from_github_fallback_still_works(conn):
     from tcginventory.services.catalog import update_catalog_from_github
 
-    sets = [{"id": "sv9", "name": "Journey Together", "ptcgoCode": "JTG",
-             "printedTotal": 159}]
-    cards = [{"id": "sv9-1", "name": "Pikachu", "number": "1", "rarity": "Common",
-              "supertype": "Pokémon",
-              "images": {"small": "https://images.pokemontcg.io/sv9/1.png"}}]
+    sets = [
+        {
+            "id": "sv9",
+            "name": "Journey Together",
+            "ptcgoCode": "JTG",
+            "printedTotal": 159,
+        }
+    ]
+    cards = [
+        {
+            "id": "sv9-1",
+            "name": "Pikachu",
+            "number": "1",
+            "rarity": "Common",
+            "supertype": "Pokémon",
+            "images": {"small": "https://images.pokemontcg.io/sv9/1.png"},
+        }
+    ]
 
     def fetch(url: str):
         if url.endswith("/sets/en.json"):
@@ -280,7 +344,9 @@ def test_update_catalog_from_github_fallback_still_works(conn):
     assert summary.cards == 1
     (pika,) = CardCatalogRepository(conn).find_by_name("Pikachu")
     assert (pika.number, pika.rarity, pika.image_small) == (
-        "1", "Common", "https://images.pokemontcg.io/sv9/1.png",
+        "1",
+        "Common",
+        "https://images.pokemontcg.io/sv9/1.png",
     )
 
 
@@ -290,19 +356,37 @@ def _hybrid_fetch(url: str):
         return [{"id": "swsh10tg", "name": "Astral Radiance Trainer Gallery"}]
     if url.endswith("/sets/swsh10tg"):
         return {
-            "id": "swsh10tg", "name": "Astral Radiance Trainer Gallery",
+            "id": "swsh10tg",
+            "name": "Astral Radiance Trainer Gallery",
             "abbreviation": {"official": "TG"},
             "cardCount": {"official": 30, "total": 30},
-            "cards": [{"id": "swsh10.5tg-TG01", "localId": "TG01",
-                       "name": "Abomasnow", "image": None}],
+            "cards": [
+                {
+                    "id": "swsh10.5tg-TG01",
+                    "localId": "TG01",
+                    "name": "Abomasnow",
+                    "image": None,
+                }
+            ],
         }
     # pokemontcg.io dump side (the fallback): same identity, WITH an image.
     if url.endswith("/sets/en.json"):
-        return [{"id": "swsh10tg", "name": "Astral Radiance Trainer Gallery",
-                 "printedTotal": 30}]
+        return [
+            {
+                "id": "swsh10tg",
+                "name": "Astral Radiance Trainer Gallery",
+                "printedTotal": 30,
+            }
+        ]
     if url.endswith("/cards/en/swsh10tg.json"):
-        return [{"id": "swsh10tg-TG01", "name": "Abomasnow", "number": "TG01",
-                 "images": {"small": "https://images.pokemontcg.io/swsh10tg/TG01.png"}}]
+        return [
+            {
+                "id": "swsh10tg-TG01",
+                "name": "Abomasnow",
+                "number": "TG01",
+                "images": {"small": "https://images.pokemontcg.io/swsh10tg/TG01.png"},
+            }
+        ]
     raise AssertionError(f"unexpected url: {url}")
 
 

@@ -75,16 +75,27 @@ def test_numeric_card_still_resolves_parent_group():
 def _seed_generations(conn):
     cards = [
         CatalogCard(
-            card_id=f"g1-RC{i}", name=f"RadiantCard{i}", set_id="g1",
-            set_name="Generations", set_code="GEN", number=f"RC{i}",
-            printed_total=83, language="EN",
+            card_id=f"g1-RC{i}",
+            name=f"RadiantCard{i}",
+            set_id="g1",
+            set_name="Generations",
+            set_code="GEN",
+            number=f"RC{i}",
+            printed_total=83,
+            language="EN",
         )
         for i in range(1, 33)  # RC1..RC32
     ]
     cards.append(
         CatalogCard(
-            card_id="g1-1", name="MainCard", set_id="g1", set_name="Generations",
-            set_code="GEN", number="1", printed_total=83, language="EN",
+            card_id="g1-1",
+            name="MainCard",
+            set_id="g1",
+            set_name="Generations",
+            set_code="GEN",
+            number="1",
+            printed_total=83,
+            language="EN",
         )
     )
     CardCatalogRepository(conn).replace_all(cards, "t")

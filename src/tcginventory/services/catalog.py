@@ -39,8 +39,14 @@ _CATEGORY_JP = 85  # tcgcsv "Pokemon Japan"
 # "Challenge from the Darkness", 1998). Those products are still cards — identify
 # them by these per-card mechanic fields so they aren't skipped as sealed product.
 _JP_CARD_FIELDS = (
-    "HP", "CardType", "Stage", "Attack 1", "Attack 2", "Weakness",
-    "Resistance", "Retreat Cost",
+    "HP",
+    "CardType",
+    "Stage",
+    "Attack 1",
+    "Attack 2",
+    "Weakness",
+    "Resistance",
+    "Retreat Cost",
 )
 
 
@@ -270,9 +276,7 @@ def update_catalog_from_github(
     total = len(set_meta)
 
     cards: list[CatalogCard] = []
-    for i, (set_id, (set_name, set_code, printed_total)) in enumerate(
-        set_meta.items()
-    ):
+    for i, (set_id, (set_name, set_code, printed_total)) in enumerate(set_meta.items()):
         try:
             entries = _as_list(fetch(f"{_RAW}/cards/en/{set_id}.json"))
         except Exception as exc:
@@ -347,9 +351,7 @@ def update_catalog_ja(
             pid = p.get("productId")
             if pid is None:
                 continue
-            ext = {
-                e.get("name"): e.get("value") for e in (p.get("extendedData") or [])
-            }
+            ext = {e.get("name"): e.get("value") for e in (p.get("extendedData") or [])}
             number = ext.get("Number")
             # A card either has a collector Number or (for vintage sets tcgcsv
             # doesn't number) carries per-card mechanic fields. Products with

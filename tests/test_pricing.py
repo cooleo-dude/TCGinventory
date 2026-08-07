@@ -77,19 +77,40 @@ def test_refresh_writes_snapshot_and_updates_current_value(conn):
 def _base_fetch(url: str):
     # Two "…Base Set" groups whose only reliable difference is the code.
     if url.endswith("/groups"):
-        return {"results": [
-            {"groupId": 604, "name": "Base Set", "abbreviation": "BS"},
-            {"groupId": 22873, "name": "SV01: Scarlet & Violet Base Set",
-             "abbreviation": "SVI"},
-        ]}
+        return {
+            "results": [
+                {"groupId": 604, "name": "Base Set", "abbreviation": "BS"},
+                {
+                    "groupId": 22873,
+                    "name": "SV01: Scarlet & Violet Base Set",
+                    "abbreviation": "SVI",
+                },
+            ]
+        }
     if url.endswith("/604/products"):
-        return {"results": [{"productId": 42347, "name": "Mewtwo", "url": "base-mewtwo",
-                             "extendedData": [{"name": "Number", "value": "10/102"}]}]}
+        return {
+            "results": [
+                {
+                    "productId": 42347,
+                    "name": "Mewtwo",
+                    "url": "base-mewtwo",
+                    "extendedData": [{"name": "Number", "value": "10/102"}],
+                }
+            ]
+        }
     if url.endswith("/604/prices"):
         return {"results": [{"productId": 42347, "marketPrice": 77.73}]}
     if url.endswith("/22873/products"):
-        return {"results": [{"productId": 487842, "name": "Vivillon", "url": "sv-viv",
-                             "extendedData": [{"name": "Number", "value": "010/198"}]}]}
+        return {
+            "results": [
+                {
+                    "productId": 487842,
+                    "name": "Vivillon",
+                    "url": "sv-viv",
+                    "extendedData": [{"name": "Number", "value": "010/198"}],
+                }
+            ]
+        }
     if url.endswith("/22873/prices"):
         return {"results": [{"productId": 487842, "marketPrice": 5.0}]}
     raise AssertionError(f"unexpected url: {url}")
@@ -100,7 +121,8 @@ def test_set_code_disambiguates_generic_set_name():
     # the original WOTC Base Set (regression: Mewtwo Base 10/102 → wrong URL).
     p = TcgcsvProvider(fetch_json=_base_fetch)
     assert p.price_for_card("Base", "10", "Mewtwo", set_code="BS") == (
-        7773, "base-mewtwo",
+        7773,
+        "base-mewtwo",
     )
 
 
@@ -108,26 +130,42 @@ def test_name_check_rejects_wrong_group_match():
     # If resolution lands on the wrong group, number 10 there is Vivillon, not
     # Mewtwo — the name guard returns None rather than a blatantly wrong link.
     p = TcgcsvProvider(fetch_json=_base_fetch)
-    assert (
-        p.price_for_card("SV01: Scarlet & Violet Base Set", "10", "Mewtwo") is None
-    )
+    assert p.price_for_card("SV01: Scarlet & Violet Base Set", "10", "Mewtwo") is None
 
 
 def _promo_fetch(url: str):
     # "PR" is shared by many groups; "Deck Exclusives" is indexed first.
     if url.endswith("/groups"):
-        return {"results": [
-            {"groupId": 1840, "name": "Deck Exclusives", "abbreviation": "PR"},
-            {"groupId": 1418, "name": "WoTC Promo", "abbreviation": "PR"},
-        ]}
+        return {
+            "results": [
+                {"groupId": 1840, "name": "Deck Exclusives", "abbreviation": "PR"},
+                {"groupId": 1418, "name": "WoTC Promo", "abbreviation": "PR"},
+            ]
+        }
     if url.endswith("/1418/products"):
-        return {"results": [{"productId": 87309, "name": "Meowth", "url": "wotc-meowth",
-                             "extendedData": [{"name": "Number", "value": "10"}]}]}
+        return {
+            "results": [
+                {
+                    "productId": 87309,
+                    "name": "Meowth",
+                    "url": "wotc-meowth",
+                    "extendedData": [{"name": "Number", "value": "10"}],
+                }
+            ]
+        }
     if url.endswith("/1418/prices"):
         return {"results": [{"productId": 87309, "marketPrice": 62.31}]}
     if url.endswith("/1840/products"):
-        return {"results": [{"productId": 999, "name": "Something Else", "url": "deck",
-                             "extendedData": [{"name": "Number", "value": "10"}]}]}
+        return {
+            "results": [
+                {
+                    "productId": 999,
+                    "name": "Something Else",
+                    "url": "deck",
+                    "extendedData": [{"name": "Number", "value": "10"}],
+                }
+            ]
+        }
     if url.endswith("/1840/prices"):
         return {"results": [{"productId": 999, "marketPrice": 1.0}]}
     raise AssertionError(f"unexpected url: {url}")
@@ -151,15 +189,25 @@ _RENAMED_PROMO_GROUPS = {
 
 def _renamed_promo_fetch(url: str):
     if url.endswith("/groups"):
-        return {"results": [
-            {"groupId": gid, "name": name, "abbreviation": "PR"}
-            for gid, (name, *_rest) in _RENAMED_PROMO_GROUPS.items()
-        ]}
+        return {
+            "results": [
+                {"groupId": gid, "name": name, "abbreviation": "PR"}
+                for gid, (name, *_rest) in _RENAMED_PROMO_GROUPS.items()
+            ]
+        }
     for gid, (_name, cname, num, curl, price) in _RENAMED_PROMO_GROUPS.items():
         pid = 500 + gid % 100
         if url.endswith(f"/{gid}/products"):
-            return {"results": [{"productId": pid, "name": cname, "url": curl,
-                                 "extendedData": [{"name": "Number", "value": num}]}]}
+            return {
+                "results": [
+                    {
+                        "productId": pid,
+                        "name": cname,
+                        "url": curl,
+                        "extendedData": [{"name": "Number", "value": num}],
+                    }
+                ]
+            }
         if url.endswith(f"/{gid}/prices"):
             return {"results": [{"productId": pid, "marketPrice": price}]}
     raise AssertionError(f"unexpected url: {url}")
@@ -184,26 +232,54 @@ def _subset_fetch(url: str):
     # A subset set whose code collides with its parent (both "HIF"), plus a set
     # (Unified Minds) that lists only the base "79", not the "79a" alt-art.
     if url.endswith("/groups"):
-        return {"results": [
-            {"groupId": 2480, "name": "Hidden Fates", "abbreviation": "HIF"},
-            {"groupId": 2594, "name": "Hidden Fates: Shiny Vault",
-             "abbreviation": "HIF"},
-            {"groupId": 2464, "name": "SM - Unified Minds", "abbreviation": "SM11"},
-        ]}
+        return {
+            "results": [
+                {"groupId": 2480, "name": "Hidden Fates", "abbreviation": "HIF"},
+                {
+                    "groupId": 2594,
+                    "name": "Hidden Fates: Shiny Vault",
+                    "abbreviation": "HIF",
+                },
+                {"groupId": 2464, "name": "SM - Unified Minds", "abbreviation": "SM11"},
+            ]
+        }
     if url.endswith("/2594/products"):
-        return {"results": [
-            {"productId": 197833, "name": "Silvally GX", "url": "sv79",
-             "extendedData": [{"name": "Number", "value": "SV79/SV94"}]}]}
+        return {
+            "results": [
+                {
+                    "productId": 197833,
+                    "name": "Silvally GX",
+                    "url": "sv79",
+                    "extendedData": [{"name": "Number", "value": "SV79/SV94"}],
+                }
+            ]
+        }
     if url.endswith("/2594/prices"):
         return {"results": [{"productId": 197833, "marketPrice": 13.47}]}
     if url.endswith("/2480/products"):  # main set has no SV79
-        return {"results": [{"productId": 1, "name": "Gyarados GX", "url": "hf",
-                             "extendedData": [{"name": "Number", "value": "7/68"}]}]}
+        return {
+            "results": [
+                {
+                    "productId": 1,
+                    "name": "Gyarados GX",
+                    "url": "hf",
+                    "extendedData": [{"name": "Number", "value": "7/68"}],
+                }
+            ]
+        }
     if url.endswith("/2480/prices"):
         return {"results": [{"productId": 1, "marketPrice": 5.0}]}
     if url.endswith("/2464/products"):
-        return {"results": [{"productId": 195009, "name": "Jirachi GX", "url": "jira",
-                             "extendedData": [{"name": "Number", "value": "79/236"}]}]}
+        return {
+            "results": [
+                {
+                    "productId": 195009,
+                    "name": "Jirachi GX",
+                    "url": "jira",
+                    "extendedData": [{"name": "Number", "value": "79/236"}],
+                }
+            ]
+        }
     if url.endswith("/2464/prices"):
         return {"results": [{"productId": 195009, "marketPrice": 13.93}]}
     raise AssertionError(f"unexpected url: {url}")
@@ -221,9 +297,10 @@ def test_subset_resolves_by_name_over_colliding_code():
 def test_alt_art_suffix_falls_back_to_base_number():
     # tcgcsv lists only "79"; the "79a" alt-art reprint falls back to it.
     p = TcgcsvProvider(fetch_json=_subset_fetch)
-    assert p.price_for_card(
-        "Unified Minds", "79a", "Jirachi-GX", set_code="UNM"
-    ) == (1393, "jira")
+    assert p.price_for_card("Unified Minds", "79a", "Jirachi-GX", set_code="UNM") == (
+        1393,
+        "jira",
+    )
 
 
 def test_unmapped_items_reported(conn):
@@ -402,8 +479,11 @@ def test_price_for_card_bridges_promo_set_naming():
         if url.endswith("/groups"):
             return {
                 "results": [
-                    {"groupId": 2545, "name": "SWSH: Sword & Shield Promo Cards",
-                     "abbreviation": "SWSD"},
+                    {
+                        "groupId": 2545,
+                        "name": "SWSH: Sword & Shield Promo Cards",
+                        "abbreviation": "SWSD",
+                    },
                 ]
             }
         if url.endswith("/2545/products"):
@@ -430,14 +510,21 @@ def test_price_for_card_bridges_promo_set_naming():
 def _fake_jp_fetch(url: str):
     """tcgcsv category 85 ("Pokemon Japan") — a group with one card."""
     if url.endswith("/85/groups"):
-        return {"results": [{"groupId": 24711, "name": "M5: Abyss Eye",
-                             "abbreviation": "M5"}]}
+        return {
+            "results": [
+                {"groupId": 24711, "name": "M5: Abyss Eye", "abbreviation": "M5"}
+            ]
+        }
     if url.endswith("/85/24711/products"):
-        return {"results": [{
-            "productId": 694993,
-            "url": "https://www.tcgplayer.com/product/694993/x",
-            "extendedData": [{"name": "Number", "value": "103/081"}],
-        }]}
+        return {
+            "results": [
+                {
+                    "productId": 694993,
+                    "url": "https://www.tcgplayer.com/product/694993/x",
+                    "extendedData": [{"name": "Number", "value": "103/081"}],
+                }
+            ]
+        }
     if url.endswith("/85/24711/prices"):
         return {"results": [{"productId": 694993, "marketPrice": 0.91}]}
     raise AssertionError(f"unexpected url: {url}")
@@ -474,8 +561,12 @@ def test_refresh_skips_graded_cards(conn):
 
     items = ItemRepository(conn)
     graded = items.add(
-        _pikachu(is_graded=True, condition=None, grading_company=GradingCompany.PSA,
-                 grade="10")
+        _pikachu(
+            is_graded=True,
+            condition=None,
+            grading_company=GradingCompany.PSA,
+            grade="10",
+        )
     )
     svc = PricingService(conn, provider=TcgcsvProvider(fetch_json=_fake_fetch))
     summary = svc.refresh()
@@ -509,20 +600,39 @@ def test_latest_prices_and_history_since(conn):
 
 def _variant_fetch(url: str):
     if url.endswith("/groups"):
-        return {"results": [{"groupId": 22872,
-                             "name": "SV: Scarlet & Violet Promo Cards",
-                             "abbreviation": "SVP"}]}
+        return {
+            "results": [
+                {
+                    "groupId": 22872,
+                    "name": "SV: Scarlet & Violet Promo Cards",
+                    "abbreviation": "SVP",
+                }
+            ]
+        }
     if url.endswith("/22872/products"):
-        return {"results": [
-            {"productId": 610757,
-             "name": "Eevee - 173 (Pokemon Center Exclusive)", "url": "eevee-excl",
-             "extendedData": [{"name": "Number", "value": "173"}]},
-            {"productId": 610758, "name": "Eevee - 173", "url": "eevee-base",
-             "extendedData": [{"name": "Number", "value": "173"}]},
-        ]}
+        return {
+            "results": [
+                {
+                    "productId": 610757,
+                    "name": "Eevee - 173 (Pokemon Center Exclusive)",
+                    "url": "eevee-excl",
+                    "extendedData": [{"name": "Number", "value": "173"}],
+                },
+                {
+                    "productId": 610758,
+                    "name": "Eevee - 173",
+                    "url": "eevee-base",
+                    "extendedData": [{"name": "Number", "value": "173"}],
+                },
+            ]
+        }
     if url.endswith("/22872/prices"):
-        return {"results": [{"productId": 610757, "marketPrice": 94.13},
-                            {"productId": 610758, "marketPrice": 13.70}]}
+        return {
+            "results": [
+                {"productId": 610757, "marketPrice": 94.13},
+                {"productId": 610758, "marketPrice": 13.70},
+            ]
+        }
     raise AssertionError(f"unexpected url: {url}")
 
 
@@ -531,7 +641,8 @@ def test_price_defaults_to_base_print_over_stamped_variant():
     # product name closest to the card name — must win by default.
     p = TcgcsvProvider(fetch_json=_variant_fetch)
     assert p.price_for_card("SVP Black Star Promos", "173", "Eevee") == (
-        1370, "eevee-base",
+        1370,
+        "eevee-base",
     )
 
 

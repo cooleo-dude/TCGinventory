@@ -241,8 +241,7 @@ class AuctionRepository:
                 market_is_manual=bool(c["market_is_manual"]),
             )
             for c in self.conn.execute(
-                "SELECT * FROM auction_card WHERE auction_id = ? "
-                "ORDER BY position, id",
+                "SELECT * FROM auction_card WHERE auction_id = ? ORDER BY position, id",
                 (row["id"],),
             ).fetchall()
         ]

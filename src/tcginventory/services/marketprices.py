@@ -43,8 +43,13 @@ def _catalog_sets(main_conn: sqlite3.Connection) -> list[_Set]:
         "SELECT DISTINCT language, set_id, set_name, set_code FROM card_catalog"
     ).fetchall()
     return [
-        _Set(f"{r['language']}:{r['set_id']}", r["language"], r["set_id"],
-             r["set_name"], r["set_code"])
+        _Set(
+            f"{r['language']}:{r['set_id']}",
+            r["language"],
+            r["set_id"],
+            r["set_name"],
+            r["set_code"],
+        )
         for r in rows
     ]
 

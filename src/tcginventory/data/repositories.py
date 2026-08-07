@@ -934,9 +934,18 @@ class CardCatalogRepository:
             """,
             [
                 (
-                    c.card_id, c.name, c.set_id, c.set_name, c.set_code,
-                    c.number, c.rarity, c.supertype, c.image_small,
-                    c.printed_total, c.language, updated_at,
+                    c.card_id,
+                    c.name,
+                    c.set_id,
+                    c.set_name,
+                    c.set_code,
+                    c.number,
+                    c.rarity,
+                    c.supertype,
+                    c.image_small,
+                    c.printed_total,
+                    c.language,
+                    updated_at,
                 )
                 for c in cards
             ],
@@ -953,9 +962,7 @@ class CardCatalogRepository:
         """Replace only one language's rows, leaving the other language intact
         (so an English re-pull doesn't wipe the Japanese catalog, or vice versa).
         """
-        self.conn.execute(
-            "DELETE FROM card_catalog WHERE language = ?", (language,)
-        )
+        self.conn.execute("DELETE FROM card_catalog WHERE language = ?", (language,))
         self._insert_many(cards, updated_at)
 
     def all_names(self) -> list[str]:
@@ -1119,8 +1126,10 @@ class CardCatalogRepository:
 
         def set_ok(row: sqlite3.Row) -> bool:
             other = (row["set_name"] or "").strip().lower()
-            return bool(want_set) and bool(other) and (
-                want_set in other or other in want_set
+            return (
+                bool(want_set)
+                and bool(other)
+                and (want_set in other or other in want_set)
             )
 
         def num_ok(row: sqlite3.Row) -> bool:
@@ -1128,8 +1137,10 @@ class CardCatalogRepository:
 
         def name_ok(row: sqlite3.Row) -> bool:
             other = flat(row["name"])
-            return bool(flat_name) and bool(other) and (
-                flat_name in other or other in flat_name
+            return (
+                bool(flat_name)
+                and bool(other)
+                and (flat_name in other or other in flat_name)
             )
 
         def name_exact(row: sqlite3.Row) -> bool:
@@ -1160,10 +1171,7 @@ class CardCatalogRepository:
                     return candidates[0]["card_id"], candidates[0]["image_small"]
                 if candidates:
                     return None
-            fuzzy = [
-                r for r in pool.values()
-                if set_ok(r) and name_ok(r) and num_ok(r)
-            ]
+            fuzzy = [r for r in pool.values() if set_ok(r) and name_ok(r) and num_ok(r)]
             if fuzzy:
                 return fuzzy[0]["card_id"], fuzzy[0]["image_small"]
             # Set given but unknown to the catalog (alt-art / special naming) →

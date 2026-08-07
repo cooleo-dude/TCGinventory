@@ -22,7 +22,7 @@ def _val(field) -> str:
 
 
 def _cond_or_grade(item) -> str:
-    """"PSA 10" for a slab, else the raw condition ("NM"); "" if unknown."""
+    """ "PSA 10" for a slab, else the raw condition ("NM"); "" if unknown."""
     if getattr(item, "is_graded", False):
         company = item.grading_company.value if item.grading_company else ""
         return f"{company} {item.grade or ''}".strip()

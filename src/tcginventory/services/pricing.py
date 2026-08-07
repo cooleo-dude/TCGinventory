@@ -138,9 +138,7 @@ class TcgcsvProvider:
         # per-category price/product files live at different URLs.
         self._group_cache: dict[int, tuple[dict[str, int], list[tuple[str, int]]]] = {}
         self._price_cache: dict[tuple[int, int], dict[int, int]] = {}
-        self._product_cache: dict[
-            tuple[int, int], list[tuple[int, str, str, str]]
-        ] = {}
+        self._product_cache: dict[tuple[int, int], list[tuple[int, str, str, str]]] = {}
 
     @staticmethod
     def _category_for(item: Item) -> int:
@@ -294,9 +292,7 @@ class TcgcsvProvider:
     def market_prices(self, category: int, group_id: int) -> dict[int, int]:
         return self._prices_for_group(category, group_id)
 
-    def products(
-        self, category: int, group_id: int
-    ) -> list[tuple[int, str, str, str]]:
+    def products(self, category: int, group_id: int) -> list[tuple[int, str, str, str]]:
         return self._products_for_group(category, group_id)
 
     # -- internals ----------------------------------------------------------
@@ -375,9 +371,7 @@ class TcgcsvProvider:
                     best_gid, best_score = gid, score
         return best_gid if best_score >= _FUZZY_THRESHOLD else None
 
-    def _groups(
-        self, category: int
-    ) -> tuple[dict[str, int], list[tuple[str, int]]]:
+    def _groups(self, category: int) -> tuple[dict[str, int], list[tuple[str, int]]]:
         if category not in self._group_cache:
             data = self._fetch(f"{_BASE_URL}/{category}/groups")
             index: dict[str, int] = {}

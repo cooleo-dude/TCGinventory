@@ -22,9 +22,11 @@ def test_deliberate_review_acquisition_overwrites_value(conn):
 
     inc = incoming("Alakazam-EX", 6000)  # same identity as the buy
     inc.review = True  # deliberate reviewed value
-    svc.post(TransactionRequest(
-        occurred_at="2026-02-01", cash_out_cents=9000, incoming=[inc]
-    ))
+    svc.post(
+        TransactionRequest(
+            occurred_at="2026-02-01", cash_out_cents=9000, incoming=[inc]
+        )
+    )
     it = items.get(item_id)
     assert it.review is True
     assert it.market_value_cents == 6000  # overwritten by the deliberate value

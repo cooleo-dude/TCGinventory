@@ -16,14 +16,25 @@ from tcginventory.services.pricing import TcgcsvProvider
 
 def _fetch(url: str):
     if url.endswith("/3/groups"):
-        return {"results": [
-            {"groupId": 24073, "name": "SV09: Journey Together", "abbreviation": "JTG"}
-        ]}
+        return {
+            "results": [
+                {
+                    "groupId": 24073,
+                    "name": "SV09: Journey Together",
+                    "abbreviation": "JTG",
+                }
+            ]
+        }
     if url.endswith("/3/24073/products"):
-        return {"results": [
-            {"productId": 623590, "url": "https://tcgplayer.com/product/623590/x",
-             "extendedData": [{"name": "Number", "value": "1/159"}]}
-        ]}
+        return {
+            "results": [
+                {
+                    "productId": 623590,
+                    "url": "https://tcgplayer.com/product/623590/x",
+                    "extendedData": [{"name": "Number", "value": "1/159"}],
+                }
+            ]
+        }
     if url.endswith("/3/24073/prices"):
         return {"results": [{"productId": 623590, "marketPrice": 6.10}]}
     if url.endswith("/85/24711/prices"):
@@ -34,19 +45,36 @@ def _fetch(url: str):
 def _seed(conn) -> None:
     CardCatalogRepository(conn).replace_all(
         [
-            CatalogCard(card_id="sv9-1", name="Pikachu", set_id="sv9",
-                        set_name="Journey Together", set_code="JTG", number="1",
-                        language="EN"),
-            CatalogCard(card_id="jp-694993", name="Energy Switch", set_id="24711",
-                        set_name="M5: Abyss Eye", set_code="M5", number="103/081",
-                        language="JP"),
+            CatalogCard(
+                card_id="sv9-1",
+                name="Pikachu",
+                set_id="sv9",
+                set_name="Journey Together",
+                set_code="JTG",
+                number="1",
+                language="EN",
+            ),
+            CatalogCard(
+                card_id="jp-694993",
+                name="Energy Switch",
+                set_id="24711",
+                set_name="M5: Abyss Eye",
+                set_code="M5",
+                number="103/081",
+                language="JP",
+            ),
         ],
         "t",
     )
     # An owned card in the Journey Together set → that set is priced first.
     ItemRepository(conn).add(
-        Item(name="Pikachu", category=Category.SINGLE, set_name="Journey Together",
-             card_number="1", language=Language.EN)
+        Item(
+            name="Pikachu",
+            category=Category.SINGLE,
+            set_name="Journey Together",
+            card_number="1",
+            language=Language.EN,
+        )
     )
     conn.commit()
 
@@ -93,7 +121,8 @@ def test_sweep_dedups_unchanged_and_records_changes():
     hist = PriceHistoryRepository(hist_conn)
     assert hist.current_price("jp-694993") == 150
     assert hist.history_for_card("jp-694993") == [
-        ("2026-07-16", 91), ("2026-07-18", 150),
+        ("2026-07-16", 91),
+        ("2026-07-18", 150),
     ]
 
 

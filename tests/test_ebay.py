@@ -17,8 +17,11 @@ from tcginventory.services.ebay import sold_search_url
 
 def test_sold_search_url_raw_card():
     item = Item(
-        name="Raticate", category=Category.SINGLE, set_name="Perfect Order",
-        card_number="99/88", condition=Condition.NM,
+        name="Raticate",
+        category=Category.SINGLE,
+        set_name="Perfect Order",
+        card_number="99/88",
+        condition=Condition.NM,
     )
     url = sold_search_url(item)
     assert url.startswith("https://www.ebay.com/sch/i.html?")
@@ -31,9 +34,13 @@ def test_sold_search_url_raw_card():
 
 def test_sold_search_url_graded_uses_company_and_grade():
     item = Item(
-        name="Charizard", category=Category.SINGLE, set_name="Base",
-        card_number="4/102", is_graded=True,
-        grading_company=GradingCompany.PSA, grade="10",
+        name="Charizard",
+        category=Category.SINGLE,
+        set_name="Base",
+        card_number="4/102",
+        is_graded=True,
+        grading_company=GradingCompany.PSA,
+        grade="10",
     )
     q = parse_qs(urlparse(sold_search_url(item)).query)
     assert q["_nkw"] == ["Charizard Base 4/102 PSA 10"]
@@ -47,9 +54,13 @@ def test_sold_search_url_drops_missing_parts():
 
 def test_sold_search_url_includes_edition_and_holo():
     item = Item(
-        name="Charizard", category=Category.SINGLE, set_name="Base",
-        card_number="4/102", condition=Condition.LP,
-        holo_pattern=HoloPattern.HOLO, edition=Edition.FIRST,
+        name="Charizard",
+        category=Category.SINGLE,
+        set_name="Base",
+        card_number="4/102",
+        condition=Condition.LP,
+        holo_pattern=HoloPattern.HOLO,
+        edition=Edition.FIRST,
     )
     q = parse_qs(urlparse(sold_search_url(item)).query)
     assert q["_nkw"] == ["Charizard Base 4/102 1st Edition Holo LP"]
@@ -57,9 +68,13 @@ def test_sold_search_url_includes_edition_and_holo():
 
 def test_sold_search_url_reverse_holo_without_edition():
     item = Item(
-        name="Arcanine", category=Category.SINGLE, set_name="151",
-        card_number="032", condition=Condition.HP,
-        holo_pattern=HoloPattern.REVERSE_HOLO, edition=Edition.NA,
+        name="Arcanine",
+        category=Category.SINGLE,
+        set_name="151",
+        card_number="032",
+        condition=Condition.HP,
+        holo_pattern=HoloPattern.REVERSE_HOLO,
+        edition=Edition.NA,
     )
     q = parse_qs(urlparse(sold_search_url(item)).query)
     assert q["_nkw"] == ["Arcanine 151 032 Reverse Holo HP"]

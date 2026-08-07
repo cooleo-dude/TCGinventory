@@ -100,17 +100,25 @@ def test_service_prefers_catalog_history():
     CardCatalogRepository(conn).replace_all(
         [
             CatalogCard(
-                card_id="sv9-1", name="Pikachu", set_id="sv9",
-                set_name="Journey Together", set_code="JTG", number="1",
-                language="EN", image_small="http://x/a.png",
+                card_id="sv9-1",
+                name="Pikachu",
+                set_id="sv9",
+                set_name="Journey Together",
+                set_code="JTG",
+                number="1",
+                language="EN",
+                image_small="http://x/a.png",
             )
         ],
         "t",
     )
     conn.commit()
     item = Item(
-        name="Pikachu", category=Category.SINGLE, set_name="Journey Together",
-        card_number="1", id=1,
+        name="Pikachu",
+        category=Category.SINGLE,
+        set_name="Journey Together",
+        card_number="1",
+        id=1,
     )
 
     hist = open_history(":memory:")

@@ -67,8 +67,6 @@ def trained_model_destination() -> Path:
     return config.data_dir() / "vision" / "models" / YOLO_MODEL_FILENAME
 
 
-
-
 def _nms(boxes_xyxy: np.ndarray, scores: np.ndarray, iou_thr: float) -> list[int]:
     """Greedy non-max suppression; returns kept indices, highest score first."""
     if len(boxes_xyxy) == 0:

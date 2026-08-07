@@ -181,8 +181,17 @@ def _value_of(field) -> str | None:
 # Card-row columns. Identity first (Name … #), then the three fields that decide
 # *which printing* this is (Cond / Holo / Printing), then money, then the links.
 _CARD_HEADERS = [
-    "Name", "Set", "#", "Cond", "Holo", "Printing",
-    "Market", "Qty", "TCG", "eBay", "",
+    "Name",
+    "Set",
+    "#",
+    "Cond",
+    "Holo",
+    "Printing",
+    "Market",
+    "Qty",
+    "TCG",
+    "eBay",
+    "",
 ]
 _NAME_COL = 0
 _PRINTING_COL = _CARD_HEADERS.index("Printing")
@@ -223,9 +232,7 @@ class _IconButton(QPushButton):
     pixmap on enter/leave to move between the idle and hover colours.
     """
 
-    def __init__(
-        self, icon_name: str, idle: str, hover: str, size: int = 16
-    ) -> None:
+    def __init__(self, icon_name: str, idle: str, hover: str, size: int = 16) -> None:
         super().__init__()
         self._icon_name = icon_name
         self._idle = idle
@@ -278,9 +285,7 @@ def _confirm_delete(parent, title: str, heading: str, body: str) -> bool:
     badge.setFixedSize(40, 40)
     badge.setAlignment(Qt.AlignCenter)
     badge.setPixmap(icons.pixmap("triangle-alert", t.neg, 20))
-    badge.setStyleSheet(
-        f"background:{t.neg_soft};border-radius:20px;"
-    )
+    badge.setStyleSheet(f"background:{t.neg_soft};border-radius:20px;")
     top.addWidget(badge, 0, Qt.AlignTop)
     text_col = QVBoxLayout()
     text_col.setSpacing(4)
