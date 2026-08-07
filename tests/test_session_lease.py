@@ -120,6 +120,12 @@ def test_an_unbalanced_quote_yields_nothing_to_judge(guard):
         "git merge main",
         "git cherry-pick abc1234",
         "git revert abc1234",
+        # `pull` is fetch + merge (or rebase): it moves HEAD like the two above it,
+        # and was missing from the first cut of the guarded set.
+        "git pull",
+        "git pull origin main",
+        "git pull --rebase",
+        "git apply patch.diff",
         "git stash",
         "git restore src/x.py",
         "git clean -fd",
@@ -172,6 +178,8 @@ def test_blocked_beside_another_session(guard, command):
         "git bisect log",
         "git clean -n",
         "git clean --dry-run",
+        "git apply --check patch.diff",
+        "git apply --stat patch.diff",
         # Not git at all.
         "./.venv/Scripts/python.exe -m pytest -q",
         "gh pr create --body 'see the checkout notes and merge later'",
@@ -181,6 +189,37 @@ def test_blocked_beside_another_session(guard, command):
 )
 def test_allowed_even_beside_another_session(guard, command):
     assert guard.verdict(command) is None, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"cd C:\Users\colel\scratch && git commit -m init",
+        "cd /tmp/elsewhere && git reset --hard",
+        "pushd ../other-repo; git switch -c whatever",
+        "Set-Location ../other; git merge main",
+    ],
+)
+def test_a_chain_that_changes_directory_is_not_judged(guard, command):
+    """A real false positive, hit while reviewing this guard: a chain that `cd`s
+    into a scratch repo and commits there was blocked with "another session is
+    working in this same checkout", which was false for that command and pointed at
+    remedies that did not apply.
+
+    Rivals are detected against the directory the tool call *starts* in, and the
+    guard cannot tell where a `cd` went — posix tokenising eats Windows backslashes,
+    so the target arrives mangled. Failing open is the same direction every other
+    ambiguity here resolves.
+    """
+    assert guard.verdict(command) is None
+
+
+def test_the_directory_change_bypass_is_known_and_bounded(guard):
+    """The accepted cost of the above, asserted so it is a decision rather than a
+    surprise: everything *before* the `cd` is still judged, so the escape only
+    covers what genuinely might not be this checkout."""
+    assert guard.verdict("git switch -c x && cd /tmp") is not None
+    assert guard.verdict("cd . && git switch -c x") is None
 
 
 def test_gh_pr_create_prose_is_not_a_git_command(guard):
@@ -218,7 +257,15 @@ def test_two_sessions_in_one_tree_are_rivals(session_mod, repo, registry):
     session_mod.claim(repo, "session-b")
     rivals = session_mod.rivals(repo, "session-a")
     assert [lease["session"] for lease in rivals] == ["session-b"]
-    # Neither owns it, so a verdict recorded here cannot be attributed to either.
+    # Neither owns it, so a verdict recorded here cannot be attributed to either...
+    assert session_mod.owning_session(repo) is None
+    # ...and the caller must be able to tell that from "nobody holds a lease",
+    # which is the difference between an unusable verdict and a legacy one.
+    assert sorted(session_mod.holders(repo)) == ["session-a", "session-b"]
+
+
+def test_holders_is_empty_when_no_lease_exists(session_mod, repo, registry):
+    assert session_mod.holders(repo) == []
     assert session_mod.owning_session(repo) is None
 
 

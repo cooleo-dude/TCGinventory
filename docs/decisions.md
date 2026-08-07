@@ -65,6 +65,23 @@ Lightweight ADR-style record of significant decisions. Newest first.
   checkout, on this same branch, while the work was being done — the guard blocked
   `git merge` with the other session's id and branch in the message, and left
   `git add <path>` and reads alone.
+- **The risk critic found three things, all real, all fixed before merge.**
+  (1) *Ambiguous ownership silently reopened the hole.* `owning_session()` returns
+  `None` when **more than one** lease holds a tree, `record` wrote that as
+  `"session": null`, and the gate's `if recorded and …` read null as "nothing to
+  compare" — so in exactly the two-session case this feature targets, either
+  session could use the other's verdict. The artifact now also carries `holders`,
+  and a null session with several holders fails **closed**; a null with none stays
+  admissible as the legacy case. (2) *`cd elsewhere && git commit` was a false
+  positive* — rivals are detected against the tool's starting directory while
+  classification is textual over the whole chain, so a commit in an unrelated
+  scratch repo was blocked. Judging now stops at any directory change. The bypass
+  that opens (`cd . && git switch`) is an accepted trade: this guard exists to stop
+  an *unthinking* `git switch`. Notably the first attempt at this fix tried to
+  resolve the `cd` target and failed, because posix tokenising eats Windows
+  backslashes — the same reason the file reads flags but never path values.
+  (3) *`git pull` was missing* from the HEAD-moving set beside `merge` and
+  `rebase`; `apply` was too. Not excluded deliberately — never considered.
 - **Consequences:** `.claude/worktrees/` is gitignored. Worktrees isolate code but
   not the app's SQLite files, so the lease records a suggested
   `TCGINVENTORY_DATA_DIR`. Merge conflicts do not go away — two sessions editing

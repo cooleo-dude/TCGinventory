@@ -135,6 +135,19 @@ def owning_session(repo: Path) -> str | None:
         return None
 
 
+def lease_holders(repo: Path) -> list[str]:
+    """Every session holding this worktree. See `owning_session` for the lazy
+    import; the distinction between *nobody* and *several* is what makes a null
+    session safe to admit or not."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _session
+
+        return _session.holders(repo)
+    except Exception:
+        return []
+
+
 def hook() -> int:
     try:
         event = json.load(sys.stdin)
@@ -185,6 +198,23 @@ def hook() -> int:
     # `session: null` in the artifact says so.
     recorded = record.get("session")
     caller = event.get("session_id")
+
+    # A verdict recorded while several sessions held the worktree belongs to none of
+    # them. Admitting it — which a plain `if recorded` does, because the session is
+    # null — hands every one of those sessions a gate pass for work the panel never
+    # saw, reinstating the exact hole this binding closes. Distinguish it from the
+    # legacy "no registry at all" null, which stays admissible.
+    if not recorded and len(record.get("holders", [])) > 1:
+        print(
+            f"BLOCKED: the verdict for {sha} was recorded while "
+            f"{len(record['holders'])} sessions held this checkout, so it cannot be "
+            f"attributed to any of them.\n"
+            f"Take your own worktree (EnterWorktree — see `## Working in parallel "
+            f"sessions` in CLAUDE.md), then re-run the panel and record it there.",
+            file=sys.stderr,
+        )
+        return 2
+
     if recorded and caller and recorded != caller:
         print(
             f"BLOCKED: the verdict for {sha} was recorded by session "
@@ -239,6 +269,7 @@ def cmd_record(args) -> int:
 
     sha = head(repo)
     session = owning_session(repo)
+    owners = lease_holders(repo)
     reviews_dir(repo).mkdir(parents=True, exist_ok=True)
     verdict_path(repo, sha).write_text(
         json.dumps(
@@ -249,10 +280,12 @@ def cmd_record(args) -> int:
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "verdicts": verdicts,
                 "findings": [str(p) for p in args.findings],
-                # Whose panel this was. `null` means no lease held this worktree at
-                # record time, so the gate cannot tell sessions apart for this sha —
-                # legible in the artifact rather than assumed.
+                # Whose panel this was. `null` means the worktree had no single
+                # owner: read `holders` to tell "no registry running" (admissible,
+                # the older weaker guarantee) from "several sessions shared this
+                # tree" (not attributable to any of them, so the gate stays shut).
                 "session": session,
+                "holders": owners,
                 "branch": branch_of(repo),
                 "worktree": str(repo),
             },
@@ -262,7 +295,15 @@ def cmd_record(args) -> int:
     )
     blocked = [k for k, v in verdicts.items() if v in BLOCKING]
     state = f"BLOCKED on {', '.join(blocked)}" if blocked else "clear"
-    attribution = f"session {session[:8]}" if session else "unattributed (no lease)"
+    if session:
+        attribution = f"session {session[:8]}"
+    elif len(owners) > 1:
+        attribution = (
+            f"UNUSABLE — {len(owners)} sessions share this checkout, so this "
+            f"verdict belongs to none of them. Take your own worktree and re-record."
+        )
+    else:
+        attribution = "unattributed (no lease)"
     print(f"  recorded {sha}  {args.scope} {args.ref}  — {state}, {attribution}")
     return 1 if blocked else 0
 

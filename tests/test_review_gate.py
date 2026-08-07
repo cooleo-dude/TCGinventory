@@ -89,7 +89,12 @@ def _sha(repo: Path) -> str:
     return done.stdout.strip()
 
 
-def _record(repo: Path, session: str | None, verdicts: dict[str, str]) -> Path:
+def _record(
+    repo: Path,
+    session: str | None,
+    verdicts: dict[str, str],
+    holders: list[str] | None = None,
+) -> Path:
     """Write a verdict artifact directly, the shape `cmd_record` produces."""
     reviews = repo / ".claude" / "context" / "reviews"
     reviews.mkdir(parents=True, exist_ok=True)
@@ -104,6 +109,9 @@ def _record(repo: Path, session: str | None, verdicts: dict[str, str]) -> Path:
                 "verdicts": verdicts,
                 "findings": [],
                 "session": session,
+                "holders": holders
+                if holders is not None
+                else ([session] if session else []),
                 "branch": "main",
                 "worktree": str(repo),
             }
@@ -243,6 +251,64 @@ def test_an_unattributed_verdict_is_still_admissible(repo, registry):
     _record(repo, None, GREEN)
     done = _run_hook(repo, registry, "session-b", CLOSE)
     assert done.returncode == 0, done.stderr
+
+
+def test_a_verdict_recorded_under_shared_ownership_opens_for_nobody(repo, registry):
+    """The hole the risk critic found, and the reason `holders` exists.
+
+    With two sessions on one worktree no single one owns it, so `owning_session`
+    returns `None` and the artifact records `session: null`. Read as the legacy
+    "no registry" null, that null is admissible — by *either* session — which
+    reinstates exactly the verdict-trading this binding was added to stop. It has
+    to fail closed, and be distinguishable from a genuinely unattributed verdict.
+    """
+    _record(repo, None, GREEN, holders=["session-a", "session-b"])
+    for caller in ("session-a", "session-b", "session-c"):
+        done = _run_hook(repo, registry, caller, CLOSE)
+        assert done.returncode == 2, f"{caller} was let through: {done.stdout}"
+        assert "cannot be attributed" in done.stderr
+
+
+def test_record_marks_a_verdict_unusable_when_the_tree_is_shared(
+    repo, registry, session_mod
+):
+    """End to end: recording while sharing a tree produces an artifact that names
+    both holders and opens for neither."""
+    session_mod.claim(repo, "session-a")
+    session_mod.claim(repo, "session-b")
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(GATE),
+            "record",
+            "--scope",
+            "ticket-close",
+            "--ref",
+            "7",
+            "--verdict",
+            "invariants=pass",
+            "--verdict",
+            "risk=pass",
+            "--verdict",
+            "test=pass",
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "TCGI_SESSION_REGISTRY": str(registry)},
+        check=False,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "UNUSABLE" in done.stdout, done.stdout
+
+    record = json.loads(
+        (repo / ".claude" / "context" / "reviews" / f"{_sha(repo)}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert record["session"] is None
+    assert sorted(record["holders"]) == ["session-a", "session-b"]
+    assert _run_hook(repo, registry, "session-a", CLOSE).returncode == 2
 
 
 def test_a_caller_without_a_session_id_is_not_second_guessed(repo, registry):

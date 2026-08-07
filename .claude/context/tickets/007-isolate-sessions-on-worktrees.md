@@ -222,6 +222,33 @@ unconditionally — not in reaction to detecting a neighbour.
   actually carries `session_id`. The guard degrades to never-block if it does not,
   so this is confirmation rather than a gamble.
 
+## What the panel found
+
+`invariants: pass` (no rule in scope — nothing under `src/`), `test: pass`,
+`risk: revise` with three findings, all real and all fixed before merge:
+
+1. **Ambiguous ownership silently reopened hole 2.** `owning_session()` returns
+   `None` when *more than one* lease holds a tree; `cmd_record` wrote that as
+   `"session": null`; and the gate's `if recorded and caller and …` reads null as
+   "nothing to compare". So in exactly the two-session case this ticket exists for,
+   either session could use the other's verdict. The artifact now carries
+   `holders` as well, and a null session with several holders fails **closed**,
+   while a null with none stays admissible as the legacy case.
+2. **`cd elsewhere && git commit` was a false positive.** Rivals are detected
+   against the tool call's starting directory, but classification is textual over
+   the whole chain, so a commit in an unrelated scratch repo was blocked with a
+   message that was false for that command. Judging now stops at any directory
+   change. The first attempt at this fix tried to resolve the `cd` target and
+   failed — posix tokenising eats Windows backslashes, which is precisely why this
+   file reads subcommands and flags but never a path *value*.
+3. **`git pull` was missing** from the HEAD-moving set, beside `merge` and
+   `rebase` which were both guarded. `apply` too. Neither was excluded
+   deliberately.
+
+The accepted cost of (2) is that `cd . && git switch -c x` is not judged. That is
+a decision, not an oversight, and it has a test saying so: the guard exists to
+stop an *unthinking* `git switch`, and everything before the `cd` is still judged.
+
 ## Notes
 
 - Every hole here is in the **dispatch and admission machinery**, not in any

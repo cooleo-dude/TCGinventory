@@ -74,10 +74,16 @@ TREE_MOVING = {
     "reset",
     "rebase",
     "merge",
+    # `pull` is fetch + merge (or rebase, under pull.rebase): it moves HEAD exactly
+    # like the two subcommands above it. It was missed in the first cut of this set,
+    # which is worth recording — it is a far more ordinary command than several that
+    # were remembered.
+    "pull",
     "cherry-pick",
     "revert",
     "stash",
     "restore",
+    "apply",
     "am",
     "bisect",
     "clean",
@@ -91,8 +97,13 @@ READ_ONLY_MODES = {
     "stash": {"list", "show"},
     "bisect": {"log", "view", "visualize"},
     "clean": set(),  # handled by the dry-run flags below
+    "apply": set(),
 }
-DRY_RUN = {"-n", "--dry-run"}
+DRY_RUN = {"-n", "--dry-run", "--check", "--stat", "--summary"}
+
+# Commands that change where the rest of a chain runs. A git command after one of
+# these is not necessarily against the checkout we detected rivals in.
+DIRECTORY_CHANGING = {"cd", "chdir", "pushd", "popd", "set-location", "sl"}
 
 # Staging that cannot tell one session's files from another's.
 STAGE_EVERYTHING = {"-A", "--all", "-u", "--update", ".", ":/", "*"}
@@ -203,8 +214,32 @@ def offence(argv: list[str]) -> str | None:
 
 
 def verdict(command: str) -> str | None:
-    """The first offence in a chained command, or `None` if all of it is safe."""
+    """The first offence in a chained command, or `None` if all of it is safe.
+
+    **Stops judging at a directory change.** Rivals are detected against the
+    directory the tool call starts in, but a chain can move: `cd <scratch> && git
+    commit -m init` runs against a completely unrelated repository, and blocking it
+    with "another session is working in this same checkout" is both false and
+    unactionable — the remedies printed do not apply to a tree nobody holds a lease
+    on. That was a real false positive, hit while reviewing this guard.
+
+    Deliberately it does **not** try to work out where `cd` went. Tokenising is
+    posix-mode, which eats Windows backslashes, so the target arrives as
+    `C:UserscolelTemp...` — the reason this file reads subcommands and flags but
+    never a path *value*. Comparing that against the worktree would be guesswork
+    dressed as a check.
+
+    The cost is a bypass: `cd . && git switch -c x` is not judged. That is an
+    accepted trade, not an oversight — this guard exists to stop an unthinking
+    `git switch`, and someone writing `cd .` first is not doing it unthinkingly.
+    Failing open on a command we cannot locate is the same direction every other
+    ambiguity in this file resolves.
+    """
     for argv in segments(command):
+        if argv and Path(argv[0]).name.lower().removesuffix(".exe") in (
+            DIRECTORY_CHANGING
+        ):
+            return None
         reason = offence(argv)
         if reason:
             return reason

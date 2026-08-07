@@ -162,18 +162,30 @@ def rivals(repo: Path, session: str | None) -> list[dict]:
     ]
 
 
+def holders(repo: Path) -> list[str]:
+    """Every live session with a lease on this worktree."""
+    here = worktree_root(repo)
+    return [
+        lease.get("session", "?")
+        for lease in leases(repo)
+        if lease.get("worktree") == here
+    ]
+
+
 def owning_session(repo: Path) -> str | None:
     """The session holding this worktree, if exactly one does.
 
-    Ambiguity is not ownership: with two live leases on one tree, no single session
-    can claim the verdicts recorded here, so the answer is `None` and the gate
-    treats them as unattributed.
+    `None` covers two very different situations, and the caller **must** tell them
+    apart with `holders()`:
+
+    * **nobody** holds a lease — the registry is not running, so verdicts cannot be
+      attributed and the gate has to fall back to its older, weaker guarantee;
+    * **several** sessions hold it — ambiguity is not ownership, and treating that
+      as "unattributed" would make a verdict admissible to every one of them. That
+      is precisely the hole ticket 007 exists to close, so it must fail *closed*.
     """
-    here = worktree_root(repo)
-    holders = [lease for lease in leases(repo) if lease.get("worktree") == here]
-    if len(holders) != 1:
-        return None
-    return holders[0].get("session")
+    owners = holders(repo)
+    return owners[0] if len(owners) == 1 else None
 
 
 def release(repo: Path, session: str) -> bool:
