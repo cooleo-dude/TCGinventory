@@ -239,6 +239,23 @@ def _rss_mb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / scale
 
 
+def _drain_threads(view, app, timeout_ms: int = 5000) -> None:
+    """Wait for any QThread a view started before moving on.
+
+    Several refreshes spawn one (Inventory prefetches previews). A running
+    QThread that gets collected aborts the whole process with an access
+    violation — mid-run, so the numbers already printed never reach the
+    terminal. Workers are held as plain attributes rather than Qt children, so
+    findChildren misses them; scan the instance dict.
+    """
+    from PySide6.QtCore import QThread
+
+    for value in list(vars(view).values()):
+        if isinstance(value, QThread) and value.isRunning():
+            value.wait(timeout_ms)
+    app.processEvents()
+
+
 def _settle(app, seconds: float = 2.0) -> None:
     """Let deferred work land before reading RSS.
 
@@ -288,7 +305,7 @@ def _latency_services(staged: Path) -> None:
 
 
 def _latency_views(staged: Path) -> None:
-    _qt_app()  # a QApplication must exist before any widget is constructed
+    app = _qt_app()  # a QApplication must exist before any widget is constructed
     conn = _conn(staged)
     print("VIEWS  (single run — construction is not idempotent)")
     built, total = {}, 0.0
@@ -308,6 +325,12 @@ def _latency_views(staged: Path) -> None:
         "  whatever is built after it — individual rows move by 100ms+ between runs.\n"
         "  Trust the total and the outliers; re-run before believing a small gap.\n"
     )
+    # Let prewarm finish before timing refreshes. Without this the refresh phase
+    # measures GIL contention with a ~2s background ONNX load, and the faster the
+    # build phase gets the more of that load spills into it — so speeding up a
+    # build made every refresh look slower. Measured: Dashboard 177ms -> 318ms
+    # purely from removing 950ms of build ahead of it.
+    _settle(app, 2.5)
 
     for name, view in built.items():
         fn = getattr(view, "refresh", None)
@@ -318,7 +341,15 @@ def _latency_views(staged: Path) -> None:
             print(f"  {elapsed:9.1f} ms  refresh  {name}")
         except Exception as exc:
             print(f"      ERROR  refresh  {name}: {type(exc).__name__}: {exc}")
+        # Before the next view churns the heap. Also keeps the next reading
+        # clean: a worker still running competes for the GIL with what follows.
+        _drain_threads(built[name], app)
     print()
+    # Several refreshes start a QThread (Inventory prefetches previews). A
+    # running QThread that gets collected aborts the process — intermittently,
+    # after the numbers are printed but before they reach the terminal. Let them
+    # finish while we still hold references to their views.
+    _settle(app, 2.0)
 
 
 # ---- memory -----------------------------------------------------------------

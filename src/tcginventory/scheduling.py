@@ -46,12 +46,28 @@ def _run(args: list[str]) -> subprocess.CompletedProcess:
     )
 
 
-def is_enabled() -> bool:
-    """Whether the daily update task is currently registered."""
+_enabled_cache: bool | None = None
+
+
+def is_enabled(*, recheck: bool = False) -> bool:
+    """Whether the daily update task is currently registered.
+
+    Cached for the life of the process. The Operations screen asks on every
+    refresh and each answer costs a ``schtasks`` subprocess — 23ms of a 64ms
+    refresh. :func:`enable` and :func:`disable` update the cache, so every change
+    this app makes is reflected at once.
+
+    The tradeoff: a task removed *outside* the app, in Task Scheduler, is not
+    noticed until the next launch or a ``recheck=True`` call. Registering the
+    task is a one-time action taken from this screen, so a stale read is both
+    unlikely and cheap; a wrong 23ms on every refresh is neither.
+    """
+    global _enabled_cache
     if not is_supported():
         return False
-    result = _run(["schtasks", "/Query", "/TN", TASK_NAME])
-    return result.returncode == 0
+    if _enabled_cache is None or recheck:
+        _enabled_cache = _run(["schtasks", "/Query", "/TN", TASK_NAME]).returncode == 0
+    return _enabled_cache
 
 
 def enable(time: str = DEFAULT_TIME) -> None:
@@ -78,6 +94,8 @@ def enable(time: str = DEFAULT_TIME) -> None:
     )
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "").strip())
+    global _enabled_cache
+    _enabled_cache = True
 
 
 def disable() -> None:
@@ -85,3 +103,5 @@ def disable() -> None:
     if not is_supported():
         return
     _run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"])
+    global _enabled_cache
+    _enabled_cache = False

@@ -163,6 +163,26 @@ def get_shared_embedder():
         return _shared_embedder
 
 
+def shared_embedder_version() -> str:
+    """The embedder's version string without building the embedder.
+
+    Callers that only need to *key* stored embeddings by model version — the
+    catalog-index counts behind the Models and Operations tiles — were paying a
+    full ONNX session load for a string derived from the model's filename: 0.13s
+    and ~110MB, on the UI thread, twice per Models refresh.
+
+    An already-built embedder answers for itself, which keeps this exact even in
+    the case a path check cannot see: a corrupt model file makes
+    :func:`build_embedder` fall back to :class:`PixelEmbedder`.
+    """
+    if _shared_embedder is not None:
+        return _shared_embedder.version
+    path = model_path()
+    if _ort is not None and path is not None:
+        return f"onnx:{Path(path).stem}"
+    return PixelEmbedder().version
+
+
 def prewarm() -> None:
     """Load the shared embedder now — call on a background thread when a vision
     window opens so the first suggestion/autofill doesn't pay the model-load

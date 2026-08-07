@@ -18,6 +18,7 @@ down with it.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -262,6 +263,53 @@ def discover_interpreters() -> list[Interpreter]:
 _size_cache: dict[str, tuple[tuple[tuple[str, ...], ...], int]] = {}
 
 
+def _size_cache_file() -> Path:
+    return Path(config.data_dir()) / "training-env-size.json"
+
+
+def _load_size_cache() -> None:
+    """Seed the in-memory cache from disk, once per process.
+
+    The fingerprint made the cache safe; it did not make it survive a restart,
+    so the first Models refresh of every launch walked ~37k files on the UI
+    thread — 0.42s of the window's build. The fingerprint is still what decides
+    whether the number is good, so a persisted entry is only ever used when the
+    environment still looks exactly as it did when the walk happened.
+    """
+    global _size_loaded
+    if _size_loaded:
+        return
+    _size_loaded = True
+    try:
+        raw = json.loads(_size_cache_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(raw, dict):
+        return
+    for key, entry in raw.items():
+        try:
+            fingerprint = tuple(tuple(listing) for listing in entry["fingerprint"])
+            _size_cache[key] = (fingerprint, int(entry["bytes"]))
+        except (TypeError, KeyError, ValueError):
+            continue
+
+
+def _save_size_cache() -> None:
+    payload = {
+        key: {"fingerprint": [list(listing) for listing in fp], "bytes": size}
+        for key, (fp, size) in _size_cache.items()
+    }
+    try:
+        path = _size_cache_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    except OSError:  # a cache that cannot be written is not an error
+        pass
+
+
+_size_loaded = False
+
+
 def _walk_size(base: Path) -> int:
     """Sum the file sizes under ``base`` with one syscall per directory.
 
@@ -328,12 +376,15 @@ def env_size(directory: Path | None = None, *, recount: bool = False) -> int:
     base = Path(directory or env_dir())
     key = str(base)
     if not base.is_dir():
-        _size_cache.pop(key, None)  # a removed environment can't be stale
+        if _size_cache.pop(key, None) is not None:  # a removed env can't be stale
+            _save_size_cache()
         return 0
+    _load_size_cache()
     fingerprint = _size_fingerprint(base)
     cached = _size_cache.get(key)
     if recount or cached is None or cached[0] != fingerprint:
         _size_cache[key] = (fingerprint, _walk_size(base))
+        _save_size_cache()  # so the next launch does not repeat the walk
     return _size_cache[key][1]
 
 
@@ -343,6 +394,7 @@ def forget_env_size(directory: Path | None = None) -> None:
         _size_cache.clear()
     else:
         _size_cache.pop(str(Path(directory)), None)
+    _save_size_cache()  # the persisted copy would otherwise outlive the drop
 
 
 def remove_env(directory: Path | None = None) -> int:

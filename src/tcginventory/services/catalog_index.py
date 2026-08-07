@@ -399,10 +399,15 @@ def index_status(
     calls this twice per refresh for ``indexed`` alone. Leaving it on cost four
     seconds of frozen UI every time a training job started or finished
     (2026-08-07); the counts either side of it are single-digit milliseconds.
-    """
-    from tcginventory.services.recognizer import get_shared_embedder
 
-    version = (embedder or get_shared_embedder()).version
+    The version is read without building an embedder
+    (:func:`~tcginventory.services.recognizer.shared_embedder_version`) — it only
+    keys the ``card_embedding`` count, and constructing an ONNX session for it
+    cost 0.13s and ~110MB on the UI thread.
+    """
+    from tcginventory.services.recognizer import shared_embedder_version
+
+    version = embedder.version if embedder is not None else shared_embedder_version()
     catalog = conn.execute("SELECT COUNT(*) FROM card_catalog").fetchone()[0]
     indexed = repo.conn.execute(
         "SELECT COUNT(*) FROM card_embedding WHERE model_version = ?", (version,)
