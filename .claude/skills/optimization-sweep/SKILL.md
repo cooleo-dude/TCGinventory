@@ -148,18 +148,27 @@ only one.
 
 ### 3a. Latency
 
-**Repeated derivation inside `data()` — the largest live latency item.**
-`ui/models/inventory_model.py:350` rebuilds strings, fonts and URLs on every
-call, and `endResetModel()` makes Qt sweep 20 columns × 1,105 rows. Measured
-without cProfile: `InventoryView.refresh()` is **340 ms**, of which `set_rows()`
-is **310 ms**; swapping `data()` for a bare dict lookup drops `set_rows()` to
-**36.8 ms**, so **298.8 ms is derivation**. Sorting accounts for only ~11 ms of
-it. The fix is to compute the display tuple once in `set_rows()` and index into
-it — but the 36.8 ms is a *ceiling*, not a promise: a real implementation also
-has to build ~22,100 entries. Check all three Qt models (`inventory_model`,
-`history_model`, `recognition_history_model`) and the five delegates in
-`ui/views/_*_delegate.py`. Precedent: `ui/thumbcache.py` already does this for
-pixmaps (ADR 2026-08-04).
+**A Qt model that is slow on reset — count the roles before caching anything.**
+`ui/models/inventory_model.py` was the largest live latency item, and every
+guess about *why* was wrong until the roles were counted. `data()` fired 31,598
+times for 1,105 rows, which looks like per-cell display derivation over 20
+columns. It was not: **all 31,598 calls were `Qt.UserRole`** — the sort role —
+over only **1,105 distinct cells**, because a `QSortFilterProxyModel` re-reads
+both operands of every comparison and asked one cell **84 times**.
+`Qt.DisplayRole` was never called during a reset, so a display cache would have
+bought exactly nothing.
+
+The real costs were the role-comparison chain — `role == Qt.SomeRole` is a rich
+comparison against a wrapped C++ enum, not an int compare — and the 96.5% repeat
+rate. Fixed with module-level `int` role constants, an early return for the sort
+role, and a `(row, column) -> key` cache cleared in `set_rows()`:
+**refresh 340 ms → 108–139 ms, build 306 ms → 128 ms.**
+
+So: instrument `data()` with a `Counter` keyed by `(row, column, role)` **before**
+designing a cache. Subclass to do it — PySide6 binds virtual overrides when the
+class is created, so a monkeypatch applied afterwards is never called and will
+silently report zero. `history_model` and `recognition_history_model` have the
+same shape and have not been measured.
 
 **cProfile lies about this path.** It counts calls honestly — 31,598 — but its
 per-call overhead swamps a function this small, and it inflated `image_for` from

@@ -284,6 +284,28 @@ LINK_URL_ROLE = Qt.UserRole + 4  # the URL a link-button column should open
 INVROW_ROLE = Qt.UserRole + 5  # the whole InventoryRow (for composite-cell delegates)
 SKU_COL = 0  # the SKU column (rendered in mono)
 
+# Plain ints for every role ``data()`` tests. Sorting the grid calls ``data()``
+# 31,598 times for 1,105 rows, and each ``role == Qt.SomeRole`` is a rich
+# comparison against a wrapped C++ enum, not an int compare. Resolving the enum
+# once here and comparing ints in the body is most of what made the sort slow.
+_R_DISPLAY = int(Qt.DisplayRole)
+_R_EDIT = int(Qt.EditRole)
+_R_TOOLTIP = int(Qt.ToolTipRole)
+_R_FONT = int(Qt.FontRole)
+_R_ALIGN = int(Qt.TextAlignmentRole)
+_R_BACKGROUND = int(Qt.BackgroundRole)
+_R_FOREGROUND = int(Qt.ForegroundRole)
+_R_SORT = int(Qt.UserRole)
+_R_ITEM_ID = int(ITEM_ID_ROLE)
+_R_REVIEW = int(REVIEW_ROLE)
+_R_LOT_ID = int(LOT_ID_ROLE)
+_R_LINK_URL = int(LINK_URL_ROLE)
+_R_INVROW = int(INVROW_ROLE)
+_ALIGN_RIGHT = int(Qt.AlignRight | Qt.AlignVCenter)
+_ALIGN_CENTER = int(Qt.AlignCenter)
+
+_MISS = object()  # distinguishes "not cached" from a cached None
+
 
 def _mono_font() -> QFont:
     return QFont(theme.mono_family())
@@ -308,6 +330,11 @@ class InventoryTableModel(QAbstractTableModel):
         super().__init__()
         self._rows: list[InventoryRow] = rows or []
         self._trends: dict[int, Trend] = {}  # item_id -> Trend (set async)
+        # (row, column) -> sort key. Only ever holds values derived from
+        # ``_rows``, so it is dropped whenever those change. The Trend column is
+        # deliberately absent: its key comes from ``_trends``, which moves
+        # independently.
+        self._sort_cache: dict[tuple[int, int], object] = {}
         self._on_edit_price = on_edit_price
         self._on_edit_intent = on_edit_intent
         self._on_edit_item = on_edit_item
@@ -316,6 +343,7 @@ class InventoryTableModel(QAbstractTableModel):
     def set_rows(self, rows: list[InventoryRow]) -> None:
         self.beginResetModel()
         self._rows = rows
+        self._sort_cache.clear()  # keys are derived from the rows being replaced
         self.endResetModel()
 
     def set_trends(self, trends: dict[int, Trend]) -> None:
@@ -350,86 +378,94 @@ class InventoryTableModel(QAbstractTableModel):
     def data(self, index: QModelIndex, role=Qt.DisplayRole):
         if not index.isValid():
             return None
+        role = int(role)
+        column = index.column()
+
+        # Sorting is the hot path by a wide margin: clicking a header, or the
+        # reset that follows every refresh, asks for this role 31,598 times over
+        # 1,105 rows — the same cell up to 84 times, because the proxy re-reads
+        # both operands of every comparison. Answer it first, and answer repeats
+        # from `_sort_cache` (cleared whenever the rows change). The Trend and
+        # link columns keep their own sort behaviour below.
+        if role == _R_SORT and column != TREND_COL:
+            key = (index.row(), column)
+            cached = self._sort_cache.get(key, _MISS)
+            if cached is _MISS:  # a sentinel, so a cached None is still a hit
+                cached = _COLUMNS[column].sort_key(self._rows[index.row()])
+                self._sort_cache[key] = cached
+            return cached
+
         row = self._rows[index.row()]
-        col = _COLUMNS[index.column()]
-        if role == INVROW_ROLE:
+        col = _COLUMNS[column]
+        if role == _R_INVROW:
             return row
-        if role == Qt.FontRole and (col.numeric or index.column() == SKU_COL):
+        if role == _R_FONT and (col.numeric or column == SKU_COL):
             return _mono_font()  # tabular figures for SKU / money / qty columns
-        if index.column() == TREND_COL:
+        if column == TREND_COL:
             return self._trend_data(row, role)
         if col.link is not None:  # link-button column (TCGplayer / eBay)
-            if role == LINK_URL_ROLE:
+            if role == _R_LINK_URL:
                 if col.link == "tcgplayer":
                     # Layer the card's condition/printing/language onto the link.
                     return tcgplayer_product_url(row.item)
                 # eBay: a manual URL wins, else a derived sold-listings search so
                 # every card has a working eBay link.
                 return row.item.ebay_url or sold_search_url(row.item)
-            if role == Qt.DisplayRole:
+            if role == _R_DISPLAY:
                 return ""
-            if role == Qt.UserRole:
-                return col.sort_key(row)
             return None
-        if role == Qt.DisplayRole:
+        if role == _R_DISPLAY:
             return col.display(row)
-        if role == Qt.UserRole:  # sort key
-            return col.sort_key(row)
-        if role == Qt.TextAlignmentRole and col.numeric:
-            return int(Qt.AlignRight | Qt.AlignVCenter)
-        if role == Qt.ForegroundRole and col.pl:
+        if role == _R_ALIGN and col.numeric:
+            return _ALIGN_RIGHT
+        if role == _R_FOREGROUND and col.pl:
             value = col.sort_key(row)
             if isinstance(value, int) and value != 0:
                 return QBrush(_pos() if value > 0 else _neg())
-        if role == Qt.ToolTipRole:
-            if index.column() == NOTES_COL and row.item.notes:
+        if role == _R_TOOLTIP:
+            if column == NOTES_COL and row.item.notes:
                 return row.item.notes
-            if index.column() == MARKET_CURRENT_COL and row.review:
+            if column == MARKET_CURRENT_COL and row.review:
                 return "Reviewed price. Click ✕ to unmark, then ↻ to refresh."
-            if index.column() == MARKET_AT_PURCHASE_COL:
+            if column == MARKET_AT_PURCHASE_COL:
                 return (
                     "Market value recorded at purchase — click to edit for "
                     "corrections. Does not change cost basis or P/L."
                 )
-        if role == ITEM_ID_ROLE:
+        if role == _R_ITEM_ID:
             return row.item.id
-        if role == REVIEW_ROLE:
+        if role == _R_REVIEW:
             return row.review
-        if role == LOT_ID_ROLE:
+        if role == _R_LOT_ID:
             return row.lot_id
-        if index.column() == MARKET_CURRENT_COL and role == Qt.EditRole:
+        if column == MARKET_CURRENT_COL and role == _R_EDIT:
             return (row.current_price_cents or 0) / 100.0
-        if index.column() == MARKET_AT_PURCHASE_COL and role == Qt.EditRole:
+        if column == MARKET_AT_PURCHASE_COL and role == _R_EDIT:
             # Dollars as text → a plain line-edit editor (no spin-box range cap).
             return f"{row.market_at_purchase_cents / 100:.2f}"
-        if index.column() == INTENT_COL and role == Qt.EditRole:
+        if column == INTENT_COL and role == _R_EDIT:
             return row.intent
-        if role == Qt.EditRole:
-            col = _COLUMNS[index.column()]
+        if role == _R_EDIT:
             if col.field is not None:  # inline-editable item field
                 val = getattr(row.item, col.field)
                 if col.enum is not None:
                     return val.value if val is not None else ""
                 return val or ""
-        if (
-            role == Qt.BackgroundRole
-            and index.column() == MARKET_CURRENT_COL
-            and row.review
-        ):
+        if role == _R_BACKGROUND and column == MARKET_CURRENT_COL and row.review:
             return QBrush(REVIEW_BG)
         return None
 
-    def _trend_data(self, row: InventoryRow, role):
+    def _trend_data(self, row: InventoryRow, role: int):
         trend = self._trends.get(row.item.id)
-        if role == Qt.DisplayRole:
+        if role == _R_DISPLAY:
             return _trend_text(trend)
-        if role == Qt.UserRole:  # sort key
+        if role == _R_SORT:  # sort key
             return _trend_sort(trend)
-        if role == Qt.ForegroundRole:
+        if role == _R_FOREGROUND:
             return QBrush(_trend_color(trend))
-        if role == Qt.TextAlignmentRole:
-            return int(Qt.AlignCenter)
-        if role == Qt.ToolTipRole:
+        if role == _R_ALIGN:
+            return _ALIGN_CENTER
+        if role == _R_TOOLTIP:
             return _trend_tooltip(trend)
         return None
 

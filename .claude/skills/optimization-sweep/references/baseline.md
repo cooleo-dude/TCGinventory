@@ -98,23 +98,30 @@ badly.** `refresh()` is 340–365 ms, and it decomposes as:
 | `_update_summary()` | 6 ms |
 | `_fill_columns()`, `_on_selection()` | <1 ms each |
 
-Inside `set_rows()`, with a model whose `data()` is a bare dict lookup as the
-ceiling:
+Inside `set_rows()` — and the answer is **not** what the shape suggests. Every
+one of the 31,598 `data()` calls is `Qt.UserRole`, the **sort** role, over only
+**1,105 distinct cells**: the proxy re-reads both operands of every comparison,
+so one cell is asked up to **84 times**. `Qt.DisplayRole` is never called during
+a reset. A display cache would have bought nothing.
 
-| | |
-|---|---:|
-| as shipped | 335.6 ms |
-| with view sorting off | 324.4 ms (so sorting is only ~11 ms) |
-| with `data()` as a dict lookup | **36.8 ms** |
-| **derivation inside `data()`** | **298.8 ms** |
+| | before | after |
+|---|---:|---:|
+| `set_rows()` as shipped | 334.0 ms | **126.1 ms** |
+| sort key replaced by a constant | 65.1 ms | 78.1 ms |
+| `data()` returns `None` for everything | 25.9 ms | 40.8 ms |
+| `InventoryView.refresh()` | 340 ms | **108–139 ms** |
+| `InventoryView` build | 306 ms | **128 ms** |
 
-`endResetModel()` makes Qt sweep 20 columns × 1,105 rows, and `data()`
-(`inventory_model.py:350`) re-derives strings, fonts and URLs on every call.
-cProfile counts 31,598 calls, but inflates the absolute numbers — the untainted
-340 ms above is the real figure.
+Column 0's key is `lambda r: r.sku`, so the 269 ms was never derivation — it was
+the role-comparison chain (`role == Qt.SomeRole` is a rich comparison against a
+wrapped C++ enum, not an int compare) multiplied by the 96.5% repeat rate. The
+fix was module-level `int` role constants, an early return for the sort role,
+and a `(row, column) -> key` cache cleared in `set_rows()`.
 
-Note the ceiling is a floor for the *fix*, not a promise: a real implementation
-must also build ~22,100 cached entries, which is not free.
+**The lesson worth keeping: count the roles before caching anything.** Both of
+this file's earlier claims here were wrong — that the cost was `DisplayRole`
+derivation, and that a dict-lookup `data()` measured a 36.8 ms "ceiling". The
+latter was measuring sort short-circuiting on `None`, not caching.
 
 Also in refresh: `repositories.image_for()` and `trends.card_id_for` appear
 expensive under cProfile but measure **0.45 ms per item** warm across all three

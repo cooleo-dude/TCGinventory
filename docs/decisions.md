@@ -4,6 +4,49 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-07 — Startup 2364ms → 1307ms, and a Qt model that was slow for the wrong reason
+
+The first run of `/optimization-sweep`. Four fixes, each with a measured before
+and after — and two of the sweep's own conclusions overturned on the way.
+
+- **Three things the app did not need to do at all.** `index_status()` built a
+  full ONNX inference session to read a version string that is
+  `f"onnx:{model.stem}"` — 0.13s and ~110MB, on the UI thread, twice per Models
+  build; `shared_embedder_version()` reads it from the path and defers to an
+  already-built embedder so the corrupt-model fallback still reports itself.
+  `env_size()` had a fingerprint cache that could not survive a restart, so the
+  first Models refresh of every launch walked 37k files; the fingerprint still
+  decides whether the number is good, it is just persisted now (0.5ms cold
+  against 336ms). `scheduling.is_enabled()` shelled out to `schtasks` on every
+  Operations refresh. **Models build 1155ms → ~200ms; Operations refresh 81ms →
+  49ms; total build 2364ms → 1307ms.**
+- **The Qt model was slow for a reason nobody would guess, including us.**
+  `data()` fired 31,598 times for a 1,105-row grid, which reads as per-cell
+  display derivation across 20 columns. It is not. **Every one of those calls is
+  `Qt.UserRole`** — the sort role — over only **1,105 distinct cells**, because
+  `QSortFilterProxyModel` re-reads both operands of every comparison and asked
+  one cell **84 times**. `Qt.DisplayRole` is never called during a reset, so the
+  display cache we set out to build would have bought nothing. The costs were the
+  role-comparison chain (`role == Qt.SomeRole` is a rich comparison against a
+  wrapped C++ enum) and the 96.5% repeat rate. Module-level `int` role constants,
+  an early return for the sort role, and a `(row, column) -> key` cache cleared
+  in `set_rows()`: **Inventory refresh 340ms → 108-139ms, build 306ms → 128ms.**
+  Verified against a Python sort on all 19 sortable columns, plus a stale-cache
+  probe.
+- **Two measurement traps, both of which produced a confident wrong answer
+  first.** A `data()` returning `None` from an empty dict looked like a 36.8ms
+  "caching ceiling"; it was measuring the sort short-circuiting on invalid
+  variants. And PySide6 binds virtual overrides when the class is created, so a
+  `data()` counter monkeypatched afterwards is never called and silently reports
+  zero — subclass instead. The rule now in the skill: **count the roles before
+  designing a cache.**
+- **Speeding up the build made every refresh look slower**, which is worth
+  recording because it is not intuitive. Removing 950ms of construction let
+  Recognition's ~2s background prewarm overlap the refresh phase, so the harness
+  measured GIL contention: Dashboard read 177ms → 318ms with no change to
+  Dashboard. Settling before timing puts it back at 184ms. The same
+  async-misattribution trap already documented for RSS, now on the clock.
+
 ### 2026-08-07 — The ledger is not the slow part, and a skill that knows it
 
 A new `/optimization-sweep` skill (`.claude/skills/optimization-sweep/`), built
