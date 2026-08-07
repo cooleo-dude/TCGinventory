@@ -52,6 +52,36 @@ started, migrated and got a window up. It never touches real data.
 6. **Close what shipped** — `/sdd-ticket close <N>` for every ticket this release
    delivered, and record the measured result in each.
 
+## The review gate
+
+**A ticket cannot be closed and a PR cannot be merged without a green critic
+panel.** This is enforced, not advised: `.claude/hooks/review_gate.py` runs as a
+`PreToolUse` hook and blocks `gh pr merge` and `ticket.py close` when there is no
+green verdict recorded for the current `HEAD`.
+
+Dispatch the panel with the Agent tool, handing each critic the diff and nothing
+else — they judge the change, never your account of it:
+
+| when | dispatch |
+|---|---|
+| default | `tcgi-invariant-critic`, `tcgi-risk-critic`, `tcgi-test-critic` in parallel |
+| the diff touches `ui/` | add `tcgi-ui-critic` |
+| <=2 files, no migration, no money path, no `ui/` | `tcgi-mini-critic` alone |
+
+Each ends in a verdict line. Record them:
+
+```bash
+python .claude/hooks/review_gate.py record --scope pr-merge --ref <n>     --verdict invariants=pass --verdict risk=pass --verdict test=pass
+```
+
+`revise` is a note to answer, not a failure. **`block` stops the gate** — fix the
+findings, commit, and re-run the panel. Verdicts are bound to a sha, so a new
+commit reopens the gate deliberately: the panel judged something that is no
+longer what would merge.
+
+Relay every finding to the user. A panel whose findings you summarise away is a
+panel that did nothing.
+
 ## Binaries
 
 `publish` is **tag and notes only** by default. The bundle is ~307 MB and the

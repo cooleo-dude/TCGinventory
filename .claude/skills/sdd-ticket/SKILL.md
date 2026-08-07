@@ -72,9 +72,40 @@ not record is a measurement the next agent has to redo. The alternative you
 rejected in your head will be re-proposed by someone else in a fortnight — that
 is what the *rejected alternatives* section is for, and it is not optional.
 
+## The review gate
+
+**A ticket cannot be closed and a PR cannot be merged without a green critic
+panel.** This is enforced, not advised: `.claude/hooks/review_gate.py` runs as a
+`PreToolUse` hook and blocks `gh pr merge` and `ticket.py close` when there is no
+green verdict recorded for the current `HEAD`.
+
+Dispatch the panel with the Agent tool, handing each critic the diff and nothing
+else — they judge the change, never your account of it:
+
+| when | dispatch |
+|---|---|
+| default | `tcgi-invariant-critic`, `tcgi-risk-critic`, `tcgi-test-critic` in parallel |
+| the diff touches `ui/` | add `tcgi-ui-critic` |
+| <=2 files, no migration, no money path, no `ui/` | `tcgi-mini-critic` alone |
+
+Each ends in a verdict line. Record them:
+
+```bash
+python .claude/hooks/review_gate.py record --scope pr-merge --ref <n>     --verdict invariants=pass --verdict risk=pass --verdict test=pass
+```
+
+`revise` is a note to answer, not a failure. **`block` stops the gate** — fix the
+findings, commit, and re-run the panel. Verdicts are bound to a sha, so a new
+commit reopens the gate deliberately: the panel judged something that is no
+longer what would merge.
+
+Relay every finding to the user. A panel whose findings you summarise away is a
+panel that did nothing.
+
 ## Closing one
 
-`ticket.py close N` sets `status: done` and closes the mirrored issue. Then edit
+`ticket.py close N` sets `status: done` and closes the mirrored issue — the
+gate above must be green first, or the call is blocked. Then edit
 the ticket to record the commit, the PR and the **measured after** — a ticket
 that says what actually happened is the reason the code looks the way it does.
 

@@ -80,3 +80,4 @@ record of why the code looks the way it does.
 | # | title | kind | issue | status |
 |---|---|---|---|---|
 | [001](001-card-embedding-float16.md) | Store card embeddings as float16 | optimization | #2 | `open` |
+| [002](002-enumerate-the-rule-registry.md) | Enumerate the rule registry to full coverage | feature | #7 | `open` |

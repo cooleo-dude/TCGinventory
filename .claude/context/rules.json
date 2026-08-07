@@ -1,0 +1,389 @@
+{
+  "_about": "The closed set of rules the review critics may judge against. A finding must cite a rule id from this file; anything else is inadmissible. Each rule points at the document that actually states it \u2014 this registry is an index, never the source. `.claude/skills/sdd-review/scripts/rules.py check` (and tests/test_rules.py) proves every source file, anchor and excerpt still matches, so a spec edit that changes what a rule means fails the suite instead of rotting silently.",
+  "version": 1,
+  "excerpt_note": "excerpt_sha256 is the sha256 of the cited section's text \u2014 from its anchor line up to the next heading of the same level, whitespace-stripped. Regenerate deliberately with `rules.py reseal <id>` after confirming the rule still says what the registry claims.",
+  "lanes": {
+    "invariants": "tcgi-invariant-critic",
+    "risk": "tcgi-risk-critic",
+    "test": "tcgi-test-critic",
+    "ui": "tcgi-ui-critic"
+  },
+  "severities": [
+    "revise",
+    "block"
+  ],
+  "rules": [
+    {
+      "id": "MONEY-CENTS",
+      "lane": "invariants",
+      "rule": "Money is integer cents (int), never float. Quantities are whole ints.",
+      "violation": "A float, a `/`, or a `round()` producing a money value; a numpy dtype holding cents; money formatted outside ui/formatting.py.",
+      "source": {
+        "file": "CLAUDE.md",
+        "anchor": "## Non-negotiable architecture rules",
+        "excerpt_sha256": "ac6adee038463cef"
+      },
+      "scope": [
+        "src/tcginventory/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "BASIS-SPLIT",
+      "lane": "invariants",
+      "rule": "Cost basis is inferred by a market-value-weighted split of net_consideration_in = cash_out + sum(cards out) - cash_in; the rounding residual goes to the largest-value line.",
+      "violation": "A basis derivation that drops the residual, reallocates it elsewhere, or reweights by anything other than market value.",
+      "source": {
+        "file": "CLAUDE.md",
+        "anchor": "## Non-negotiable architecture rules",
+        "excerpt_sha256": "ac6adee038463cef"
+      },
+      "scope": [
+        "src/tcginventory/services/allocation.py",
+        "src/tcginventory/services/transactions.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "FIFO-DRAWDOWN",
+      "lane": "invariants",
+      "rule": "Disposals draw down lots FIFO.",
+      "violation": "A disposal path without a deterministic acquisition ordering, or a batching rewrite that loses it.",
+      "source": {
+        "file": "CLAUDE.md",
+        "anchor": "## Non-negotiable architecture rules",
+        "excerpt_sha256": "ac6adee038463cef"
+      },
+      "scope": [
+        "src/tcginventory/services/**/*.py",
+        "src/tcginventory/data/repositories.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "NO-HARD-DELETE",
+      "lane": "invariants",
+      "rule": "Transactions are never hard-deleted: soft-void plus an append-only audit_log; edit = atomic void + re-post. Sole sanctioned exception: delete_inventory_entry (ADR 2026-07-11).",
+      "violation": "A DELETE against transaction/transaction_line, or a state change with no audit_log row.",
+      "source": {
+        "file": "CLAUDE.md",
+        "anchor": "## Non-negotiable architecture rules",
+        "excerpt_sha256": "ac6adee038463cef"
+      },
+      "scope": [
+        "src/tcginventory/services/**/*.py",
+        "src/tcginventory/data/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "RIPPING-ZERO",
+      "lane": "invariants",
+      "rule": "Intent is per-lot: personal | resale | ripping. Ripping lots are valued at $0 and are never sellable.",
+      "violation": "A valuation path that omits the ripping check, or a sell path that can reach a ripping lot.",
+      "source": {
+        "file": "CLAUDE.md",
+        "anchor": "## Non-negotiable architecture rules",
+        "excerpt_sha256": "ac6adee038463cef"
+      },
+      "scope": [
+        "src/tcginventory/services/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "MIGRATIONS-FORWARD-ONLY",
+      "lane": "invariants",
+      "rule": "Migrations are forward-only and append-only: add a new numbered file in data/migrations/, never edit a shipped one.",
+      "violation": "A modification to an existing file under data/migrations/, or a numbered migration aimed at a database other than inventory.db.",
+      "source": {
+        "file": "CLAUDE.md",
+        "anchor": "## Non-negotiable architecture rules",
+        "excerpt_sha256": "ac6adee038463cef"
+      },
+      "scope": [
+        "src/tcginventory/data/migrations/**",
+        "src/tcginventory/data/migrator.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "QT-FREE-CORE",
+      "lane": "invariants",
+      "rule": "The domain and service layers are Qt-free and unit-testable headless.",
+      "violation": "A PySide6 import reaching src/tcginventory/domain/ or src/tcginventory/services/.",
+      "source": {
+        "file": "CLAUDE.md",
+        "anchor": "## Non-negotiable architecture rules",
+        "excerpt_sha256": "ac6adee038463cef"
+      },
+      "scope": [
+        "src/tcginventory/domain/**/*.py",
+        "src/tcginventory/services/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "UI-NO-SQL",
+      "lane": "invariants",
+      "rule": "The UI never issues SQL and never does money math.",
+      "violation": "A conn.execute or raw SQL string under src/tcginventory/ui/, or arithmetic on cents in a view, model or delegate.",
+      "source": {
+        "file": "CLAUDE.md",
+        "anchor": "## Non-negotiable architecture rules",
+        "excerpt_sha256": "ac6adee038463cef"
+      },
+      "scope": [
+        "src/tcginventory/ui/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "INVARIANTS-DOC",
+      "lane": "invariants",
+      "rule": "The ledger invariants in specs/02-data-model.md must always hold.",
+      "violation": "A change that breaks any numbered invariant in that section and is not covered by a more specific rule here.",
+      "source": {
+        "file": "specs/02-data-model.md",
+        "anchor": "## Invariants (must always hold)",
+        "excerpt_sha256": "628505bbda028f63"
+      },
+      "scope": [
+        "src/tcginventory/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "SQLITE-THREAD-AFFINITY",
+      "lane": "risk",
+      "rule": "A SQLite connection belongs to the thread that created it; a worker opens its own.",
+      "violation": "A connection created on the UI thread and used inside a QThread, or shared across threads.",
+      "source": {
+        "file": ".claude/context/app-map.json",
+        "anchor": "shared_ui.background_jobs",
+        "excerpt_sha256": "554a7da06aefae8e"
+      },
+      "scope": [
+        "src/tcginventory/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "QTHREAD-LIFETIME",
+      "lane": "risk",
+      "rule": "A running QThread that is garbage-collected aborts the process; workers must be owned and awaited, and deleteLater needs an event loop to take effect.",
+      "violation": "A worker started without a reference that outlives it, or teardown that relies on deleteLater with no loop running.",
+      "source": {
+        "file": "tests/conftest.py",
+        "anchor": null,
+        "excerpt_sha256": "0b8049da891f552f"
+      },
+      "scope": [
+        "src/tcginventory/ui/**/*.py",
+        "tests/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "UI-THREAD-BLOCKING",
+      "lane": "risk",
+      "rule": "Work that blocks a repaint \u2014 subprocess, network, model loads, filesystem walks \u2014 belongs behind ui/views/_worker.py's TaskWorker.",
+      "violation": "A subprocess call, httpx request, ONNX session build or directory walk on the UI thread.",
+      "source": {
+        "file": ".claude/context/app-map.json",
+        "anchor": "shared_ui.background_jobs",
+        "excerpt_sha256": "554a7da06aefae8e"
+      },
+      "scope": [
+        "src/tcginventory/ui/**/*.py"
+      ],
+      "severity_max": "revise"
+    },
+    {
+      "id": "LEDGER-VS-DERIVED",
+      "lane": "risk",
+      "rule": "Only inventory.db is the ledger; vision.db, auctions.db and pricehistory.db are derived or ephemeral and are not migrated by data/migrator.py.",
+      "violation": "Treating a derived database as the ledger (or the reverse) \u2014 e.g. a numbered migration for vision.db, or ledger data written to auctions.db.",
+      "source": {
+        "file": ".claude/context/app-map.json",
+        "anchor": "databases",
+        "excerpt_sha256": "870e4ebfd046f154"
+      },
+      "scope": [
+        "src/tcginventory/data/**/*.py",
+        "src/tcginventory/services/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "BLAST-RADIUS",
+      "lane": "risk",
+      "rule": "Windows share tables; a change to a shared table or service reaches every window that reads it.",
+      "violation": "A schema or service change whose other readers \u2014 per .claude/context/app-map.json \u2014 are not accounted for.",
+      "source": {
+        "file": ".claude/context/app-map.json",
+        "anchor": "windows",
+        "excerpt_sha256": "3596d160cb8a43fe"
+      },
+      "scope": [
+        "src/tcginventory/**/*.py"
+      ],
+      "severity_max": "revise"
+    },
+    {
+      "id": "TEST-PROVES-BEHAVIOUR",
+      "lane": "test",
+      "rule": "A test must fail if the behaviour it covers regresses; asserting the setup does not count.",
+      "violation": "A behavioural change with no test that would go red on revert, or a test that passes against a broken implementation.",
+      "source": {
+        "file": "CLAUDE.md",
+        "anchor": "## Non-negotiable architecture rules",
+        "excerpt_sha256": "ac6adee038463cef"
+      },
+      "scope": [
+        "src/**/*.py",
+        "tests/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "CHECKER-NEEDS-NEGATIVE-TEST",
+      "lane": "test",
+      "rule": "A new validator, guard, lint or gate ships with a test proving it fails on bad input.",
+      "violation": "A check subcommand or guard exercised only against the passing case.",
+      "source": {
+        "file": "docs/decisions.md",
+        "anchor": null,
+        "excerpt_sha256": "46389d47e11d146b"
+      },
+      "scope": [
+        "src/**/*.py",
+        "tests/**/*.py",
+        ".claude/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "TESTS-HEADLESS",
+      "lane": "test",
+      "rule": "Qt tests run offscreen (QT_QPA_PLATFORM=offscreen) and the suite runs in parallel with -n auto --dist loadfile; a file's tests share a worker.",
+      "violation": "A UI test that needs a display, or a test depending on cross-file ordering or module state set elsewhere.",
+      "source": {
+        "file": "pyproject.toml",
+        "anchor": "[tool.pytest.ini_options]",
+        "excerpt_sha256": "508d1b0fd61dd344"
+      },
+      "scope": [
+        "tests/**/*.py"
+      ],
+      "severity_max": "revise"
+    },
+    {
+      "id": "APP-MAP-CURRENT",
+      "lane": "test",
+      "rule": "Adding or renaming a window, migration, service or window test updates .claude/context/app-map.json in the same change.",
+      "violation": "New structure with a stale map \u2014 tests/test_app_map.py is where it surfaces.",
+      "source": {
+        "file": ".claude/skills/task-planning/SKILL.md",
+        "anchor": "## Maintaining the map",
+        "excerpt_sha256": "c838c1264010e5a5"
+      },
+      "scope": [
+        "src/tcginventory/**/*.py",
+        "src/tcginventory/data/migrations/**",
+        ".claude/context/app-map.json"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "THEME-TOKENS",
+      "lane": "ui",
+      "rule": "Never hardcode a colour in a view; read tokens via theme.active().",
+      "violation": "A hex literal, a named colour, or a stylesheet colour outside ui/theme.py.",
+      "source": {
+        "file": ".claude/context/app-map.json",
+        "anchor": "shared_ui.theme",
+        "excerpt_sha256": "493e70171a259951"
+      },
+      "scope": [
+        "src/tcginventory/ui/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "MONEY-FORMATTING",
+      "lane": "ui",
+      "rule": "money(cents) and percent() in ui/formatting.py are the only place cents become strings.",
+      "violation": "An f-string or format call turning cents into display text anywhere else.",
+      "source": {
+        "file": ".claude/context/app-map.json",
+        "anchor": "shared_ui.formatting",
+        "excerpt_sha256": "afae0aa5be1f73e5"
+      },
+      "scope": [
+        "src/tcginventory/ui/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "CARD-ENTRY-STANDARD",
+      "lane": "ui",
+      "rule": "Inline card rows use ui/views/_card_entry.py \u2014 CardEntryMixin, PriceLookupWorker, MatchDelegate. Do not fork it.",
+      "violation": "A new inline card row with its own autocomplete, pricing or match delegate.",
+      "source": {
+        "file": ".claude/context/app-map.json",
+        "anchor": "shared_ui.card_entry",
+        "excerpt_sha256": "cffe95161e2907d8"
+      },
+      "scope": [
+        "src/tcginventory/ui/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "PREVIEW-HOVER",
+      "lane": "ui",
+      "rule": "Hover shows the hovered card; on leave fall back to the selected card, else the last hovered.",
+      "violation": "A preview that clears on leave, or that ignores the selection.",
+      "source": {
+        "file": ".claude/context/app-map.json",
+        "anchor": "shared_ui.card_preview",
+        "excerpt_sha256": "8320b268e631699f"
+      },
+      "scope": [
+        "src/tcginventory/ui/**/*.py"
+      ],
+      "severity_max": "revise"
+    },
+    {
+      "id": "QT-MODEL-SORT-ROLE",
+      "lane": "ui",
+      "rule": "In a Qt model's data(), compare plain ints rather than wrapped enums, answer the sort role first, and cache it per (row, column) cleared in set_rows().",
+      "violation": "A model whose data() falls through enum comparisons before reaching the sort role, or recomputes the sort key per call.",
+      "source": {
+        "file": "docs/decisions.md",
+        "anchor": null,
+        "excerpt_sha256": "46389d47e11d146b"
+      },
+      "scope": [
+        "src/tcginventory/ui/models/**/*.py"
+      ],
+      "severity_max": "revise"
+    },
+    {
+      "id": "UNENUMERATED",
+      "lane": "any",
+      "rule": "A real concern this registry does not yet cover. Raise it, never block on it, and say what rule should exist.",
+      "violation": "n/a \u2014 this id exists so a grounded panel can still surface something novel without inventing a mandate.",
+      "source": {
+        "file": ".claude/context/verdict.schema.json",
+        "anchor": null,
+        "excerpt_sha256": "a1c1a3462edc8c50"
+      },
+      "scope": [
+        "**"
+      ],
+      "severity_max": "revise"
+    }
+  ]
+}

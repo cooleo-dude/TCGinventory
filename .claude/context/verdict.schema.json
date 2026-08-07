@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tcginventory.local/verdict.schema.json",
+  "title": "Critic verdict",
+  "description": "What one critic returns and what the review gate records. Every finding cites a rule id from .claude/context/rules.json — a finding without one is inadmissible, which is how 'no invented rules' becomes a validation error instead of an instruction.",
+  "type": "object",
+  "required": ["lane", "verdict", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "lane": {
+      "description": "Which critic produced this.",
+      "enum": ["invariants", "risk", "test", "ui"]
+    },
+    "verdict": {
+      "description": "pass = nothing found. revise = concerns worth answering, does not stop the gate. block = at least one violation; the gate refuses the merge or close.",
+      "enum": ["pass", "revise", "block"]
+    },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/finding" }
+    },
+    "notes": {
+      "description": "Optional context for the human. Never a substitute for a finding.",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "finding": {
+      "type": "object",
+      "required": ["rule", "file", "line", "evidence", "severity"],
+      "additionalProperties": false,
+      "properties": {
+        "rule": {
+          "description": "A rule id from rules.json. Use UNENUMERATED for a real concern the registry does not cover yet — it can never block.",
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9-]*$"
+        },
+        "file": {
+          "description": "Repo-relative path the finding is in.",
+          "type": "string",
+          "minLength": 1
+        },
+        "line": {
+          "description": "1-indexed line the finding anchors to.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "evidence": {
+          "description": "What is actually there, and why it breaks the rule. Not a restatement of the rule.",
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "description": "Must not exceed the rule's severity_max.",
+          "enum": ["revise", "block"]
+        },
+        "suggested_rule": {
+          "description": "Required when rule is UNENUMERATED: the rule that should exist, and the document that would state it.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}
