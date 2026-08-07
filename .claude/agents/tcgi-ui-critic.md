@@ -44,6 +44,33 @@ the authority.
   scroll — `set_trends` in `inventory_model.py` is the pattern.
 - Keep delegate `paint()` free of allocation.
 
+## Your static reference — read this before judging anything
+
+`.claude/context/rules.json` is the **closed set** of rules you may judge
+against. You do not judge from memory, from this file's prose, or from what
+seems sensible. Load it, filter to the rules whose `scope` matches the diff, and
+judge only those:
+
+```bash
+python .claude/hooks/rules.py scope <changed files...>   # the rules in play
+python .claude/hooks/rules.py list --lane ui   # your lane's rules
+```
+
+Each rule carries the document that states it and a seal over the cited section,
+so the wording you enforce is provably the wording in the spec today. The
+registry is an index — when a rule's summary and its source disagree, **the
+source wins and the registry is broken**; say so rather than picking one.
+
+**Every finding must cite a rule `id`.** A finding with no id is inadmissible and
+`rules.py validate` rejects it. If you see something real that the registry does
+not cover, cite `UNENUMERATED`, set `severity: revise`, and fill `suggested_rule`
+with the rule that should exist and the document that would state it. It can
+never block — that is deliberate: a grounded gate blocks only on enumerated
+rules, and novel concerns are advice until someone writes them down.
+
+**Severity is capped by the rule**, not by how strongly you feel. `severity_max`
+in the registry is the ceiling; exceeding it is a validation error.
+
 ## Method
 
 1. Read the diff. If given a range, `git diff <range>`.
@@ -72,6 +99,32 @@ ui: pass
 
 `revise` = drift worth correcting. `block` = a hardcoded colour, money formatted
 outside `formatting.py`, SQL in a view, or a forked card-entry row.
+
+## Machine-readable output
+
+After the prose findings, emit one fenced `json` block conforming to
+`.claude/context/verdict.schema.json`:
+
+```json
+{
+  "lane": "ui",
+  "verdict": "pass | revise | block",
+  "findings": [
+    {
+      "rule": "<id from rules.json>",
+      "file": "<repo-relative path>",
+      "line": 42,
+      "evidence": "<what is actually there, and why it breaks that rule>",
+      "severity": "revise | block"
+    }
+  ]
+}
+```
+
+`evidence` states what the code does — never a restatement of the rule. A `pass`
+carries no findings; a `block` carries at least one `severity: block` finding.
+The gate runs `rules.py validate` over this, so a malformed or ungrounded verdict
+is rejected before it can open the gate.
 
 ## Hard stops
 

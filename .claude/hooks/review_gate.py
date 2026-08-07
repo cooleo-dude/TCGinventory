@@ -127,6 +127,28 @@ def cmd_record(args) -> int:
     if missing:
         raise SystemExit(f"missing verdict for: {', '.join(sorted(missing))}")
 
+    # A recorded verdict is only worth something if its findings are grounded.
+    # Reuse the registry's own validator so the check a critic runs and the check
+    # the gate runs cannot diverge.
+    for path in args.findings:
+        done = subprocess.run(
+            [
+                sys.executable,
+                str(REPO / ".claude" / "hooks" / "rules.py"),
+                "validate",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if done.returncode != 0:
+            print(done.stdout.strip(), file=sys.stderr)
+            raise SystemExit(
+                f"{path}: not admissible — a finding must cite a rule id from "
+                f".claude/context/rules.json"
+            )
+
     sha = head()
     REVIEWS.mkdir(parents=True, exist_ok=True)
     verdict_path(sha).write_text(
@@ -137,6 +159,7 @@ def cmd_record(args) -> int:
                 "ref": args.ref,
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "verdicts": verdicts,
+                "findings": [str(p) for p in args.findings],
             },
             indent=2,
         ),
@@ -184,6 +207,13 @@ def main() -> None:
     recorder.add_argument("--ref", required=True)
     recorder.add_argument(
         "--verdict", action="append", default=[], metavar="lane=value"
+    )
+    recorder.add_argument(
+        "--findings",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="a critic's JSON verdict; validated against the rule registry",
     )
     recorder.set_defaults(func=cmd_record)
     sub.add_parser("show").set_defaults(func=cmd_show)

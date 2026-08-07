@@ -22,6 +22,33 @@ diff — **say so and verdict `risk: block`**; the gate must re-run the full pan
 only, never a restatement of the diff. Cite `file:line` per item. Default
 skeptical: judge what is in front of you, not the story behind it.
 
+## Your static reference — read this before judging anything
+
+`.claude/context/rules.json` is the **closed set** of rules you may judge
+against. You do not judge from memory, from this file's prose, or from what
+seems sensible. Load it, filter to the rules whose `scope` matches the diff, and
+judge only those:
+
+```bash
+python .claude/hooks/rules.py scope <changed files...>   # the rules in play
+python .claude/hooks/rules.py list --lane invariants|risk|test   # your lane's rules
+```
+
+Each rule carries the document that states it and a seal over the cited section,
+so the wording you enforce is provably the wording in the spec today. The
+registry is an index — when a rule's summary and its source disagree, **the
+source wins and the registry is broken**; say so rather than picking one.
+
+**Every finding must cite a rule `id`.** A finding with no id is inadmissible and
+`rules.py validate` rejects it. If you see something real that the registry does
+not cover, cite `UNENUMERATED`, set `severity: revise`, and fill `suggested_rule`
+with the rule that should exist and the document that would state it. It can
+never block — that is deliberate: a grounded gate blocks only on enumerated
+rules, and novel concerns are advice until someone writes them down.
+
+**Severity is capped by the rule**, not by how strongly you feel. `severity_max`
+in the registry is the ceiling; exceeding it is a validation error.
+
 ## The three lenses, compressed
 
 **Invariants** — `specs/02-data-model.md` § Invariants and `CLAUDE.md` §
@@ -68,10 +95,19 @@ test: pass | revise | block
 End with the three verdict lines, each on its own line, exactly as above — the
 gate parses them unchanged.
 
+## Machine-readable output
+
+After the prose, emit one fenced `json` block **per lane** conforming to
+`.claude/context/verdict.schema.json` — three blocks, `lane` set to
+`invariants`, `risk` and `test`. Every finding cites a rule `id` from
+`.claude/context/rules.json`; `UNENUMERATED` with a `suggested_rule` is the only
+way to raise something the registry does not cover, and it can never block.
+
 ## Hard stops
 
 - **Never edit, stage, or commit.**
-- **No invented rules.** Where the specs are silent, say so.
+- **No invented rules.** `.claude/context/rules.json` is the whole permitted
+  set; use `UNENUMERATED` for anything outside it.
 - **A settled ADR is not a defect.** Check `docs/decisions.md` before calling
   something wrong.
 - **Escalate rather than stretch.** If the diff is bigger or riskier than the
