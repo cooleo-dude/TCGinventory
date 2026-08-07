@@ -191,15 +191,41 @@ Note `overview()`'s standalone cost is an artefact — it recomputes `signals()`
 when called bare, which the harness does and the view does not (it passes the
 list in). Do not "fix" that.
 
+## What the sort caches cost
+
+Measured after the fact, because adding a cache without measuring its footprint
+is the same mistake in the other direction:
+
+| | entries | deep size |
+|---|---:|---:|
+| Inventory, normal use | 1,105 | 195 KiB |
+| Inventory, after sorting all 20 columns in one session | 20,995 | 2.5 MiB |
+| History | 262 | 44 KiB |
+| Inventory after 5 further refreshes | 1,105 | no accumulation |
+
+Only the **sorted column** is ever asked for `Qt.UserRole`, so the normal cache is
+one entry per row, not per cell. The worst case is bounded by 20 columns × rows
+and is cleared on every `set_rows()`. Resident memory is unchanged: **256.7 MB**
+against 256.4 MB before the caches existed.
+
 ### Where startup stands
 
-| | 2026-08-07 first sweep | after four fixes |
+| | 2026-08-07 first sweep | after six fixes |
 |---|---:|---:|
-| total view build | 2,364 ms | **1,205 ms** |
+| total view build | 2,364 ms | **~1,210 ms** |
 | Models build | 1,155 ms | ~200 ms |
-| Inventory build / refresh | 306 / 401 ms | 128 / 120 ms |
-| History build / refresh | 128 / 151 ms | 87 / 70 ms |
-| Operations refresh | 81 ms | 51 ms |
+| Inventory build / refresh | 306 / 401 ms | 127 / 115 ms |
+| History build / refresh | 128 / 151 ms | 87 / 74 ms |
+| Market refresh | 94 ms | 64 ms |
+| Dashboard refresh | 202 ms | 113 ms |
+| Operations refresh | 81 ms | 49 ms |
+| resident memory | 256 MB | 257 MB (unchanged) |
+
+**The cheap latency wins are spent.** What is left, in order of size: the two
+storage items (Recognition's 112 MB prewarm, the 2.2 GB PNG cache) which are
+deferred by decision; lazy view construction, out of scope by decision; and
+`collection_value_series` at 31 ms, `all_positions()` at 24 ms — the latter still
+called by nothing. Anything further needs a new measurement, not a new idea.
 
 Also in refresh: `repositories.image_for()` and `trends.card_id_for` appear
 expensive under cProfile but measure **0.45 ms per item** warm across all three
