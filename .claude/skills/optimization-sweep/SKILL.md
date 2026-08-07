@@ -46,7 +46,7 @@ it measured small is as valuable as fixing one that measured large.
 | `specs/02-data-model.md` | The money and schema invariants. |
 | `references/baseline.md` (next to this file) | What was measured on 2026-08-07 and how. Read it before running anything — it will stop you rediscovering settled facts. |
 | `references/declined.md` (next to this file) | Every variant the user has turned down, and every one measurement rejected. Read it **before proposing anything**, in either pass. |
-| `.claude/context/optimizations/` | Tickets already filed by previous research passes. Check before proposing — the work may be queued, or done. |
+| `.claude/context/tickets/` | Tickets already filed — by any skill, not just this one. Check before proposing: the work may be queued, or done. |
 | `docs/decisions.md`, newest first | Several performance ADRs. Something that looks slow is often a decision. |
 
 Interpreter and tools (Windows is primary; both given):
@@ -633,7 +633,7 @@ aggregate)`. That table is the deliverable as much as the proposals are.
 
 **Now split the results two ways, because they have different destinations.**
 
-**Irrefutably positive → file a ticket in `.claude/context/optimizations/`.**
+**Irrefutably positive → file a ticket with `/sdd-ticket`.**
 A prose finding evaporates when the conversation ends; a ticket survives it. A
 finding qualifies only if it clears all five:
 
@@ -644,7 +644,8 @@ finding qualifies only if it clears all five:
 5. Passes the 7f constraint checklist.
 
 Write it as the next number in that directory, following
-`.claude/context/optimizations/README.md`, and add it to that file's index. The
+`.claude/context/tickets/README.md`. `/sdd-ticket` assigns the number, writes
+the GitHub issue and regenerates the index — do not do those by hand. The
 ticket must carry the measurement, the area of impact as a `file:line` table, the
 chosen approach **and the rejected alternatives with their reasons**, a numbered
 plan, and how to verify it. **Assume the agent who picks it up has none of this

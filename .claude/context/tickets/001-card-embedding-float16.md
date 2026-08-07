@@ -2,8 +2,11 @@
 
 ```
 status:   open
+kind:     optimization
+source:   /optimization-sweep research pass (Step 7)
+issue:    #2
 axis:     storage
-found:    2026-08-07, /optimization-sweep research pass (Step 7)
+found:    2026-08-07
 saving:   38.0 MB of vision.db (104.3 MB -> ~66 MB); 38 MB of RAM per loaded index
 risk:     medium — changes a stored binary format; needs a migration + a marker
 ```

@@ -88,11 +88,20 @@ Keep it tight. This is a working document.
 
 Do not edit anything yet. Let the user confirm or adjust the plan.
 
-Once they approve, work the steps in order, then close out per the dossier's
+Once they approve, either **work it** or **file it** — not neither.
+
+**Working it now:** the steps in order, then close out per the dossier's
 **Definition of done**: `ruff format .`, `ruff check .`, the full suite with
 `QT_QPA_PLATFORM=offscreen`, an ADR in `docs/decisions.md` if the decision was
-significant, `CLAUDE.md` status if a milestone moved, commit to `main`, rebuild
-the exe.
+significant, `CLAUDE.md` status if a milestone moved. Then a branch and a PR —
+this repo moved off direct-to-`main` on 2026-08-07 — and rebuild the exe after
+merge.
+
+**Not working it now:** file the brief as a ticket via `/sdd-ticket`, `kind:
+feature` or `fix`. The brief is already the right shape for one — the blast-radius
+table is the area of impact, the numbered steps are the plan, and the open
+questions are what blocks it. An agreed plan that is only in a transcript is a
+plan that gets re-derived from scratch, dossier and all.
 
 ## Maintaining the map
 
