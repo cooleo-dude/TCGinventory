@@ -27,7 +27,7 @@ TICKETS = REPO / ".claude" / "context" / "tickets"
 README = TICKETS / "README.md"
 GH_FALLBACK = Path(r"C:\Program Files\GitHub CLI\gh.exe")
 
-STATUSES = ("open", "in-progress", "done", "dropped")
+STATUSES = ("open", "in-progress", "deferred", "done", "dropped")
 KINDS = ("optimization", "dead-code", "feature", "fix")
 REQUIRED = ("status", "kind", "source", "issue", "axis", "found", "saving", "risk")
 

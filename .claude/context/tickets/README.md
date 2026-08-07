@@ -40,9 +40,13 @@ now. The ticket is what the branch, the pull request and the commit point back
 at.
 
 Everything else — minimal impact, an alternative worth weighing, a `none` result
-— goes to the user in the skill's report and no further. If the user declines it,
-it belongs in
-`../../skills/optimization-sweep/references/declined.md`, not here.
+— goes to the user in the skill's report and no further.
+
+**Declined is not the same as worthless.** A finding the user has said "not now"
+to, but which is real and measured, is filed as `deferred` so it stays visible
+and re-openable; `declined.md` keeps the reasoning and the reopening condition.
+A finding that measurement *killed* is not a ticket at all — it is a permanent
+result and lives only in `declined.md`.
 
 ## Format
 
@@ -68,6 +72,7 @@ plan, and how to verify.
 | status | meaning |
 |---|---|
 | `open` | ready to implement |
+| `deferred` | real and measured, but the user has said not now — carries the condition that reopens it |
 | `in-progress` | someone is on it — say who and when |
 | `done` | landed; record the commit, the PR and the measured after |
 | `dropped` | abandoned; say why, and mirror it into `declined.md` |
@@ -82,3 +87,6 @@ record of why the code looks the way it does.
 | [001](001-card-embedding-float16.md) | Store card embeddings as float16 | optimization | #2 | `open` |
 | [002](002-enumerate-the-rule-registry.md) | Enumerate the rule registry to full coverage | feature | #7 | `open` |
 | [003](003-gate-binds-verdict-to-the-wrong-commit.md) | The review gate binds a verdict to the checkout, not to what is being merged | fix | #10 | `open` |
+| [004](004-recognition-prewarm-costs-112mb-at-startup.md) | Recognition prewarm holds 112 MB at startup for everyone | optimization | #12 | `deferred` |
+| [005](005-card-image-cache-is-2.2gb-of-png.md) | The card image cache is 2.2 GB of PNG | optimization | #13 | `deferred` |
+| [006](006-sub-threshold-optimizations.md) | Two measured optimizations that are real and too small to ship | optimization | #14 | `deferred` |
