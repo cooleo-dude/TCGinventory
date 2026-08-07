@@ -42,6 +42,10 @@ class DetectorSummary:
     runs: list[dict]
     epochs: list[dict]
     state: str  # 'served' | 'stale' | 'none'
+    # A later run that did see the whole corpus but scored worse, so it was not
+    # promoted. Without this the screen keeps saying "stale" after a retrain and
+    # you click Retrain forever.
+    declined: dict | None = None
 
     @property
     def unseen_images(self) -> int:
@@ -212,6 +216,15 @@ def detector_summary(repo, runs) -> DetectorSummary:
         if drifted >= STALE_IMAGE_DRIFT
         else "served"
     )
+    # The newest finished run, when it is not the one being served.
+    declined = None
+    for row in history:
+        if row["status"] != "ok" or row["promoted"]:
+            continue
+        if current is not None and row["id"] > current["id"]:
+            declined = row
+        break
+
     return DetectorSummary(
         installed=status.installed,
         version=status.version,
@@ -224,6 +237,7 @@ def detector_summary(repo, runs) -> DetectorSummary:
         runs=history,
         epochs=epochs,
         state=state,
+        declined=declined,
     )
 
 

@@ -44,6 +44,11 @@ def train_detector(_conn) -> str:
             job.command,
             capture_output=True,
             text=True,
+            # utf-8 explicitly: the default decodes as the console codepage
+            # (cp1252 here), and one byte outside it kills the reader thread
+            # and takes the whole of the worker's output with it.
+            encoding="utf-8",
+            errors="replace",
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if proc.returncode != 0:
@@ -116,6 +121,11 @@ def build_training_env(_conn, flavour: str = "cpu") -> str:
             argv,
             capture_output=True,
             text=True,
+            # utf-8 explicitly: the default decodes as the console codepage
+            # (cp1252 here), and one byte outside it kills the reader thread
+            # and takes the whole of the worker's output with it.
+            encoding="utf-8",
+            errors="replace",
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if proc.returncode != 0:

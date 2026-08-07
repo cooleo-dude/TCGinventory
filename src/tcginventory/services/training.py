@@ -393,6 +393,11 @@ def probe_training_env(python: str | None = None) -> TrainingEnv:
             [candidate, "-c", "import ultralytics;print(ultralytics.__version__)"],
             capture_output=True,
             text=True,
+            # utf-8 explicitly: the default decodes as the console codepage
+            # (cp1252 here), and one byte outside it kills the reader thread
+            # and takes the whole of the worker's output with it.
+            encoding="utf-8",
+            errors="replace",
             timeout=180,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )

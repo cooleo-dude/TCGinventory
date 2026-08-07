@@ -32,7 +32,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
     conn = connect(":memory:")
     migrate(conn)
-    vision = open_vision(":memory:")
+    # A real file under the tmp data dir, not ":memory:": the view opens and
+    # closes its own vision connection on every refresh, exactly as it does in
+    # the app, and a shared in-memory handle would be dead after the first one.
+    vision = open_vision()
     yield conn, VisionRepository(vision), ModelRunRepository(vision), tmp_path
     conn.close()
     vision.close()
@@ -351,8 +354,6 @@ def test_the_environment_section_offers_a_switch_once_one_is_installed(
     """Building and switching are the same environment from opposite sides —
     with one in place there is nothing to *build*, only something to swap."""
     conn, repo, _runs, _tmp = env
-    vision = repo.conn
-    monkeypatch.setattr("tcginventory.data.vision.open_vision", lambda *a, **k: vision)
     _install_fake_env(tmp_path)
 
     summary = ms.environment_summary()
@@ -363,8 +364,6 @@ def test_the_environment_section_offers_a_switch_once_one_is_installed(
 
 def test_an_absent_environment_reads_as_not_set_up(app, env, monkeypatch):
     conn, repo, _runs, _tmp = env
-    vision = repo.conn
-    monkeypatch.setattr("tcginventory.data.vision.open_vision", lambda *a, **k: vision)
 
     summary = ms.environment_summary()
     assert not summary.ready  # nothing installed in this tmp data dir
@@ -386,8 +385,6 @@ def test_the_screen_refuses_to_train_without_an_environment(app, env, monkeypatc
     """Training the detector needs the interpreter; saying so beats a failure
     twenty seconds into a background job."""
     conn, repo, _runs, _tmp = env
-    vision = repo.conn
-    monkeypatch.setattr("tcginventory.data.vision.open_vision", lambda *a, **k: vision)
 
     from PySide6.QtWidgets import QMessageBox
 
@@ -406,3 +403,145 @@ def test_the_screen_refuses_to_train_without_an_environment(app, env, monkeypatc
     assert not started, "no job should start without an environment"
     assert told and "environment" in told[0].lower()
     view.deleteLater()
+
+
+# -- feedback while a job runs -----------------------------------------------
+
+
+def _view(conn, repo=None, monkeypatch=None):
+    """The screen, reading the tmp data dir like the real one reads yours."""
+    from tcginventory.ui.views.models import ModelsView
+
+    return ModelsView(conn)
+
+
+def _actions(view):
+    from PySide6.QtWidgets import QPushButton
+
+    return [b for b in view.findChildren(QPushButton) if b.property("action")]
+
+
+def test_a_running_job_is_visible_and_locks_the_other_buttons(app, env, monkeypatch):
+    """Training the detector takes minutes on a worker thread. Without this the
+    screen looks identical before and after the click, which reads as a button
+    that does nothing — which is exactly how it was first reported."""
+    from PySide6.QtWidgets import QFrame
+
+    conn, repo, _runs, _tmp = env
+    view = _view(conn, repo, monkeypatch)
+    assert any(b.isEnabled() for b in _actions(view))
+
+    view._running = "models.detector.train"
+    view.refresh()
+
+    assert not any(b.isEnabled() for b in _actions(view))
+    assert [f for f in view.findChildren(QFrame) if f.property("tone") == "busy"]
+
+    view._running = None
+    view.refresh()
+    assert any(b.isEnabled() for b in _actions(view))
+    view.deleteLater()
+
+
+def test_starting_a_job_marks_the_screen_busy(app, env, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    conn, repo, _runs, _tmp = env
+    view = _view(conn, repo, monkeypatch)
+    # _task explains itself with a modal when there is nowhere to run a job, and
+    # an unpatched modal blocks the whole run.
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(view, "_db_file", lambda: None)  # no real thread
+
+    view._benchmark_identity()
+    assert view._running is None  # refused: nowhere to run it
+
+    started = {}
+    monkeypatch.setattr(
+        view, "_task", lambda op_id, job: started.setdefault("op", op_id)
+    )
+    view._benchmark_identity()
+    assert started["op"] == "identity.benchmark"
+    view.deleteLater()
+
+
+def test_a_blocked_train_button_says_what_it_wants(app, env, monkeypatch):
+    """A greyed button with no reason is indistinguishable from a broken one."""
+    from PySide6.QtWidgets import QPushButton
+
+    conn, repo, _runs, _tmp = env
+    view = _view(conn, repo, monkeypatch)
+
+    # With no detector installed its button also reads "Train"; the grader's is
+    # the one that explains itself.
+    train = [
+        b for b in view.findChildren(QPushButton) if b.text() == "Train" and b.toolTip()
+    ][0]
+    assert not train.isEnabled()
+    tip = train.toolTip()
+    assert "more graded cards" in tip and "per grade" in tip
+    view.deleteLater()
+
+
+def test_every_job_the_screen_can_start_has_a_banner_of_its_own(app):
+    """A generic "Working…" would leave you guessing which of six jobs is under
+    way, and how long it might take."""
+    from tcginventory.ui.views import models as mv
+
+    started = [
+        "models.detector.train",
+        "models.condition.train",
+        "identity.benchmark",
+        "identity.fit_projection",
+        "identity.index_catalog",
+        "vision.reindex",
+        "models.training_env",
+        "models.training_env_gpu",
+        "models.training_env_remove",
+    ]
+    for op_id in started:
+        banner = mv._running_banner(op_id)
+        labels = [
+            child.text()
+            for child in banner.children()
+            if hasattr(child, "text") and child.text()
+        ]
+        assert labels, op_id
+        assert "Working" not in labels[0], f"{op_id} falls back to the generic banner"
+
+
+def test_a_retrain_that_lost_is_not_reported_as_more_staleness(env, tmp_path):
+    """Retraining on the full corpus can score *worse* and be refused promotion.
+    Saying "stale" again would send you round the same loop forever, so the
+    screen has to distinguish "never tried" from "tried and it lost"."""
+    _conn, repo, runs, _tmp = env
+    _install_model()
+    _corpus(repo, tmp_path, images=1)
+    served = runs.start(kind=KIND_DETECTOR, corpus_images=1, corpus_boxes=2)
+    runs.finish(served, map50=0.99, map50_95=0.97)
+    runs.promote(served)
+
+    # More photos arrive, and a retrain sees all of them but scores lower.
+    _corpus(repo, tmp_path, images=ms.STALE_IMAGE_DRIFT, card="c-2")
+    loser = runs.start(kind=KIND_DETECTOR, corpus_images=5, corpus_boxes=10)
+    runs.finish(loser, map50=0.98, map50_95=0.95)  # not promoted
+
+    summary = ms.detector_summary(repo, runs)
+    assert summary.state == "stale"  # the served model genuinely is behind
+    assert summary.declined is not None
+    assert summary.declined["id"] == loser
+    assert summary.version == 1  # and the better model is still the one serving
+
+
+def test_no_declined_run_when_the_retrain_won(env, tmp_path):
+    _conn, repo, runs, _tmp = env
+    _install_model()
+    _corpus(repo, tmp_path, images=5)
+    first = runs.start(kind=KIND_DETECTOR, corpus_images=1, corpus_boxes=2)
+    runs.finish(first, map50_95=0.90)
+    runs.promote(first)
+    better = runs.start(kind=KIND_DETECTOR, corpus_images=5, corpus_boxes=10)
+    runs.finish(better, map50_95=0.96)
+    runs.promote(better)
+
+    assert ms.detector_summary(repo, runs).declined is None

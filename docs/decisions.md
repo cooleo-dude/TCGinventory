@@ -1580,3 +1580,41 @@ _Template for new entries:_
   snapshot; it does not before anything is trained. And `QChartView` paints its
   own pale viewport, which framed the dark loss chart in white until it was made
   transparent — `theme.style_chart` handles the chart, not the view around it.
+
+## 2026-08-07 — "The train buttons do not work" — three real defects behind it
+
+- **The wiring was fine.** A click did start the job; the screen simply never
+  said so. `refresh_running` set an attribute and nothing else. Detector
+  training runs for minutes on a worker thread, so the screen was byte-for-byte
+  identical before and after the click — which is indistinguishable from a dead
+  button. There is now a **busy banner** naming the job and roughly how long it
+  takes, with an indeterminate progress bar, and every action disables until it
+  finishes.
+- **A disabled button now says why.** Condition's *Train* is gated on the corpus;
+  greyed with no explanation it read as broken. It carries the shortfall:
+  "Needs 13 more graded cards across MP, HP, DMG (8 per grade, over 3 photos)".
+- **`refresh()` left the previous render's widgets parented.** `deleteLater()`
+  defers to the event loop, so a walk over the children could still find last
+  render's buttons — the disable-everything pass would then miss the real ones.
+  They are unparented immediately.
+- **The encoding trap, for the third time in this project.**
+  `subprocess.run(..., text=True)` decodes the trainer's output as the console
+  codepage (cp1252 here); ultralytics emits a byte outside it, the reader thread
+  dies, and *the whole of the worker's stdout is lost* — including the
+  `TCGI_RESULT` line carrying the metrics. All three call sites now pass
+  `encoding="utf-8", errors="replace"`.
+- **Retraining can lose, and the screen used to hide it.** A run on the full
+  corpus scored mAP50-95 **0.95522** against the served model's **0.96996**, so
+  `should_promote` correctly refused it — and the staleness banner, which
+  measures against the *promoted* model, said "stale" again. That is a loop:
+  click Retrain, wait six minutes, get told to retrain. `DetectorSummary.declined`
+  now carries the newer-but-worse run, and the section says so and points at more
+  labelled photos instead.
+- **Verified end to end on a real run** (#11): 100 epochs recorded, and
+  `train_box_loss` holds **100 distinct values** where the validation column
+  still repeats at 75 — the per-epoch fix works on live data, and the chart has
+  its full four lines.
+- **A performance worry that was not real:** `environment_summary()` looked
+  expensive (it probes ultralytics, torch/CUDA and `nvidia-smi`, and reads the
+  environment's size) but measures 0.82s cold and 0.07s warm, because `training`
+  already caches its probes. No change made.

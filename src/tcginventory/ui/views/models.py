@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -90,11 +91,23 @@ def _pill(text: str, state: str) -> QLabel:
     return label
 
 
-def _button(text: str, on_click, *, primary: bool = False, enabled: bool = True):
+def _button(
+    text: str,
+    on_click,
+    *,
+    primary: bool = False,
+    enabled: bool = True,
+    why: str = "",
+):
+    """An action. ``why`` explains a disabled one — a greyed button with no
+    reason is indistinguishable from a broken one."""
     btn = QPushButton(text)
     btn.setObjectName("mdPrimary" if primary else "mdBtn")
-    btn.setCursor(Qt.PointingHandCursor)
+    btn.setCursor(Qt.PointingHandCursor if enabled else Qt.ForbiddenCursor)
     btn.setEnabled(enabled)
+    btn.setProperty("action", True)
+    if why:
+        btn.setToolTip(why)
     btn.clicked.connect(on_click)
     return btn
 
@@ -531,6 +544,9 @@ class ModelsView(QWidget):
         row.addWidget(self._scroll, 1)
 
         self._sections: list[_Section] = []
+        # The op_id of the job in flight, if any. Training the detector takes
+        # minutes, so the screen has to say so — silence reads as a dead button.
+        self._running: str | None = None
         self.refresh()
 
     # -- rendering ----------------------------------------------------------
@@ -542,8 +558,6 @@ class ModelsView(QWidget):
         the history, the staleness, the corpus feed and the chart at once, and
         the screen is a few dozen widgets.
         """
-        if self._workers:
-            return  # mid-run: the running state is on screen and should stay
         from tcginventory.data.vision import (
             ModelRunRepository,
             VisionRepository,
@@ -554,6 +568,10 @@ class ModelsView(QWidget):
             item = self._col.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # Unparent before deleteLater: deletion waits for the event loop,
+                # and until it runs the old widgets are still in the tree — so a
+                # walk over the children would find last render's buttons too.
+                widget.setParent(None)
                 widget.deleteLater()
         self._sections = []
 
@@ -571,6 +589,9 @@ class ModelsView(QWidget):
         heading.addWidget(title)
         heading.addWidget(sub)
         self._col.addWidget(head)
+
+        if self._running:
+            self._col.addWidget(_running_banner(self._running))
 
         vision = None
         try:
@@ -604,6 +625,13 @@ class ModelsView(QWidget):
         for section in self._sections:
             self._nav.addItem(section.property("navLabel"))
         self._nav.show_current(0)
+
+        if self._running:
+            # One job at a time: they share the corpus, the run log and the GPU.
+            for button in self.findChildren(QPushButton):
+                if button.property("action"):
+                    button.setEnabled(False)
+                    button.setToolTip("Another job is running")
 
     def _section(self, key: str, label: str, nav: str | None = None) -> _Section:
         section = _Section(key, label)
@@ -673,7 +701,12 @@ class ModelsView(QWidget):
             )
         card.actions(
             [
-                _button("Train", self._train_condition, enabled=condition.ok),
+                _button(
+                    "Train",
+                    self._train_condition,
+                    enabled=condition.ok,
+                    why=_gate_reason(condition),
+                ),
                 _button("What's missing?", lambda: self._jump_key("model_condition")),
             ]
         )
@@ -715,7 +748,23 @@ class ModelsView(QWidget):
 
     def _regions(self, detector, env) -> None:
         section = self._section("model_regions", "Region detection")
-        if detector.unseen_images:
+        if detector.unseen_images and detector.declined:
+            # Retraining already happened and lost. Saying "stale" again would
+            # send you round the same loop.
+            declined = detector.declined
+            section.body.addWidget(
+                _banner(
+                    f"<b>A newer run has already seen the whole corpus, and it "
+                    f"scored lower.</b> Run #{declined['id']} reached mAP50-95 "
+                    f"{_pct(declined['map50_95'])} against the served model's "
+                    f"{detector.metrics[1].value}, so it was not promoted — "
+                    f"v{detector.version} is still the better model. Training "
+                    "again will not change that; more labelled photos will.",
+                    _button("Train anyway", self._train_detector),
+                    tone="calm",
+                )
+            )
+        elif detector.unseen_images:
             section.body.addWidget(
                 _banner(
                     f"<b>Trained on a smaller corpus than you have.</b> "
@@ -795,7 +844,15 @@ class ModelsView(QWidget):
         row = QHBoxLayout(buttons)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(7)
-        row.addWidget(_button("Train", self._train_condition, enabled=condition.ok))
+        row.addWidget(
+            _button(
+                "Train",
+                self._train_condition,
+                enabled=condition.ok,
+                primary=condition.ok,
+                why=_gate_reason(condition),
+            )
+        )
         if not condition.ok:
             hint = QLabel(
                 f"{condition.cards_needed} more cards across "
@@ -1143,13 +1200,11 @@ class ModelsView(QWidget):
         self._workers[op_id] = worker
         worker.done.connect(lambda payload, oid=op_id: self._finished(oid, payload))
         worker.start()
-        self.refresh_running(op_id)
-
-    def refresh_running(self, op_id: str) -> None:
-        """Say which job is in flight, since a rebuild would wipe the buttons."""
-        self._banner_for_running = op_id
+        self._running = op_id
+        self.refresh()
 
     def _finished(self, op_id: str, payload) -> None:
+        self._running = None
         worker = self._workers.pop(op_id, None)
         if worker is not None:
             worker.deleteLater()
@@ -1185,6 +1240,79 @@ def _gpu_ready() -> bool:
     from tcginventory.services import training
 
     return bool(_gpu()) and training.training_env_summary().ready
+
+
+def _gate_reason(condition) -> str:
+    """Why the grader cannot be trained yet, in one line on the button."""
+    if condition.ok:
+        return ""
+    short = ", ".join(c.grade for c in condition.coverage if not c.ok)
+    return (
+        f"Needs {condition.cards_needed} more graded cards across {short} "
+        f"({condition.min_cards} per grade, over {condition.min_images} photos)"
+    )
+
+
+def _running_banner(op_id: str) -> QFrame:
+    """Say a job is under way, and roughly how long to expect.
+
+    Training the detector runs for minutes on a worker thread. Without this the
+    screen looks identical before and after the click, which reads as a button
+    that does nothing.
+    """
+    titles = {
+        "models.detector.train": (
+            "Training the region detector",
+            "Runs in the background — a few minutes. The screen updates when it "
+            "finishes.",
+        ),
+        "models.condition.train": (
+            "Training the condition grader",
+            "Fitting over the graded cards. This is quick.",
+        ),
+        "identity.benchmark": (
+            "Benchmarking identification",
+            "Scoring every labelled crop against the whole index, layer by layer.",
+        ),
+        "identity.fit_projection": (
+            "Fitting photo matching",
+            "Reading catalog art and measuring the gap to a photograph — a few "
+            "minutes.",
+        ),
+        "identity.index_catalog": (
+            "Indexing the catalog",
+            "Downloading and embedding card art. It can be stopped and resumed.",
+        ),
+        "vision.reindex": ("Re-indexing labelled crops", "Re-embedding the corpus."),
+        "models.training_env": (
+            "Building the training environment",
+            "Downloading the training stack.",
+        ),
+        "models.training_env_gpu": (
+            "Building the GPU training environment",
+            "Downloading CUDA-enabled torch — this is a large download.",
+        ),
+        "models.training_env_remove": ("Removing the training environment", ""),
+    }
+    title, detail = titles.get(op_id, ("Working", ""))
+
+    frame = QFrame()
+    frame.setObjectName("mdBanner")
+    frame.setProperty("tone", "busy")
+    col = QVBoxLayout(frame)
+    col.setContentsMargins(13, 11, 13, 12)
+    col.setSpacing(7)
+    label = QLabel(f"<b>{title}…</b>" + (f"  {detail}" if detail else ""))
+    label.setObjectName("mdBannerText")
+    label.setWordWrap(True)
+    col.addWidget(label)
+    bar = QProgressBar()
+    bar.setObjectName("mdProgress")
+    bar.setRange(0, 0)  # indeterminate: none of these report a percentage
+    bar.setTextVisible(False)
+    bar.setFixedHeight(5)
+    col.addWidget(bar)
+    return frame
 
 
 def _banner(text: str, action, tone: str = "warn") -> QFrame:
@@ -1271,6 +1399,10 @@ def _qss(t: theme.Tokens) -> str:
         background: {t.surface2}; }}
     #mdBanner[tone="warn"] {{ border-color: {t.warn};
         background: {_tint(t.warn, 0.10)}; }}
+    #mdBanner[tone="busy"] {{ border-color: {t.accent};
+        background: {t.accent_soft}; }}
+    #mdProgress {{ border: none; border-radius: 3px; background: {t.line2}; }}
+    #mdProgress::chunk {{ background: {t.accent}; border-radius: 3px; }}
     #mdBannerText {{ color: {t.ink}; font-size: 11.5px; }}
 
     #mdFacts {{ background: {t.line}; border: 1px solid {t.line};
