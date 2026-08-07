@@ -369,10 +369,45 @@ def benchmark_identity(conn) -> str:
         # for that layer is the leave-one-capture-out one from the fit itself.
         in_sample = _projection_used_the_corpus(runs)
 
+        from tcginventory.services import fitness
+
+        # Identity has no single artifact to promote — it is an encoder plus three
+        # corrections, any of which can change under it. What a version pins is
+        # therefore the *measurement*: the benchmark this one has to be judged
+        # against. Without it every identity run was promoted=0 and
+        # current_model('identity') was always None, so a change that halved top-1
+        # would have passed in silence (2026-08-07).
+        score = fitness.identity_fitness(final.top1, final.top5)
+        incumbent = runs.current_model(KIND_IDENTITY, source="benchmark")
+        # A hundred-odd labelled crops put a wide error bar on any single figure:
+        # at 58 queries the standard error of a 45% top-1 is about 6.5 points, so
+        # two benchmarks inside that band are the same benchmark.
+        floor = fitness.binomial_noise(final.top1, final.queries)
+        was = {}
+        if incumbent is not None:
+            try:
+                was = json.loads(incumbent["metrics_json"] or "{}")
+            except (ValueError, TypeError):  # pragma: no cover - corrupt payload
+                was = {}
+        verdict = fitness.compare(
+            score,
+            incumbent["fitness"] if incumbent else None,
+            floor=floor,
+            candidate_data=final.queries,
+            incumbent_data=int(was.get("queries") or 0),
+        )
         payload = json.loads(final.as_json())
         payload["layers"] = {name: r.top1 for name, r in results.items()}
         payload["layers_top5"] = {name: r.top5 for name, r in results.items()}
         payload["in_sample_from"] = "projection" if in_sample else None
+        payload["verdict"] = verdict.reason
+        payload["margin"] = verdict.margin
+        payload["noise_floor"] = floor
+        # A regression is the thing this gate exists to catch: materially worse
+        # than the benchmark in use, not merely unlucky.
+        payload["regressed"] = bool(
+            incumbent is not None and verdict.margin < -floor and not verdict.promote
+        )
         runs.finish(
             run_id,
             status="ok",
@@ -380,11 +415,17 @@ def benchmark_identity(conn) -> str:
             map50_95=final.top5,
             precision=final.mrr,
             recall=1.0 - (final.wrong_printing / max(1, final.queries)),
+            fitness=score,
             metrics_json=json.dumps(payload),
             notes=final.summary,
         )
+        if verdict.promote:
+            runs.promote(run_id)
+
         gain = final.top1 - results["encoder"].top1
         line = f"{final.summary} · the stack is worth {gain:+.0%} over the encoder"
+        if payload["regressed"]:
+            line += f" · ⚠ down on the benchmark in use — {verdict.reason}"
         if in_sample:
             line += " (photo matching was fitted on these crops — in-sample)"
         return line

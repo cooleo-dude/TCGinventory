@@ -34,7 +34,7 @@ from tcginventory.data.vision import (
     ModelRunRepository,
     VisionRepository,
 )
-from tcginventory.services import detector
+from tcginventory.services import detector, fitness
 from tcginventory.services.detector_dataset import export_yolo_dataset
 
 # A box is fingerprinted at this precision — enough that nudging a box by a pixel
@@ -96,6 +96,9 @@ class DetectorStatus:
     recall: float | None
     last_status: str | None  # last attempt's outcome, even if not promoted
     last_notes: str | None
+    # The corpus the newest *finished* run saw, promoted or not. Staleness is
+    # measured against this rather than against ``trained_on`` — see ``stale``.
+    evaluated_on: CorpusSnapshot | None = None
 
     @property
     def never_trained(self) -> bool:
@@ -117,21 +120,36 @@ class DetectorStatus:
         return (datetime.now(timezone.utc) - stamp).total_seconds() / 86400
 
     @property
+    def baseline(self) -> CorpusSnapshot | None:
+        """The corpus that training has already been *given a look at*.
+
+        The newest finished run, whether or not it was promoted. A run that saw
+        every photo and then lost on score still saw every photo, so there is
+        nothing left to show it — and measuring staleness against the promoted
+        run instead meant that once a better-fitted model was rejected, the
+        detector was marked stale permanently and Retrain never stopped asking
+        (2026-08-07). Falls back to the promoted run for a log that predates any
+        finished run being recorded.
+        """
+        return self.evaluated_on or self.trained_on
+
+    @property
     def stale(self) -> bool:
-        """True when the corpus has changed since the model was trained."""
-        if self.trained_on is None:
+        """True when the corpus holds labels no training run has seen yet."""
+        base = self.baseline
+        if base is None:
             return self.corpus.trainable  # nothing trained yet, but data waiting
-        return self.trained_on.fingerprint != self.corpus.fingerprint
+        return base.fingerprint != self.corpus.fingerprint
 
     @property
     def new_images(self) -> int:
-        base = self.trained_on.images if self.trained_on else 0
-        return max(0, self.corpus.images - base)
+        base = self.baseline
+        return max(0, self.corpus.images - (base.images if base else 0))
 
     @property
     def new_boxes(self) -> int:
-        base = self.trained_on.boxes if self.trained_on else 0
-        return max(0, self.corpus.boxes - base)
+        base = self.baseline
+        return max(0, self.corpus.boxes - (base.boxes if base else 0))
 
 
 def corpus_snapshot(repo: VisionRepository) -> CorpusSnapshot:
@@ -166,16 +184,20 @@ def detector_status(
     now = corpus_snapshot(repo)
     current = runs.current_model(KIND_DETECTOR)
     last = runs.last_run(KIND_DETECTOR)
+    finished = runs.last_finished(KIND_DETECTOR)
     model = detector.yolo_model_path()
 
-    trained_on = None
-    if current is not None:
-        trained_on = CorpusSnapshot(
-            images=int(current["corpus_images"] or 0),
-            boxes=int(current["corpus_boxes"] or 0),
-            cards=int(current["corpus_cards"] or 0),
-            fingerprint=current["corpus_fingerprint"] or "",
+    def snapshot_of(row) -> CorpusSnapshot | None:
+        if row is None:
+            return None
+        return CorpusSnapshot(
+            images=int(row["corpus_images"] or 0),
+            boxes=int(row["corpus_boxes"] or 0),
+            cards=int(row["corpus_cards"] or 0),
+            fingerprint=row["corpus_fingerprint"] or "",
         )
+
+    trained_on = snapshot_of(current)
     return DetectorStatus(
         installed=model is not None,
         model_path=str(model) if model else None,
@@ -183,6 +205,7 @@ def detector_status(
         trained_at=current["finished_at"] if current else None,
         trained_on=trained_on,
         corpus=now,
+        evaluated_on=snapshot_of(finished),
         map50=current["map50"] if current else None,
         map50_95=current["map50_95"] if current else None,
         precision=current["precision"] if current else None,
@@ -195,24 +218,99 @@ def detector_status(
 def should_promote(
     candidate: float | None, incumbent: float | None, *, margin: float = 0.0
 ) -> bool:
-    """Whether a new model should replace the one in use.
+    """Whether one score beats another by more than ``margin``.
 
-    Compares mAP50-95. **A first model always wins** — there is nothing to lose
-    against, and an unscored model in hand still beats no model at all. Against
-    an incumbent an unmeasured candidate never wins: with no score there is no
-    evidence it is an improvement, and the model in use is known-good.
-    ``margin`` demands a real gain rather than noise.
+    The bare score comparison, kept because two rules in it are hard-won. **A
+    first model always wins** — there is nothing to lose against, and an unscored
+    model in hand still beats no model at all. Against an incumbent an unmeasured
+    candidate never wins: with no score there is no evidence it is an
+    improvement, and the model in use is known-good.
 
     The order of those two rules matters. It used to be the other way round, so
     a *first* model whose metrics could not be read lost to nothing at all: the
     artifact was installed and in use while the run log recorded no version, and
     the Operations window called a working detector "never run" (2026-08-06).
+
+    Training does **not** decide with this — see :func:`promotion_verdict`, which
+    also weighs how the two scores were measured and how much of the difference
+    is noise. This remains the primitive underneath it.
     """
-    if incumbent is None:
-        return True
-    if candidate is None:
-        return False
-    return candidate >= incumbent + margin
+    return fitness.compare(candidate, incumbent, floor=margin).promote
+
+
+def promotion_verdict(
+    runs: ModelRunRepository,
+    *,
+    epochs: list[dict],
+    metrics: dict,
+    corpus_images: int,
+    split_policy: str | None,
+    baseline: dict | None = None,
+    margin: float = 0.0,
+) -> tuple[fitness.Verdict, float | None]:
+    """Decide whether this run replaces the detector in use, and say why.
+
+    Returns the verdict and the candidate's fitness. Three things feed it that
+    the old mAP50-95 comparison ignored:
+
+    * **what "better" means** — a weighted score over recall, precision and both
+      mAP thresholds, rather than mAP50-95 alone (which above 0.75 IoU is scoring
+      how tightly the boxes were drawn by hand);
+    * **how much of a gap is noise** — measured from this run's own last epochs,
+      which are near-identical models on an identical split;
+    * **whether the two numbers describe the same exam** — a ``baseline`` is the
+      incumbent re-scored on *this* run's validation split, which is the only
+      strictly like-for-like comparison available. Without one, runs from
+      different split policies are held to be incomparable and the corpus
+      decides.
+    """
+    candidate = fitness.detector_fitness(metrics)
+    incumbent_row = runs.current_model(KIND_DETECTOR)
+    floor = max(fitness.tail_noise(epochs), margin)
+
+    if baseline:
+        # The incumbent, re-measured on the very images this run was scored on.
+        # Nothing else needs to line up for this to be a fair fight.
+        return (
+            fitness.compare(
+                candidate,
+                fitness.detector_fitness(baseline),
+                floor=floor,
+                candidate_data=corpus_images,
+                incumbent_data=corpus_images,
+                like_for_like=True,
+            ),
+            candidate,
+        )
+
+    incumbent = None
+    incumbent_images = 0
+    like_for_like = True
+    if incumbent_row is not None:
+        incumbent = incumbent_row["fitness"]
+        if incumbent is None:
+            # A run recorded before fitness existed: rebuild it from the columns.
+            incumbent = fitness.detector_fitness(
+                {
+                    "map50": incumbent_row["map50"],
+                    "map50_95": incumbent_row["map50_95"],
+                    "precision": incumbent_row["precision"],
+                    "recall": incumbent_row["recall"],
+                }
+            )
+        incumbent_images = int(incumbent_row["corpus_images"] or 0)
+        like_for_like = fitness.comparable(split_policy, incumbent_row["split_policy"])
+    return (
+        fitness.compare(
+            candidate,
+            incumbent,
+            floor=floor,
+            candidate_data=corpus_images,
+            incumbent_data=incumbent_images,
+            like_for_like=like_for_like,
+        ),
+        candidate,
+    )
 
 
 def sha256_file(path: str | Path, chunk: int = 1 << 20) -> str:
@@ -274,6 +372,24 @@ def best_epoch(epochs: list[dict], key: str = "map50_95") -> dict | None:
     (ultralytics exports ``best.pt``, not the last epoch)."""
     scored = [e for e in epochs if e.get(key) is not None]
     return max(scored, key=lambda e: e[key]) if scored else None
+
+
+def representative_epoch(epochs: list[dict]) -> dict | None:
+    """The epoch whose metrics best describe what this run produced.
+
+    Picked on the composite fitness rather than on mAP50-95, because that is what
+    the promotion gate judges and reporting one number while deciding on another
+    is how a model gets rejected for a reason the screen never showed.
+
+    A caveat worth keeping in view: ultralytics exports ``best.pt`` by *its* own
+    fitness (0.1·mAP50 + 0.9·mAP50-95), so on a run where the two disagree the
+    artifact is a near neighbour of this epoch rather than this epoch exactly.
+    Near convergence they are the same model to within the noise
+    :func:`fitness.tail_noise` measures, which is why the gate works in that unit.
+    """
+    scored = [(fitness.detector_fitness(e), e) for e in epochs]
+    ranked = [(f, e) for f, e in scored if f is not None]
+    return max(ranked, key=lambda pair: pair[0])[1] if ranked else None
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +544,8 @@ class TrainingJob:
     val_images: int
     boxes: int
     out_path: Path
+    split_policy: str | None = None
+    corpus_images: int = 0
 
 
 def prepare_detector_training(
@@ -486,6 +604,7 @@ def prepare_detector_training(
         imgsz=imgsz,
         val_frac=val_frac,
         split_seed=seed,
+        split_policy=summary.policy,
     )
     command = [
         str(env.python),
@@ -505,6 +624,13 @@ def prepare_detector_training(
         "--name",
         f"run{run_id}",
     ]
+    # Hand the worker the model currently in use so it can re-score it on *this*
+    # run's validation split. That turns promotion from "compare two numbers from
+    # two different exams" into one measurement against another, which is the only
+    # comparison that was ever sound.
+    baseline = incumbent_artifact(runs)
+    if baseline is not None:
+        command += ["--baseline", str(baseline)]
     return TrainingJob(
         run_id=run_id,
         command=command,
@@ -514,7 +640,18 @@ def prepare_detector_training(
         val_images=summary.val,
         boxes=summary.boxes,
         out_path=out,
+        split_policy=summary.policy,
+        corpus_images=snapshot.images,
     )
+
+
+def incumbent_artifact(runs: ModelRunRepository) -> Path | None:
+    """The promoted detector's model file, when it is still on disk."""
+    current = runs.current_model(KIND_DETECTOR)
+    if current is None or not current["artifact_path"]:
+        return None
+    path = Path(current["artifact_path"])
+    return path if path.is_file() else None
 
 
 def parse_worker_result(output: str) -> dict:
@@ -569,6 +706,8 @@ def complete_detector_training(
     force_promote: bool = False,
 ) -> TrainingOutcome:
     """Record a finished run: metrics, artifact, and the promotion decision."""
+    import json
+
     result = parse_worker_result(worker_output)
     onnx = Path(result.get("onnx") or job.out_path)
 
@@ -577,10 +716,18 @@ def complete_detector_training(
     if csv_path is not None:
         epochs = parse_results_csv(csv_path)
         runs.add_epochs(job.run_id, epochs)
-    best = best_epoch(epochs) or {}
+    best = representative_epoch(epochs) or best_epoch(epochs) or {}
+    baseline = result.get("baseline") or None
 
-    incumbent = runs.current_model(KIND_DETECTOR)
-    incumbent_score = incumbent["map50_95"] if incumbent else None
+    verdict, score = promotion_verdict(
+        runs,
+        epochs=epochs,
+        metrics=best,
+        corpus_images=job.corpus_images,
+        split_policy=job.split_policy,
+        baseline=baseline,
+        margin=promote_margin,
+    )
 
     runs.finish(
         job.run_id,
@@ -592,23 +739,36 @@ def complete_detector_training(
         precision=best.get("precision"),
         recall=best.get("recall"),
         best_epoch=best.get("epoch"),
+        fitness=score,
         artifact_path=str(onnx),
         artifact_sha256=sha256_file(onnx) if onnx.is_file() else None,
         artifact_bytes=onnx.stat().st_size if onnx.is_file() else None,
+        metrics_json=json.dumps(
+            {
+                "verdict": verdict.reason,
+                "margin": verdict.margin,
+                "noise_floor": verdict.floor,
+                "comparable": verdict.comparable,
+                # The incumbent as re-measured on this run's own val split, when
+                # the worker was able to score it. This is what makes the two
+                # numbers in the window mean the same thing.
+                "baseline": baseline,
+                "baseline_fitness": fitness.detector_fitness(baseline)
+                if baseline
+                else None,
+            }
+        ),
         notes=f"{len(epochs)} epochs recorded",
     )
 
     # Nothing to put to work if the run produced no file, whatever it scored.
     have_artifact = onnx.is_file()
-    promote = have_artifact and (
-        force_promote
-        or should_promote(best.get("map50_95"), incumbent_score, margin=promote_margin)
-    )
+    promote = have_artifact and (force_promote or verdict.promote)
     version = runs.promote(job.run_id) if promote else None
     if promote:
         summary = f"Trained detector v{version}"
-        if best.get("map50_95") is not None:
-            summary += f" — mAP50-95 {best['map50_95']:.3f}"
+        if score is not None:
+            summary += f" — fitness {score:.3f}, {verdict.reason}"
         else:
             # Promoted on faith: say so, because the accuracy trend will have a
             # gap where this model's score should be.
@@ -616,10 +776,7 @@ def complete_detector_training(
     elif not have_artifact:
         summary = "No model file was produced — nothing to promote"
     else:
-        summary = (
-            f"Not promoted — mAP50-95 {best.get('map50_95')} does not beat the "
-            f"model in use ({incumbent_score})"
-        )
+        summary = f"Not promoted — {verdict.reason}"
     return TrainingOutcome(
         run_id=job.run_id,
         promoted=promote,

@@ -293,17 +293,34 @@ def train_condition_model(
         runs.finish(run_id, status="failed", notes=str(exc)[:300])
         return ConditionTrainingResult(ok=False, reason=str(exc), samples=len(kept))
 
+    from tcginventory.services import fitness
     from tcginventory.services.training import sha256_file
 
+    # One higher-is-better number, expressed as lift over always-guessing the
+    # commonest grade. Zero means the model learned nothing a constant could not
+    # do; negative means it is worse than that.
+    score = fitness.condition_fitness(
+        metrics.accuracy,
+        metrics.mean_distance,
+        metrics.baseline_accuracy,
+        metrics.baseline_distance,
+    )
     runs.finish(
         run_id,
         status="ok",
         train_images=len(kept),
         val_images=len(np.unique(captures)),
-        precision=metrics.macro_f1,  # the closest column for a shared schema
+        # NOTE: these four columns carry *grader* metrics, not detection ones.
+        # Nothing shared may read them — `fitness` is the comparable number, and
+        # metrics_json holds the rest under its own names. Reading `precision` as
+        # if it were the always-NM baseline is exactly the bug that had the window
+        # announcing a grader "beats guessing" by comparing accuracy against
+        # macro-F1 (2026-08-07).
+        precision=metrics.macro_f1,
         recall=metrics.within_one,
         map50=metrics.accuracy,
-        map50_95=metrics.mean_distance,  # NOTE: lower is better for this kind
+        map50_95=metrics.mean_distance,  # lower is better for this kind
+        fitness=score,
         metrics_json=metrics.as_json(),
         artifact_path=str(out),
         artifact_sha256=sha256_file(out),
@@ -315,11 +332,20 @@ def train_condition_model(
             f"{metrics.baseline_distance:.2f})"
         ),
     )
-    # Promotion compares mean grade distance, where **lower** wins — the opposite
-    # of the detector's mAP, so it can't share should_promote().
+    # A grader that cannot beat guessing must not serve, however it compares with
+    # an earlier grader that also could not. That gate comes first; only then does
+    # a new fit have to improve on the one in use by more than the noise a corpus
+    # this small carries.
     incumbent = runs.current_model(KIND_CONDITION)
-    previous = incumbent["map50_95"] if incumbent else None
-    if previous is None or metrics.mean_distance <= previous:
+    floor = fitness.binomial_noise(metrics.accuracy, metrics.samples)
+    verdict = fitness.compare(
+        score,
+        incumbent["fitness"] if incumbent else None,
+        floor=floor,
+        candidate_data=len(kept),
+        incumbent_data=int(incumbent["corpus_cards"] or 0) if incumbent else 0,
+    )
+    if score is not None and score > 0 and verdict.promote:
         runs.promote(run_id)
     return ConditionTrainingResult(
         ok=True,

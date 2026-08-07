@@ -50,6 +50,41 @@ def _install_model() -> None:
     path.write_bytes(b"not a real onnx, but a real file")
 
 
+def _finish_grader(
+    runs, run_id, *, exact, baseline, macro_f1=0.3, distance=0.8, baseline_distance=1.0
+):
+    """Close a condition run the way ``condition_train`` does.
+
+    Worth a helper because the shared columns carry *grader* metrics here —
+    ``precision`` is macro-F1, ``map50_95`` is mean grade distance where lower
+    wins — and the always-NM baseline lives only in ``metrics_json``. Writing
+    them by hand in each test is how a test can pass while the screen quotes the
+    wrong number.
+    """
+    import json
+
+    from tcginventory.services import fitness
+
+    runs.finish(
+        run_id,
+        map50=exact,
+        map50_95=distance,
+        precision=macro_f1,
+        recall=0.9,
+        fitness=fitness.condition_fitness(exact, distance, baseline, baseline_distance),
+        metrics_json=json.dumps(
+            {
+                "accuracy": exact,
+                "baseline_accuracy": baseline,
+                "mean_distance": distance,
+                "baseline_distance": baseline_distance,
+                "macro_f1": macro_f1,
+                "samples": 63,
+            }
+        ),
+    )
+
+
 def _corpus(repo, tmp_path, images=3, boxes_each=2, card="c-1"):
     from PIL import Image
 
@@ -107,7 +142,11 @@ def test_a_detector_that_has_seen_the_whole_corpus_is_serving(env):
     summary = ms.detector_summary(repo, runs)
     assert summary.state == "served"
     assert summary.unseen_images == 0
-    assert [m.value for m in summary.metrics][:2] == ["99.0%", "95.0%"]
+    # Fitness leads, because it is what the promotion gate judges: recall and
+    # precision weighted above box tightness. 0.4·1.0 + 0.3·0.9 + 0.2·0.99 +
+    # 0.1·0.95 = 0.963.
+    assert [m.label for m in summary.metrics][:2] == ["fitness", "recall"]
+    assert [m.value for m in summary.metrics][:2] == ["96.3%", "100.0%"]
 
 
 def test_a_detector_falls_behind_when_the_corpus_grows(env):
@@ -151,12 +190,29 @@ def test_the_condition_gate_reports_the_shortfall_per_grade(env):
 def test_a_trained_grader_reports_itself_as_serving(env):
     _conn, repo, runs, _tmp = env
     run = runs.start(kind=KIND_CONDITION)
-    runs.finish(run, map50=0.61, precision=0.44)
+    _finish_grader(runs, run, exact=0.61, baseline=0.44)
     runs.promote(run)
 
     summary = ms.condition_summary(repo, runs)
-    assert summary.trained and summary.state == "served"
-    assert [m.value for m in summary.metrics] == ["61.0%", "44.0%"]
+    assert summary.trained and summary.beats_guessing and summary.state == "served"
+    assert [m.label for m in summary.metrics][:2] == ["exact", "always-NM"]
+    assert [m.value for m in summary.metrics][:2] == ["61.0%", "44.0%"]
+
+
+def test_a_grader_no_better_than_guessing_is_not_called_serving(env):
+    """The baseline lives in metrics_json; the `precision` column holds macro-F1.
+    Reading the column instead compared exact accuracy against an unrelated
+    number and announced the difference as beating a constant guess."""
+    _conn, repo, runs, _tmp = env
+    run = runs.start(kind=KIND_CONDITION)
+    _finish_grader(runs, run, exact=0.44, baseline=0.61, macro_f1=0.12)
+    runs.promote(run)
+
+    summary = ms.condition_summary(repo, runs)
+    assert summary.trained and not summary.beats_guessing
+    assert summary.state == "stale"
+    # The quoted baseline is the real one, not the macro-F1 sitting in `precision`.
+    assert [m.value for m in summary.metrics][:2] == ["44.0%", "61.0%"]
 
 
 # -- identity ----------------------------------------------------------------
@@ -510,27 +566,83 @@ def test_every_job_the_screen_can_start_has_a_banner_of_its_own(app):
         assert "Working" not in labels[0], f"{op_id} falls back to the generic banner"
 
 
-def test_a_retrain_that_lost_is_not_reported_as_more_staleness(env, tmp_path):
-    """Retraining on the full corpus can score *worse* and be refused promotion.
-    Saying "stale" again would send you round the same loop forever, so the
-    screen has to distinguish "never tried" from "tried and it lost"."""
+def test_a_retrain_that_lost_leaves_nothing_stale(env, tmp_path):
+    """Regression, 2026-08-07: this is the loop.
+
+    A retrain that sees the whole corpus can still be refused promotion. Drift
+    used to be measured against the *promoted* run, so the moment that happened
+    the detector was marked stale permanently — with a highlighted Retrain beside
+    it — and no amount of retraining could clear it. The real corpus collected
+    five identical runs that way. What the screen owes you here is "there is
+    nothing left to train on", not "stale".
+    """
     _conn, repo, runs, _tmp = env
     _install_model()
     _corpus(repo, tmp_path, images=1)
     served = runs.start(kind=KIND_DETECTOR, corpus_images=1, corpus_boxes=2)
-    runs.finish(served, map50=0.99, map50_95=0.97)
+    runs.finish(served, map50=0.99, map50_95=0.97, precision=0.95, recall=1.0)
     runs.promote(served)
 
     # More photos arrive, and a retrain sees all of them but scores lower.
     _corpus(repo, tmp_path, images=ms.STALE_IMAGE_DRIFT, card="c-2")
     loser = runs.start(kind=KIND_DETECTOR, corpus_images=5, corpus_boxes=10)
-    runs.finish(loser, map50=0.98, map50_95=0.95)  # not promoted
+    runs.finish(loser, map50=0.98, map50_95=0.95, precision=0.94, recall=1.0)
 
     summary = ms.detector_summary(repo, runs)
-    assert summary.state == "stale"  # the served model genuinely is behind
-    assert summary.declined is not None
+    assert summary.state == "served"  # everything labelled has been trained on
+    assert summary.unseen_images == 0  # so there is nothing to retrain *for*
+    assert summary.evaluated_images == 5  # the losing run still saw all five
+    assert summary.declined is not None  # but the screen can still explain itself
     assert summary.declined["id"] == loser
     assert summary.version == 1  # and the better model is still the one serving
+    # The served model *is* older than the corpus, which is worth showing and is
+    # never on its own a reason to retrain.
+    assert summary.behind_images == 4
+
+
+def test_a_run_that_beats_the_served_model_is_worth_promoting(env, tmp_path):
+    """The migration case, and the one the real corpus is in.
+
+    Every run refused under the old mAP50-95 comparison is still in the log, and
+    the best of them beats the serving model on fitness — it lost on box
+    tightness while winning on precision. That is worth a nudge, and unlike the
+    old staleness flag this one clears the moment you retrain.
+    """
+    _conn, repo, runs, _tmp = env
+    _install_model()
+    _corpus(repo, tmp_path, images=3)
+    served = runs.start(kind=KIND_DETECTOR, corpus_images=3, corpus_boxes=6)
+    # v1: perfect recall, loose boxes, five points worse precision.
+    runs.finish(served, map50=0.995, map50_95=0.970, precision=0.949, recall=1.0)
+    runs.promote(served)
+    # The refused run: same recall and mAP50, better precision, tighter-scoring
+    # boxes marginally worse. The old gate compared only the last of those.
+    better = runs.start(kind=KIND_DETECTOR, corpus_images=3, corpus_boxes=6)
+    runs.finish(better, map50=0.995, map50_95=0.955, precision=0.999, recall=1.0)
+
+    summary = ms.detector_summary(repo, runs)
+    assert summary.declined_scored_higher
+    assert summary.declined_fitness > summary.served_fitness
+    assert summary.state == "stale"  # there is something better to be had
+    assert summary.unseen_images == 0  # but not because of unseen labels
+
+
+def test_labels_no_run_has_seen_are_still_stale(env, tmp_path):
+    """The other half of the same rule: drift against the newest *finished* run
+    must still fire when photos land after it."""
+    _conn, repo, runs, _tmp = env
+    _install_model()
+    _corpus(repo, tmp_path, images=1)
+    served = runs.start(kind=KIND_DETECTOR, corpus_images=1, corpus_boxes=2)
+    runs.finish(served, map50=0.99, map50_95=0.97, precision=0.95, recall=1.0)
+    runs.promote(served)
+
+    _corpus(repo, tmp_path, images=ms.STALE_IMAGE_DRIFT, card="c-2")
+
+    summary = ms.detector_summary(repo, runs)
+    assert summary.state == "stale"
+    assert summary.unseen_images == ms.STALE_IMAGE_DRIFT
+    assert summary.declined is None
 
 
 def test_no_declined_run_when_the_retrain_won(env, tmp_path):
@@ -559,29 +671,77 @@ def test_a_promoted_detector_run_says_it_is_now_the_model(env, tmp_path):
     result = ms.run_result(runs, KIND_DETECTOR)
     assert result.outcome == "Promoted as v1" and result.tone == "served"
     assert [m.label for m in result.headline] == [
+        "fitness",
+        "recall",
+        "precision",
         "mAP50",
         "mAP50-95",
-        "precision",
-        "recall",
     ]
     assert "100 epochs on 39 images" in result.lines[0]
-    assert "uses from now on" in result.lines[1]
+    assert "uses from now on" in result.lines[-1]
 
 
-def test_a_losing_run_explains_why_and_what_would_help(env):
-    """The result window is where "not promoted" has to stop being cryptic."""
+def test_a_losing_run_quotes_both_sides_on_the_same_validation_split(env):
+    """The result window is where "not promoted" has to stop being cryptic — and
+    the two numbers it quotes have to be measurements of the same thing.
+
+    Comparing a candidate against the incumbent's *historical* score compared two
+    different exams, because the validation split moved with the corpus. When the
+    run re-scored the incumbent on its own split, that is the figure to show.
+    """
+    import json
+
     _conn, repo, runs, _tmp = env
     served = runs.start(kind=KIND_DETECTOR)
-    runs.finish(served, map50_95=0.97)
+    runs.finish(served, map50=0.99, map50_95=0.97, precision=0.95, recall=1.0)
     runs.promote(served)
     loser = runs.start(kind=KIND_DETECTOR, corpus_images=39, corpus_boxes=152)
-    runs.finish(loser, map50=0.99, map50_95=0.955)
+    runs.finish(
+        loser,
+        map50=0.99,
+        map50_95=0.955,
+        precision=0.90,
+        recall=0.95,
+        fitness=0.941,
+        metrics_json=json.dumps(
+            {
+                "verdict": "it scored -0.020 on fitness, outside the ±0.004 band",
+                "baseline_fitness": 0.961,
+                "noise_floor": 0.004,
+                "comparable": True,
+            }
+        ),
+    )
 
     result = ms.run_result(runs, KIND_DETECTOR)
     assert result.outcome == "Not promoted" and result.tone == "stale"
     reason = " ".join(result.lines)
-    assert "95.5%" in reason and "97.0%" in reason  # both sides of the comparison
-    assert "more labelled photos" in reason
+    assert "94.1%" in reason and "96.1%" in reason  # both sides, one exam
+    assert "like-for-like" in reason
+
+
+def test_a_losing_run_says_when_the_two_scores_were_never_comparable(env):
+    """Runs from before the split was stabilised cannot be compared at all, and
+    the window must say that rather than imply the gap is real."""
+    import json
+
+    _conn, repo, runs, _tmp = env
+    served = runs.start(kind=KIND_DETECTOR)
+    runs.finish(served, map50=0.99, map50_95=0.97, precision=0.95, recall=1.0)
+    runs.promote(served)
+    loser = runs.start(kind=KIND_DETECTOR, corpus_images=9, corpus_boxes=20)
+    runs.finish(
+        loser,
+        map50=0.98,
+        map50_95=0.95,
+        fitness=0.93,
+        metrics_json=json.dumps(
+            {"verdict": "it saw less of the corpus", "comparable": False}
+        ),
+    )
+
+    result = ms.run_result(runs, KIND_DETECTOR)
+    assert "different validation split" in " ".join(result.lines)
 
 
 def test_a_failed_run_is_reported_as_failed(env):
@@ -600,22 +760,37 @@ def test_a_grader_that_loses_to_always_nm_says_so(env):
     window has to say that rather than call it a success."""
     _conn, repo, runs, _tmp = env
     run = runs.start(kind=KIND_CONDITION, corpus_cards=63)
-    runs.finish(run, map50=0.14, precision=0.61)
+    _finish_grader(runs, run, exact=0.14, baseline=0.61, distance=1.4)
 
     result = ms.run_result(runs, KIND_CONDITION)
     assert result.tone == "stale"
-    assert "not better than guessing" in result.outcome
+    assert "no better than guessing" in result.outcome
     assert "thin grades" in " ".join(result.lines)
+    # Both figures, correctly sourced: exact accuracy and the real always-NM rate.
+    assert [m.value for m in result.headline][:2] == ["14.0%", "61.0%"]
 
 
 def test_a_grader_that_beats_the_baseline_is_worth_using(env):
     _conn, repo, runs, _tmp = env
     run = runs.start(kind=KIND_CONDITION, corpus_cards=120)
-    runs.finish(run, map50=0.72, precision=0.61)
+    _finish_grader(runs, run, exact=0.72, baseline=0.61, distance=0.5)
 
     result = ms.run_result(runs, KIND_CONDITION)
     assert result.outcome == "Trained" and result.tone == "served"
     assert "worth using" in " ".join(result.lines)
+
+
+def test_a_grader_is_judged_on_the_baseline_not_on_macro_f1(env):
+    """Regression, 2026-08-07: `precision` on a condition run holds macro-F1, and
+    reading it as the always-NM baseline made this grader "beat guessing" — it
+    was comparing 44% accuracy against an unrelated 12%."""
+    _conn, repo, runs, _tmp = env
+    run = runs.start(kind=KIND_CONDITION, corpus_cards=63)
+    _finish_grader(runs, run, exact=0.44, baseline=0.61, macro_f1=0.12, distance=1.1)
+
+    result = ms.run_result(runs, KIND_CONDITION)
+    assert result.tone == "stale"
+    assert "no better than guessing" in result.outcome
 
 
 def test_the_benchmark_result_carries_the_layers_and_the_caveat(env):

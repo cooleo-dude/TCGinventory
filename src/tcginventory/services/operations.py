@@ -801,7 +801,11 @@ def _catalog_index_status(conn, op: Operation) -> Status:
         from tcginventory.data.vision import VisionRepository
 
         repo = VisionRepository(vision)
-        status = ci.index_status(conn, repo)
+        # Only the reclaim tile reports on the art on disk, and counting it means
+        # a stat per file — two seconds across a full catalog. Every other caller
+        # wants the two counts, which are a pair of COUNT(*)s.
+        wants_archive = op.id == "identity.reclaim"
+        status = ci.index_status(conn, repo, with_archive=wants_archive)
         if op.id == "identity.reclaim":
             if not status.archived:
                 return Status(
@@ -833,10 +837,7 @@ def _catalog_index_status(conn, op: Operation) -> Status:
         return Status(
             f"{status.indexed:,} of {status.catalog:,} cards ({share:.0f}%)",
             state,
-            detail=(
-                f"Indexed for {status.model_version}. Archived art: "
-                f"{status.archive_bytes / 1e9:.2f} GB."
-            ),
+            detail=f"Indexed for {status.model_version}.",
         )
     finally:
         vision.close()

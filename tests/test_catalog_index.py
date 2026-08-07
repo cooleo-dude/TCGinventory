@@ -287,8 +287,12 @@ def test_status_reports_how_much_of_the_catalog_is_searchable(env):
     status = ci.index_status(conn, repo, embedder=emb)
     assert status.catalog == 4
     assert status.indexed == 2
-    assert status.archived == 2 and status.archive_bytes > 0  # the PNG store
     assert not status.complete
+    # Counting the art on disk is a stat per file — 50k of them on a real
+    # catalog, two seconds — so it is opt-in. Only the reclaim tile asks.
+    assert (status.archived, status.archive_bytes) == (0, 0)
+    with_art = ci.index_status(conn, repo, embedder=emb, with_archive=True)
+    assert with_art.archived == 2 and with_art.archive_bytes > 0  # the PNG store
 
 
 # -- the candidate pool ------------------------------------------------------

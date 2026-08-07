@@ -14,7 +14,7 @@ them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 # How far a model may drift from the corpus before the window says so. Retraining
 # is minutes, and a detector that has never seen a third of your photos is the
@@ -35,27 +35,65 @@ class DetectorSummary:
     version: int | None
     metrics: list[Metric]
     trained_at: str | None
-    trained_images: int
+    trained_images: int  # the corpus the *served* model trained on
     trained_boxes: int
     corpus_images: int
     corpus_boxes: int
     runs: list[dict]
     epochs: list[dict]
     state: str  # 'served' | 'stale' | 'none'
+    # What the newest *finished* run saw, promoted or not. Drift is measured
+    # against this: a run that read every photo and then lost on score has still
+    # read every photo, and there is nothing left to show it.
+    evaluated_images: int = 0
+    evaluated_boxes: int = 0
     # A later run that did see the whole corpus but scored worse, so it was not
-    # promoted. Without this the screen keeps saying "stale" after a retrain and
-    # you click Retrain forever.
+    # promoted. Reported so the screen can say why the served model is older than
+    # the newest run, instead of calling it stale and sending you round the loop.
     declined: dict | None = None
+    # Why that run lost, in the gate's own words, and the two comparable scores
+    # behind it. Empty when the served model is the newest run.
+    declined_reason: str = ""
+    declined_fitness: float | None = None
+    served_fitness: float | None = None
 
     @property
     def unseen_images(self) -> int:
         if not self.installed:
             return 0  # nothing has been trained, so nothing is behind
-        return max(0, self.corpus_images - self.trained_images)
+        return max(0, self.corpus_images - self.evaluated_images)
 
     @property
     def unseen_boxes(self) -> int:
-        return max(0, self.corpus_boxes - self.trained_boxes)
+        return max(0, self.corpus_boxes - self.evaluated_boxes)
+
+    @property
+    def behind_images(self) -> int:
+        """How far the *served* model is behind the corpus.
+
+        Distinct from :attr:`unseen_images`, which asks whether there is anything
+        left to train on. This asks how old the model in use is — worth showing,
+        but never a reason to press Retrain on its own.
+        """
+        if not self.installed:
+            return 0
+        return max(0, self.corpus_images - self.trained_images)
+
+    @property
+    def declined_scored_higher(self) -> bool:
+        """A run sitting unpromoted that the current gate would have promoted.
+
+        Every run refused under the old mAP50-95 comparison is still in the log,
+        and on this corpus the best of them beats the serving model on fitness by
+        a point and a half. Retraining now *will* promote it, so the window says
+        so — unlike the old staleness flag, this one clears the moment you act on
+        it.
+        """
+        if self.declined is None or self.declined_fitness is None:
+            return False
+        if self.served_fitness is None:
+            return True
+        return self.declined_fitness > self.served_fitness
 
 
 @dataclass(frozen=True)
@@ -93,6 +131,10 @@ class ConditionSummary:
     metrics: list[Metric]
     min_cards: int
     min_images: int
+    # Whether the grader in use actually improves on always guessing the
+    # commonest grade. A trained model that does not is not "serving" in any
+    # sense worth the word, and the screen has to be able to say so.
+    beats_guessing: bool = False
 
     @property
     def ok(self) -> bool:
@@ -100,7 +142,9 @@ class ConditionSummary:
 
     @property
     def state(self) -> str:
-        return "served" if self.trained else "blocked" if self.reasons else "none"
+        if self.trained:
+            return "served" if self.beats_guessing else "stale"
+        return "blocked" if self.reasons else "none"
 
     @property
     def cards_needed(self) -> int:
@@ -138,10 +182,19 @@ class IdentitySummary:
     # to say so rather than quote a number that flatters itself.
     in_sample_from: str | None = None
     held_out_top1: float | None = None
+    # The benchmark this stack is measured against. Identity has no single
+    # artifact, so a version pins the *measurement* rather than a file — it is
+    # what makes a regression detectable at all.
+    version: int | None = None
+    regressed: bool = False
+    verdict: str = ""
+    noise_floor: float = 0.0
 
     @property
     def state(self) -> str:
-        return "served" if self.pool else "none"
+        if not self.pool:
+            return "none"
+        return "stale" if self.regressed else "served"
 
 
 @dataclass(frozen=True)
@@ -186,36 +239,66 @@ def _pct(value) -> str:
     return "—" if value is None else f"{float(value) * 100:.1f}%"
 
 
+def _payload(row) -> dict:
+    """A run's ``metrics_json``, or an empty dict if it has none or it is broken.
+
+    The kind-specific metrics live here rather than in the shared columns, which
+    mean four different things depending on ``kind``.
+    """
+    import json
+
+    if row is None:
+        return {}
+    try:
+        raw = row["metrics_json"]
+    except (KeyError, IndexError):  # pragma: no cover - row without the column
+        return {}
+    try:
+        return json.loads(raw or "{}") or {}
+    except (ValueError, TypeError):  # pragma: no cover - corrupt payload
+        return {}
+
+
 def detector_summary(repo, runs) -> DetectorSummary:
     """The detector: what is served, what it scored, and how far the corpus has
     moved since it trained."""
+    import json
+
     from tcginventory.data.vision import KIND_DETECTOR
-    from tcginventory.services import training
+    from tcginventory.services import fitness, training
 
     status = training.detector_status(repo, runs)
     history = [dict(r) for r in runs.recent(KIND_DETECTOR, limit=12)]
     current = runs.current_model(KIND_DETECTOR)
     epochs = [dict(r) for r in runs.epochs(current["id"])] if current else []
 
+    served_fitness = None
+    if current is not None:
+        served_fitness = current["fitness"]
+        if served_fitness is None:
+            served_fitness = fitness.detector_fitness(
+                {
+                    "map50": current["map50"],
+                    "map50_95": current["map50_95"],
+                    "precision": current["precision"],
+                    "recall": current["recall"],
+                }
+            )
     metrics = [
         Metric(
-            "mAP50", _pct(status.map50), good=bool(status.map50 and status.map50 > 0.9)
+            "fitness",
+            _pct(served_fitness),
+            good=bool(served_fitness and served_fitness > 0.9),
         ),
-        Metric("mAP50-95", _pct(status.map50_95)),
-        Metric("precision", _pct(status.precision)),
         Metric("recall", _pct(status.recall)),
+        Metric("precision", _pct(status.precision)),
+        Metric("mAP50", _pct(status.map50)),
+        Metric("mAP50-95", _pct(status.map50_95)),
     ]
-    # No promoted model means no snapshot to compare against — a corpus cannot
-    # have drifted from a model that was never trained.
-    trained_on = status.trained_on
-    drifted = 0 if trained_on is None else status.corpus.images - trained_on.images
-    state = (
-        "none"
-        if not status.installed or trained_on is None
-        else "stale"
-        if drifted >= STALE_IMAGE_DRIFT
-        else "served"
-    )
+    # What training has already been shown, promoted or not. A corpus cannot have
+    # drifted from a model that was never trained.
+    seen = status.baseline
+    drifted = 0 if seen is None else status.corpus.images - seen.images
     # The newest finished run, when it is not the one being served.
     declined = None
     for row in history:
@@ -225,20 +308,61 @@ def detector_summary(repo, runs) -> DetectorSummary:
             declined = row
         break
 
-    return DetectorSummary(
+    declined_reason = ""
+    declined_fitness = None
+    if declined is not None:
+        declined_fitness = declined["fitness"]
+        try:
+            payload = json.loads(declined["metrics_json"] or "{}")
+        except (ValueError, TypeError):  # pragma: no cover - corrupt payload
+            payload = {}
+        declined_reason = str(payload.get("verdict") or "")
+        # When the run re-scored the incumbent on its own split, that is the
+        # number to quote against it — not the incumbent's own historical score,
+        # which was measured on a validation set that no longer exists.
+        if payload.get("baseline_fitness") is not None:
+            served_fitness = payload["baseline_fitness"]
+        if declined_fitness is None:
+            declined_fitness = fitness.detector_fitness(
+                {
+                    "map50": declined["map50"],
+                    "map50_95": declined["map50_95"],
+                    "precision": declined["precision"],
+                    "recall": declined["recall"],
+                }
+            )
+
+    summary = DetectorSummary(
         installed=status.installed,
         version=status.version,
         metrics=metrics,
         trained_at=status.trained_at,
-        trained_images=trained_on.images if trained_on else 0,
-        trained_boxes=trained_on.boxes if trained_on else 0,
+        trained_images=status.trained_on.images if status.trained_on else 0,
+        trained_boxes=status.trained_on.boxes if status.trained_on else 0,
         corpus_images=status.corpus.images,
         corpus_boxes=status.corpus.boxes,
+        evaluated_images=seen.images if seen else 0,
+        evaluated_boxes=seen.boxes if seen else 0,
         runs=history,
         epochs=epochs,
-        state=state,
+        state="served",  # replaced below, once `declined` is known
         declined=declined,
+        declined_reason=declined_reason,
+        declined_fitness=declined_fitness,
+        served_fitness=served_fitness,
     )
+    # "Stale" means there is something better to be had: labels no run has seen,
+    # or a run already in the log that beats what is serving. Both clear the
+    # moment you retrain — unlike the old rule, which measured drift against the
+    # promoted run and so could never clear once a retrain was refused.
+    state = (
+        "none"
+        if not status.installed or status.trained_on is None
+        else "stale"
+        if drifted >= STALE_IMAGE_DRIFT or summary.declined_scored_higher
+        else "served"
+    )
+    return replace(summary, state=state)
 
 
 def condition_summary(repo, runs) -> ConditionSummary:
@@ -269,10 +393,22 @@ def condition_summary(repo, runs) -> ConditionSummary:
         )
 
     metrics: list[Metric] = []
+    beats_guessing = False
     if current is not None:
+        # The baseline lives in metrics_json under its own name. It used to be
+        # read off the `precision` column, which for this kind holds macro-F1 —
+        # so the window compared exact accuracy against an unrelated quantity and
+        # announced the result as "beats guessing Near Mint" (2026-08-07).
+        payload = _payload(current)
+        baseline = payload.get("baseline_accuracy")
+        score = current["fitness"]
+        beats_guessing = bool(score is not None and score > 0)
         metrics = [
-            Metric("exact", _pct(current["map50"])),
-            Metric("baseline", _pct(current["precision"])),
+            Metric("exact", _pct(current["map50"]), good=beats_guessing),
+            Metric("always-NM", _pct(baseline)),
+            Metric("grades off", f"{current['map50_95']:.2f}")
+            if current["map50_95"] is not None
+            else Metric("grades off", "—"),
         ]
     return ConditionSummary(
         trained=current is not None,
@@ -282,6 +418,7 @@ def condition_summary(repo, runs) -> ConditionSummary:
         metrics=metrics,
         min_cards=cds.MIN_PER_GRADE,
         min_images=cds.MIN_IMAGES_PER_GRADE,
+        beats_guessing=beats_guessing,
     )
 
 
@@ -393,6 +530,7 @@ def identity_summary(conn, repo, runs) -> IdentitySummary:
         except (ValueError, TypeError):  # pragma: no cover - corrupt payload
             held_out = None
 
+    promoted = runs.current_model(KIND_IDENTITY, source="benchmark")
     return IdentitySummary(
         components=components,
         layers=layers,
@@ -404,6 +542,10 @@ def identity_summary(conn, repo, runs) -> IdentitySummary:
         measured_at=bench["started_at"] if bench else None,
         wrong_printing=int(payload.get("wrong_printing") or 0),
         wrong_card=int(payload.get("wrong_card") or 0),
+        version=int(promoted["version"]) if promoted and promoted["version"] else None,
+        regressed=bool(payload.get("regressed")),
+        verdict=str(payload.get("verdict") or ""),
+        noise_floor=float(payload.get("noise_floor") or 0.0),
     )
 
 
@@ -434,19 +576,24 @@ def environment_summary() -> EnvironmentSummary:
     )
 
 
-def corpus_summary(conn, repo, runs) -> CorpusSummary:
+def corpus_summary(conn, repo, runs, *, detector=None, condition=None) -> CorpusSummary:
     """The corpus, and what each model is still short of.
 
     The feeds are the point: counts alone do not tell you that the detector has
     never seen a third of your photos, or that three grades are blocking the
     grader.
+
+    ``detector`` and ``condition`` are accepted ready-made because the window
+    has already built both by the time it asks for this. Rebuilding them here
+    re-ran a corpus fingerprint, three passes over the graded samples and a second
+    catalog-index probe on every refresh.
     """
     from tcginventory.services import catalog_index as ci
-    from tcginventory.services import condition_dataset as cds
 
-    detector = detector_summary(repo, runs)
-    condition = condition_summary(repo, runs)
+    detector = detector if detector is not None else detector_summary(repo, runs)
+    condition = condition if condition is not None else condition_summary(repo, runs)
     index = ci.index_status(conn, repo)
+    graded = condition.graded_cards
 
     rows = repo.conn.execute(
         "SELECT i.capture_id AS cap, COUNT(*) AS n "
@@ -476,7 +623,7 @@ def corpus_summary(conn, repo, runs) -> CorpusSummary:
         Feed(
             "Card identity",
             "ok" if index.indexed else "no",
-            f"{len(cds.collect_samples(repo))} graded · {index.indexed:,} cards indexed"
+            f"{graded} graded · {index.indexed:,} cards indexed"
             if index.indexed
             else "catalog not indexed yet",
         ),
@@ -486,7 +633,7 @@ def corpus_summary(conn, repo, runs) -> CorpusSummary:
         images=detector.corpus_images,
         boxes=detector.corpus_boxes,
         cards=repo.labeled_card_count(),
-        graded=len(cds.collect_samples(repo)),
+        graded=graded,
         exemplars=repo.region_embedding_count(),
         indexed=index.indexed,
         per_capture=per_capture,
@@ -553,7 +700,7 @@ def run_result(runs, kind: str) -> RunResult | None:
         )
 
     if kind == KIND_DETECTOR:
-        return _detector_result(runs, row)
+        return _detector_result(runs, row, payload)
     if kind == KIND_CONDITION:
         return _condition_result(row, payload)
     if kind == KIND_IDENTITY:
@@ -568,42 +715,69 @@ _KIND_TITLES = {
 }
 
 
-def _detector_result(runs, row: dict) -> RunResult:
+def _detector_result(runs, row: dict, payload: dict) -> RunResult:
     from tcginventory.data.vision import KIND_DETECTOR
 
     promoted = bool(row["promoted"])
     current = runs.current_model(KIND_DETECTOR)
+    score = row["fitness"]
     lines = [
         f"Trained for {row['epochs'] or '—'} epochs on {row['corpus_images']} "
         f"images and {row['corpus_boxes']} boxes.",
     ]
     if promoted:
         outcome, tone = f"Promoted as v{row['version']}", "served"
+        lines.append(f"Promoted because {payload.get('verdict') or 'it scored best'}.")
         lines.append("This is the model Recognition uses from now on.")
     else:
         outcome, tone = "Not promoted", "stale"
-        beaten = current["map50_95"] if current else None
-        if beaten is not None:
+        version = f"v{current['version']}" if current else "the model in use"
+        lines.append(
+            f"{version} keeps serving — {payload.get('verdict') or 'it scored higher'}."
+        )
+        if payload.get("baseline_fitness") is not None:
+            # Both numbers came off the same validation split, which is the whole
+            # point of re-scoring the incumbent.
             lines.append(
-                f"It scored below the model already in use "
-                f"({_pct(row['map50_95'])} against {_pct(beaten)}), so v"
-                f"{current['version']} keeps serving. Training again will not "
-                "change that — more labelled photos will."
+                f"Both were scored on this run's own validation split: "
+                f"{_pct(score)} against {_pct(payload['baseline_fitness'])}. "
+                "That is a like-for-like comparison, so the gap is real rather "
+                "than an artefact of the two runs sitting different exams."
+            )
+        elif not payload.get("comparable", True):
+            lines.append(
+                "The model in use was scored on a different validation split, so "
+                "the two figures were never directly comparable — the corpus each "
+                "one saw decided it instead."
             )
         else:
-            lines.append("It did not beat the model already in use.")
+            lines.append(
+                "More labelled photos will change this; training the same corpus "
+                "again will not."
+            )
+
+    headline = [
+        Metric("fitness", _pct(score), good=bool(score and score > 0.9)),
+        Metric("recall", _pct(row["recall"])),
+        Metric("precision", _pct(row["precision"])),
+        Metric("mAP50", _pct(row["map50"]), good=(row["map50"] or 0) > 0.9),
+        Metric("mAP50-95", _pct(row["map50_95"])),
+    ]
+    caveat = None
+    if payload.get("noise_floor"):
+        caveat = (
+            f"Fitness weights recall and precision above box tightness, and this "
+            f"run's own epochs vary by ±{_pct(payload['noise_floor'])} — anything "
+            "smaller than that is measurement noise, not a better model."
+        )
     return RunResult(
         kind=KIND_DETECTOR,
         title="Region detection",
         outcome=outcome,
         tone=tone,
-        headline=[
-            Metric("mAP50", _pct(row["map50"]), good=(row["map50"] or 0) > 0.9),
-            Metric("mAP50-95", _pct(row["map50_95"])),
-            Metric("precision", _pct(row["precision"])),
-            Metric("recall", _pct(row["recall"])),
-        ],
+        headline=headline,
         lines=lines,
+        caveat=caveat,
         notes=(row["notes"] or "").strip(),
     )
 
@@ -611,27 +785,40 @@ def _detector_result(runs, row: dict) -> RunResult:
 def _condition_result(row: dict, payload: dict) -> RunResult:
     from tcginventory.data.vision import KIND_CONDITION
 
-    exact, baseline = row["map50"], row["precision"]
-    beats = exact is not None and baseline is not None and exact > baseline
+    # `precision` on a condition run is macro-F1, not the baseline; the baseline
+    # is in metrics_json. Reading the column instead compared exact accuracy with
+    # macro-F1 and called the difference "beats guessing" (2026-08-07).
+    exact = row["map50"]
+    baseline = payload.get("baseline_accuracy")
+    score = row["fitness"]
+    beats = bool(score is not None and score > 0)
     lines = [
-        f"Fitted over {row['corpus_cards'] or payload.get('cards', 0)} graded "
+        f"Fitted over {row['corpus_cards'] or payload.get('samples', 0)} graded "
         "cards, each read from both faces."
     ]
-    lines.append(
-        "It beats guessing Near Mint every time, so it is worth using."
-        if beats
-        else "It does not beat guessing Near Mint every time — the grades in the "
-        "corpus are still too lopsided for it to learn wear rather than "
-        "lighting. More cards in the thin grades is the fix."
-    )
+    if beats:
+        lines.append(
+            f"It gets {_pct(exact)} exactly right against {_pct(baseline)} for "
+            "always guessing the commonest grade, so it is worth using."
+        )
+    else:
+        lines.append(
+            f"It gets {_pct(exact)} exactly right, against {_pct(baseline)} for "
+            "simply guessing the commonest grade every time — so it has learned "
+            "nothing a constant could not do. The grades in the corpus are still "
+            "too lopsided for it to learn wear rather than lighting; more cards "
+            "in the thin grades is the fix, and it will not be promoted until "
+            "then."
+        )
     return RunResult(
         kind=KIND_CONDITION,
         title="Condition grader",
-        outcome="Trained" if beats else "Trained, but not better than guessing",
+        outcome="Trained" if beats else "Trained, but no better than guessing",
         tone="served" if beats else "stale",
         headline=[
-            Metric("exact", _pct(exact), good=bool(beats)),
+            Metric("exact", _pct(exact), good=beats),
             Metric("always-NM", _pct(baseline)),
+            Metric("lift", f"{score:+.1%}" if score is not None else "—", good=beats),
         ],
         lines=lines,
         notes=(row["notes"] or "").strip(),
@@ -681,6 +868,15 @@ def _identity_result(row: dict, payload: dict) -> RunResult:
             + " — the wrong-card ones need a better encoder, not another layer."
         )
 
+    if payload.get("noise_floor"):
+        lines.append(
+            f"With {queries} queries the error bar on top-1 is about "
+            f"±{_pct(payload['noise_floor'])}, so treat anything smaller than "
+            "that as the same result."
+        )
+    if payload.get("verdict"):
+        lines.append(str(payload["verdict"]).capitalize() + ".")
+
     caveat = None
     if payload.get("in_sample_from") == "projection":
         caveat = (
@@ -688,11 +884,16 @@ def _identity_result(row: dict, payload: dict) -> RunResult:
             "below it are in-sample and read higher than they should. The honest "
             "measure of that layer is its own held-out score."
         )
+    regressed = bool(payload.get("regressed"))
     return RunResult(
         kind=KIND_IDENTITY,
         title="Card identification",
-        outcome="Benchmarked",
-        tone="served",
+        outcome="Benchmarked — down on the one in use"
+        if regressed
+        else f"Benchmarked as v{row['version']}"
+        if row["promoted"] and row["version"]
+        else "Benchmarked",
+        tone="stale" if regressed else "served",
         headline=[
             Metric("top-1", _pct(row["map50"]), good=(row["map50"] or 0) > 0.6),
             Metric("top-5", _pct(row["map50_95"]), good=(row["map50_95"] or 0) > 0.8),

@@ -18,6 +18,7 @@ all. One repeated tile shape would flatten exactly the differences worth seeing.
 from __future__ import annotations
 
 import sqlite3
+from functools import lru_cache
 
 from PySide6.QtCharts import QChart, QLineSeries, QValueAxis
 from PySide6.QtCore import Qt, QThread, Signal
@@ -611,7 +612,12 @@ class ModelsView(QWidget):
             detector = summary.detector_summary(repo, runs)
             condition = summary.condition_summary(repo, runs)
             identity = summary.identity_summary(self._conn, repo, runs)
-            corpus = summary.corpus_summary(self._conn, repo, runs)
+            # Hand over what has already been built: assembling it twice cost a
+            # second fingerprint of the corpus and three more passes over the
+            # graded samples, per refresh.
+            corpus = summary.corpus_summary(
+                self._conn, repo, runs, detector=detector, condition=condition
+            )
         except Exception as exc:  # pragma: no cover - vision DB unavailable
             warning = QLabel(f"The recognition corpus is unavailable — {exc}")
             warning.setObjectName("mdSub")
@@ -643,6 +649,20 @@ class ModelsView(QWidget):
                     button.setEnabled(False)
                     button.setToolTip("Another job is running")
 
+    def _show_running(self) -> None:
+        """Put the running banner up and lock the actions, touching nothing else.
+
+        The cheap half of :meth:`refresh` — no vision DB, no corpus fingerprint,
+        no catalog probe. Starting a job is the one moment where the screen has
+        to react instantly and has nothing new to say.
+        """
+        if self._running:
+            self._col.insertWidget(1, _running_banner(self._running))
+        for button in self.findChildren(QPushButton):
+            if button.property("action"):
+                button.setEnabled(False)
+                button.setToolTip("Another job is running")
+
     def _section(self, key: str, label: str, nav: str | None = None) -> _Section:
         section = _Section(key, label)
         section.setProperty("navLabel", nav or label)
@@ -672,8 +692,24 @@ class ModelsView(QWidget):
             if detector.unseen_images:
                 card.note(
                     f"⚠ {detector.unseen_images} images and {detector.unseen_boxes} "
-                    "boxes drawn since it trained",
+                    "boxes drawn since anything trained",
                     "Flag",
+                )
+            elif detector.declined_scored_higher:
+                card.note(
+                    f"⚠ Run #{detector.declined['id']} scores "
+                    f"{_pct(detector.declined_fitness)} against this model's "
+                    f"{_pct(detector.served_fitness)} — retrain to promote it.",
+                    "Flag",
+                )
+            elif detector.declined:
+                # Everything has been trained on; a newer run simply lost. Saying
+                # "stale" here, with a highlighted Retrain beside it, is what sent
+                # this corpus round the same run five times.
+                card.note(
+                    f"A newer run (#{detector.declined['id']}) has seen the whole "
+                    "corpus and did not beat this one — nothing to retrain until "
+                    "more photos are labelled."
                 )
         else:
             card.note("No detector yet — draw boxes in Recognition, then train.")
@@ -693,10 +729,20 @@ class ModelsView(QWidget):
         card = _Card(
             "Condition",
             condition.state,
-            "Serving" if condition.trained else "No model",
+            "Serving"
+            if condition.beats_guessing
+            else "No better than guessing"
+            if condition.trained
+            else "No model",
         )
         if condition.trained:
-            card.note("Serving a trained grader", "Who")
+            card.note(
+                "Serving a trained grader"
+                if condition.beats_guessing
+                else "A grader is fitted, but it does not beat always guessing "
+                "the commonest grade — so it is not promoted",
+                "Who",
+            )
             card.metrics(condition.metrics)
         else:
             card.note("Serving a <b>heuristic</b>, not a trained model", "Who")
@@ -724,8 +770,22 @@ class ModelsView(QWidget):
         section.body.addWidget(cards)
 
         # identity spans the width: it is a stack, not a single figure
-        card = _Card("Card identity", identity.state, "Serving")
+        card = _Card(
+            "Card identity",
+            identity.state,
+            "Down on last"
+            if identity.regressed
+            else f"Serving v{identity.version}"
+            if identity.version
+            else "Serving",
+        )
         card.note("Not one model — a stack. Each layer's measured contribution:", "Who")
+        if identity.regressed:
+            card.note(
+                f"⚠ The last benchmark scored below the one in use — "
+                f"{identity.verdict}",
+                "Flag",
+            )
         if identity.layers:
             rows = []
             for layer in identity.layers:
@@ -758,18 +818,40 @@ class ModelsView(QWidget):
 
     def _regions(self, detector, env) -> None:
         section = self._section("model_regions", "Region detection")
-        if detector.unseen_images and detector.declined:
-            # Retraining already happened and lost. Saying "stale" again would
-            # send you round the same loop.
+        if detector.declined_scored_higher:
+            # A run refused under the old mAP50-95 comparison that the current
+            # gate would promote. Retraining clears this, so it is worth pressing.
             declined = detector.declined
             section.body.addWidget(
                 _banner(
-                    f"<b>A newer run has already seen the whole corpus, and it "
-                    f"scored lower.</b> Run #{declined['id']} reached mAP50-95 "
-                    f"{_pct(declined['map50_95'])} against the served model's "
-                    f"{detector.metrics[1].value}, so it was not promoted — "
-                    f"v{detector.version} is still the better model. Training "
-                    "again will not change that; more labelled photos will.",
+                    f"<b>A run in the log already beats the model in use.</b> Run "
+                    f"#{declined['id']} scored {_pct(detector.declined_fitness)} "
+                    f"against v{detector.version}'s "
+                    f"{_pct(detector.served_fitness)} — it was refused under the "
+                    "old comparison, which weighed box tightness above finding "
+                    "cards. Training again will promote it.",
+                    _button(
+                        "Retrain and promote", self._train_detector, primary=True
+                    ),
+                    tone="warn",
+                )
+            )
+        elif detector.declined and not detector.unseen_images:
+            # Everything labelled has been trained on; the newest run simply did
+            # not win. That is a finished state, not a chore — the banner says so
+            # once, calmly, and does not push Retrain.
+            declined = detector.declined
+            reason = detector.declined_reason or (
+                "it did not beat the model already in use"
+            )
+            section.body.addWidget(
+                _banner(
+                    f"<b>The whole corpus has been trained on.</b> Run "
+                    f"#{declined['id']} saw all {detector.evaluated_images} images "
+                    f"and scored {_pct(detector.declined_fitness)} against v"
+                    f"{detector.version}'s {_pct(detector.served_fitness)} — "
+                    f"{reason}. More labelled photos will move this; training the "
+                    "same corpus again will not.",
                     _button("Train anyway", self._train_detector),
                     tone="calm",
                 )
@@ -777,10 +859,11 @@ class ModelsView(QWidget):
         elif detector.unseen_images:
             section.body.addWidget(
                 _banner(
-                    f"<b>Trained on a smaller corpus than you have.</b> "
-                    f"{detector.trained_images} images / {detector.trained_boxes} "
-                    f"boxes then, {detector.corpus_images} / {detector.corpus_boxes} "
-                    f"now — the {detector.unseen_images} newest have never been seen.",
+                    f"<b>There are labels no training run has seen.</b> The last "
+                    f"run covered {detector.evaluated_images} images / "
+                    f"{detector.evaluated_boxes} boxes; the corpus now holds "
+                    f"{detector.corpus_images} / {detector.corpus_boxes} — the "
+                    f"{detector.unseen_images} newest have never been trained on.",
                     _button(
                         "Retrain on the full corpus", self._train_detector, primary=True
                     ),
@@ -1211,7 +1294,11 @@ class ModelsView(QWidget):
         worker.done.connect(lambda payload, oid=op_id: self._finished(oid, payload))
         worker.start()
         self._running = op_id
-        self.refresh()
+        # Deliberately *not* a full refresh. Nothing about the models has changed
+        # yet — the job has only just started — and rebuilding every section to
+        # add one banner froze the window for seconds at exactly the moment the
+        # user pressed a button and wanted to see it respond.
+        self._show_running()
 
     def _finished(self, op_id: str, payload) -> None:
         self._running = None
@@ -1222,8 +1309,10 @@ class ModelsView(QWidget):
         if op_id in ops.BY_ID:
             ops.record(self._conn, op_id, ok=ok, summary=sentence)
         title = ops.BY_ID[op_id].title if op_id in ops.BY_ID else "Models"
-        self.refresh()
 
+        # Report first, rebuild after. The outcome is one query against the run
+        # log; the rebuild reads the whole corpus, and putting it in front meant
+        # a run finished into several seconds of nothing before saying so.
         kind = _RESULT_KINDS.get(op_id)
         result = self._run_result(kind) if (ok and kind) else None
         if result is not None:
@@ -1232,6 +1321,7 @@ class ModelsView(QWidget):
             QMessageBox.warning(self, title, sentence)
         else:
             QMessageBox.information(self, title, sentence)
+        self.refresh()
         if ok:
             self.changed.emit()
 
@@ -1257,7 +1347,14 @@ class ModelsView(QWidget):
         return None
 
 
+@lru_cache(maxsize=1)
 def _gpu():
+    """The GPU, probed once per session.
+
+    ``detect_gpu`` shells out to nvidia-smi, and the overview asked for it on
+    every rebuild — twice, since the environment section asks too. A graphics
+    card does not come and go while the window is open.
+    """
     from tcginventory.services import trainingenv
 
     try:

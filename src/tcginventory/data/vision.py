@@ -124,6 +124,12 @@ CREATE TABLE IF NOT EXISTS model_run (
     precision          REAL,
     recall             REAL,
     best_epoch         INTEGER,
+    -- One comparable, higher-is-better number per kind (see services/fitness.py).
+    -- The four columns above mean different things for each model — mAP for the
+    -- detector, accuracy/mean-distance/macro-F1 for the grader, top-1/top-5 for
+    -- identity — so nothing shared could ever read them safely. This one can.
+    fitness            REAL,
+    split_policy       TEXT,               -- how val was chosen; see _SPLIT_POLICY
     metrics_json       TEXT,               -- kind-specific extras (confusion matrix…)
     -- what it produced
     artifact_path      TEXT,
@@ -190,6 +196,16 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE model_epoch ADD COLUMN train_box_loss REAL")
     if "train_cls_loss" not in epoch_cols:
         conn.execute("ALTER TABLE model_epoch ADD COLUMN train_cls_loss REAL")
+
+    # One comparable score per kind, and the split policy behind it (2026-08-07).
+    # Runs recorded before this shipped keep a NULL policy, which is exactly what
+    # marks them as scored on an unstable validation split and therefore not
+    # comparable with anything after it — see services/fitness.py.
+    run_cols = {r[1] for r in conn.execute("PRAGMA table_info(model_run)")}
+    if "fitness" not in run_cols:
+        conn.execute("ALTER TABLE model_run ADD COLUMN fitness REAL")
+    if "split_policy" not in run_cols:
+        conn.execute("ALTER TABLE model_run ADD COLUMN split_policy TEXT")
 
 
 def _migrate_run_log(conn: sqlite3.Connection) -> None:
@@ -365,8 +381,7 @@ class VisionRepository:
 
     def get_embedding(self, card_id: str, model_version: str) -> bytes | None:
         row = self.conn.execute(
-            "SELECT vector FROM card_embedding WHERE card_id = ? AND "
-            "model_version = ?",
+            "SELECT vector FROM card_embedding WHERE card_id = ? AND model_version = ?",
             (card_id, model_version),
         ).fetchone()
         return bytes(row["vector"]) if row is not None else None
@@ -422,9 +437,7 @@ class VisionRepository:
         )
 
     def region_embedding_count(self) -> int:
-        return self.conn.execute(
-            "SELECT COUNT(*) FROM region_embedding"
-        ).fetchone()[0]
+        return self.conn.execute("SELECT COUNT(*) FROM region_embedding").fetchone()[0]
 
     def region_vectors(self, model_version: str) -> list[tuple[str, bytes]]:
         """All exemplar (card_id, vector-bytes) pairs for a model version."""
@@ -483,8 +496,7 @@ class VisionRepository:
     def labeled_region_count(self) -> int:
         """Regions carrying an identity — the labeled crops in the corpus."""
         return self.conn.execute(
-            "SELECT COUNT(*) FROM region r "
-            f"WHERE {self._LABELED}"  # noqa: S608 - constant predicate
+            f"SELECT COUNT(*) FROM region r WHERE {self._LABELED}"  # noqa: S608 - constant predicate
         ).fetchone()[0]
 
     def labeled_card_count(self) -> int:
@@ -582,6 +594,7 @@ class ModelRunRepository:
         imgsz: int | None = None,
         val_frac: float | None = None,
         split_seed: int | None = None,
+        split_policy: str | None = None,
         now: str | None = None,
     ) -> int:
         """Open a run (status ``running``) and return its id.
@@ -594,8 +607,8 @@ class ModelRunRepository:
             cur = self.conn.execute(
                 "INSERT INTO model_run (kind, status, source, started_at, "
                 "corpus_images, corpus_boxes, corpus_cards, corpus_fingerprint, "
-                "base_weights, epochs, imgsz, val_frac, split_seed, created_at) "
-                "VALUES (?,'running',?,?,?,?,?,?,?,?,?,?,?,?)",
+                "base_weights, epochs, imgsz, val_frac, split_seed, split_policy, "
+                "created_at) VALUES (?,'running',?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     kind,
                     source,
@@ -609,6 +622,7 @@ class ModelRunRepository:
                     imgsz,
                     val_frac,
                     split_seed,
+                    split_policy,
                     stamp,
                 ),
             )
@@ -626,6 +640,7 @@ class ModelRunRepository:
         precision: float | None = None,
         recall: float | None = None,
         best_epoch: int | None = None,
+        fitness: float | None = None,
         artifact_path: str | None = None,
         artifact_sha256: str | None = None,
         artifact_bytes: int | None = None,
@@ -638,9 +653,9 @@ class ModelRunRepository:
             self.conn.execute(
                 "UPDATE model_run SET status = ?, finished_at = ?, "
                 "train_images = ?, val_images = ?, map50 = ?, map50_95 = ?, "
-                "precision = ?, recall = ?, best_epoch = ?, artifact_path = ?, "
-                "artifact_sha256 = ?, artifact_bytes = ?, metrics_json = ?, "
-                "notes = ? WHERE id = ?",
+                "precision = ?, recall = ?, best_epoch = ?, fitness = ?, "
+                "artifact_path = ?, artifact_sha256 = ?, artifact_bytes = ?, "
+                "metrics_json = ?, notes = ? WHERE id = ?",
                 (
                     status,
                     now or _now(),
@@ -651,6 +666,7 @@ class ModelRunRepository:
                     precision,
                     recall,
                     best_epoch,
+                    fitness,
                     artifact_path,
                     artifact_sha256,
                     artifact_bytes,
@@ -737,12 +753,47 @@ class ModelRunRepository:
         rows = self.recent(kind, limit=1)
         return rows[0] if rows else None
 
-    def current_model(self, kind: str = KIND_DETECTOR) -> sqlite3.Row | None:
-        """The promoted run behind the model in use (top version of a kind)."""
+    def current_model(
+        self, kind: str = KIND_DETECTOR, *, source: str | None = None
+    ) -> sqlite3.Row | None:
+        """The promoted run behind the model in use (top version of a kind).
+
+        ``source`` narrows to one flavour of run within a kind. Identity needs
+        it: benchmarks and projection fits share ``KIND_IDENTITY``, and only a
+        benchmark is a measurement another benchmark can be judged against.
+        """
+        if source is None:
+            return self.conn.execute(
+                "SELECT * FROM model_run WHERE promoted = 1 AND kind = ? "
+                "ORDER BY version DESC, id DESC LIMIT 1",
+                (kind,),
+            ).fetchone()
         return self.conn.execute(
-            "SELECT * FROM model_run WHERE promoted = 1 AND kind = ? "
+            "SELECT * FROM model_run WHERE promoted = 1 AND kind = ? AND source = ? "
             "ORDER BY version DESC, id DESC LIMIT 1",
-            (kind,),
+            (kind, source),
+        ).fetchone()
+
+    def last_finished(
+        self, kind: str = KIND_DETECTOR, *, source: str | None = None
+    ) -> sqlite3.Row | None:
+        """The newest run that finished successfully, promoted or not.
+
+        Staleness is measured against this rather than against the promoted run.
+        A retrain that saw the whole corpus and then lost on score still *saw the
+        whole corpus*, and a screen that keeps saying "stale" after it sends you
+        round the same loop forever (2026-08-07).
+        """
+        if source is None:
+            return self.conn.execute(
+                "SELECT * FROM model_run WHERE kind = ? AND status = 'ok' "
+                "ORDER BY started_at DESC, id DESC LIMIT 1",
+                (kind,),
+            ).fetchone()
+        return self.conn.execute(
+            "SELECT * FROM model_run WHERE kind = ? AND status = 'ok' AND source = ? "
+            "ORDER BY started_at DESC, id DESC LIMIT 1",
+            (kind, source),
         ).fetchone()
 
     def epochs(self, run_id: int) -> list[sqlite3.Row]:
@@ -754,12 +805,18 @@ class ModelRunRepository:
     def accuracy_series(
         self, kind: str = KIND_DETECTOR, limit: int = 20
     ) -> list[tuple[int, float]]:
-        """(version, map50_95) for promoted models of a kind, oldest first — the
-        accuracy trend the Operations panel charts."""
+        """(version, fitness) for promoted models of a kind, oldest first — the
+        accuracy trend the Operations panel charts.
+
+        Charts ``fitness``, not ``map50_95``. That column is the grader's *mean
+        grade distance*, where lower is better, so plotting it as an accuracy
+        trend drew the condition model's improvement upside down (2026-08-07).
+        ``fitness`` is higher-is-better for every kind by construction.
+        """
         rows = self.conn.execute(
-            "SELECT version, map50_95 FROM model_run "
-            "WHERE promoted = 1 AND kind = ? AND map50_95 IS NOT NULL "
+            "SELECT version, fitness FROM model_run "
+            "WHERE promoted = 1 AND kind = ? AND fitness IS NOT NULL "
             "ORDER BY version DESC LIMIT ?",
             (kind, limit),
         ).fetchall()
-        return [(int(r["version"]), float(r["map50_95"])) for r in reversed(rows)]
+        return [(int(r["version"]), float(r["fitness"])) for r in reversed(rows)]

@@ -9,12 +9,13 @@ with a ``data.yaml`` pointing at them — the layout ultralytics expects.
 
 from __future__ import annotations
 
-import random
+import hashlib
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from tcginventory.data.vision import VisionRepository
+from tcginventory.services.fitness import SPLIT_HASHED_V1
 
 
 @dataclass
@@ -25,10 +26,46 @@ class DatasetSummary:
     boxes: int
     data_yaml: Path
     skipped_missing: int  # source image files that no longer exist on disk
+    policy: str = SPLIT_HASHED_V1  # how val was chosen; recorded on the run
 
 
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+def _val_rank(image_id: int, seed: int) -> float:
+    """A stable position in [0, 1) for one image, from its id alone.
+
+    This is what makes two runs comparable. The exporter used to shuffle the
+    whole corpus and slice off the first 20%, which sounds deterministic and is —
+    for a corpus of a fixed size. Add eleven images and ``shuffle`` deals a
+    different hand, so the validation set is replaced wholesale and the new
+    model's score describes a different exam from the old model's. Comparing the
+    two then rejected five consecutive better detectors (2026-08-07).
+
+    Hashing the id instead pins each image to its own place: an image in val
+    stays in val however much the corpus grows around it.
+    """
+    digest = hashlib.blake2b(f"{seed}:{image_id}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") / float(1 << 64)
+
+
+def _clear_split_dirs(out: Path) -> None:
+    """Empty the train/val directories before writing this export.
+
+    They were only ever added to. An image that moved between splits — which the
+    old shuffle did constantly — left its previous copy behind, so the same photo
+    could sit in *both* train and val and the validation score was measured partly
+    on images the model had trained on.
+    """
+    for kind in ("images", "labels"):
+        for split in ("train", "val"):
+            target = out / kind / split
+            if not target.is_dir():
+                continue
+            for path in target.iterdir():
+                if path.is_file():
+                    path.unlink()
 
 
 def export_yolo_dataset(
@@ -41,25 +78,34 @@ def export_yolo_dataset(
 ) -> DatasetSummary:
     """Write a YOLO dataset for the single ``card`` class under ``out_dir``.
 
-    Deterministic given ``seed``. Images whose source file is gone are skipped
-    (counted in the summary). Returns the counts and the ``data.yaml`` path.
+    Deterministic given ``seed``, and **stable as the corpus grows**: each image
+    is assigned to train or val by a hash of its own id, so adding photos never
+    reshuffles the ones already there. Images whose source file is gone are
+    skipped (counted in the summary). Returns the counts and the ``data.yaml``
+    path.
     """
     out = Path(out_dir)
     for split in ("train", "val"):
         (out / "images" / split).mkdir(parents=True, exist_ok=True)
         (out / "labels" / split).mkdir(parents=True, exist_ok=True)
+    _clear_split_dirs(out)
 
-    images = list(repo.images_with_regions())
-    random.Random(seed).shuffle(images)
-    n_val = int(len(images) * val_frac)
+    images = sorted(repo.images_with_regions(), key=lambda r: int(r["id"]))
+    ranks = {int(img["id"]): _val_rank(int(img["id"]), seed) for img in images}
+    chosen = {i for i, rank in ranks.items() if rank < val_frac}
+    # Hashing gives *about* val_frac, not exactly it, and on a small corpus about
+    # can be none at all — which ultralytics cannot validate against. Fall back to
+    # the single lowest-ranked image, still chosen by hash and so still stable.
+    if not chosen and len(images) >= 2:
+        chosen = {min(ranks, key=lambda i: ranks[i])}
 
     train = val = boxes = skipped = 0
-    for i, img in enumerate(images):
+    for img in images:
         src = Path(img["path"])
         if copy_images and not src.exists():
             skipped += 1
             continue
-        split = "val" if i < n_val else "train"
+        split = "val" if int(img["id"]) in chosen else "train"
         regions = repo.regions_for_image(img["id"])
         lines = []
         for r in regions:
@@ -97,4 +143,5 @@ def export_yolo_dataset(
         boxes=boxes,
         data_yaml=data_yaml,
         skipped_missing=skipped,
+        policy=SPLIT_HASHED_V1,
     )

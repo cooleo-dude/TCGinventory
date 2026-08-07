@@ -190,9 +190,12 @@ def test_an_older_database_gains_the_training_loss_columns(tmp_path):
 
 
 def test_accuracy_series_tracks_promoted_models_oldest_first(runs):
+    """Charts ``fitness``, not ``map50_95``. That column is mean grade *distance*
+    on a condition run — lower is better — so plotting it as an accuracy trend
+    drew the grader's improvement upside down."""
     for score in (0.20, 0.31, 0.29):
         run_id = runs.start()
-        runs.finish(run_id, map50_95=score)
+        runs.finish(run_id, fitness=score)
         runs.promote(run_id)
     assert runs.accuracy_series() == [(1, 0.20), (2, 0.31), (3, 0.29)]
 
@@ -345,7 +348,8 @@ import argparse, json, sys
 from pathlib import Path
 
 p = argparse.ArgumentParser()
-for flag in ("--data", "--out", "--weights", "--project", "--name", "--device"):
+for flag in ("--data", "--out", "--weights", "--project", "--name", "--device",
+             "--baseline"):
     p.add_argument(flag)
 for flag in ("--epochs", "--imgsz", "--batch"):
     p.add_argument(flag, type=int)
@@ -551,10 +555,18 @@ def test_worker_takes_save_dir_from_the_trainer_not_the_metrics():
 def test_a_worse_second_run_is_not_promoted(
     repo, runs, ready_env, stub_worker, tmp_path
 ):
+    from tcginventory.services import fitness as fit
+
     _scene_capture(repo, tmp_path)
-    first = runs.start()
-    runs.finish(first, map50_95=0.90)
-    runs.promote(first)  # a strong incumbent
+    # A strong incumbent, recorded the way a real run now records itself: scored
+    # on the same split policy the candidate will use, so the two are genuinely
+    # comparable. Without a policy they are held incomparable and the corpus
+    # decides instead — which is correct, but a different rule from this one.
+    first = runs.start(split_policy=fit.SPLIT_HASHED_V1)
+    runs.finish(
+        first, map50=0.99, map50_95=0.90, precision=0.98, recall=1.0, fitness=0.90
+    )
+    runs.promote(first)
 
     import subprocess
 

@@ -1643,3 +1643,103 @@ _Template for new entries:_
   keep the plain message — an empty results window would be worse than none.
 - A `failed` run gets the window too, with the error, rather than the outcome
   being a warning box that looks unrelated to the model.
+
+## 2026-08-07 — What makes a detector better, and when a model is stale
+
+The Models window could not replace the detector and would not stop asking. Both
+came from the same root: **mAP50-95 was the whole promotion gate**, and staleness
+was measured against whatever that gate had last promoted.
+
+- **The metric was wrong for the job.** mAP50-95 averages average-precision
+  across IoU 0.5→0.95, so above about 0.75 IoU it scores how tightly a *human*
+  drew the training boxes rather than whether a card was found. On this corpus it
+  was also saturated: mAP50 pinned at 0.995 and recall at 1.000 for every run.
+  Five consecutive retrains, each on 39% more data and each with **five points
+  better precision** (0.949 → 0.999), lost by 0.0147 of the one metric that
+  happened to disagree.
+- **The number was read off the luckiest epoch.** `best.pt` is the maximum of a
+  hundred noisy samples. The incumbent's 0.970 sat **2.1 standard deviations
+  above its own tail mean** (0.931, σ 0.018) — the rejection margin was smaller
+  than one run's epoch-to-epoch noise.
+- **The two numbers were never comparable anyway.** The exporter shuffled the
+  whole corpus and sliced off the first 20%, so growing from 28 images to 39
+  replaced the validation set wholesale. v1 was scored on five held-out images;
+  every candidate since was scored on seven different ones.
+
+**What replaced it** (`services/fitness.py`, one module for a judgement that had
+been living in three places and disagreeing with itself):
+
+- **A composite score, per kind.** For the detector, 0.40·recall + 0.30·precision
+  + 0.20·mAP50 + 0.10·mAP50-95 — a card not found is a card not identified, a
+  phantom box is a row to delete by hand, and crop tightness only has to be good
+  enough for the encoder. Deliberately not ultralytics' own fitness (0.1·mAP50 +
+  0.9·mAP50-95), which is tuned for leaderboards where tightness is the game. On
+  the real log this scores the refused run **0.9942 against v1's 0.9807** — it
+  wins outright, not on a tiebreak. The grader's score is *lift over always
+  guessing the commonest grade*, so "must beat guessing" needs no threshold;
+  identity's is 0.7·top-1 + 0.3·top-5.
+- **A noise floor from the run's own tail.** Consecutive late epochs are
+  near-identical models on an identical split, so their spread is measurement
+  noise. Guarded at both ends: fewer than five epochs is not a tail, and a spread
+  wider than 0.05 means the run never converged — both fall back to a flat
+  minimum, because an unusable noise estimate must not become a licence to ignore
+  real differences.
+- **Inside the band, more data wins.** Indistinguishable models are separated by
+  which saw more of the corpus. This is what lets the detector move at all once
+  the metrics saturate.
+- **A stable validation split** (`_val_rank`): membership decided per image by
+  hash of its id, so an image in val stays in val as the corpus grows. Runs are
+  stamped with `split_policy`; runs from before it are held **incomparable** and
+  the corpus decides instead. The split directories are also cleared before each
+  export — they were only ever added to, so an image that moved between splits
+  left its old copy behind and could sit in *both*.
+- **The incumbent is re-scored on the candidate's own split.** The worker takes
+  `--baseline` and runs one val pass over the outgoing model, which is the only
+  strictly like-for-like comparison there is. Best-effort: a baseline that fails
+  to load must not lose a good training run.
+
+**Staleness now means "there is something better to be had"** — labels no run has
+seen, or a run already in the log that beats what is serving. Measured against
+the newest *finished* run rather than the promoted one, because a run that read
+every photo and then lost on score has still read every photo. Both conditions
+clear the moment you retrain; the old one could never clear once a retrain was
+refused, which is what produced five identical runs.
+
+**Two display bugs found alongside.** The grader's `precision` column holds
+macro-F1, but the window read it as the always-NM baseline — so "it beats
+guessing Near Mint every time" was comparing exact accuracy against an unrelated
+quantity. The baseline is in `metrics_json` and is now read from there.
+`accuracy_series` charted `map50_95`, which for a condition run is *mean grade
+distance* where lower wins, so the grader's improvement was drawn upside down; it
+charts the new `fitness` column, higher-is-better for every kind by construction.
+
+**Identity had no version at all.** Every benchmark was `promoted=0`, so
+`current_model('identity')` was always None and a change that halved top-1 would
+have passed in silence. Benchmarks are now promoted against the previous one,
+scoped to `source='benchmark'`, with a binomial error bar for a floor — at 58
+queries the standard error of a 45% top-1 is **6.5 points**, and two benchmarks
+inside that band are the same benchmark. A materially worse one is reported as a
+regression rather than as the new truth.
+
+### The window froze for four seconds
+
+Measured, not guessed: one `refresh()` cost **4.2s**, of which `ci.index_status`
+was 2.07s — a `stat` per file across **50,546 cached PNGs** — called twice, for
+two integers already available from a 3ms `COUNT(*)`. The archive walk is now
+opt-in (only the reclaim tile reads those fields); `corpus_summary` takes the
+detector and condition summaries it used to rebuild; `_gpu()` is cached rather
+than shelling out to `nvidia-smi` twice per refresh; starting a job shows its
+banner without a data pass at all; and a finished job reports before it rebuilds.
+**4201ms → 58ms.**
+
+### A flaky segfault that was ours all along
+
+Adding four tests turned the suite into an intermittent access violation, in an
+unrelated file, at a site that moved between runs. The cause was a total, not a
+line of code: views drop old widgets with `deleteLater()`, which needs an event
+loop to take effect, and the suite never spins one — a full run finished holding
+**~33,000 live QWidgets and 1,800 top-level windows**. A module-scoped autouse
+fixture now drains the deferred deletes (14,433 / 258, and stable over repeated
+runs). Deliberately **module**-scoped: draining after every test frees the C++
+side under wrappers a live fixture still holds and crashes far sooner than the
+leak does.

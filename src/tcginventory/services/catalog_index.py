@@ -385,9 +385,21 @@ class IndexStatus:
 
 
 def index_status(
-    conn: sqlite3.Connection, repo: VisionRepository, *, embedder=None
+    conn: sqlite3.Connection,
+    repo: VisionRepository,
+    *,
+    embedder=None,
+    with_archive: bool = False,
 ) -> IndexStatus:
-    """What the Operations tile reports: how much of the catalog is searchable."""
+    """What the Operations tile reports: how much of the catalog is searchable.
+
+    ``with_archive`` counts the kept card art on disk, which means a ``stat`` per
+    file — 50,546 of them here, and just over two seconds. Off by default because
+    only the reclaim tile ever reads those two fields, while the Models window
+    calls this twice per refresh for ``indexed`` alone. Leaving it on cost four
+    seconds of frozen UI every time a training job started or finished
+    (2026-08-07); the counts either side of it are single-digit milliseconds.
+    """
     from tcginventory.services.recognizer import get_shared_embedder
 
     version = (embedder or get_shared_embedder()).version
@@ -397,7 +409,7 @@ def index_status(
     ).fetchone()[0]
     archived = 0
     total_bytes = 0
-    if cardimages.cache_dir().is_dir():
+    if with_archive and cardimages.cache_dir().is_dir():
         for path in cardimages.cache_dir().glob("*.png"):
             archived += 1
             try:

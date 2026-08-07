@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import gc
+import sys
+
 import pytest
 
 from tcginventory.data.db import connect
@@ -14,6 +17,40 @@ from tcginventory.services.transactions import (
     TransactionRequest,
     TransactionService,
 )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _drain_deferred_deletions():
+    """Carry out the ``deleteLater()`` calls a module's tests left pending.
+
+    Views drop their old widgets with ``deleteLater()``, which only takes effect
+    when an event loop delivers the deferred-delete event. The suite never spins
+    one, so nothing was ever freed: a full run ended holding roughly 33,000 live
+    ``QWidget`` objects and 1,800 top-level windows, and somewhere past thirty
+    thousand Qt fell over with an access violation inside whichever widget
+    happened to be under construction. It looked like a flaky crash in an
+    unrelated file — the site moved between runs — because the cliff was a total
+    rather than a line of code (2026-08-07).
+
+    Deliberately **module**-scoped. Draining after every test tripped over
+    widgets a still-live fixture held a Python reference to, and freeing the C++
+    side under a live wrapper crashes far sooner than the leak does. By the time
+    a module finishes, its function fixtures have been torn down, so the only
+    objects collected are ones the code already asked to delete.
+    """
+    yield
+    # Never import Qt for the headless service tests — most of the suite has no
+    # business paying for it.
+    if "PySide6.QtWidgets" not in sys.modules:
+        return
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return
+    gc.collect()  # drop wrappers the module was holding, then honour the deletes
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 @pytest.fixture()

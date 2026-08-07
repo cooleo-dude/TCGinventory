@@ -61,7 +61,38 @@ def _parse_args(argv=None):
     p.add_argument("--project", default=None, help="ultralytics runs directory")
     p.add_argument("--name", default=None, help="ultralytics run name")
     p.add_argument("--device", default=None, help="e.g. cpu, 0 (default: auto)")
+    p.add_argument(
+        "--baseline",
+        default=None,
+        help="model currently in use; re-scored on this run's val split so the "
+        "promotion decision compares like with like",
+    )
     return p.parse_args(argv)
+
+
+def _score(model_path: str, data: str, imgsz: int, device: str | None) -> dict | None:
+    """Run one validation pass and return the four headline metrics.
+
+    Best-effort by design: the caller can still decide without it, and a baseline
+    that fails to load (an ONNX exported by an older opset, a missing runtime)
+    must not take a good training run down with it.
+    """
+    try:
+        from ultralytics import YOLO
+
+        kwargs = {"data": data, "imgsz": imgsz, "single_cls": True, "verbose": False}
+        if device:
+            kwargs["device"] = device
+        box = YOLO(model_path).val(**kwargs).box
+        return {
+            "map50": float(box.map50),
+            "map50_95": float(box.map),
+            "precision": float(box.mp),
+            "recall": float(box.mr),
+        }
+    except Exception as exc:  # noqa: BLE001 - any failure here is non-fatal
+        print(f"baseline scoring skipped: {exc}", file=sys.stderr)
+        return None
 
 
 def main(argv=None) -> int:
@@ -105,6 +136,11 @@ def main(argv=None) -> int:
         "onnx": str(out),
         "epochs": args.epochs,
     }
+    # Score the outgoing model on the same validation split, so the app compares
+    # two measurements of the same thing rather than two numbers from different
+    # corpora. Done after export so a baseline failure cannot lose the training.
+    if args.baseline:
+        payload["baseline"] = _score(args.baseline, args.data, args.imgsz, args.device)
     print(RESULT_PREFIX + json.dumps(payload), flush=True)
     return 0
 
