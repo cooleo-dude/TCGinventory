@@ -1743,3 +1743,28 @@ fixture now drains the deferred deletes (14,433 / 258, and stable over repeated
 runs). Deliberately **module**-scoped: draining after every test frees the C++
 side under wrappers a live fixture still holds and crashes far sooner than the
 leak does.
+
+### Correction, same day: "Stale" is about the corpus, not the model
+
+The first pass at this folded *"a logged run beats the model in use"* into the
+stale state. Wrong, and wrong in the same shape as the bug it replaced: it made
+the flag a claim about model quality, so it stayed lit after a retrain that had
+nothing left to learn from.
+
+**Stale now means one thing: a significant amount of labelled data that no
+training run has seen.** Never a judgement about how anything scored. A model
+that has read everything you have is not stale however it performs; one that
+hasn't is stale even if it performs beautifully. The two questions have different
+answers and different fixes, so they get different marks — quality problems are
+`weak` ("Underperforming"), and the stale pill reads **"New data"**, which is
+what it actually reports.
+
+Applied to all three: the grader gets the same corpus-drift reading over graded
+cards, and "trained but no better than guessing" became `weak`; identity has no
+corpus of its own to fall behind, so it is never stale, and a benchmark below the
+one in use is `weak`.
+
+**Significance is proportional** (`stale_threshold`): `max(4, 10% of the
+corpus)`. A flat four photos fires after every labelling session once the corpus
+is large, and a flag that fires constantly is one you stop reading. Below the
+threshold the card still says how many are new — as a plain line, not a warning.

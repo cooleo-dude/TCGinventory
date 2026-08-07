@@ -16,10 +16,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
-# How far a model may drift from the corpus before the window says so. Retraining
-# is minutes, and a detector that has never seen a third of your photos is the
-# most actionable thing the screen can tell you.
+# How far a model may drift from the corpus before the window says so.
+#
+# "Stale" means one thing and only one thing: **there is a significant amount of
+# labelled data no training run has seen**. It is never a judgement about how the
+# model scored — a model that has read everything you have is not stale, however
+# it performs, and one that hasn't is stale even if it performs beautifully.
+# Folding performance into it is what produced a flag that could not be cleared
+# (2026-08-07).
+#
+# Significance is both absolute and proportional. Four new photos matter on a
+# corpus of thirty; the same four are noise on a corpus of four hundred, and a
+# flag that fires on every session's labelling is a flag you learn to ignore.
 STALE_IMAGE_DRIFT = 4
+STALE_IMAGE_SHARE = 0.10
+
+
+def stale_threshold(corpus_images: int) -> int:
+    """How many unseen images count as a corpus worth retraining on."""
+    return max(STALE_IMAGE_DRIFT, int(corpus_images * STALE_IMAGE_SHARE))
 
 
 @dataclass(frozen=True)
@@ -135,16 +150,33 @@ class ConditionSummary:
     # commonest grade. A trained model that does not is not "serving" in any
     # sense worth the word, and the screen has to be able to say so.
     beats_guessing: bool = False
+    # Graded cards the fitted grader was trained on, for the same corpus-drift
+    # reading the detector gets.
+    trained_cards: int = 0
 
     @property
     def ok(self) -> bool:
         return not self.reasons
 
     @property
+    def unseen_cards(self) -> int:
+        if not self.trained:
+            return 0
+        return max(0, self.graded_cards - self.trained_cards)
+
+    @property
     def state(self) -> str:
-        if self.trained:
-            return "served" if self.beats_guessing else "stale"
-        return "blocked" if self.reasons else "none"
+        """As with the detector, ``stale`` is about the corpus and nothing else.
+
+        A grader that has not learned to beat a constant guess is ``weak``, which
+        is a different problem with a different fix — more cards in the thin
+        grades, not a rerun over the same ones.
+        """
+        if not self.trained:
+            return "blocked" if self.reasons else "none"
+        if self.unseen_cards >= stale_threshold(self.graded_cards):
+            return "stale"
+        return "served" if self.beats_guessing else "weak"
 
     @property
     def cards_needed(self) -> int:
@@ -192,9 +224,11 @@ class IdentitySummary:
 
     @property
     def state(self) -> str:
+        """Identity has no corpus of its own to fall behind, so it is never
+        ``stale`` — a benchmark that scored below the one in use is ``weak``."""
         if not self.pool:
             return "none"
-        return "stale" if self.regressed else "served"
+        return "weak" if self.regressed else "served"
 
 
 @dataclass(frozen=True)
@@ -351,15 +385,17 @@ def detector_summary(repo, runs) -> DetectorSummary:
         declined_fitness=declined_fitness,
         served_fitness=served_fitness,
     )
-    # "Stale" means there is something better to be had: labels no run has seen,
-    # or a run already in the log that beats what is serving. Both clear the
-    # moment you retrain — unlike the old rule, which measured drift against the
-    # promoted run and so could never clear once a retrain was refused.
+    # Stale is a statement about the *corpus*, not about the model: labels no
+    # training run has seen yet, and enough of them to be worth six minutes. How
+    # the served model scored has no bearing on it — a run that beats the model in
+    # use is reported separately (`declined_scored_higher`), because that is news
+    # about the model rather than about the data, and mixing the two gives you a
+    # flag that retraining cannot clear.
     state = (
         "none"
         if not status.installed or status.trained_on is None
         else "stale"
-        if drifted >= STALE_IMAGE_DRIFT or summary.declined_scored_higher
+        if drifted >= stale_threshold(status.corpus.images)
         else "served"
     )
     return replace(summary, state=state)
@@ -419,6 +455,7 @@ def condition_summary(repo, runs) -> ConditionSummary:
         min_cards=cds.MIN_PER_GRADE,
         min_images=cds.MIN_IMAGES_PER_GRADE,
         beats_guessing=beats_guessing,
+        trained_cards=int(current["corpus_cards"] or 0) if current is not None else 0,
     )
 
 

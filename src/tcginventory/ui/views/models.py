@@ -680,7 +680,15 @@ class ModelsView(QWidget):
         row.setSpacing(11)
 
         # detector
-        pill = {"served": "Serving", "stale": "Stale", "none": "No model"}
+        # "Stale" is only ever about the corpus — new labels nothing has trained
+        # on. A model that is serving badly gets a different word, because it
+        # needs a different thing done about it.
+        pill = {
+            "served": "Serving",
+            "stale": "New data",
+            "weak": "Underperforming",
+            "none": "No model",
+        }
         card = _Card("Region detection", detector.state, pill[detector.state])
         if detector.installed:
             card.note(f"Serving card_yolo v{detector.version}", "Who")
@@ -689,13 +697,21 @@ class ModelsView(QWidget):
                 f"Trained {ops.when(detector.trained_at)} on "
                 f"{detector.trained_images} images · {detector.trained_boxes} boxes"
             )
-            if detector.unseen_images:
+            if detector.state == "stale":
                 card.note(
                     f"⚠ {detector.unseen_images} images and {detector.unseen_boxes} "
                     "boxes drawn since anything trained",
                     "Flag",
                 )
-            elif detector.declined_scored_higher:
+            elif detector.unseen_images:
+                # Some new labels, but not yet enough to be worth six minutes.
+                # Stated plainly rather than flagged: a warning that fires on
+                # every session's labelling is a warning you stop reading.
+                card.note(
+                    f"{detector.unseen_images} images labelled since it trained — "
+                    "not enough yet to be worth retraining on."
+                )
+            if detector.declined_scored_higher:
                 card.note(
                     f"⚠ Run #{detector.declined['id']} scores "
                     f"{_pct(detector.declined_fitness)} against this model's "
@@ -729,7 +745,9 @@ class ModelsView(QWidget):
         card = _Card(
             "Condition",
             condition.state,
-            "Serving"
+            "New data"
+            if condition.state == "stale"
+            else "Serving"
             if condition.beats_guessing
             else "No better than guessing"
             if condition.trained
@@ -773,7 +791,7 @@ class ModelsView(QWidget):
         card = _Card(
             "Card identity",
             identity.state,
-            "Down on last"
+            "Underperforming"
             if identity.regressed
             else f"Serving v{identity.version}"
             if identity.version
@@ -818,7 +836,24 @@ class ModelsView(QWidget):
 
     def _regions(self, detector, env) -> None:
         section = self._section("model_regions", "Region detection")
-        if detector.declined_scored_higher:
+        # Corpus first: new labelled data is the only thing here that retraining
+        # is actually *for*, so it outranks anything to say about how the served
+        # model scored.
+        if detector.state == "stale":
+            section.body.addWidget(
+                _banner(
+                    f"<b>There are labels no training run has seen.</b> The last "
+                    f"run covered {detector.evaluated_images} images / "
+                    f"{detector.evaluated_boxes} boxes; the corpus now holds "
+                    f"{detector.corpus_images} / {detector.corpus_boxes} — the "
+                    f"{detector.unseen_images} newest have never been trained on.",
+                    _button(
+                        "Retrain on the full corpus", self._train_detector, primary=True
+                    ),
+                    tone="warn",
+                )
+            )
+        elif detector.declined_scored_higher:
             # A run refused under the old mAP50-95 comparison that the current
             # gate would promote. Retraining clears this, so it is worth pressing.
             declined = detector.declined
@@ -836,7 +871,7 @@ class ModelsView(QWidget):
                     tone="warn",
                 )
             )
-        elif detector.declined and not detector.unseen_images:
+        elif detector.declined:
             # Everything labelled has been trained on; the newest run simply did
             # not win. That is a finished state, not a chore — the banner says so
             # once, calmly, and does not push Retrain.
@@ -854,20 +889,6 @@ class ModelsView(QWidget):
                     "same corpus again will not.",
                     _button("Train anyway", self._train_detector),
                     tone="calm",
-                )
-            )
-        elif detector.unseen_images:
-            section.body.addWidget(
-                _banner(
-                    f"<b>There are labels no training run has seen.</b> The last "
-                    f"run covered {detector.evaluated_images} images / "
-                    f"{detector.evaluated_boxes} boxes; the corpus now holds "
-                    f"{detector.corpus_images} / {detector.corpus_boxes} — the "
-                    f"{detector.unseen_images} newest have never been trained on.",
-                    _button(
-                        "Retrain on the full corpus", self._train_detector, primary=True
-                    ),
-                    tone="warn",
                 )
             )
         if not env.ready:
@@ -1560,15 +1581,16 @@ def _qss(t: theme.Tokens) -> str:
         color: {t.ink3}; }}
     #mdPill[state="served"] {{ color: {t.pos}; border-color: {t.pos};
         background: {_tint(t.pos)}; }}
-    #mdPill[state="stale"] {{ color: {t.warn}; border-color: {t.warn};
-        background: {_tint(t.warn)}; }}
+    #mdPill[state="stale"], #mdPill[state="weak"] {{ color: {t.warn};
+        border-color: {t.warn}; background: {_tint(t.warn)}; }}
     #mdPill[state="blocked"] {{ color: {t.neg}; border-color: {t.neg};
         background: {t.neg_soft}; }}
 
     #mdCard {{ background: {t.surface2}; border: 1px solid {t.line};
         border-top: 2px solid {t.line2}; border-radius: 8px; }}
     #mdCard[state="served"] {{ border-top-color: {t.pos}; }}
-    #mdCard[state="stale"] {{ border-top-color: {t.warn}; }}
+    #mdCard[state="stale"], #mdCard[state="weak"] {{
+        border-top-color: {t.warn}; }}
     #mdCard[state="blocked"] {{ border-top-color: {t.neg}; }}
     #mdCardTitle {{ font-size: 12px; font-weight: 700; color: {t.ink}; }}
     #mdCardNote {{ color: {t.ink3}; font-size: 11px; }}

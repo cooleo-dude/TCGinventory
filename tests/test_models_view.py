@@ -210,7 +210,9 @@ def test_a_grader_no_better_than_guessing_is_not_called_serving(env):
 
     summary = ms.condition_summary(repo, runs)
     assert summary.trained and not summary.beats_guessing
-    assert summary.state == "stale"
+    # "weak", not "stale": nothing has been added to the corpus, and the fix is
+    # more cards in the thin grades rather than another pass over these ones.
+    assert summary.state == "weak"
     # The quoted baseline is the real one, not the macro-F1 sitting in `precision`.
     assert [m.value for m in summary.metrics][:2] == ["44.0%", "61.0%"]
 
@@ -623,8 +625,11 @@ def test_a_run_that_beats_the_served_model_is_worth_promoting(env, tmp_path):
     summary = ms.detector_summary(repo, runs)
     assert summary.declined_scored_higher
     assert summary.declined_fitness > summary.served_fitness
-    assert summary.state == "stale"  # there is something better to be had
-    assert summary.unseen_images == 0  # but not because of unseen labels
+    # Reported, but **not** as staleness: nothing has been added to the corpus, so
+    # there is nothing stale about it. Mixing the two is what produced a flag that
+    # retraining could not clear.
+    assert summary.unseen_images == 0
+    assert summary.state == "served"
 
 
 def test_labels_no_run_has_seen_are_still_stale(env, tmp_path):
@@ -643,6 +648,33 @@ def test_labels_no_run_has_seen_are_still_stale(env, tmp_path):
     assert summary.state == "stale"
     assert summary.unseen_images == ms.STALE_IMAGE_DRIFT
     assert summary.declined is None
+
+
+def test_a_handful_of_new_labels_is_not_yet_stale(env, tmp_path):
+    """ "Stale" has to mean *significant* new data, or it fires after every
+    labelling session and stops being read. Significance is proportional: four
+    photos matter on a corpus of thirty and are noise on a corpus of four
+    hundred."""
+    _conn, repo, runs, _tmp = env
+    _install_model()
+    _corpus(repo, tmp_path, images=60)
+    run = runs.start(kind=KIND_DETECTOR, corpus_images=60, corpus_boxes=120)
+    runs.finish(run, map50=0.99, map50_95=0.95, precision=0.95, recall=1.0)
+    runs.promote(run)
+
+    _corpus(repo, tmp_path, images=5, card="c-2")  # 5 of 65 — under a tenth
+    summary = ms.detector_summary(repo, runs)
+    assert summary.unseen_images == 5
+    assert summary.state == "served"
+
+    _corpus(repo, tmp_path, images=4, card="c-3")  # now 9 of 69 — over the line
+    assert ms.detector_summary(repo, runs).state == "stale"
+
+
+def test_the_stale_threshold_scales_with_the_corpus():
+    assert ms.stale_threshold(0) == ms.STALE_IMAGE_DRIFT  # a floor, always
+    assert ms.stale_threshold(30) == ms.STALE_IMAGE_DRIFT  # 3 < 4, so the floor
+    assert ms.stale_threshold(400) == 40  # a tenth, once that is the larger
 
 
 def test_no_declined_run_when_the_retrain_won(env, tmp_path):
