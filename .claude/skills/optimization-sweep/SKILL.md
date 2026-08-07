@@ -215,6 +215,17 @@ a service, report a sentence".
 `services.detector` (0.18 s) are imported lazily, which just relocates the cost
 to whoever clicks first.
 
+**Deferring a heavy import is not automatically a win — measure the total.**
+`import main_window` costs 383 ms, 159 ms of it `services.inference` pulling
+onnxruntime and numpy for one eager `write_back`. Deferring it does drop the
+import phase to 230 ms with the whole vision chain gone, and makes total startup
+**worse**: `RecognitionView(prewarm=True)` then loads onnxruntime itself on a
+background thread, contending for the import lock, and Recognition's build goes
+35 ms → 260 ms for a net **+96 ms**. Measured over three runs each way and
+reverted. Use `python -X importtime` to see the chain, but judge the change on
+`perf.py latency --views` **TOTAL BUILD**, which already includes import cost —
+adding the two together double-counts.
+
 ### 3b. Memory
 
 **Prewarming something the user may never open.** `RecognitionView(prewarm=True)`

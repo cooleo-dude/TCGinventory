@@ -47,6 +47,27 @@ and after — and two of the sweep's own conclusions overturned on the way.
   this dataset, so there was nothing to measure, and a third model "fixed by
   analogy" is exactly the change this sweep exists to prevent.
 - **Total view build is now 1205ms against 2364ms** at the start of the sweep.
+- **The collection-value series stopped redoing its own work.**
+  `_reconstruct_collection_series` was O(dates × lots) — 85 dates × 1,105 lots ≈
+  94k iterations — re-testing each lot's intent/missing flags per date,
+  re-summing its disposals from scratch, and walking lots not yet acquired. It
+  now filters once, bisects a cumulative disposal series, and advances a pointer
+  through lots in acquisition order. **59.3ms → 39.2ms**, and
+  `collection_value_series()` 42.6ms → 30.1ms. Verified identical point-for-point
+  across four intents × three cutoffs, with the `now` anchor checked separately —
+  this draws money on the Dashboard, so "close" would not have been a result.
+- **Deferring the vision imports off startup: measured and rejected.**
+  `import main_window` is 383ms, of which `services.inference` is 159ms
+  (onnxruntime 78 + numpy 70), pulled by one eager `write_back` import in
+  `auctions.py` and `transaction.py`, plus a second numpy chain through
+  `history.py → corpus → exemplars`. Deferring both does exactly what it
+  promises — imports drop to 230ms and numpy, onnxruntime and PIL leave the
+  startup path entirely — and total startup gets **worse**: with the eager import
+  gone, `RecognitionView(prewarm=True)` loads onnxruntime itself on a background
+  thread against the import lock, its build goes 35ms → 260ms, and TOTAL BUILD
+  goes 1228ms → 1324ms over three runs each way. Reverted. The cost does not
+  disappear, it moves somewhere worse — and it would only pay off alongside a
+  change to prewarm, which is out of scope by decision.
 - **Speeding up the build made every refresh look slower**, which is worth
   recording because it is not intuitive. Removing 950ms of construction let
   Recognition's ~2s background prewarm overlap the refresh phase, so the harness

@@ -131,6 +131,46 @@ latter was measuring sort short-circuiting on `None`, not caching.
 `recognition_history_model` is **unmeasured** — its model holds zero rows on
 this dataset. It has not been changed.
 
+## Startup imports
+
+`import tcginventory.ui.main_window` costs **383 ms** (`python -X importtime`),
+of which `services.inference` is **159 ms** — onnxruntime 78 ms plus numpy 70 ms —
+pulled by a single eager `write_back` import in `auctions.py` and `transaction.py`.
+A second chain, `history.py` → `services.corpus` → `services.exemplars`, pulls
+numpy again.
+
+**Deferring both was measured and rejected.** It does exactly what it promises to
+the import phase — 383 ms → 230 ms, with numpy, onnxruntime, PIL and the whole
+vision chain gone — and it makes total startup **worse**:
+
+| median of 3 | eager (HEAD) | deferred |
+|---|---:|---:|
+| Transaction build | 185 ms | 23 ms |
+| Recognition build | 35 ms | **260 ms** |
+| **TOTAL BUILD** (includes imports) | **1,228 ms** | **1,324 ms** |
+
+With the eager import gone, `RecognitionView(prewarm=True)` has to load
+onnxruntime itself, on a background thread, contending for the import lock while
+the main thread keeps constructing views. The cost does not disappear; it moves
+somewhere worse. **Do not re-propose this without also changing prewarm.**
+
+## Dashboard collection series
+
+`reporting._reconstruct_collection_series` was an O(dates × lots) loop —
+85 distinct dates × 1,105 lots ≈ 94k iterations — that re-tested each lot's
+intent/missing flags per date, re-summed its disposals from scratch, and walked
+lots not yet acquired.
+
+| | before | after |
+|---|---:|---:|
+| `_reconstruct_collection_series()` | 59.3 ms | **39.2 ms** |
+| `collection_value_series()` (public) | 42.6 ms | **30.1 ms** |
+
+Verified identical point-for-point across 4 intents × 3 `before` cutoffs, with
+the `now` anchor checked against `collection_value_cents()` separately. The
+remaining ~39 ms is mostly the setup queries, including 23,583 `price_snapshot`
+rows read into two dicts.
+
 ### Where startup stands
 
 | | 2026-08-07 first sweep | after four fixes |

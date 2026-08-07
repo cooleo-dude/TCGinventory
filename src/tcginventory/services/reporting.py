@@ -559,21 +559,55 @@ class ReportingService:
         if before is not None:  # recorded figures cover on/after `before`
             dates = {d for d in dates if d < before}
 
+        # Three things this loop used to redo per date, at 85 dates x 1,105 lots:
+        # re-test every lot's intent/missing flags, re-sum a lot's disposals from
+        # scratch, and walk lots that were not acquired yet. Hoisting the filter,
+        # turning each lot's disposals into a cumulative series it can bisect, and
+        # advancing through lots in acquisition order leaves the arithmetic —
+        # and so the series — exactly as it was.
+        eligible = [
+            lot
+            for lot in lots
+            if lot["intent"] != "ripping"
+            and not lot["missing"]
+            and (intent is None or lot["intent"] == intent.value)
+        ]
+        eligible.sort(key=lambda lot: lot["acquired_at"])
+
+        # lot_id -> (disposal dates ascending, quantity disposed on or before each)
+        cumulative: dict[int, tuple[list[str], list[int]]] = {}
+        for lot_id, entries in disposals.items():
+            entries.sort()
+            running, totals = 0, []
+            for _at, qty in entries:
+                running += qty
+                totals.append(running)
+            cumulative[lot_id] = ([at for at, _ in entries], totals)
+
         out: list[SeriesPoint] = []
+        held_through = 0  # how far into `eligible` the acquisition date has reached
         for d in sorted(dates):
+            while (
+                held_through < len(eligible)
+                and eligible[held_through]["acquired_at"] <= d
+            ):
+                held_through += 1
             total = 0
-            for lot in lots:
-                if lot["intent"] == "ripping" or lot["missing"]:
-                    continue  # ripping and missing lots are always $0
-                if intent is not None and lot["intent"] != intent.value:
-                    continue
-                if lot["acquired_at"] > d:
-                    continue  # not yet acquired at this date
-                held = lot["quantity"] - sum(
-                    q for cd, q in disposals.get(lot["id"], ()) if cd <= d
-                )
+            priced: dict[int, int] = {}  # item_id -> value at this date
+            for lot in eligible[:held_through]:
+                held = lot["quantity"]
+                disposed = cumulative.get(lot["id"])
+                if disposed is not None:
+                    at, totals = disposed
+                    idx = bisect.bisect_right(at, d) - 1
+                    if idx >= 0:
+                        held -= totals[idx]
                 if held > 0:
-                    total += held * effective(lot["item_id"], d)
+                    item_id = lot["item_id"]
+                    value = priced.get(item_id)
+                    if value is None:
+                        value = priced[item_id] = effective(item_id, d)
+                    total += held * value
             out.append(SeriesPoint(at=d, value_cents=total))
         # Anchor the endpoint to the tile (same computation) so the two never
         # disagree at "now" — only when we're building the whole series (no
