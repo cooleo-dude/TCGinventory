@@ -657,7 +657,8 @@ PATTERNS: list[tuple[str, str, str]] = [
     (
         "append-only table",
         r"INSERT INTO (price_snapshot|catalog_price_snapshot|audit_log|operation_run)",
-        "nothing prunes these; retention is a product decision, surface it",
+        "check retention before assuming there is none — catalog_price_snapshot "
+        "keeps 365 days (marketprices.py) and audit_log is append-only by invariant",
     ),
     (
         "regex compiled at call time",
