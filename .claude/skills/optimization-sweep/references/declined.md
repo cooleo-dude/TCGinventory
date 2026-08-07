@@ -17,6 +17,13 @@ Two kinds of entry, and they carry different weight:
 Append a new entry the moment a proposal is declined, before doing anything
 else. Newest first.
 
+**Declined by the user is not the same as dead.** Where the finding is real and
+measured and the user has only said *not now*, it also gets a ticket at status
+`deferred` so it stays visible and re-openable — the entry here keeps the
+reasoning and the reopening condition, and names the ticket. A finding that
+*measurement* killed gets no ticket: it is a permanent result and lives only
+here.
+
 ---
 
 ### 2026-08-07 — Lazy view construction · **user**
@@ -38,7 +45,7 @@ A timing assertion in the suite to catch regressions.
   `references/baseline.md`, which is where they now go.
 - **Reopen if:** never, unless the suite gains a serial, isolated benchmark lane.
 
-### 2026-08-07 — Recognition's 112 MB startup prewarm · **user**
+### 2026-08-07 — Recognition's 112 MB startup prewarm · **user** · ticket 004 / issue #12
 
 `RecognitionView(conn, prewarm=True)` loads the DINOv2 ONNX session at startup
 for every user: **96 → 198 MB resident**, arriving ~1 s after construction.
@@ -50,7 +57,7 @@ Recognition.
   freeze, and that tradeoff stands.
 - **Reopen if:** the user asks, or resident memory becomes a reported problem.
 
-### 2026-08-07 — PNG → WebP for the card image cache · **user**
+### 2026-08-07 — PNG → WebP for the card image cache · **user** · ticket 005 / issue #13
 
 `card_images/` is **2,212 MB across 50,546 PNGs** (`services/cardimages.py:33`
 writes `.png` unconditionally), 200×279 RGB, 48.8 KB average. Measured on a

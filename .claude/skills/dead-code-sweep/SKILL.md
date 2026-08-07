@@ -368,5 +368,21 @@ A concise summary:
 
 If the tree was clean: *"No dead code or unnecessary defensiveness found."*
 
-Do not commit. Per this repo's workflow the user commits to `main` and rebuilds
-the exe once they have reviewed the flagged items.
+## Step 9 — File the flagged items
+
+**Every *Flagged for review* item becomes a ticket** — a symbol whose only
+reference could be dynamic, an exception handler whose failure mode you could not
+pin down, anything in `domain/`, `data/migrations/` or the money path. Those are
+the findings this sweep is forbidden to act on alone, which is exactly why they
+must outlive the conversation instead of scrolling away in a summary.
+
+Use `/sdd-ticket`, `kind: dead-code`. One ticket per item, or one per cluster
+when the same reasoning covers several. Each needs the `file:line`, why removal
+*looks* safe, and the specific thing that has to be confirmed before it is —
+"confirm against `OperationsView._runner`, which dispatches by string id" is a
+ticket; "might be unused" is not.
+
+Items you already removed need no ticket: they are in the diff.
+
+Do not commit. Per this repo's branch + PR flow the user reviews the branch, and
+rebuilds the exe after merge.

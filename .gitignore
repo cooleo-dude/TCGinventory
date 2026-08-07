@@ -30,3 +30,6 @@ htmlcov/
 
 # Exported session transcripts
 20??-??-??-*.txt
+
+# Review-gate verdicts are per-commit and local.
+.claude/context/reviews/
