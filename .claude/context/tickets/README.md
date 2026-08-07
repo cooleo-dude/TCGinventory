@@ -81,3 +81,4 @@ record of why the code looks the way it does.
 |---|---|---|---|---|
 | [001](001-card-embedding-float16.md) | Store card embeddings as float16 | optimization | #2 | `open` |
 | [002](002-enumerate-the-rule-registry.md) | Enumerate the rule registry to full coverage | feature | #7 | `open` |
+| [003](003-gate-binds-verdict-to-the-wrong-commit.md) | The review gate binds a verdict to the checkout, not to what is being merged | fix | #10 | `open` |
