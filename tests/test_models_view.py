@@ -597,9 +597,10 @@ def test_a_retrain_that_lost_leaves_nothing_stale(env, tmp_path):
     assert summary.declined is not None  # but the screen can still explain itself
     assert summary.declined["id"] == loser
     assert summary.version == 1  # and the better model is still the one serving
-    # The served model *is* older than the corpus, which is worth showing and is
+    # The served model is older than the corpus — it trained on one image while
+    # the corpus holds five — and the card says so from `trained_images`. That is
     # never on its own a reason to retrain.
-    assert summary.behind_images == 4
+    assert summary.trained_images == 1 and summary.corpus_images == 5
 
 
 def test_a_run_that_beats_the_served_model_is_worth_promoting(env, tmp_path):

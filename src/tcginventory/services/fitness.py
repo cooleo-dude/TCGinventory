@@ -200,11 +200,6 @@ class Verdict:
     floor: float = 0.0  # how big a difference had to be to count
     comparable: bool = True
 
-    @property
-    def decisive(self) -> bool:
-        """True when the scores themselves settled it, rather than a tiebreak."""
-        return abs(self.margin) > self.floor
-
 
 def compare(
     candidate: float | None,

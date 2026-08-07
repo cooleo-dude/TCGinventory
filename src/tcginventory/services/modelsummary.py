@@ -83,18 +83,6 @@ class DetectorSummary:
         return max(0, self.corpus_boxes - self.evaluated_boxes)
 
     @property
-    def behind_images(self) -> int:
-        """How far the *served* model is behind the corpus.
-
-        Distinct from :attr:`unseen_images`, which asks whether there is anything
-        left to train on. This asks how old the model in use is — worth showing,
-        but never a reason to press Retrain on its own.
-        """
-        if not self.installed:
-            return 0
-        return max(0, self.corpus_images - self.trained_images)
-
-    @property
     def declined_scored_higher(self) -> bool:
         """A run sitting unpromoted that the current gate would have promoted.
 
