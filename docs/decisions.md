@@ -56,6 +56,15 @@ and after — and two of the sweep's own conclusions overturned on the way.
   `collection_value_series()` 42.6ms → 30.1ms. Verified identical point-for-point
   across four intents × three cutoffs, with the `now` anchor checked separately —
   this draws money on the Dashboard, so "close" would not have been a result.
+- **`statistics` was the wrong tool for the volatility column.**
+  `_coefficient_of_variation` used `statistics.mean`/`pstdev`, which compute in
+  exact `Fraction` arithmetic — correct, and far too slow for 797 short lists of
+  integer cents on every Market refresh. Written out longhand: the 797 series
+  (23,583 points) go **16.44ms → 1.68ms**, `signals()` 40.0ms → 24.3ms, and the
+  Market refresh 94ms → 64ms. The two agree to within **3.6e-14 percentage
+  points** and round identically at the 2dp the column shows, which is the only
+  reason the swap is allowed — it is a displayed statistic, not money, and the
+  money rule still forbids this anywhere near cents.
 - **Deferring the vision imports off startup: measured and rejected.**
   `import main_window` is 383ms, of which `services.inference` is 159ms
   (onnxruntime 78 + numpy 70), pulled by one eager `write_back` import in

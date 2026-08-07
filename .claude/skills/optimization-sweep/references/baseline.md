@@ -171,6 +171,26 @@ the `now` anchor checked against `collection_value_cents()` separately. The
 remaining ~39 ms is mostly the setup queries, including 23,583 `price_snapshot`
 rows read into two dicts.
 
+## Market volatility
+
+`_coefficient_of_variation` used `statistics.mean`/`pstdev`, which compute in
+exact `Fraction` arithmetic — the right default, the wrong tool for 797 short
+lists of integer cents on every Market refresh.
+
+| | before | after |
+|---|---:|---:|
+| the 797 series (23,583 points) | 16.44 ms | **1.68 ms** (9.8×) |
+| `MarketSignalService.signals()` | 40.0 ms | **24.3 ms** |
+| `MarketSignalService.overview()` | 40.3 ms | **24.6 ms** |
+| Market view refresh | 94 ms | **64 ms** |
+
+Worst disagreement between the two: **3.6e-14 percentage points**, zero
+`None`-disagreements, identical at the 2dp the column displays.
+
+Note `overview()`'s standalone cost is an artefact — it recomputes `signals()`
+when called bare, which the harness does and the view does not (it passes the
+list in). Do not "fix" that.
+
 ### Where startup stands
 
 | | 2026-08-07 first sweep | after four fixes |
