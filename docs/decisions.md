@@ -4,6 +4,72 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-07 — The ledger is not the slow part, and a skill that knows it
+
+A new `/optimization-sweep` skill (`.claude/skills/optimization-sweep/`), built
+the way `dead-code-sweep` was: a playbook grounded in numbers measured on this
+repo, plus a harness (`scripts/perf.py`) that regenerates them. The harness
+measures three axes separately — latency, resident memory, bytes on disk —
+because they disagree, and a sweep watching only the stopwatch misses the largest
+item in the app.
+
+- **The headline finding is negative, and it is the reason the skill exists.**
+  The ledger is ~1,000 rows and already fast; every real cost is in the catalog,
+  the image cache and the model stack. `item` 903, `lot` 1,105, `transaction` 262
+  against `card_catalog` 53,289, `card_embedding` 49,551,
+  `catalog_price_snapshot` 223,893 and 50,546 cached PNGs. Measured:
+  `all_positions()` is a textbook N+1 — two queries × 903 items — and costs
+  **25 ms**, called by no view; every `ReportingService` method but
+  `collection_value_series` (44 ms) runs in **0.2–3.5 ms**; VACUUM reclaims
+  **nothing**, the freelist is 0 pages in all four databases. A generic
+  performance pass would have spent its whole budget there. The skill's
+  do-not-touch list is as long as its findings list, with a number beside each
+  entry, because "measured, and not worth changing" is a complete result.
+- **Where the time actually goes:** ~2.0–2.4 s of view construction on every
+  launch, of which `ModelsView` is ~1.1 s (`catalog_index.index_status` called
+  twice, each building an ONNX embedder; `trainingenv._walk_size` at 0.28 s
+  across 6,139 `nt.scandir` calls); `inventory_model.data()` fires **31,598
+  times** for a 1,105-row grid, re-deriving strings and fonts per role; and
+  `InventoryView.refresh()` spends 0.37 s in `image_for()` querying the 53k-row
+  catalog 27 times.
+- **Memory earns its own axis.** `RecognitionView(prewarm=True)` costs **112 MB**
+  resident, at startup, for every user whether or not they open Recognition —
+  while its build time barely moves (198 ms vs 182 ms with prewarm off). No
+  amount of latency work would have surfaced that. Total resident with all views
+  built: 256 MB.
+- **Storage likewise.** 8.7 GB of app data, of which the app owns 2,212 MB as
+  **50,546 PNGs** (`services/cardimages.py` writes `.png` unconditionally).
+  Re-encoding a 25-file sample: WebP q85 averages 19.7 KB against PNG's 48.8 KB —
+  60% smaller, ~1.2 GB. Flagged rather than done: 50k existing files need a
+  migration path, and that is the real cost of the idea. Same treatment for the
+  float32 `card_embedding` (1,589 B/row, 78.8 MB) — halving it is easy, but
+  ADR 2026-08-06 prices a re-embed at ~68 minutes and retrieval accuracy has to
+  be benchmarked, not assumed.
+- **The harness found two redundant indexes unaided** —
+  `card_catalog.idx_catalog_name` duplicates `idx_card_catalog_name`, and
+  `idx_card_catalog_set_name` is a prefix of `idx_catalog_set(set_name, number)`.
+  Each is paid again on every insert.
+- **Four measurement traps are baked into the harness** because each one produced
+  a wrong answer first: `data.db.connect()` defaults to `:memory:`, so a bare
+  call profiles an empty database that answers instantly; Windows will not delete
+  the staged copy while SQLite holds it; Qt teardown without an event loop exits
+  with an access violation (the same total behind `conftest.py`'s
+  deferred-deletion fixture); and **RSS deltas misattribute across async work** —
+  the 112 MB above first appeared under `MarketView`, which allocates nothing,
+  because prewarm lands a second after the constructor returns. `all` runs each
+  axis in a fresh subprocess for the same reason.
+- **Two ideas are ruled out by decision, and the skill says so** so they are not
+  re-proposed each sweep: making view construction lazy (the ~2 s prize, but an
+  architecture change touching the splash contract and the nav indexes), and a
+  performance-regression test (the suite runs `-n auto`; a timing assertion in it
+  would be flaky). Results go here instead.
+- **Research is bounded rather than open-ended.** Three in-repo questions first —
+  can it be cached, can it move behind `_worker.TaskWorker`, can SQLite do it —
+  each with precedent and no new dependency. Only then outward, and then the
+  proposal must price the `packaging/tcginventory.spec` `hiddenimports` entry and
+  the frozen boot. In an offline PyInstaller app most library answers cannot ship,
+  and a worse-on-paper stdlib answer usually wins.
+
 ### 2026-08-07 — Recognition: a mode trap, not a broken Delete
 
 - **The delete handler was always correct; nothing could reach it.** Both delete
