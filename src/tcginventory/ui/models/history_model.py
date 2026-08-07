@@ -45,6 +45,20 @@ ITEMS_COL = _HEADERS.index("Items")
 # Role the thumbnail delegate reads: (thumb_card_ids, total_card_count).
 CARDS_ROLE = Qt.UserRole + 1
 
+# Plain ints for the roles ``data()`` tests — see inventory_model for why. The
+# grid's sort accounts for 100% of the calls during a reset (5,132 for 262 rows,
+# 94.9% of them repeats), and comparing wrapped C++ enums is what made it slow.
+_R_DISPLAY = int(Qt.DisplayRole)
+_R_TOOLTIP = int(Qt.ToolTipRole)
+_R_FONT = int(Qt.FontRole)
+_R_ALIGN = int(Qt.TextAlignmentRole)
+_R_FOREGROUND = int(Qt.ForegroundRole)
+_R_SORT = int(Qt.UserRole)
+_R_CARDS = int(CARDS_ROLE)
+_ALIGN_RIGHT = int(Qt.AlignRight | Qt.AlignVCenter)
+
+_MISS = object()  # distinguishes "not cached" from a cached None
+
 
 @dataclass(frozen=True)
 class HistoryRow:
@@ -60,10 +74,13 @@ class HistoryTableModel(QAbstractTableModel):
     def __init__(self, rows: list[HistoryRow] | None = None) -> None:
         super().__init__()
         self._rows: list[HistoryRow] = rows or []
+        # (row, column) -> sort key, derived from _rows and dropped with them.
+        self._sort_cache: dict[tuple[int, int], object] = {}
 
     def set_rows(self, rows: list[HistoryRow]) -> None:
         self.beginResetModel()
         self._rows = rows
+        self._sort_cache.clear()  # keys are derived from the rows being replaced
         self.endResetModel()
 
     def row_at(self, source_row: int) -> HistoryRow:
@@ -85,26 +102,37 @@ class HistoryTableModel(QAbstractTableModel):
     def data(self, index: QModelIndex, role=Qt.DisplayRole):
         if not index.isValid():
             return None
+        role = int(role)
+        col = index.column()
+
+        # The sort is the whole cost of a reset here, and it asks for the same
+        # cell up to 124 times. Answer it first, and answer repeats from cache.
+        if role == _R_SORT:
+            key = (index.row(), col)
+            cached = self._sort_cache.get(key, _MISS)
+            if cached is _MISS:  # a sentinel, so a cached None is still a hit
+                row = self._rows[index.row()]
+                cached = self._sort_key(row, row.transaction, col)
+                self._sort_cache[key] = cached
+            return cached
+
         row = self._rows[index.row()]
         txn = row.transaction
-        col = index.column()
         voided = txn.status is TransactionStatus.VOIDED
 
-        if role == Qt.DisplayRole:
+        if role == _R_DISPLAY:
             return self._display(row, txn, col)
-        if role == Qt.UserRole:
-            return self._sort_key(row, txn, col)
-        if role == CARDS_ROLE and col == CARDS_COL:
+        if role == _R_CARDS and col == CARDS_COL:
             return (row.thumb_ids, row.card_count)
-        if role == Qt.ToolTipRole and col == CARDS_COL and row.items_label:
+        if role == _R_TOOLTIP and col == CARDS_COL and row.items_label:
             return row.items_label
-        if role == Qt.ToolTipRole and col == ITEMS_COL and row.items_label:
+        if role == _R_TOOLTIP and col == ITEMS_COL and row.items_label:
             return row.items_label + "\n\n(click to view the full list)"
-        if role == Qt.TextAlignmentRole and col in (3, 4):
-            return int(Qt.AlignRight | Qt.AlignVCenter)
-        if role == Qt.FontRole and col in (0, 3, 4):  # date + money → mono, aligned
+        if role == _R_ALIGN and col in (3, 4):
+            return _ALIGN_RIGHT
+        if role == _R_FONT and col in (0, 3, 4):  # date + money → mono, aligned
             return QFont(theme.mono_family())
-        if role == Qt.ForegroundRole:
+        if role == _R_FOREGROUND:
             if voided:
                 return QBrush(_muted())
             if col == 3 and txn.cash_delta_cents != 0:

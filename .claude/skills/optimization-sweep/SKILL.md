@@ -167,8 +167,20 @@ role, and a `(row, column) -> key` cache cleared in `set_rows()`:
 So: instrument `data()` with a `Counter` keyed by `(row, column, role)` **before**
 designing a cache. Subclass to do it — PySide6 binds virtual overrides when the
 class is created, so a monkeypatch applied afterwards is never called and will
-silently report zero. `history_model` and `recognition_history_model` have the
-same shape and have not been measured.
+silently report zero.
+
+`history_model` measured the same and got the same fix — 5,132 calls for 262
+rows, **100% sort role**, 94.9% repeats, one cell asked 124 times;
+`set_rows()` 40.0 ms → 15.5 ms, History build 128 ms → 87 ms, refresh
+151 ms → 70 ms. **`recognition_history_model` is unmeasured**: its model holds
+zero rows on this dataset, so there was nothing to profile. Do not "fix" it by
+analogy — measure it on a dataset that populates it, or leave it.
+
+**Verify a sort cache against a Python sort**, every column, both directions.
+And when the check fails, suspect the check first: ties keep source order, so
+comparing row *identities* reports a false failure. Compare the sequence of
+sort *keys*. That caught nothing real twice and would have looked like a bug
+both times.
 
 **cProfile lies about this path.** It counts calls honestly — 31,598 — but its
 per-call overhead swamps a function this small, and it inflated `image_for` from

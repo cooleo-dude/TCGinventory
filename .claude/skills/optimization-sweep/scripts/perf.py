@@ -239,20 +239,29 @@ def _rss_mb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / scale
 
 
-def _drain_threads(view, app, timeout_ms: int = 5000) -> None:
-    """Wait for any QThread a view started before moving on.
+def _drain_threads(app, timeout_ms: int = 5000) -> None:
+    """Wait for every live QThread before moving on.
 
-    Several refreshes spawn one (Inventory prefetches previews). A running
-    QThread that gets collected aborts the whole process with an access
-    violation — mid-run, so the numbers already printed never reach the
-    terminal. Workers are held as plain attributes rather than Qt children, so
-    findChildren misses them; scan the instance dict.
+    Several refreshes spawn one — Inventory prefetches previews, History
+    resolves thumbnails. A running QThread that gets collected aborts the whole
+    process with an access violation, mid-run, so numbers already printed never
+    reach the terminal.
+
+    Sweeping the garbage collector rather than a view's ``__dict__``: workers are
+    not Qt children (so ``findChildren`` misses them) and they are not all held
+    as attributes either (History's ``_ThumbResolver`` is not), which cost two
+    debugging rounds before this was general.
     """
+    import gc
+
     from PySide6.QtCore import QThread
 
-    for value in list(vars(view).values()):
-        if isinstance(value, QThread) and value.isRunning():
-            value.wait(timeout_ms)
+    for obj in gc.get_objects():
+        try:
+            if isinstance(obj, QThread) and obj.isRunning():
+                obj.wait(timeout_ms)
+        except RuntimeError:  # already deleted on the C++ side
+            continue
     app.processEvents()
 
 
@@ -343,7 +352,7 @@ def _latency_views(staged: Path) -> None:
             print(f"      ERROR  refresh  {name}: {type(exc).__name__}: {exc}")
         # Before the next view churns the heap. Also keeps the next reading
         # clean: a worker still running competes for the GIL with what follows.
-        _drain_threads(built[name], app)
+        _drain_threads(app)
     print()
     # Several refreshes start a QThread (Inventory prefetches previews). A
     # running QThread that gets collected aborts the process — intermittently,

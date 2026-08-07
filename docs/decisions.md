@@ -40,6 +40,13 @@ and after — and two of the sweep's own conclusions overturned on the way.
   `data()` counter monkeypatched afterwards is never called and silently reports
   zero — subclass instead. The rule now in the skill: **count the roles before
   designing a cache.**
+- **The same shape in History, measured before it was assumed.** 5,132 calls for
+  262 rows, again 100% sort role, 94.9% repeats, one cell asked 124 times. Same
+  fix: `set_rows()` 40.0ms → 15.5ms, build 128ms → 87ms, refresh 151ms → 70ms.
+  **`recognition_history_model` was left alone** — its model holds zero rows on
+  this dataset, so there was nothing to measure, and a third model "fixed by
+  analogy" is exactly the change this sweep exists to prevent.
+- **Total view build is now 1205ms against 2364ms** at the start of the sweep.
 - **Speeding up the build made every refresh look slower**, which is worth
   recording because it is not intuitive. Removing 950ms of construction let
   Recognition's ~2s background prewarm overlap the refresh phase, so the harness

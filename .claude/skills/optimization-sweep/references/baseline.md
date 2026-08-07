@@ -123,6 +123,24 @@ this file's earlier claims here were wrong — that the cost was `DisplayRole`
 derivation, and that a dict-lookup `data()` measured a 36.8 ms "ceiling". The
 latter was measuring sort short-circuiting on `None`, not caching.
 
+`history_model` measured the same shape and got the same fix: 5,132 calls for
+262 rows, 100% sort role, 94.9% repeats, worst cell asked 124 times.
+`set_rows()` 40.0 ms → 15.5 ms; History build 128 ms → 87 ms; refresh 151 ms →
+70 ms.
+
+`recognition_history_model` is **unmeasured** — its model holds zero rows on
+this dataset. It has not been changed.
+
+### Where startup stands
+
+| | 2026-08-07 first sweep | after four fixes |
+|---|---:|---:|
+| total view build | 2,364 ms | **1,205 ms** |
+| Models build | 1,155 ms | ~200 ms |
+| Inventory build / refresh | 306 / 401 ms | 128 / 120 ms |
+| History build / refresh | 128 / 151 ms | 87 / 70 ms |
+| Operations refresh | 81 ms | 51 ms |
+
 Also in refresh: `repositories.image_for()` and `trends.card_id_for` appear
 expensive under cProfile but measure **0.45 ms per item** warm across all three
 `gather()` queries (40 real items sampled). Fresh connection vs reused is
