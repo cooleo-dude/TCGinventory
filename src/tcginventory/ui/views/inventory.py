@@ -725,6 +725,15 @@ class InventoryView(QWidget):
         worker.start()
 
     def _on_previews_resolved(self, worker: _PreviewPrefetchWorker) -> None:
+        # Only the worker we are currently waiting on may publish. A retired one
+        # breaks out of its loop at the next row and then emits regardless, so
+        # what it carries is partial and describes a row set that has already
+        # been filtered away. It used to be dropped mid-run (taking the process
+        # with it, which is the bug retire() fixes); now that it survives to
+        # finish, its results have to be ignored deliberately. History guards the
+        # same way, by generation.
+        if worker is not self._prefetch_worker:
+            return
         # Results are read from the finished worker's attributes, not signal args
         # (dicts of Python objects don't survive a cross-thread queued signal).
         self._row_image = worker.images

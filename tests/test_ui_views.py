@@ -92,6 +92,34 @@ def test_inventory_ebay_link_auto_populated(app, seeded_conn):
     assert url and "ebay.com/sch" in url and "LH_Sold=1" in url
 
 
+def test_inventory_ignores_a_retired_prefetch_workers_results(app, seeded_conn):
+    """A retired prefetch worker now survives to finish, so its results have to
+    be ignored explicitly.
+
+    It breaks out of its loop at the next row and emits `resolved` regardless, so
+    what it carries is partial and describes a row set that has been filtered
+    away. Before `retire()` it was dropped mid-run — the crash hid this — so
+    without an identity guard the stale maps silently overwrite the live
+    worker's, and the grid shows the wrong art and trend.
+    """
+    from types import SimpleNamespace
+
+    from tcginventory.ui.views.inventory import InventoryView
+
+    view = InventoryView(seeded_conn)
+    live = SimpleNamespace(images={"live": 1}, history={}, trends={})
+    view._prefetch_worker = live
+    view._row_image = {"live": 1}
+
+    stale = SimpleNamespace(images={"stale": 2}, history={"s": 1}, trends={"s": 1})
+    view._on_previews_resolved(stale)  # a worker that is no longer the current one
+    assert view._row_image == {"live": 1}  # not overwritten
+
+    view._on_previews_resolved(live)  # the current one still publishes
+    assert view._row_image == {"live": 1}
+    view.deleteLater()
+
+
 def test_retired_worker_outlives_being_replaced(app):
     """A worker that has been asked to stop but is still running must stay
     referenced until it actually exits.
