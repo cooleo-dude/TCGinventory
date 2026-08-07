@@ -1618,3 +1618,28 @@ _Template for new entries:_
   expensive (it probes ultralytics, torch/CUDA and `nvidia-smi`, and reads the
   environment's size) but measures 0.82s cold and 0.07s warm, because `training`
   already caches its probes. No change made.
+
+## 2026-08-07 — A finished run gets a window, not a toast
+
+- Training the detector, training the grader and benchmarking identification now
+  end in a themed **result window** rather than a one-line message box. A run has
+  metrics, a promotion decision and usually a reason it went the way it did;
+  those are worth reading once, at the moment the run lands.
+- **Assembled from the run log, not from the job's return string**
+  (`modelsummary.run_result`). The log already holds the metrics, the promotion
+  outcome and the corpus it trained on — parsing a sentence back apart to show
+  any of it would have been absurd, and would have coupled the window to
+  wording.
+- **Each kind reports what it actually has.** The detector shows mAP50/mAP50-95/
+  precision/recall and, when it loses, both sides of the comparison plus the
+  advice that follows from it ("95.5% against 97.0%, so v1 keeps serving —
+  training again will not change that, more labelled photos will"). The grader
+  shows exact against always-NM, and says plainly when it is *worse* than the
+  constant guess. The benchmark shows the layer bars, the split of remaining
+  misses, and the in-sample caveat when photo matching was fitted on the same
+  crops.
+- **Only jobs with a run behind them open it.** Indexing the catalog, re-indexing
+  crops and building the environment report a sentence and nothing more, so they
+  keep the plain message — an empty results window would be worse than none.
+- A `failed` run gets the window too, with the error, rather than the outcome
+  being a warning box that looks unrelated to the model.

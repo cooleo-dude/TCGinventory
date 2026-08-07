@@ -492,3 +492,213 @@ def corpus_summary(conn, repo, runs) -> CorpusSummary:
         per_capture=per_capture,
         feeds=feeds,
     )
+
+
+# ---------------------------------------------------------------------------
+# what a finished job has to report
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """The outcome of one training run, ready to put in front of someone.
+
+    Assembled from the run log rather than from the job's return sentence: the
+    log already holds the metrics, the promotion decision and the corpus it
+    trained on, and a sentence would have to be parsed back apart to show any of
+    it.
+    """
+
+    kind: str
+    title: str
+    outcome: str  # 'Promoted', 'Not promoted', 'Trained', 'Failed'…
+    tone: str  # 'served' | 'stale' | 'blocked'
+    headline: list[Metric]
+    lines: list[str]
+    layers: list[Layer] = field(default_factory=list)
+    caveat: str | None = None
+    notes: str = ""
+
+    @property
+    def succeeded(self) -> bool:
+        return self.tone != "blocked"
+
+
+def run_result(runs, kind: str) -> RunResult | None:
+    """The most recent run of ``kind``, described for the results window."""
+    import json
+
+    from tcginventory.data.vision import KIND_CONDITION, KIND_DETECTOR, KIND_IDENTITY
+
+    rows = [dict(r) for r in runs.recent(kind, limit=1)]
+    if not rows:
+        return None
+    row = rows[0]
+    payload = {}
+    if row.get("metrics_json"):
+        try:
+            payload = json.loads(row["metrics_json"])
+        except (ValueError, TypeError):  # pragma: no cover - corrupt payload
+            payload = {}
+
+    if row["status"] != "ok":
+        return RunResult(
+            kind=kind,
+            title=_KIND_TITLES.get(kind, "Model"),
+            outcome="Failed" if row["status"] == "failed" else row["status"].title(),
+            tone="blocked",
+            headline=[],
+            lines=[],
+            notes=(row["notes"] or "").strip(),
+        )
+
+    if kind == KIND_DETECTOR:
+        return _detector_result(runs, row)
+    if kind == KIND_CONDITION:
+        return _condition_result(row, payload)
+    if kind == KIND_IDENTITY:
+        return _identity_result(row, payload)
+    return None  # pragma: no cover - a kind with no result view
+
+
+_KIND_TITLES = {
+    "detector": "Region detection",
+    "condition": "Condition grader",
+    "identity": "Card identification",
+}
+
+
+def _detector_result(runs, row: dict) -> RunResult:
+    from tcginventory.data.vision import KIND_DETECTOR
+
+    promoted = bool(row["promoted"])
+    current = runs.current_model(KIND_DETECTOR)
+    lines = [
+        f"Trained for {row['epochs'] or '—'} epochs on {row['corpus_images']} "
+        f"images and {row['corpus_boxes']} boxes.",
+    ]
+    if promoted:
+        outcome, tone = f"Promoted as v{row['version']}", "served"
+        lines.append("This is the model Recognition uses from now on.")
+    else:
+        outcome, tone = "Not promoted", "stale"
+        beaten = current["map50_95"] if current else None
+        if beaten is not None:
+            lines.append(
+                f"It scored below the model already in use "
+                f"({_pct(row['map50_95'])} against {_pct(beaten)}), so v"
+                f"{current['version']} keeps serving. Training again will not "
+                "change that — more labelled photos will."
+            )
+        else:
+            lines.append("It did not beat the model already in use.")
+    return RunResult(
+        kind=KIND_DETECTOR,
+        title="Region detection",
+        outcome=outcome,
+        tone=tone,
+        headline=[
+            Metric("mAP50", _pct(row["map50"]), good=(row["map50"] or 0) > 0.9),
+            Metric("mAP50-95", _pct(row["map50_95"])),
+            Metric("precision", _pct(row["precision"])),
+            Metric("recall", _pct(row["recall"])),
+        ],
+        lines=lines,
+        notes=(row["notes"] or "").strip(),
+    )
+
+
+def _condition_result(row: dict, payload: dict) -> RunResult:
+    from tcginventory.data.vision import KIND_CONDITION
+
+    exact, baseline = row["map50"], row["precision"]
+    beats = exact is not None and baseline is not None and exact > baseline
+    lines = [
+        f"Fitted over {row['corpus_cards'] or payload.get('cards', 0)} graded "
+        "cards, each read from both faces."
+    ]
+    lines.append(
+        "It beats guessing Near Mint every time, so it is worth using."
+        if beats
+        else "It does not beat guessing Near Mint every time — the grades in the "
+        "corpus are still too lopsided for it to learn wear rather than "
+        "lighting. More cards in the thin grades is the fix."
+    )
+    return RunResult(
+        kind=KIND_CONDITION,
+        title="Condition grader",
+        outcome="Trained" if beats else "Trained, but not better than guessing",
+        tone="served" if beats else "stale",
+        headline=[
+            Metric("exact", _pct(exact), good=bool(beats)),
+            Metric("always-NM", _pct(baseline)),
+        ],
+        lines=lines,
+        notes=(row["notes"] or "").strip(),
+    )
+
+
+def _identity_result(row: dict, payload: dict) -> RunResult:
+    from tcginventory.data.vision import KIND_IDENTITY
+
+    layers: list[Layer] = []
+    previous = None
+    for key, label in (
+        ("encoder", "DINOv2-small encoder"),
+        ("scope", "+ language scope"),
+        ("projection", "+ photo matching"),
+        ("band", "+ bottom band"),
+    ):
+        value = (payload.get("layers") or {}).get(key)
+        if value is None:
+            continue
+        value = float(value)
+        layers.append(
+            Layer(label, value, None if previous is None else value - previous)
+        )
+        previous = value
+
+    queries = int(payload.get("queries") or row["corpus_boxes"] or 0)
+    pool = int(payload.get("pool") or row["corpus_cards"] or 0)
+    lines = [
+        f"Scored {queries} labelled crops against {pool:,} indexed cards.",
+    ]
+    if layers:
+        gain = layers[-1].top1 - layers[0].top1
+        lines.append(
+            f"The corrections are worth {gain * 100:+.1f} points of top-1 over the "
+            "encoder on its own."
+        )
+    misses = []
+    if payload.get("wrong_printing"):
+        misses.append(f"{payload['wrong_printing']} wrong printing")
+    if payload.get("wrong_card"):
+        misses.append(f"{payload['wrong_card']} wrong card")
+    if misses:
+        lines.append(
+            "Remaining misses: "
+            + " and ".join(misses)
+            + " — the wrong-card ones need a better encoder, not another layer."
+        )
+
+    caveat = None
+    if payload.get("in_sample_from") == "projection":
+        caveat = (
+            "Photo matching was fitted partly on these same crops, so the figures "
+            "below it are in-sample and read higher than they should. The honest "
+            "measure of that layer is its own held-out score."
+        )
+    return RunResult(
+        kind=KIND_IDENTITY,
+        title="Card identification",
+        outcome="Benchmarked",
+        tone="served",
+        headline=[
+            Metric("top-1", _pct(row["map50"]), good=(row["map50"] or 0) > 0.6),
+            Metric("top-5", _pct(row["map50_95"]), good=(row["map50_95"] or 0) > 0.8),
+        ],
+        lines=lines,
+        layers=layers,
+        caveat=caveat,
+        notes=(row["notes"] or "").strip(),
+    )

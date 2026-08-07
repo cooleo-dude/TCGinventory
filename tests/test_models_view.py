@@ -545,3 +545,131 @@ def test_no_declined_run_when_the_retrain_won(env, tmp_path):
     runs.promote(better)
 
     assert ms.detector_summary(repo, runs).declined is None
+
+
+# -- the result window -------------------------------------------------------
+
+
+def test_a_promoted_detector_run_says_it_is_now_the_model(env, tmp_path):
+    _conn, repo, runs, _tmp = env
+    run = runs.start(kind=KIND_DETECTOR, corpus_images=39, corpus_boxes=152, epochs=100)
+    runs.finish(run, map50=0.99, map50_95=0.97, precision=0.95, recall=1.0)
+    runs.promote(run)
+
+    result = ms.run_result(runs, KIND_DETECTOR)
+    assert result.outcome == "Promoted as v1" and result.tone == "served"
+    assert [m.label for m in result.headline] == [
+        "mAP50",
+        "mAP50-95",
+        "precision",
+        "recall",
+    ]
+    assert "100 epochs on 39 images" in result.lines[0]
+    assert "uses from now on" in result.lines[1]
+
+
+def test_a_losing_run_explains_why_and_what_would_help(env):
+    """The result window is where "not promoted" has to stop being cryptic."""
+    _conn, repo, runs, _tmp = env
+    served = runs.start(kind=KIND_DETECTOR)
+    runs.finish(served, map50_95=0.97)
+    runs.promote(served)
+    loser = runs.start(kind=KIND_DETECTOR, corpus_images=39, corpus_boxes=152)
+    runs.finish(loser, map50=0.99, map50_95=0.955)
+
+    result = ms.run_result(runs, KIND_DETECTOR)
+    assert result.outcome == "Not promoted" and result.tone == "stale"
+    reason = " ".join(result.lines)
+    assert "95.5%" in reason and "97.0%" in reason  # both sides of the comparison
+    assert "more labelled photos" in reason
+
+
+def test_a_failed_run_is_reported_as_failed(env):
+    _conn, repo, runs, _tmp = env
+    run = runs.start(kind=KIND_DETECTOR)
+    runs.finish(run, status="failed", notes="ultralytics is not installed")
+
+    result = ms.run_result(runs, KIND_DETECTOR)
+    assert result.outcome == "Failed" and result.tone == "blocked"
+    assert not result.succeeded
+    assert "ultralytics" in result.notes
+
+
+def test_a_grader_that_loses_to_always_nm_says_so(env):
+    """It can train successfully and still be worse than a constant guess. The
+    window has to say that rather than call it a success."""
+    _conn, repo, runs, _tmp = env
+    run = runs.start(kind=KIND_CONDITION, corpus_cards=63)
+    runs.finish(run, map50=0.14, precision=0.61)
+
+    result = ms.run_result(runs, KIND_CONDITION)
+    assert result.tone == "stale"
+    assert "not better than guessing" in result.outcome
+    assert "thin grades" in " ".join(result.lines)
+
+
+def test_a_grader_that_beats_the_baseline_is_worth_using(env):
+    _conn, repo, runs, _tmp = env
+    run = runs.start(kind=KIND_CONDITION, corpus_cards=120)
+    runs.finish(run, map50=0.72, precision=0.61)
+
+    result = ms.run_result(runs, KIND_CONDITION)
+    assert result.outcome == "Trained" and result.tone == "served"
+    assert "worth using" in " ".join(result.lines)
+
+
+def test_the_benchmark_result_carries_the_layers_and_the_caveat(env):
+    _conn, repo, runs, _tmp = env
+    _identity_run(
+        runs,
+        {"encoder": 0.194, "scope": 0.672, "projection": 0.910, "band": 0.925},
+        pool=49551,
+        wrong_printing=2,
+        wrong_card=3,
+        in_sample_from="projection",
+    )
+    result = ms.run_result(runs, KIND_IDENTITY)
+
+    assert result.outcome == "Benchmarked"
+    assert [layer.label for layer in result.layers][0] == "DINOv2-small encoder"
+    assert "+73.1 points" in " ".join(result.lines)
+    assert "2 wrong printing and 3 wrong card" in " ".join(result.lines)
+    assert result.caveat and "in-sample" in result.caveat
+
+
+def test_a_clean_benchmark_carries_no_caveat(env):
+    _conn, repo, runs, _tmp = env
+    _identity_run(runs, {"encoder": 0.2, "band": 0.7})
+    assert ms.run_result(runs, KIND_IDENTITY).caveat is None
+
+
+def test_only_the_jobs_with_a_run_behind_them_open_the_window(app):
+    """Indexing and building an environment report a sentence and nothing more,
+    so they keep the plain message rather than an empty results window."""
+    from tcginventory.ui.views import models as mv
+
+    assert set(mv._RESULT_KINDS) == {
+        "models.detector.train",
+        "models.condition.train",
+        "identity.benchmark",
+    }
+    for op_id in ("identity.index_catalog", "vision.reindex", "models.training_env"):
+        assert op_id not in mv._RESULT_KINDS
+
+
+def test_the_result_window_builds_for_every_kind(app, env):
+    from tcginventory.ui.views.models import ResultDialog
+
+    _conn, repo, runs, _tmp = env
+    run = runs.start(kind=KIND_DETECTOR, corpus_images=3, corpus_boxes=6, epochs=10)
+    runs.finish(run, map50=0.9, map50_95=0.8, precision=0.9, recall=0.9)
+    runs.promote(run)
+    _identity_run(runs, {"encoder": 0.2, "band": 0.7}, in_sample_from="projection")
+    cond = runs.start(kind=KIND_CONDITION, corpus_cards=40)
+    runs.finish(cond, map50=0.7, precision=0.6)
+
+    for kind in (KIND_DETECTOR, KIND_CONDITION, KIND_IDENTITY):
+        result = ms.run_result(runs, kind)
+        dialog = ResultDialog(result)
+        assert dialog.windowTitle().startswith(result.title)
+        dialog.deleteLater()

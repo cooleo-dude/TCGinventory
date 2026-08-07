@@ -23,6 +23,7 @@ from PySide6.QtCharts import QChart, QLineSeries, QValueAxis
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
+    QDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -47,6 +48,15 @@ from tcginventory.services import operations as ops
 from tcginventory.ui import theme
 from tcginventory.ui.charts import HoverChartView
 from tcginventory.ui.views._worker import TaskWorker
+
+# Jobs that finish with something worth reading: a run row with metrics behind
+# it. The maintenance jobs (indexing, reclaim, building the environment) report
+# a sentence and nothing more, so they keep the plain message.
+_RESULT_KINDS = {
+    "models.detector.train": "detector",
+    "models.condition.train": "condition",
+    "identity.benchmark": "identity",
+}
 
 # A line under each heading, so a section says what it is for rather than
 # leaving its contents to imply it.
@@ -1212,13 +1222,33 @@ class ModelsView(QWidget):
         if op_id in ops.BY_ID:
             ops.record(self._conn, op_id, ok=ok, summary=sentence)
         title = ops.BY_ID[op_id].title if op_id in ops.BY_ID else "Models"
-        if not ok:
+        self.refresh()
+
+        kind = _RESULT_KINDS.get(op_id)
+        result = self._run_result(kind) if (ok and kind) else None
+        if result is not None:
+            ResultDialog(result, self).exec()
+        elif not ok:
             QMessageBox.warning(self, title, sentence)
         else:
             QMessageBox.information(self, title, sentence)
-        self.refresh()
         if ok:
             self.changed.emit()
+
+    def _run_result(self, kind: str):
+        """Read back what the run recorded, so the window shows the run rather
+        than the sentence the job happened to return."""
+        from tcginventory.data.vision import ModelRunRepository, open_vision
+
+        vision = None
+        try:
+            vision = open_vision()
+            return summary.run_result(ModelRunRepository(vision), kind)
+        except Exception:  # pragma: no cover - vision DB unavailable
+            return None
+        finally:
+            if vision is not None:
+                vision.close()
 
     def _db_file(self) -> str | None:
         for _seq, name, file in self._conn.execute("PRAGMA database_list"):
@@ -1240,6 +1270,82 @@ def _gpu_ready() -> bool:
     from tcginventory.services import training
 
     return bool(_gpu()) and training.training_env_summary().ready
+
+
+class ResultDialog(QDialog):
+    """What a finished training run actually produced.
+
+    A one-line toast is the wrong shape for this: a run has metrics, a
+    promotion decision, and often a reason it went the way it did. Those are
+    the things worth reading once, at the moment the run lands — after that
+    they live in the section behind it.
+    """
+
+    def __init__(self, result, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"{result.title} — {result.outcome}")
+        self.setObjectName("mdDialog")
+        self.setModal(True)
+        self.setMinimumWidth(520)
+        self.setStyleSheet(_qss(theme.active()))
+
+        col = QVBoxLayout(self)
+        col.setContentsMargins(20, 17, 20, 18)
+        col.setSpacing(13)
+
+        head = QHBoxLayout()
+        head.setSpacing(9)
+        title = QLabel(result.title)
+        title.setObjectName("mdDialogTitle")
+        head.addWidget(title)
+        head.addWidget(_pill(result.outcome, result.tone))
+        head.addStretch(1)
+        col.addLayout(head)
+
+        if result.headline:
+            col.addWidget(
+                _Facts([(m.label, m.value, "", m.good) for m in result.headline])
+            )
+
+        if result.layers:
+            col.addWidget(_eyebrow("What each layer is worth"))
+            col.addWidget(
+                _Bars(
+                    [
+                        (
+                            layer.label,
+                            layer.top1,
+                            "base" if layer.delta is None else "accent",
+                            f"{layer.top1 * 100:.1f}%"
+                            + (
+                                ""
+                                if layer.delta is None
+                                else f"  {layer.delta * 100:+.1f}"
+                            ),
+                        )
+                        for layer in result.layers
+                    ]
+                )
+            )
+
+        for line in result.lines:
+            label = QLabel(line)
+            label.setObjectName("mdDialogLine")
+            label.setWordWrap(True)
+            col.addWidget(label)
+
+        if result.caveat:
+            col.addWidget(_banner(result.caveat, None, tone="warn"))
+
+        # No stretch: the dialog is sized to its content, and a stretch would
+        # only open a gap above the button.
+        footer = QHBoxLayout()
+        footer.setSpacing(8)
+        footer.addStretch(1)
+        close = _button("Close", self.accept, primary=True)
+        close.setDefault(True)
+        footer.addWidget(close)
+        col.addLayout(footer)
 
 
 def _gate_reason(condition) -> str:
@@ -1399,6 +1505,9 @@ def _qss(t: theme.Tokens) -> str:
         background: {t.surface2}; }}
     #mdBanner[tone="warn"] {{ border-color: {t.warn};
         background: {_tint(t.warn, 0.10)}; }}
+    #mdDialog {{ background: {t.surface}; }}
+    #mdDialogTitle {{ font-size: 16px; font-weight: 700; color: {t.ink}; }}
+    #mdDialogLine {{ color: {t.ink2}; font-size: 12px; }}
     #mdBanner[tone="busy"] {{ border-color: {t.accent};
         background: {t.accent_soft}; }}
     #mdProgress {{ border: none; border-radius: 3px; background: {t.line2}; }}
