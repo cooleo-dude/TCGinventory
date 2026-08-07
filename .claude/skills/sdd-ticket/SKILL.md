@@ -42,12 +42,13 @@ their own format.
 | `/optimization-sweep` grounded pass | findings it may not auto-apply: money path, migrations, stored precision, retention |
 | `/optimization-sweep` research pass | `MECHANISM` proposals clearing all five bars |
 | `/dead-code-sweep` | *Flagged for review* items — a symbol whose only reference could be dynamic, a handler whose failure mode was not pinned down |
-| `/task-planning` | the brief: its numbered plan, blast-radius table and open questions |
+| `/task-planning` | **always** — every approved brief, before any code is written |
 
 Read `.claude/context/tickets/README.md` for the bar each must clear. The short
 version: a found improvement needs a measurement, no regression, no accuracy
-cost, no product decision, and a clean constraint checklist. Planned work needs
-an agreed brief that is not being executed right now.
+cost, no product decision, and a clean constraint checklist. Planned work from
+`/task-planning` files unconditionally — the ticket is what the branch, the PR
+and the commit point back at.
 
 **Anything that does not qualify goes to the user in the calling skill's report,
 not into this directory.** Minimal-impact wins, alternatives worth weighing and

@@ -19,7 +19,7 @@ qualifies; none of them invent their own format.
 | `/optimization-sweep` — grounded pass | findings it is forbidden to auto-apply: the money path, migrations, stored precision, retention policy |
 | `/optimization-sweep` — research pass | `MECHANISM` proposals clearing all five bars below |
 | `/dead-code-sweep` | *Flagged for review* items — a symbol whose only reference could be dynamic, a handler whose failure mode was not pinned down |
-| `/task-planning` | the brief itself: the numbered plan, the blast-radius table and the open questions |
+| `/task-planning` | **every approved brief, always** — the plan, the blast-radius table and the open questions |
 
 ## What earns a ticket
 
@@ -34,8 +34,10 @@ For a **found improvement** (either sweep), all five:
 5. **Passes the constraint checklist** — packaging, offline, layer, platform,
    maintenance.
 
-For **planned work** (`/task-planning`) the bar is different: a ticket is
-warranted when the brief is agreed and the work is not being done immediately.
+For **planned work** (`/task-planning`) there is no bar: an approved brief is
+always filed, before any code is written, whether or not it is being worked on
+now. The ticket is what the branch, the pull request and the commit point back
+at.
 
 Everything else — minimal impact, an alternative worth weighing, a `none` result
 — goes to the user in the skill's report and no further. If the user declines it,

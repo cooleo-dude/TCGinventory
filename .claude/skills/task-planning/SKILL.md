@@ -88,20 +88,32 @@ Keep it tight. This is a working document.
 
 Do not edit anything yet. Let the user confirm or adjust the plan.
 
-Once they approve, either **work it** or **file it** — not neither.
+## Step 5 — File the ticket. Always.
 
-**Working it now:** the steps in order, then close out per the dossier's
-**Definition of done**: `ruff format .`, `ruff check .`, the full suite with
-`QT_QPA_PLATFORM=offscreen`, an ADR in `docs/decisions.md` if the decision was
-significant, `CLAUDE.md` status if a milestone moved. Then a branch and a PR —
-this repo moved off direct-to-`main` on 2026-08-07 — and rebuild the exe after
-merge.
+**Once the brief is approved it becomes a ticket, before any code is written.**
+Not "if you are not doing it now" — always. The ticket is what the branch, the
+pull request and the commit all point back at, and it is the only artefact that
+survives the conversation. A brief that exists solely in a transcript gets
+re-derived from scratch, dossier and all.
 
-**Not working it now:** file the brief as a ticket via `/sdd-ticket`, `kind:
-feature` or `fix`. The brief is already the right shape for one — the blast-radius
-table is the area of impact, the numbered steps are the plan, and the open
-questions are what blocks it. An agreed plan that is only in a transcript is a
-plan that gets re-derived from scratch, dossier and all.
+`/sdd-ticket`, `kind: feature` or `fix`. The brief is already the right shape:
+the blast-radius table is the area of impact, the numbered steps are the plan,
+the open questions are what blocks it, and the rules section is why the approach
+is what it is. Then `push` it so the issue exists.
+
+Then work it, or leave it `open` for someone else — that decision no longer
+changes whether the ticket gets written.
+
+## Step 6 — Working it
+
+The steps in order, then close out per the dossier's **Definition of done**:
+`ruff format .`, `ruff check .`, the full suite with `QT_QPA_PLATFORM=offscreen`,
+an ADR in `docs/decisions.md` if the decision was significant, `CLAUDE.md` status
+if a milestone moved.
+
+Then a branch and a pull request — this repo moved off direct-to-`main` on
+2026-08-07 — with `Closes #<issue>` in the PR body. Rebuild the exe after merge,
+and `/sdd-ticket close <N>` once it lands.
 
 ## Maintaining the map
 
