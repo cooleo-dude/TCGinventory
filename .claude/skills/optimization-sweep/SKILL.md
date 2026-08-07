@@ -46,6 +46,7 @@ it measured small is as valuable as fixing one that measured large.
 | `specs/02-data-model.md` | The money and schema invariants. |
 | `references/baseline.md` (next to this file) | What was measured on 2026-08-07 and how. Read it before running anything — it will stop you rediscovering settled facts. |
 | `references/declined.md` (next to this file) | Every variant the user has turned down, and every one measurement rejected. Read it **before proposing anything**, in either pass. |
+| `.claude/context/optimizations/` | Tickets already filed by previous research passes. Check before proposing — the work may be queued, or done. |
 | `docs/decisions.md`, newest first | Several performance ADRs. Something that looks slow is often a decision. |
 
 Interpreter and tools (Windows is primary; both given):
@@ -630,6 +631,34 @@ Then a one-line coverage table for every other location `candidates` printed,
 with its verdict. Short is fine — `services/foo.py:120 — none (already a single
 aggregate)`. That table is the deliverable as much as the proposals are.
 
+**Now split the results two ways, because they have different destinations.**
+
+**Irrefutably positive → file a ticket in `.claude/context/optimizations/`.**
+A prose finding evaporates when the conversation ends; a ticket survives it. A
+finding qualifies only if it clears all five:
+
+1. Measured better on at least one axis, against real staged data, before and after.
+2. No measured regression on the other two.
+3. No correctness or accuracy cost — or a cost *measured* to be zero.
+4. Not a product decision. A tradeoff the user must weigh is a question, not a ticket.
+5. Passes the 7f constraint checklist.
+
+Write it as the next number in that directory, following
+`.claude/context/optimizations/README.md`, and add it to that file's index. The
+ticket must carry the measurement, the area of impact as a `file:line` table, the
+chosen approach **and the rejected alternatives with their reasons**, a numbered
+plan, and how to verify it. **Assume the agent who picks it up has none of this
+conversation.** If it cannot be executed cold, it is not finished.
+
+Do **not** implement a ticketed change in the same pass unless the user asks. The
+point is to hand it off.
+
+**Everything else → the user, for judgement.** Minimal-impact wins, alternatives
+worth considering, and `none` results are reported in the sweep's summary and go
+no further. Say plainly which bucket each one is in and why it did not qualify —
+"41% faster, 0.02 ms in real use" is the whole argument. If the user then
+declines one, it goes to `references/declined.md`.
+
 **When the user declines a proposal, append it to `references/declined.md`
 before doing anything else.** One entry, with: what was proposed, the date, who
 declined it (user decision vs. measurement), the reason if given, and the
@@ -656,8 +685,12 @@ permanent asset.
 
 **From the research pass (Step 7) — always present, even when it found nothing:**
 
+- **Tickets filed** — number, title, axis and expected saving for each, so the
+  user knows what is now queued for someone else
 - Each `MECHANISM` block, in the 7h format
 - The coverage table: every location `candidates` printed, with its verdict
+- **For judgement** — minimal-impact wins and alternatives, each with the number
+  that disqualified it from a ticket
 - Anything newly written to `references/declined.md`
 
 If nothing measured badly and research found nothing better:
