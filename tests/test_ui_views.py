@@ -92,6 +92,47 @@ def test_inventory_ebay_link_auto_populated(app, seeded_conn):
     assert url and "ebay.com/sch" in url and "LH_Sold=1" in url
 
 
+def test_retired_worker_outlives_being_replaced(app):
+    """A worker that has been asked to stop but is still running must stay
+    referenced until it actually exits.
+
+    Freeing it early destroys the C++ QThread underneath a live thread, and Qt
+    answers that with a hard abort (0xC0000409) rather than an exception — which
+    is how startup died once Inventory and History each refreshed twice fast
+    enough to replace their own still-running worker.
+    """
+    import gc
+
+    from PySide6.QtCore import QThread
+
+    from tcginventory.ui.views._worker import retire
+
+    class _Spinner(QThread):
+        def run(self) -> None:
+            while not self.isInterruptionRequested():
+                self.msleep(5)
+
+    parked: list = []
+    worker = _Spinner()
+    worker.start()
+    while not worker.isRunning():
+        pass
+
+    retire(worker, parked)
+    assert parked == [worker]  # held, not dropped
+
+    del worker  # the caller's reference goes away (self._worker = new one)
+    gc.collect()  # …this is the collection that used to kill the process
+    assert len(parked) == 1
+
+    parked[0].wait(5000)
+    for _ in range(50):  # let finished() land, however it's delivered
+        app.processEvents()
+        if not parked:
+            break
+    assert parked == []  # released once it really stopped
+
+
 def test_history_view_populates_and_details(app, seeded_conn):
     from tcginventory.ui.views.history import HistoryView
 

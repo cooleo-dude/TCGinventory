@@ -87,6 +87,7 @@ from tcginventory.ui.models.recognition_history_model import (
     RecognitionHistoryModel,
     RecognitionRow,
 )
+from tcginventory.ui.views._worker import retire
 
 _TYPES = ["All", "purchase", "sale", "trade", "adjustment"]
 _TYPE_COL, _STATUS_COL = 1, 5
@@ -895,6 +896,7 @@ class _RecHistoryPanel(QWidget):
         self._conn = conn
         self._vision = vision_repo  # None → opened lazily on first refresh
         self._cropper: _CropWorker | None = None
+        self._parked: list = []  # workers stopping but not yet exited
         self._thumb_gen = 0
 
         self._model = RecognitionHistoryModel()
@@ -1146,8 +1148,9 @@ class _RecHistoryPanel(QWidget):
         self._cropper.start()
 
     def _stop_cropper(self) -> None:
-        if self._cropper is not None and self._cropper.isRunning():
-            self._cropper.requestInterruption()
+        # Parked, not dropped — see _stop_resolver.
+        retire(self._cropper, self._parked)
+        self._cropper = None
 
     def _on_crop_done(self, generation: int) -> None:
         if generation == self._thumb_gen:
@@ -1231,6 +1234,7 @@ class HistoryView(QWidget):
         self._service = TransactionService(conn)
         self._db_file = self._resolve_db_file(conn)
         self._resolver: _ThumbResolver | None = None
+        self._parked: list = []  # workers stopping but not yet exited
         self._thumb_gen = 0  # bumps each refresh so stale resolver emits are ignored
         # Per-page freshness (0 Transaction, 1 Recognition): a page is rebuilt on
         # its first show and after a data change, never on a plain mode toggle.
@@ -1603,9 +1607,10 @@ class HistoryView(QWidget):
     def _stop_resolver(self) -> None:
         # Ask the old resolver to exit at its next row boundary; don't block the
         # UI waiting for it (a mid-flight fetch would stall). Stale emits are
-        # ignored via the generation guard.
-        if self._resolver is not None and self._resolver.isRunning():
-            self._resolver.requestInterruption()
+        # ignored via the generation guard. It stays parked until it has really
+        # exited — dropping it mid-run frees a live QThread and aborts the app.
+        retire(self._resolver, self._parked)
+        self._resolver = None
 
     def _on_thumbs_resolved(self, generation: int, source_row: int, ids: list) -> None:
         if generation != self._thumb_gen:

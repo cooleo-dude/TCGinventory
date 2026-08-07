@@ -96,6 +96,7 @@ from tcginventory.ui.views._inventory_delegates import (
 )
 from tcginventory.ui.views._link_delegate import LinkButtonDelegate
 from tcginventory.ui.views._review_delegate import ReviewPriceDelegate
+from tcginventory.ui.views._worker import retire
 from tcginventory.ui.views.item_detail import ItemDetailDialog
 
 
@@ -365,6 +366,7 @@ class InventoryView(QWidget):
         self._row_trends: dict[int, object] = {}  # item_id -> Trend
         self._thumb_cache: dict[int, QPixmap | None] = {}  # lot_id -> row thumbnail
         self._prefetch_worker: _PreviewPrefetchWorker | None = None
+        self._parked: list = []  # workers stopping but not yet exited
         self._columns_sized = False  # auto-size grid columns once, on first load
         self._model = InventoryTableModel(
             on_edit_price=self._set_manual_price,
@@ -709,8 +711,10 @@ class InventoryView(QWidget):
         db_file = self._db_file()
         if not db_file or not rows:
             return
-        if self._prefetch_worker is not None and self._prefetch_worker.isRunning():
-            self._prefetch_worker.requestInterruption()
+        # Park the outgoing worker until it has actually stopped; overwriting
+        # self._prefetch_worker while it still runs frees a live QThread, which
+        # Qt turns into a hard abort rather than an exception.
+        retire(self._prefetch_worker, self._parked)
         payload = [
             (r.lot_id, r.item.id, r.item.name, r.item.set_name, r.item.card_number)
             for r in rows
