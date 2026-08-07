@@ -80,6 +80,31 @@ def test_export_runs_the_service_and_logs_it(app, seeded_conn, tmp_path, monkeyp
     view.deleteLater()
 
 
+def test_full_export_writes_the_dump_and_the_readable_csvs(
+    app, seeded_conn, tmp_path, monkeypatch
+):
+    """``export.full`` writes both halves: the machine-readable dump that
+    ``import_all`` restores from, and the human CSVs beside it."""
+    from PySide6.QtWidgets import QFileDialog
+
+    from tcginventory.ui.views.operations import OperationsView
+
+    target = tmp_path / "dump"
+    target.mkdir()
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        staticmethod(lambda *a, **k: str(target)),
+    )
+    view = OperationsView(seeded_conn)
+    view._run(ops.BY_ID["export.full"])
+
+    assert (target / "item.csv").exists()  # the round-trippable dump
+    assert (target / "inventory_readable.csv").exists()  # the human copy
+    assert ops.status_for(seeded_conn, ops.BY_ID["export.full"]).state == ops.READY
+    view.deleteLater()
+
+
 def test_import_posts_rows_and_announces_the_change(app, tmp_path, monkeypatch):
     """An import changes the ledger, so the window tells the shell to refresh."""
     from PySide6.QtWidgets import QFileDialog
@@ -349,27 +374,45 @@ def _install_fake_env(tmp_path):
     return env
 
 
-def test_file_menu_is_trimmed_to_operations_and_exit(app, seeded_conn):
+@pytest.fixture(scope="module")
+def shell(app, tmp_path_factory):
+    """One MainWindow for the two tests below, which check the *shell's* wiring
+    rather than anything inside Operations.
+
+    Building it warms all eleven views — the most expensive single thing the
+    suite does — and neither test touches state the other reads. It brings its
+    own data directory because the autouse ``_quiet`` fixture is per-test and
+    this outlives any one of them.
+    """
+    from tcginventory.data.seed import seed_demo
     from tcginventory.ui.main_window import MainWindow
 
-    window = MainWindow(seeded_conn)
-    labels = [a.text() for a in window._file_menu.actions() if a.text()]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path_factory.mktemp("shell")))
+        conn = connect(":memory:")
+        migrate(conn)
+        seed_demo(conn)
+        window = MainWindow(conn)
+        yield window
+        window.close()
+        conn.close()
+
+
+def test_file_menu_is_trimmed_to_operations_and_exit(shell):
+    labels = [a.text() for a in shell._file_menu.actions() if a.text()]
     assert labels == ["Operations", "Exit"]
     # The verbs really did move — no stray import/export handlers left behind.
     for gone in ("_import_items", "_export_all", "_backup_database", "_run_import"):
-        assert not hasattr(window, gone), f"{gone} should live on the Operations view"
-    window.close()
+        assert not hasattr(shell, gone), f"{gone} should live on the Operations view"
 
 
-def test_menu_and_nav_both_reach_the_operations_screen(app, seeded_conn):
-    from tcginventory.ui.main_window import _OPERATIONS_INDEX, NAV_ITEMS, MainWindow
+def test_menu_and_nav_both_reach_the_operations_screen(shell):
+    from tcginventory.ui.main_window import _OPERATIONS_INDEX, NAV_ITEMS
 
-    window = MainWindow(seeded_conn)
     assert NAV_ITEMS[-1] == "Operations"
-    assert window._stack.count() == len(NAV_ITEMS)
+    assert shell._stack.count() == len(NAV_ITEMS)
 
-    window._operations_action.trigger()
+    shell._operations_action.trigger()
 
-    assert window._nav.currentRow() == _OPERATIONS_INDEX
-    assert window._stack.currentWidget() is window._operations
-    window.close()
+    assert shell._nav.currentRow() == _OPERATIONS_INDEX
+    assert shell._stack.currentWidget() is shell._operations

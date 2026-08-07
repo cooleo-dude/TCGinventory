@@ -104,10 +104,16 @@ def test_main_window_reports_every_view_in_nav_order(app, conn):
 
 def test_every_view_is_preloaded_so_navigation_never_refreshes(app, conn):
     """The point of pre-loading: the first visit to a screen costs nothing,
-    because its refresh already happened behind the splash."""
+    because its refresh already happened behind the splash.
+
+    Built without a ``progress`` callback, which is also the guarantee that a
+    splash is optional — tests and any other caller construct the window this
+    way.
+    """
     from tcginventory.ui.main_window import MainWindow
 
     window = MainWindow(conn)
+    assert window._stack.count() == len(NAV_ITEMS)  # no splash, full window
 
     # Every view is marked fresh at the current data version, which is what
     # _on_nav_changed checks before paying for a refresh.
@@ -145,13 +151,4 @@ def test_a_view_that_fails_to_warm_does_not_stop_startup(app, conn):
 
     assert window._stack.count() == len(NAV_ITEMS)  # the window still came up
     assert NAV_ITEMS.index("Market") not in window._view_versions  # left stale
-    window.close()
-
-
-def test_progress_is_optional(app, conn):
-    """Tests and any other caller build the window without a splash."""
-    from tcginventory.ui.main_window import MainWindow
-
-    window = MainWindow(conn)
-    assert window._stack.count() == len(NAV_ITEMS)
     window.close()

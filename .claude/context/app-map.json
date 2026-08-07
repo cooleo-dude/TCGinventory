@@ -343,7 +343,7 @@
       "repositories": ["data/backup.py", "data/db.py (open_database)", "data/pricehistory.py"],
       "tables": ["operation_run", "price_snapshot", "card_catalog", "card_show"],
       "supporting_files": ["ui/views/_worker.py (TaskWorker)", "src/tcginventory/scheduling.py"],
-      "tests": ["tests/test_ui_operations.py", "tests/test_operations.py", "tests/test_importexport.py", "tests/test_backup.py", "tests/test_pricing.py", "tests/test_scheduling.py", "tests/test_ui_menu.py"],
+      "tests": ["tests/test_ui_operations.py", "tests/test_operations.py", "tests/test_importexport.py", "tests/test_backup.py", "tests/test_pricing.py", "tests/test_scheduling.py"],
       "signals_out": ["changed() -> an import or price refresh changes every read screen"],
       "gotchas": [
         "ADDING AN OPERATION = one registry entry in services/operations.py + one runner in OperationsView._runner. The generic TaskWorker covers 'call a service, report a sentence'. Do not add a new QThread subclass or a File-menu item.",
