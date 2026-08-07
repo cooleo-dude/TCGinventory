@@ -148,13 +148,25 @@ only one.
 
 ### 3a. Latency
 
-**Repeated derivation inside `data()`.** `ui/models/inventory_model.py:350` is
-called **31,598 times** for a 1,105-row grid — Qt asks per row *per role*, so
-~28 calls each — and rebuilds strings, fonts and URLs every time. The fix is to
-compute the display tuple once in `set_rows()` and have `data()` index into it.
-Check all three Qt models (`inventory_model`, `history_model`,
-`recognition_history_model`) and the five delegates in `ui/views/_*_delegate.py`.
-Precedent: `ui/thumbcache.py` already does this for pixmaps (ADR 2026-08-04).
+**Repeated derivation inside `data()` — the largest live latency item.**
+`ui/models/inventory_model.py:350` rebuilds strings, fonts and URLs on every
+call, and `endResetModel()` makes Qt sweep 20 columns × 1,105 rows. Measured
+without cProfile: `InventoryView.refresh()` is **340 ms**, of which `set_rows()`
+is **310 ms**; swapping `data()` for a bare dict lookup drops `set_rows()` to
+**36.8 ms**, so **298.8 ms is derivation**. Sorting accounts for only ~11 ms of
+it. The fix is to compute the display tuple once in `set_rows()` and index into
+it — but the 36.8 ms is a *ceiling*, not a promise: a real implementation also
+has to build ~22,100 entries. Check all three Qt models (`inventory_model`,
+`history_model`, `recognition_history_model`) and the five delegates in
+`ui/views/_*_delegate.py`. Precedent: `ui/thumbcache.py` already does this for
+pixmaps (ADR 2026-08-04).
+
+**cProfile lies about this path.** It counts calls honestly — 31,598 — but its
+per-call overhead swamps a function this small, and it inflated `image_for` from
+a real 0.45 ms/item to an apparent 83 ms/call. When a profile points at
+something called tens of thousands of times, **re-measure it with
+`perf_counter` before believing the magnitude.** Use cProfile to find *where*,
+never to size *how much*.
 
 **The same expensive call, twice in one pass.** `catalog_index.index_status` runs
 twice per `ModelsView` build — 0.43 s, each one constructing the shared ONNX
@@ -330,6 +342,14 @@ thread that made it — hence the separate connection.
 
 Every index costs write time and disk. `perf.py storage` flags redundant ones,
 and adding one is a forward-only migration like any other.
+
+**Never propose dropping an index on column names alone.** `card_catalog` looks
+like it carries two duplicate pairs and carries none: `idx_catalog_name(name)`
+is BINARY while `idx_card_catalog_name(name COLLATE NOCASE)` is NOCASE, and
+SQLite picks between them by the collation of the *comparison* — `name = ?` uses
+one, `name = ? COLLATE NOCASE` the other. Both are live. Collation and `DESC`
+are part of the key and `PRAGMA index_info` reports neither; read
+`PRAGMA index_xinfo` and confirm with a plan before touching anything.
 
 ### 4d. Mechanism repertoire for the other two axes
 

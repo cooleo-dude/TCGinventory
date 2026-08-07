@@ -373,18 +373,41 @@ def _payload_bytes(conn: sqlite3.Connection, table: str) -> tuple[int, int]:
     return rows or 0, total or 0
 
 
+def _key_desc(cols: tuple[tuple[str, str, int], ...]) -> str:
+    parts = []
+    for name, coll, desc in cols:
+        part = name
+        if coll != "BINARY":
+            part += f" COLLATE {coll}"
+        if desc:
+            part += " DESC"
+        parts.append(part)
+    return ", ".join(parts)
+
+
 def _redundant_indexes(conn: sqlite3.Connection) -> list[str]:
-    """Indexes whose column list is a prefix of another on the same table.
+    """Indexes whose key is a prefix of another's on the same table.
 
     A prefix index earns nothing a longer one does not already serve, and every
     one of them is paid for again on each insert.
+
+    **Collation and direction are part of the key.** `PRAGMA index_info` omits
+    both, and comparing on column names alone reports two false positives on
+    `card_catalog` alone: `idx_catalog_name(name)` is BINARY while
+    `idx_card_catalog_name(name COLLATE NOCASE)` is NOCASE, and SQLite picks
+    between them by the collation of the comparison — dropping either sends a
+    real query to a full scan. `index_xinfo` carries both, so use it.
     """
-    by_table: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
+    by_table: dict[str, list[tuple[str, tuple[tuple[str, str, int], ...]]]] = {}
     for name, table in conn.execute(
         "SELECT name, tbl_name FROM sqlite_master WHERE type='index' "
         "AND name NOT LIKE 'sqlite_%'"
     ).fetchall():
-        cols = tuple(r[2] for r in conn.execute(f'PRAGMA index_info("{name}")'))
+        cols = tuple(
+            (row[2], (row[4] or "BINARY").upper(), row[3])
+            for row in conn.execute(f'PRAGMA index_xinfo("{name}")')
+            if row[5]  # key columns only, not the trailing rowid
+        )
         by_table.setdefault(table, []).append((name, cols))
     findings = []
     for table, entries in by_table.items():
@@ -399,8 +422,8 @@ def _redundant_indexes(conn: sqlite3.Connection) -> list[str]:
                     covered.add(other if len(other_cols) == len(cols) else name)
                     verb = "duplicates" if other_cols == cols else "is a prefix of"
                     findings.append(
-                        f"{table}.{name} ({', '.join(cols)}) {verb} "
-                        f"{other} ({', '.join(other_cols)})"
+                        f"{table}.{name} ({_key_desc(cols)}) {verb} "
+                        f"{other} ({_key_desc(other_cols)})"
                     )
                     break
     return findings

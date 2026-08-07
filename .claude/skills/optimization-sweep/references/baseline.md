@@ -88,15 +88,38 @@ non-finding in the repo.
 - `ModelsView.refresh()` spends 44 ms in `subprocess.run` — `nvidia-smi`, per
   refresh
 
-**`InventoryView` build / refresh:**
+**`InventoryView` refresh — measured without cProfile, which distorts this path
+badly.** `refresh()` is 340–365 ms, and it decomposes as:
 
-- `inventory_model.data()` fires **31,598 times** for a 1,105-row grid — roughly
-  28 calls per row across roles — for 0.21–0.23 s, re-deriving strings, fonts and
-  URLs on every call
-- refresh spends 0.37 s in `fetchall`, almost all of it in
-  `repositories.image_for()` → 27 `gather()` queries against the 53k-row
-  `card_catalog`
-- `trends.card_id_for` 0.14 s across 4 calls
+| Part | Cost |
+|---|---:|
+| `set_rows()` | **310–336 ms** |
+| `inventory_rows()` (the service) | 17 ms |
+| `_update_summary()` | 6 ms |
+| `_fill_columns()`, `_on_selection()` | <1 ms each |
+
+Inside `set_rows()`, with a model whose `data()` is a bare dict lookup as the
+ceiling:
+
+| | |
+|---|---:|
+| as shipped | 335.6 ms |
+| with view sorting off | 324.4 ms (so sorting is only ~11 ms) |
+| with `data()` as a dict lookup | **36.8 ms** |
+| **derivation inside `data()`** | **298.8 ms** |
+
+`endResetModel()` makes Qt sweep 20 columns × 1,105 rows, and `data()`
+(`inventory_model.py:350`) re-derives strings, fonts and URLs on every call.
+cProfile counts 31,598 calls, but inflates the absolute numbers — the untainted
+340 ms above is the real figure.
+
+Note the ceiling is a floor for the *fix*, not a promise: a real implementation
+must also build ~22,100 cached entries, which is not free.
+
+Also in refresh: `repositories.image_for()` and `trends.card_id_for` appear
+expensive under cProfile but measure **0.45 ms per item** warm across all three
+`gather()` queries (40 real items sampled). Fresh connection vs reused is
+16.5 ms vs 14.3 ms for 60 items — not the bottleneck.
 
 ## Memory — 257 MB resident, 112 MB of it optional
 
@@ -163,13 +186,25 @@ Measured facts that bound the obvious ideas:
 - `pricehistory.db` has 223,893 snapshots and nothing prunes them.
   `auctions.db` is documented in the app map as never pruned.
 
-### Redundant indexes
+### Redundant indexes — none. (Corrected 2026-08-07.)
 
-`perf.py storage` flags these on `card_catalog`:
+`perf.py storage` reports none, and the two it first reported on `card_catalog`
+were **false positives worth remembering**:
 
-- `idx_catalog_name (name)` **duplicates** `idx_card_catalog_name (name)`
-- `idx_card_catalog_set_name (set_name)` is a **prefix of**
-  `idx_catalog_set (set_name, number)`
+- `idx_catalog_name(name)` is BINARY; `idx_card_catalog_name(name COLLATE
+  NOCASE)` is NOCASE.
+- `idx_card_catalog_set_name(set_name COLLATE NOCASE)` is NOCASE;
+  `idx_catalog_set(set_name, number)` is BINARY.
+
+SQLite chooses between them by the collation of the comparison, and query plans
+confirm all four are live: `name = ?` → `idx_catalog_name`; `name = ? COLLATE
+NOCASE` → `idx_card_catalog_name`; `set_name = ? COLLATE NOCASE` →
+`idx_card_catalog_set_name`; `set_name = ? AND number = ?` → `idx_catalog_set`.
+Dropping any one sends a real query to a full scan of 53,289 rows.
+
+The detector used `PRAGMA index_info`, which omits collation and direction. It
+now uses `PRAGMA index_xinfo`, which carries both. **Never propose dropping an
+index on column names alone — check the collation and run the plan.**
 
 ### Connection pragmas
 

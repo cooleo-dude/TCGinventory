@@ -45,10 +45,18 @@ item in the app.
   float32 `card_embedding` (1,589 B/row, 78.8 MB) — halving it is easy, but
   ADR 2026-08-06 prices a re-embed at ~68 minutes and retrieval accuracy has to
   be benchmarked, not assumed.
-- **The harness found two redundant indexes unaided** —
-  `card_catalog.idx_catalog_name` duplicates `idx_card_catalog_name`, and
-  `idx_card_catalog_set_name` is a prefix of `idx_catalog_set(set_name, number)`.
-  Each is paid again on every insert.
+- **Correction, same day — the two "redundant indexes" were load-bearing.** The
+  first pass reported `card_catalog.idx_catalog_name` as a duplicate of
+  `idx_card_catalog_name`, and `idx_card_catalog_set_name` as a prefix of
+  `idx_catalog_set`. Both wrong, and wrong in a way worth keeping: the pairs
+  differ by **collation**, which `PRAGMA index_info` does not report. SQLite
+  chooses between a BINARY and a NOCASE index by the collation of the
+  comparison, and plans confirm all four are live — `name = ?` uses one,
+  `name = ? COLLATE NOCASE` the other. Dropping either would have sent a real
+  query to a full scan of 53,289 rows. The detector now reads
+  `PRAGMA index_xinfo`, which carries collation and direction, and reports no
+  redundant indexes anywhere. The general rule is in the skill: never propose
+  dropping an index on column names alone.
 - **Four measurement traps are baked into the harness** because each one produced
   a wrong answer first: `data.db.connect()` defaults to `:memory:`, so a bare
   call profiles an empty database that answers instantly; Windows will not delete
