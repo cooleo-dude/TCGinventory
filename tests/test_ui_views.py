@@ -110,6 +110,76 @@ def test_history_view_populates_and_details(app, seeded_conn):
     view.deleteLater()
 
 
+def test_history_preview_gallery_follows_selection_then_hover(
+    app, monkeypatch, tmp_path
+):
+    """Selecting a transaction fills the bottom-right region with every card in
+    it; hovering a detail row focuses that one card, and leaving reverts — to the
+    pinned row if one is selected, else to the full gallery."""
+    from PySide6.QtGui import QPixmap
+
+    from conftest import incoming
+    from tcginventory.services import cardimages
+    from tcginventory.services.transactions import (
+        TransactionRequest,
+        TransactionService,
+    )
+    from tcginventory.ui.views import history as history_mod
+
+    # A real file on disk, so the panes paint from cache and no fetch thread runs.
+    png = tmp_path / "art.png"
+    QPixmap(4, 6).save(str(png), "PNG")
+    monkeypatch.setattr(cardimages, "cache_path", lambda card_id: png)
+    monkeypatch.setattr(cardimages, "is_cached", lambda card_id: True)
+    art = {
+        "Charizard ex": ("sv3-125", "https://img.example/1.png"),
+        "Blastoise": ("base1-2", "https://img.example/2.png"),
+    }
+    monkeypatch.setattr(
+        cardimages,
+        "art_for",
+        lambda conn, name, set_name=None, number=None: art.get(name),
+    )
+    history_mod._ART_MEMO.clear()
+
+    conn = connect(":memory:")
+    migrate(conn)
+    TransactionService(conn).post(
+        TransactionRequest(
+            occurred_at="2026-01-01",
+            cash_out_cents=3000,
+            incoming=[incoming("Charizard ex", 2000), incoming("Blastoise", 1000)],
+        )
+    )
+
+    view = history_mod.HistoryView(conn)
+    view._table.selectRow(0)
+    app.processEvents()
+
+    assert view._detail_table.rowCount() == 2  # one lot per card
+    assert view._gallery._gallery.count() == 2  # both cards in the gallery
+    assert view._gallery._stack.currentIndex() == 1  # …showing all of them
+
+    view._on_detail_hover(0)  # pointer over the first lot
+    assert view._gallery._stack.currentIndex() == 0  # focused on that one card
+    view._on_detail_hover(None)  # pointer leaves the table
+    assert view._gallery._stack.currentIndex() == 1  # back to the full gallery
+
+    view._detail_table.selectRow(1)  # pin a row: it outlives the hover
+    view._on_detail_hover(0)
+    view._on_detail_hover(None)
+    assert view._gallery._stack.currentIndex() == 0
+
+    # Selecting a different transaction rebuilds the gallery from scratch.
+    view._table.clearSelection()
+    app.processEvents()
+    assert view._gallery._stack.currentIndex() == 1
+    assert not view._detail_art
+
+    view.deleteLater()
+    conn.close()
+
+
 def test_history_search_matches_card_or_counterparty(app):
     from conftest import incoming
     from tcginventory.services.transactions import (
@@ -303,7 +373,7 @@ def test_history_thumbnails_persist_across_refreshes(app, monkeypatch):
         )
     )
 
-    history_mod._CARD_ID_MEMO.clear()
+    history_mod._ART_MEMO.clear()
     lookups: list[str] = []
     monkeypatch.setattr(cardimages, "is_cached", lambda card_id: True)
     monkeypatch.setattr(
@@ -311,7 +381,7 @@ def test_history_thumbnails_persist_across_refreshes(app, monkeypatch):
         "art_for",
         lambda conn, name, set_name=None, number=None: (
             lookups.append(name),
-            ("cel-4", None),
+            ("cel-4", "https://img.example/cel-4.png"),
         )[1],
     )
 

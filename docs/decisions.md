@@ -4,6 +4,37 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-07 — History gets the auction editor's card preview, and the art memo keeps its URL
+
+- **Decision:** the History detail pane splits horizontally — the per-lot table
+  on the left, a **`CardGallery`** on the right showing every card in the
+  selected transaction. Hovering a detail row focuses that one card
+  (`show_single`); leaving falls back to the **selected** row, and with neither,
+  to the full gallery. Same widget and the same two-mode toggle the auction
+  editor and Price Lookup use (ADR 2026-07-16), so History inherits the
+  rapid-rebuild fix rather than forking a preview.
+- **Why:** the Cards column only ever showed three overlapping thumbnails plus a
+  "+N" chip; a 32-lot purchase was unreadable as pictures. The leave-behaviour
+  follows the platform-wide preview convention rather than the auction editor's
+  simpler revert, because History's detail rows are *selectable* — a pinned row
+  that vanished the moment the pointer left would read as a bug.
+- **`_CARD_ID_MEMO` → `_ART_MEMO`.** The memo threw away the URL half of
+  `art_for()`'s result and kept only the card id. The gallery needs the URL to
+  fetch a card whose image isn't on disk yet, so the memo now stores the whole
+  `(card_id, image_url)` tuple and `_art_id()` reads the id back out. One source
+  of truth; the thumbnail resolver and the preview share every lookup.
+- **The selected transaction's art resolves on the UI thread**, deliberately —
+  the log's three-thumbnail resolve stays off-thread as before. `_show_detail`
+  already runs several repo queries per line, `art_for` is two indexed lookups,
+  the memo makes repeat selections free, and the image *bytes* still arrive
+  through the shared bounded fetch queue. Measured on the real ledger: a 32-lot
+  purchase resolves 26 distinct cards without a visible hitch. A third `QThread`
+  in this file would have bought generation-guard bookkeeping and little else.
+- **Consequences:** the detail table now shares its width, so its last two
+  columns scroll rather than always fitting. The gallery carries a 226px minimum
+  height so the default split never opens on a row of cards sliced off at the
+  chin, and a 330px minimum width so two thumbnails fit per row.
+
 ### 2026-08-07 — Startup 2364ms → 1307ms, and a Qt model that was slow for the wrong reason
 
 The first run of `/optimization-sweep`. Four fixes, each with a measured before

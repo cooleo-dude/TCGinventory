@@ -73,6 +73,7 @@ from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.reporting import ReportingService
 from tcginventory.services.transactions import TransactionService
 from tcginventory.ui import icons, theme, thumbcache
+from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.formatting import money, percent
 from tcginventory.ui.models.history_model import (
     CARDS_COL,
@@ -318,20 +319,28 @@ def _rounded(x: float, y: float, w: float, h: float, r: float) -> QPainterPath:
     return path
 
 
-# (name, set, number) -> catalog card id (None = no match), memoised for the
-# session. Art resolution is a catalog query per card, so re-running it on every
-# refresh is what made the Cards column repopulate from scratch on each visit;
-# with the memo a refresh paints the thumbnails it already knows immediately.
+# (name, set, number) -> (card id, image url), or None for no match, memoised for
+# the session. Art resolution is a catalog query per card, so re-running it on
+# every refresh is what made the Cards column repopulate from scratch on each
+# visit; with the memo a refresh paints the thumbnails it already knows
+# immediately. The *url* is kept as well as the id because the preview gallery
+# needs it to fetch a card whose image isn't on disk yet.
 # Written from the resolver thread, read on the UI thread: plain dict of
 # immutable keys/values, so single assignments are enough — no lock needed.
-_CARD_ID_MEMO: dict[tuple, str | None] = {}
+_ART_MEMO: dict[tuple, tuple[str, str] | None] = {}
+
+
+def _art_id(ident: tuple) -> str | None:
+    """The memoised card id for ``ident`` — None if unknown or unmatched."""
+    art = _ART_MEMO.get(ident)
+    return art[0] if art else None
 
 
 def _needs_resolve(idents: list, ids: list) -> bool:
     """True when a row still needs a catalog lookup or an image download; rows
     that are fully memoised and cached skip the resolver entirely."""
     for ident, card_id in zip(idents, ids, strict=False):
-        if ident not in _CARD_ID_MEMO:
+        if ident not in _ART_MEMO:
             return True
         if card_id is not None and not cardimages.is_cached(card_id):
             return True
@@ -372,13 +381,13 @@ class _ThumbResolver(QThread):
         """Art key for one (name, set, number), fetching its image if needed.
         Reuses the session memo unless the image still isn't on disk (a failed or
         never-attempted download), in which case we re-resolve and retry."""
-        memoised = ident in _CARD_ID_MEMO
-        card_id = _CARD_ID_MEMO.get(ident)
+        memoised = ident in _ART_MEMO
+        card_id = _art_id(ident)
         if memoised and (card_id is None or cardimages.is_cached(card_id)):
             return card_id
         resolved = cardimages.art_for(conn, *ident)
         card_id = resolved[0] if resolved else None
-        _CARD_ID_MEMO[ident] = card_id
+        _ART_MEMO[ident] = resolved
         if resolved:
             url = resolved[1]
             if url and not cardimages.is_cached(card_id):
@@ -1226,6 +1235,10 @@ class HistoryView(QWidget):
         # Per-page freshness (0 Transaction, 1 Recognition): a page is rebuilt on
         # its first show and after a data change, never on a plain mode toggle.
         self._stale = {0: True, 1: True}
+        # Preview state: one (card_id, image_url) per *detail* row (None when the
+        # card has no art), plus which row the pointer is currently over.
+        self._detail_art: list[tuple[str, str] | None] = []
+        self._hover_row: int | None = None
 
         self._model = HistoryTableModel()
         self._proxy = _HistoryFilterProxy()
@@ -1329,13 +1342,45 @@ class HistoryView(QWidget):
         self._detail_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._detail_table.setAlternatingRowColors(True)
         self._detail_table.horizontalHeader().setStretchLastSection(True)
+        # Hovering a row focuses that card in the gallery; the viewport is held
+        # rather than re-read in the filter, because teardown delivers events
+        # after the C++ widget is gone (the _ExportDelegate rule).
+        self._detail_table.setMouseTracking(True)
+        self._detail_viewport = self._detail_table.viewport()
+        self._detail_viewport.installEventFilter(self)
+        self._detail_table.itemSelectionChanged.connect(self._apply_focus)
+
+        # …and to its right, every card in the transaction, the same CardGallery
+        # the auction editor and Price Lookup use.
+        gallery_caption = QLabel("CARDS IN THIS TRANSACTION")
+        gallery_caption.setStyleSheet(
+            f"color:{theme.active().ink3}; font-size:10px; font-weight:700;"
+            " letter-spacing:.6px;"
+        )
+        self._gallery = CardGallery(empty_hint="Select a transaction to see its cards.")
+        # Enough for a whole 150×210 thumbnail row, so the default split never
+        # opens on a rank of cards sliced off at the chin.
+        self._gallery.setMinimumHeight(226)
+        gallery_box = QWidget()
+        gallery_layout = QVBoxLayout(gallery_box)
+        gallery_layout.setContentsMargins(0, 0, 0, 0)
+        gallery_layout.setSpacing(8)
+        gallery_layout.addWidget(gallery_caption)
+        gallery_layout.addWidget(self._gallery, 1)
+        gallery_box.setMinimumWidth(330)  # two 150px thumbnails per row
+
+        cards_split = QSplitter(Qt.Horizontal)
+        cards_split.addWidget(self._detail_table)  # the lots, left
+        cards_split.addWidget(gallery_box)  # their card images, right
+        cards_split.setStretchFactor(0, 2)  # 8 columns need the room
+        cards_split.setStretchFactor(1, 1)
 
         detail_box = QWidget()
         detail_layout = QVBoxLayout(detail_box)
         detail_layout.setContentsMargins(0, 0, 0, 0)
         detail_layout.setSpacing(8)
-        detail_layout.addWidget(self._detail_band)
-        detail_layout.addWidget(self._detail_table)
+        detail_layout.addWidget(self._detail_band)  # spans both, it's the summary
+        detail_layout.addWidget(cards_split, 1)
 
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(self._stack)
@@ -1496,7 +1541,7 @@ class HistoryView(QWidget):
             items = self._txn_items(txn.id)
             labels = [f"{it.name} {it.card_number or ''}".strip() for it in items]
             idents = [(it.name, it.set_name, it.card_number) for it in items[:3]]
-            thumb_ids = [_CARD_ID_MEMO.get(ident) for ident in idents]
+            thumb_ids = [_art_id(ident) for ident in idents]
             rows.append(
                 HistoryRow(
                     transaction=txn,
@@ -1657,7 +1702,13 @@ class HistoryView(QWidget):
             f"color:{t.ink3}; border:none; background:transparent;"
         )
         self._detail_header.setText("Select a transaction to see its items.")
+        # Drop the art before emptying the table: clearing it emits a selection
+        # change, and _apply_focus must not read the departing transaction's rows.
+        self._detail_art = []
+        self._hover_row = None
         self._detail_table.setRowCount(0)
+        self._gallery.set_cards([])
+        self._gallery.show_gallery()
 
     def _show_detail(self) -> None:
         row = self._selected_row()
@@ -1703,10 +1754,12 @@ class HistoryView(QWidget):
         )
         self._detail_header.setText(sep.join(parts))
 
-        cells = self._detail_rows(txn.id)
-        self._detail_table.setRowCount(len(cells))
+        detail = self._detail_rows(txn.id)
+        self._detail_art = [art for _cells, art in detail]
+        self._hover_row = None
+        self._detail_table.setRowCount(len(detail))
         mono = QFont(theme.mono_family())
-        for r, values in enumerate(cells):
+        for r, (values, _art) in enumerate(detail):
             for c, text in enumerate(values):
                 cell = QTableWidgetItem(text)
                 if c in (0, 4):  # SKU + price → mono
@@ -1718,10 +1771,12 @@ class HistoryView(QWidget):
                 self._detail_table.setItem(r, c, cell)
         self._detail_table.resizeColumnsToContents()
         self._detail_table.horizontalHeader().setStretchLastSection(True)
+        self._rebuild_gallery()
 
-    def _detail_rows(self, transaction_id: int) -> list[list[str]]:
-        """One row per lot in the transaction, with the requested columns."""
-        rows: list[list[str]] = []
+    def _detail_rows(self, transaction_id: int) -> list[tuple[list[str], tuple | None]]:
+        """One entry per lot in the transaction: its cells, and the card's
+        ``(card_id, image_url)`` art for the preview (None when unmatched)."""
+        rows: list[tuple[list[str], tuple | None]] = []
         for line in self._lines.list_for_transaction(transaction_id):
             item = self._items.get(line.item_id)
             if item is None:
@@ -1737,17 +1792,92 @@ class HistoryView(QWidget):
                     pairs.append((sku, cons.unit_cost_cents))
             if not pairs:  # fallback so the card still shows
                 pairs = [("", line.unit_price_cents)]
+            art = self._art_for(item)
             for sku, price_cents in pairs:
                 rows.append(
-                    [
-                        sku,
-                        item.name,
-                        item.set_name or "",
-                        item.card_number or "",
-                        money(price_cents),
-                        item.notes or "",
-                        _cond_grade(item),
-                        item.language.value,
-                    ]
+                    (
+                        [
+                            sku,
+                            item.name,
+                            item.set_name or "",
+                            item.card_number or "",
+                            money(price_cents),
+                            item.notes or "",
+                            _cond_grade(item),
+                            item.language.value,
+                        ],
+                        art,
+                    )
                 )
         return rows
+
+    def _art_for(self, item: Item) -> tuple[str, str] | None:
+        """``(card_id, image_url)`` for a card's printed identity, memoised.
+
+        Resolved on demand for the *selected* transaction only — the log itself
+        resolves just the three cards its thumbnail stack shows, off-thread. This
+        runs on the UI thread because it shares the session memo (so anything the
+        thumbnail resolver already found is free) and `_show_detail` is already a
+        few repo queries per line; the image *bytes* are still fetched off-thread
+        by the gallery's panes.
+        """
+        ident = (item.name, item.set_name, item.card_number)
+        if ident not in _ART_MEMO:
+            _ART_MEMO[ident] = cardimages.art_for(self._conn, *ident)
+        return _ART_MEMO[ident]
+
+    # -- card preview (gallery of the transaction; one card on hover) --------
+
+    def _rebuild_gallery(self) -> None:
+        """Rebuild the preview from the selected transaction's cards.
+
+        Only called when the *selection* changes — hover merely flips the gallery
+        between its two modes, so each thumbnail's image loads once and persists
+        (the Price Lookup / auction-editor rule).
+        """
+        border = theme.active().line2  # neutral thumbnail frame
+        entries, seen = [], set()
+        for art in self._detail_art:
+            if not self._usable(art) or art[0] in seen:
+                continue  # one thumbnail per card, however many lots it has
+            seen.add(art[0])
+            entries.append((art[0], art[1], border))
+        self._gallery.set_cards(entries)
+        self._gallery.show_gallery()
+
+    @staticmethod
+    def _usable(art) -> bool:
+        """A card is previewable only with both an id and a URL to fetch by."""
+        return bool(art and art[0] and art[1])
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self._detail_viewport:
+            try:
+                if event.type() == QEvent.MouseMove:
+                    index = self._detail_table.indexAt(event.position().toPoint())
+                    self._on_detail_hover(index.row() if index.isValid() else None)
+                elif event.type() == QEvent.Leave:
+                    self._on_detail_hover(None)
+            except RuntimeError:
+                pass  # our C++ widget is already gone (app teardown)
+        return super().eventFilter(obj, event)
+
+    def _on_detail_hover(self, row: int | None) -> None:
+        if row != self._hover_row:
+            self._hover_row = row
+            self._apply_focus()
+
+    def _apply_focus(self) -> None:
+        """The hovered row wins; on leave fall back to the selected row, and with
+        neither, back to the whole transaction's gallery."""
+        row = self._hover_row
+        if row is None:
+            selected = self._detail_table.selectionModel().selectedRows()
+            row = selected[0].row() if selected else None
+        art = None
+        if row is not None and 0 <= row < len(self._detail_art):
+            art = self._detail_art[row]
+        if self._usable(art):
+            self._gallery.show_single(art[0], art[1])
+        else:
+            self._gallery.show_gallery()
