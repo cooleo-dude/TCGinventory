@@ -4,6 +4,37 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-07 — Startup abort: a worker replaced while it was still running
+
+- **Symptom:** the app died ~1s into startup, every time, with no traceback —
+  `QThread: Destroyed while thread '' is still running` and exit `0xC0000409`
+  (a Windows fast-fail, not a Python exception, so nothing was logged).
+- **Cause:** `Inventory._prefetch_previews` and `History._start_resolver` /
+  `_start_cropper` each called `requestInterruption()` and then **immediately
+  overwrote** `self._worker`. Interruption only raises a flag; the thread runs
+  to its next checkpoint. Overwriting dropped the last Python reference first,
+  so the C++ `QThread` was destroyed underneath a live thread, which Qt answers
+  by aborting the process. Dashboard, Calendar and Shows never had the bug —
+  they *return early* when a worker is running instead of replacing it.
+- **Why now:** latent for as long as the code existed. The optimization sweep
+  cut view build from 2364ms to ~1205ms, and the faster startup meant the second
+  refresh (`_warm_views` then the nav change) now landed while the first worker
+  was still going. The instrumented run shows the shape exactly: four workers
+  created, two of them replacements, then the abort.
+- **Decision:** a shared `retire(worker, parked)` in `ui/views/_worker.py`.
+  It interrupts, parks the worker in a per-view list, and lets `finished`
+  release it. Kept out of the individual views because three sites had the bug
+  and any future worker will want the same. **Not** `wait()` — blocking the UI
+  on a mid-flight image fetch is what the original comment was avoiding, and
+  that trade-off still holds.
+- **Consequences:** interruption stays non-blocking; a retiring worker lives a
+  moment longer than its view's reference to it. Regression test drives the real
+  sequence (start → retire → drop the reference → `gc.collect()`), which aborted
+  the interpreter before the fix.
+- **Worth remembering:** a `QThread` GC'd while running kills the process with
+  no Python-level trace, so it presents as "crashes at startup, no error." The
+  test harness hit the same shape earlier the same day (`_drain_threads`).
+
 ### 2026-08-07 — History gets the auction editor's card preview, and the art memo keeps its URL
 
 - **Decision:** the History detail pane splits horizontally — the per-lot table

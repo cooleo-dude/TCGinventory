@@ -92,6 +92,75 @@ def test_inventory_ebay_link_auto_populated(app, seeded_conn):
     assert url and "ebay.com/sch" in url and "LH_Sold=1" in url
 
 
+def test_inventory_ignores_a_retired_prefetch_workers_results(app, seeded_conn):
+    """A retired prefetch worker now survives to finish, so its results have to
+    be ignored explicitly.
+
+    It breaks out of its loop at the next row and emits `resolved` regardless, so
+    what it carries is partial and describes a row set that has been filtered
+    away. Before `retire()` it was dropped mid-run — the crash hid this — so
+    without an identity guard the stale maps silently overwrite the live
+    worker's, and the grid shows the wrong art and trend.
+    """
+    from types import SimpleNamespace
+
+    from tcginventory.ui.views.inventory import InventoryView
+
+    view = InventoryView(seeded_conn)
+    live = SimpleNamespace(images={"live": 1}, history={}, trends={})
+    view._prefetch_worker = live
+    view._row_image = {"live": 1}
+
+    stale = SimpleNamespace(images={"stale": 2}, history={"s": 1}, trends={"s": 1})
+    view._on_previews_resolved(stale)  # a worker that is no longer the current one
+    assert view._row_image == {"live": 1}  # not overwritten
+
+    view._on_previews_resolved(live)  # the current one still publishes
+    assert view._row_image == {"live": 1}
+    view.deleteLater()
+
+
+def test_retired_worker_outlives_being_replaced(app):
+    """A worker that has been asked to stop but is still running must stay
+    referenced until it actually exits.
+
+    Freeing it early destroys the C++ QThread underneath a live thread, and Qt
+    answers that with a hard abort (0xC0000409) rather than an exception — which
+    is how startup died once Inventory and History each refreshed twice fast
+    enough to replace their own still-running worker.
+    """
+    import gc
+
+    from PySide6.QtCore import QThread
+
+    from tcginventory.ui.views._worker import retire
+
+    class _Spinner(QThread):
+        def run(self) -> None:
+            while not self.isInterruptionRequested():
+                self.msleep(5)
+
+    parked: list = []
+    worker = _Spinner()
+    worker.start()
+    while not worker.isRunning():
+        pass
+
+    retire(worker, parked)
+    assert parked == [worker]  # held, not dropped
+
+    del worker  # the caller's reference goes away (self._worker = new one)
+    gc.collect()  # …this is the collection that used to kill the process
+    assert len(parked) == 1
+
+    parked[0].wait(5000)
+    for _ in range(50):  # let finished() land, however it's delivered
+        app.processEvents()
+        if not parked:
+            break
+    assert parked == []  # released once it really stopped
+
+
 def test_history_view_populates_and_details(app, seeded_conn):
     from tcginventory.ui.views.history import HistoryView
 
