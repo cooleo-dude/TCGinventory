@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -123,6 +124,26 @@ def test_scope_globbing(rules_module, path, pattern, expected):
     """A rule's scope decides whether its critic is dispatched at all, so a
     matching bug fails open and fails silently."""
     assert rules_module.path_matches(path, pattern) is expected
+
+
+def test_repeated_globstars_do_not_blow_up(rules_module):
+    """Consecutive `**` used to branch combinatorially — 7.86s at eight in a row.
+
+    Every critic shells out to `rules.py scope` before judging a diff, so a
+    doubled `**` in a rule's scope would hang the whole review gate with no error
+    saying why. Folding runs of `**` into one makes that impossible.
+    """
+    path = "/".join(f"d{i}" for i in range(25)) + "/x.py"
+    pathological = "/".join(["**"] * 12) + "/*.md"  # deliberately non-matching
+
+    start = time.perf_counter()
+    assert rules_module.path_matches(path, pathological) is False
+    assert time.perf_counter() - start < 1.0, "repeated ** is branching again"
+
+    # Folding must not change what matches.
+    assert rules_module.path_matches("a/b/c.py", "a/**/**/c.py") is True
+    assert rules_module.path_matches("a/c.py", "a/**/**/c.py") is True
+    assert rules_module._collapse(["a", "**", "**", "**", "b"]) == ["a", "**", "b"]
 
 
 def test_every_rule_scope_matches_its_own_source(rules_module, registry):
