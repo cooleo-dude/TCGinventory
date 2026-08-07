@@ -1546,3 +1546,37 @@ _Template for new entries:_
   because they are what the model is judged on.
 - **Existing rows are left alone** — the data was never wrong, only partial, and
   the CSVs are still on disk if a backfill is ever wanted.
+
+## 2026-08-06 — Models becomes a destination of its own
+
+- **Built** `ui/views/models.py`: Overview, Region detection, Condition, Card
+  identity, Training environment, Data corpus, behind an in-page navigator that
+  mirrors the Operations screen so the two maintenance surfaces read as siblings.
+- **The four model groups left Operations outright**, with no pointers behind
+  them — `GROUPS` is now the ledger's sections and `MODEL_GROUPS` the Models
+  screen's. One registry still backs both, so the run log, statuses and staleness
+  keep working off the same ids.
+- **Deliberately not a tile grid.** A detector has a hundred epochs of loss; the
+  grader has a gate it has not passed; identification has no single artifact at
+  all. Repeating one tile shape would flatten exactly the differences worth
+  seeing, so each model gets the shape its evidence needs — metrics and a curve,
+  a coverage chart, a component table.
+- **New seams:** `services/modeljobs.py` holds the ten jobs (Qt-free, so a script
+  or a scheduled task can call them), `services/modelsummary.py` assembles what
+  each section says, and `ui/views/_worker.py` is the background worker both
+  screens share. The view holds no SQL and makes no judgement about "stale" or
+  "blocked" — those are testable claims now, and they are tested.
+- **A layered identity benchmark** (`modeljobs.benchmark_identity`) scores the
+  encoder, then each correction on top of it, and stores the breakdown in
+  `metrics_json`. That is what lets the screen say what each layer is worth
+  rather than quoting one number for the stack.
+- **It found a leak, and the screen says so.** Measured through the layers, the
+  stack reads **top-1 93%** — but photo matching is fitted partly on the labelled
+  crops, and those crops *are* the benchmark's queries. Anything downstream of it
+  is scoring data it has already seen. The run records `in_sample_from`, and the
+  overview prints the caveat next to the honest held-out figure (66.7%). A
+  dashboard that quietly reported 93% would be worse than no dashboard.
+- **Also fixed:** `detector_summary` assumed a promoted model always has a corpus
+  snapshot; it does not before anything is trained. And `QChartView` paints its
+  own pale viewport, which framed the dark loss chart in white until it was made
+  transparent — `theme.style_chart` handles the chart, not the view around it.

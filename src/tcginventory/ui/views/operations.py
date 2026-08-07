@@ -16,7 +16,6 @@ refresh, catalog pull, market sweep); the window now only hosts the screen.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from datetime import datetime
 
@@ -27,7 +26,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QListWidget,
     QMessageBox,
@@ -42,6 +40,7 @@ from tcginventory import config
 from tcginventory.services import importexport
 from tcginventory.services import operations as ops
 from tcginventory.ui import icons, theme
+from tcginventory.ui.views._worker import TaskWorker
 
 _COLUMNS = 2  # tiles per row (a "wide" tile spans both)
 _WIDE = {"backup.database", "automation.daily_prices"}
@@ -56,19 +55,6 @@ _SECTION_NOTES = {
     "prices": "What your cards are worth, and the history behind the trends.",
     "reference": "The card database and show listings everything else looks up.",
     "automation": "What runs on its own, with the app closed.",
-    "training_env": (
-        "The Python environment that trains the models. Built once, and removable."
-    ),
-    "model_regions": (
-        "Finds where the cards are in a photo. Trains on the boxes you draw."
-    ),
-    "model_condition": (
-        "Grades wear from both faces of a card. Trains on the grades you set."
-    ),
-    "model_identity": (
-        "Names a card from its picture. Learns from every crop you label, with "
-        "no training environment to install."
-    ),
     "maintenance": "Checks and housekeeping for the database itself.",
 }
 
@@ -165,38 +151,6 @@ class _CatalogUpdateWorker(QThread):
             len(summary.errors),
         )
         self.done.emit(summary)
-
-
-class _TaskWorker(QThread):
-    """Runs ``task(conn) -> summary`` off the UI thread with its own connection.
-
-    The seam for any job that is "call a service and report a sentence" — the
-    maintenance and card-show operations all arrive this way, so adding one costs
-    a function rather than another QThread subclass.
-    """
-
-    done = Signal(object)  # (ok, summary)
-
-    def __init__(self, db_path, task) -> None:
-        super().__init__()
-        self._db_path = db_path
-        self._task = task
-
-    def run(self) -> None:  # pragma: no cover - exercised via the UI
-        import logging
-
-        from tcginventory.data.db import open_database
-
-        try:
-            conn = open_database(self._db_path)
-            try:
-                summary = self._task(conn)
-            finally:
-                conn.close()
-            self.done.emit((True, summary))
-        except Exception as exc:
-            logging.getLogger(__name__).exception("operation failed")
-            self.done.emit((False, str(exc)[:200]))
 
 
 class _MarketSweepWorker(QThread):
@@ -717,28 +671,6 @@ class OperationsView(QWidget):
             "catalog.update_en": lambda: self._update_catalog("EN"),
             "catalog.update_jp": lambda: self._update_catalog("JP"),
             "shows.refresh": lambda: self._task("shows.refresh", _refresh_shows),
-            "vision.reindex": lambda: self._task("vision.reindex", _reindex_corpus),
-            "identity.fit_projection": lambda: self._task(
-                "identity.fit_projection", _fit_photo_projection
-            ),
-            "identity.forget_projection": lambda: self._task(
-                "identity.forget_projection", _forget_photo_projection
-            ),
-            "identity.index_catalog": self._index_catalog,
-            "identity.reclaim": lambda: self._task(
-                "identity.reclaim", _reclaim_catalog_art
-            ),
-            "models.training_env": lambda: self._setup_env(
-                "models.training_env", "cpu"
-            ),
-            "models.training_env_gpu": lambda: self._setup_env(
-                "models.training_env_gpu", "gpu"
-            ),
-            "models.training_env_remove": self._remove_training_env,
-            "models.detector.train": lambda: self._task(
-                "models.detector.train", _train_detector
-            ),
-            "models.condition.train": self._train_condition,
             "db.integrity_check": lambda: self._task(
                 "db.integrity_check", _integrity_check
             ),
@@ -882,7 +814,7 @@ class OperationsView(QWidget):
         """Run a plain ``task(conn) -> summary`` job in the background."""
         self._start(
             op_id,
-            lambda db, fn=task: _TaskWorker(db, fn),
+            lambda db, fn=task: TaskWorker(db, fn),
             lambda payload, oid=op_id: self._on_task_done(oid, payload),
         )
 
@@ -972,139 +904,6 @@ class OperationsView(QWidget):
 
     # -- toggle -------------------------------------------------------------
 
-    def _remove_training_env(self) -> None:
-        """Confirm first: it's a big download to rebuild, even though nothing
-        irreplaceable goes with it."""
-        from tcginventory.services import trainingenv
-
-        op = ops.BY_ID["models.training_env_remove"]
-        prompt = (
-            f"Remove the training environment?\n\n"
-            f"Deletes {trainingenv.env_dir()} and frees "
-            f"{ops.human_bytes(trainingenv.env_size())}.\n\n"
-            "Kept: your trained models, the labelled corpus, and every training "
-            "run.\n\nSetting it up again re-downloads about 280 MB."
-        )
-        if QMessageBox.question(self, op.title, prompt) != QMessageBox.Yes:
-            return
-        self._task(op.id, _remove_training_env)
-
-    def _setup_env(self, op_id: str, flavour: str) -> None:
-        """Build the training environment, or swap the installed one for the other
-        flavour. Swapping asks first: it throws away a working install and pulls
-        the replacement down again."""
-        from tcginventory.services import training, trainingenv
-
-        installed = (
-            training.training_env_flavour()
-            if training.training_env_summary().ready
-            else None
-        )
-        if installed and installed != flavour:
-            other = "GPU" if flavour == trainingenv.FLAVOUR_GPU else "CPU"
-            size = (
-                "about 2.5 GB" if flavour == trainingenv.FLAVOUR_GPU else "about 280 MB"
-            )
-            if (
-                QMessageBox.question(
-                    self,
-                    f"Switch to the {other} environment?",
-                    f"This removes the {installed.upper()} environment and builds the "
-                    f"{other} one in its place, downloading {size}.\n\nTrained "
-                    "models, the labelled corpus and the training history are all "
-                    "kept.",
-                )
-                != QMessageBox.Yes
-            ):
-                return
-        self._task(op_id, lambda conn, f=flavour: _build_training_env(conn, f))
-
-    def _index_catalog(self) -> None:
-        """Ask how much of the catalog to take on, then index it in the background.
-
-        The scopes differ by orders of magnitude — nothing, a couple of gigabytes,
-        or most of an evening — so this asks rather than assuming.
-        """
-        from tcginventory.services import catalog_index as ci
-
-        counts = {}
-        for scope in ci.SCOPES:
-            try:
-                counts[scope] = len(ci.scope_card_ids(self._conn, scope))
-            except Exception:  # pragma: no cover - catalog unavailable
-                counts[scope] = 0
-        choices = [
-            f"{ci.SCOPE_LABELS[scope]} — {counts[scope]:,} cards" for scope in ci.SCOPES
-        ]
-        chosen, ok = QInputDialog.getItem(
-            self,
-            "Index the card catalog",
-            "Recognition can only name cards it has embeddings for.\n"
-            "How much of the catalog should it learn?",
-            choices,
-            0,
-            False,
-        )
-        if not ok:
-            return
-        scope = ci.SCOPES[choices.index(chosen)]
-        if scope != ci.SCOPE_CACHED:
-            gb = counts[scope] * 0.129 / 1000  # ~129 KB of art per card
-            if (
-                QMessageBox.question(
-                    self,
-                    "Index the card catalog",
-                    f"This downloads art for up to {counts[scope]:,} cards — roughly "
-                    f"{gb:.1f} GB — and keeps each one on disk so a future "
-                    "model can re-learn offline.\n\nIt can be stopped and resumed; "
-                    "nothing is downloaded twice. Continue?",
-                )
-                != QMessageBox.Yes
-            ):
-                return
-        self._task(
-            "identity.index_catalog", lambda conn, s=scope: _index_catalog_task(conn, s)
-        )
-
-    def _train_condition(self) -> None:
-        """Train the condition grader, or explain exactly what the corpus lacks.
-
-        Unlike the detector this needs no training environment — it is a ridge
-        regression over measured wear, which numpy fits in milliseconds — so it runs
-        as an ordinary background task.
-        """
-        from tcginventory.data.vision import VisionRepository, open_vision
-        from tcginventory.services import condition_dataset as cds
-        from tcginventory.services import operations as ops_mod
-
-        title = ops_mod.BY_ID["models.condition.train"].title
-        try:
-            conn = open_vision()
-        except Exception:  # pragma: no cover - unreadable vision DB
-            QMessageBox.warning(self, title, "The recognition corpus is unavailable.")
-            return
-        try:
-            samples = cds.collect_samples(VisionRepository(conn))
-            gate = cds.check_gate(samples)
-        finally:
-            conn.close()
-
-        if not gate.ok:
-            QMessageBox.information(
-                self,
-                title,
-                "Not enough graded cards yet.\n\n"
-                "The grader reads both faces of a card — one grade per card, from "
-                "its front and its back together — and needs a fair number of each "
-                "grade, seen across several photos, before it can learn anything "
-                "honest.\n\nStill needed:\n  • "
-                + "\n  • ".join(gate.reasons)
-                + "\n\nKeep photographing cards front and back in Recognition and "
-                "grading them; this becomes available on its own.",
-            )
-            return
-        self._task("models.condition.train", _train_condition_model)
-
     def _toggle_auto_updates(self) -> None:
         from tcginventory import scheduling
 
@@ -1139,7 +938,7 @@ class OperationsView(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# background tasks — plain functions over a connection (see _TaskWorker)
+# background tasks — plain functions over a connection (see TaskWorker)
 # ---------------------------------------------------------------------------
 
 
@@ -1159,276 +958,6 @@ def _refresh_shows(conn) -> str:
     if summary.errors:
         text += f" ({len(summary.errors)} state(s) failed)"
     return text
-
-
-def _build_training_env(_conn, flavour: str = "cpu") -> str:
-    """Build (or rebuild) the training environment in the requested flavour.
-
-    Runs in a worker thread: creating the virtualenv and downloading the stack take
-    minutes. An existing environment is removed first, so switching flavours can't
-    leave two torch builds fighting over the same site-packages.
-    """
-    import subprocess
-
-    from tcginventory.services import training, trainingenv
-
-    found = trainingenv.discover_interpreters()
-    if not found:
-        raise RuntimeError(trainingenv.NO_PYTHON_HINT)
-    interpreter = found[0]
-    if flavour == trainingenv.FLAVOUR_GPU and trainingenv.detect_gpu() is None:
-        raise RuntimeError("No NVIDIA GPU is visible to nvidia-smi on this machine.")
-
-    if trainingenv.is_bootstrapped():
-        trainingenv.remove_env()
-
-    for label, argv in trainingenv.bootstrap_steps(interpreter, flavour=flavour):
-        proc = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
-            raise RuntimeError(f"{label} failed: {' '.join(tail)[:300]}")
-
-    # Validate what was built, and record what torch can *actually* do — an install
-    # can quietly fall back to CPU wheels.
-    env = training.probe_training_env(str(trainingenv.env_python()))
-    if not env.ready:
-        raise RuntimeError(f"Environment built but not usable: {env.detail}")
-    built, described = trainingenv.probe_flavour(trainingenv.env_python())
-    training.remember_training_env(env)
-    training.remember_training_flavour(built)
-    if flavour == trainingenv.FLAVOUR_GPU and built != trainingenv.FLAVOUR_GPU:
-        raise RuntimeError(
-            f"Installed, but the GPU is not usable from it — {described}"
-        )
-    return f"{env.detail} · {described}"
-
-
-def _remove_training_env(_conn) -> str:
-    """Delete the training virtualenv; models and corpus are left alone."""
-    from tcginventory.services import trainingenv
-
-    target = trainingenv.env_dir()
-    reclaimed = trainingenv.remove_env()
-    return f"removed {target} — {ops.human_bytes(reclaimed)} reclaimed, models kept"
-
-
-def _train_detector(_conn) -> str:
-    """Train the card detector: export the corpus, drive the worker, record it."""
-    import subprocess
-
-    from tcginventory.data.vision import (
-        ModelRunRepository,
-        VisionRepository,
-        open_vision,
-    )
-    from tcginventory.services import detector, training
-
-    env = training.probe_training_env()
-    conn = open_vision()
-    try:
-        repo = VisionRepository(conn)
-        runs = ModelRunRepository(conn)
-        job = training.prepare_detector_training(
-            repo,
-            runs,
-            env=env,
-            dataset_dir=trainingenv_dataset_dir(),
-            out_path=detector.trained_model_destination(),
-            source="ui",
-        )
-        proc = subprocess.run(
-            job.command,
-            capture_output=True,
-            text=True,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if proc.returncode != 0:
-            tail = (proc.stderr or "").strip().splitlines()[-2:]
-            training.fail_detector_training(job, runs, " ".join(tail)[:300])
-            raise RuntimeError(f"Training failed: {' '.join(tail)[:200]}")
-        outcome = training.complete_detector_training(
-            job, runs, worker_output=proc.stdout or ""
-        )
-        return outcome.summary
-    finally:
-        conn.close()
-
-
-def trainingenv_dataset_dir():
-    """Where the exported YOLO dataset goes — beside the corpus, not in the repo."""
-    from tcginventory import config
-
-    return config.data_dir() / "vision" / "datasets" / "detector"
-
-
-def _train_condition_model(_conn) -> str:
-    """Fit the condition grader from the graded corpus and record the run."""
-    from tcginventory.data.vision import (
-        ModelRunRepository,
-        VisionRepository,
-        open_vision,
-    )
-    from tcginventory.services.condition_train import train_condition_model
-
-    conn = open_vision()
-    try:
-        repo = VisionRepository(conn)
-        result = train_condition_model(repo, ModelRunRepository(conn), source="ui")
-        if not result.ok:
-            raise RuntimeError(result.reason)
-        metrics = result.metrics
-        return (
-            f"{result.samples} cards · {metrics.accuracy:.0%} exact · "
-            f"{metrics.mean_distance:.2f} grades off "
-            f"(baseline {metrics.baseline_distance:.2f})"
-        )
-    finally:
-        conn.close()
-
-
-def _index_catalog_task(conn, scope: str) -> str:
-    """Embed a scope of the catalog, then hand back unneeded art automatically."""
-    from tcginventory.data.vision import VisionRepository, open_vision
-    from tcginventory.services import catalog_index as ci
-
-    vision = open_vision()
-    try:
-        repo = VisionRepository(vision)
-        summary = ci.index_catalog(conn, repo, scope)
-        # No reclaim here. It used to run automatically, back when the art was kept
-        # as a separate archive and the downloads were transient. With one store,
-        # reclaiming straight after a sweep would delete exactly what the sweep
-        # just fetched — and the reason for keeping it is that re-embedding for a
-        # future model reads from disk. Reclaim is the tile beside this one.
-        return summary.summary
-    finally:
-        vision.close()
-
-
-def _reclaim_catalog_art(conn) -> str:
-    from tcginventory.data.vision import VisionRepository, open_vision
-    from tcginventory.services import catalog_index as ci
-
-    vision = open_vision()
-    try:
-        return ci.reclaim(conn, VisionRepository(vision)).summary
-    finally:
-        vision.close()
-
-
-def _reindex_corpus(_conn) -> str:
-    """Re-embed every labelled crop against the current model."""
-    from tcginventory.data.vision import VisionRepository, open_vision
-    from tcginventory.services import exemplars
-    from tcginventory.services.recognizer import get_shared_embedder
-
-    vision = open_vision()
-    try:
-        repo = VisionRepository(vision)
-        indexed = exemplars.reindex_all(repo, get_shared_embedder(), skip_existing=True)
-        total = repo.region_embedding_count()
-        return f"{indexed:,} newly indexed · {total:,} exemplars in the corpus"
-    finally:
-        vision.close()
-
-
-# The fit converges well before the catalog runs out: measured, 3,000 cards
-# (6,000 pairs) reaches the same accuracy as 10,000, while a thinner fit costs
-# more top-5 than it returns. 4,000 leaves margin without a long wait.
-_PROJECTION_CARDS = 4000
-
-
-def _fit_photo_projection(conn) -> str:
-    """Fit the map from photo-domain embeddings onto catalog-render ones.
-
-    Two sources of truth: catalog art degraded to look photographed (broad, but
-    an imitation) and the crops you have actually labelled (few, but the real
-    thing). Logged as a model run like the trained models, with **held-out**
-    accuracy — the corpus pairs are also the benchmark's queries, so an in-sample
-    score would flatter itself.
-    """
-    import numpy as np
-
-    from tcginventory.data.vision import (
-        KIND_IDENTITY,
-        ModelRunRepository,
-        VisionRepository,
-        open_vision,
-    )
-    from tcginventory.services import identity_eval as ie
-    from tcginventory.services import identity_projection as ip
-    from tcginventory.services.recognizer import get_shared_embedder
-
-    vision = open_vision()
-    try:
-        repo = VisionRepository(vision)
-        runs = ModelRunRepository(vision)
-        embedder = get_shared_embedder()
-        ids, bank = ie.load_pool(repo, embedder.version)
-        if not ids:
-            return "nothing indexed yet — index the card catalog first"
-        targets = {cid: bank[i] for i, cid in enumerate(ids)}
-        sample = list(ids)
-        np.random.default_rng(7).shuffle(sample)
-
-        run_id = runs.start(
-            kind=KIND_IDENTITY,
-            source="projection",
-            corpus_cards=len(ids),
-            base_weights=embedder.version,
-        )
-        try:
-            pairs_x, pairs_y, cards = ip.synthetic_pairs(
-                repo, embedder, sample[:_PROJECTION_CARDS], targets
-            )
-            if pairs_x is None:
-                runs.finish(run_id, status="skipped", notes="not enough usable art")
-                return (
-                    "not enough usable art to fit — index more of the catalog first"
-                )
-            corpus = ip.corpus_pairs(repo, embedder.version, targets)
-            report = ip.cross_validate(conn, repo, embedder, (pairs_x, pairs_y))
-            rotation, result = ip.fit_rotation(
-                (pairs_x, pairs_y), (corpus[0], corpus[1]), cards=cards
-            )
-            ip.save(rotation)
-        except Exception as exc:  # the run log should not lose a failure
-            runs.finish(run_id, status="failed", notes=str(exc)[:400])
-            raise
-
-        note = result.summary
-        if report is not None:
-            runs.finish(
-                run_id,
-                status="ok",
-                map50=report.fitted_top1,
-                map50_95=report.fitted_top5,
-                precision=report.baseline_top1,
-                recall=report.baseline_top5,
-                metrics_json=json.dumps(report.__dict__),
-                notes=f"{result.summary} · {report.summary}",
-            )
-            return f"photo matching fitted · {report.summary}"
-        runs.finish(run_id, status="ok", notes=note)
-        return f"photo matching fitted · {note}"
-    finally:
-        vision.close()
-
-
-def _forget_photo_projection(_conn) -> str:
-    """Remove the fitted map, putting identification back on the raw encoder."""
-    from tcginventory.services import identity_projection as ip
-
-    path = ip.matrix_path()
-    if not path.is_file():
-        return "no photo matching was fitted"
-    path.unlink()
-    return "photo matching removed — suggestions use the encoder as-is"
 
 
 def _integrity_check(conn) -> str:

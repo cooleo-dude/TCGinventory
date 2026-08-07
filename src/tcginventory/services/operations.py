@@ -38,20 +38,29 @@ class Group:
 
 
 # Display order of the sections, and the order of the in-page navigator beside
-# them. Each section is about **one** thing: the three recognition models are
-# separate concerns with separate data and separate metrics, and the environment
-# that trains them is machine setup rather than a model at all.
+# them. Operations is about the **ledger**: getting data in and out, keeping
+# prices and the card database current, and looking after the file itself.
 GROUPS: tuple[Group, ...] = (
     Group("data_in", "Bring data in"),
     Group("data_out", "Get data out"),
     Group("prices", "Prices"),
     Group("reference", "Reference data"),
     Group("automation", "Automation"),
-    Group("training_env", "Model training environment"),
-    Group("model_regions", "Region detection model"),
-    Group("model_condition", "Condition model"),
-    Group("model_identity", "Card identity model"),
     Group("maintenance", "Maintenance & diagnostics"),
+)
+
+# The Models window's sections. They were once tiles here, which put "train the
+# detector" beside "import a CSV" and gave a model nowhere to report its metrics,
+# its losses or its history. Each is about **one** thing: the three models have
+# separate data and separate lifecycles, and the environment that trains them is
+# machine setup rather than a model at all. The entries stay in the registry
+# below — the run log, statuses and staleness all key off them — but Operations
+# no longer renders them.
+MODEL_GROUPS: tuple[Group, ...] = (
+    Group("model_regions", "Region detection"),
+    Group("model_condition", "Condition"),
+    Group("model_identity", "Card identity"),
+    Group("training_env", "Training environment"),
 )
 
 

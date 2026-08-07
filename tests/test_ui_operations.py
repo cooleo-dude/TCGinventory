@@ -49,8 +49,11 @@ def test_every_registered_operation_gets_a_tile_and_a_runner(app, seeded_conn):
     from tcginventory.ui.views.operations import OperationsView
 
     view = OperationsView(seeded_conn)
-    assert set(view._tiles) == set(ops.BY_ID)
-    for op_id in ops.BY_ID:
+    # The model sections live on the Models screen now, so this covers what
+    # Operations itself draws — every ledger operation, and nothing else.
+    ledger = {op.id for op in ops.OPERATIONS if op.group in {g.id for g in ops.GROUPS}}
+    assert set(view._tiles) == ledger
+    for op_id in ledger:
         assert view._runner(op_id) is not None, f"{op_id} has no runner"
     assert view._runner("models.something") is None  # nothing reserved is wired
     view.deleteLater()
@@ -216,41 +219,6 @@ def test_only_groups_with_operations_get_a_section(app, seeded_conn, monkeypatch
     view.deleteLater()
 
 
-def test_each_model_gets_its_own_section(app, seeded_conn):
-    """The three models are separate concerns with separate data and metrics, and
-    the environment that trains them is machine setup rather than a model."""
-    from tcginventory.ui.views.operations import OperationsView
-
-    view = OperationsView(seeded_conn)
-    titles = _section_titles(view)
-    for label in (
-        "Model training environment",
-        "Region detection model",
-        "Condition model",
-        "Card identity model",
-    ):
-        assert label in titles, label
-
-    # And nothing shares a section with an unrelated job any more.
-    assert [op.id for op in ops.in_group("training_env")] == [
-        "models.training_env",
-        "models.training_env_gpu",
-        "models.training_env_remove",
-    ]
-    assert [op.id for op in ops.in_group("model_regions")] == ["models.detector.train"]
-    assert [op.id for op in ops.in_group("model_condition")] == [
-        "models.condition.train"
-    ]
-    assert [op.id for op in ops.in_group("model_identity")] == [
-        "identity.index_catalog",
-        "identity.reclaim",
-        "identity.fit_projection",
-        "identity.forget_projection",
-        "vision.reindex",
-    ]
-    view.deleteLater()
-
-
 def test_every_section_carries_a_heading_and_a_note(app, seeded_conn):
     """A section says what it is for, rather than leaving the tiles to imply it."""
     from tcginventory.ui.views.operations import _SECTION_NOTES, OperationsView
@@ -396,67 +364,6 @@ def _install_fake_env(tmp_path):
         training.TrainingEnv(str(python), True, "8.4.115", "ultralytics 8.4.115")
     )
     return env
-
-
-def test_setup_button_greys_out_once_the_environment_exists(app, seeded_conn, tmp_path):
-    """Regression: 'Set up model training' stayed clickable after setup, so it
-    would happily rebuild an environment that was already there."""
-    from tcginventory.ui.views.operations import OperationsView
-
-    view = OperationsView(seeded_conn)
-    setup = view._tiles["models.training_env"]
-    remove = view._tiles["models.training_env_remove"]
-    assert not remove.button.isEnabled()  # nothing installed, nothing to remove
-
-    _install_fake_env(tmp_path)
-    view.refresh()
-
-    assert not setup.button.isEnabled()
-    assert "remove the environment first" in setup.button.toolTip().lower()
-    assert remove.button.isEnabled()  # …and its opposite comes alive
-    view.deleteLater()
-
-
-def test_removing_the_environment_revives_the_setup_button(app, seeded_conn, tmp_path):
-    """The pair flips together — finishing one refreshes its whole group."""
-    from tcginventory.services import trainingenv
-    from tcginventory.ui.views.operations import OperationsView, _remove_training_env
-
-    env = _install_fake_env(tmp_path)
-    view = OperationsView(seeded_conn)
-    assert not view._tiles["models.training_env"].button.isEnabled()
-
-    summary = _remove_training_env(seeded_conn)
-    view._log("models.training_env_remove", True, summary)
-
-    assert not env.exists()
-    assert "models kept" in summary
-    assert view._tiles["models.training_env"].button.isEnabled()
-    assert not view._tiles["models.training_env_remove"].button.isEnabled()
-    assert not trainingenv.is_bootstrapped()
-    view.deleteLater()
-
-
-def test_removing_the_environment_is_confirmed_first(
-    app, seeded_conn, tmp_path, monkeypatch
-):
-    from PySide6.QtWidgets import QMessageBox
-
-    from tcginventory.ui.views.operations import OperationsView
-
-    env = _install_fake_env(tmp_path)
-    asked: list[str] = []
-    monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        staticmethod(lambda *a, **k: (asked.append(a[2]), QMessageBox.No)[1]),
-    )
-    view = OperationsView(seeded_conn)
-    view._run(ops.BY_ID["models.training_env_remove"])
-
-    assert env.exists()  # declined → nothing deleted
-    assert "models" in asked[0].lower() and "corpus" in asked[0].lower()
-    view.deleteLater()
 
 
 def test_file_menu_is_trimmed_to_operations_and_exit(app, seeded_conn):

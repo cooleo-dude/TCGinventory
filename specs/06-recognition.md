@@ -177,6 +177,18 @@ labels → periodic offline retrain of detector + embedder. Inference runs via
     across 3+ photos: on 44 graded cards the fit scores 14% exact / 1.52 grades off
     against a 0.84 baseline, so the tile greys its button and says what's missing.
 
+- **A `Models` destination ✅ done.** The recognition subsystem left Operations
+  for a screen of its own (`ui/views/models.py`, nav icon `cpu`): **Overview**
+  (what is serving right now, per model), **Region detection** (metrics, the
+  per-epoch loss curve with a switch per line, run history, a stale banner when
+  the corpus has moved on), **Condition** (per-grade coverage against the gate),
+  **Card identity** (its four components and what each is worth), **Training
+  environment**, and **Data corpus** (counts, and what each model is short of).
+  `services/modeljobs.py` holds the jobs and `services/modelsummary.py` assembles
+  the figures, both Qt-free — the view renders and nothing else. Operations keeps
+  the ledger's own work; `ops.GROUPS` and `ops.MODEL_GROUPS` split the one
+  registry between the two screens.
+
 - **Photo→render projection ✅ done.** Queries are photographs and the index is
   clean renders, and the encoder handles that badly enough to invert the answer
   (a photo sits at median cosine 0.792 from its own card's art, 0.877 from the

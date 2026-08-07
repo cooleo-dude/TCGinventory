@@ -40,6 +40,7 @@ from tcginventory.ui.views.history import HistoryView
 from tcginventory.ui.views.inventory import InventoryView
 from tcginventory.ui.views.market import PriceLookupView
 from tcginventory.ui.views.market_signal import MarketView
+from tcginventory.ui.views.models import ModelsView
 from tcginventory.ui.views.operations import OperationsView
 from tcginventory.ui.views.recognition import RecognitionView
 from tcginventory.ui.views.transaction import TransactionView
@@ -54,6 +55,7 @@ NAV_ITEMS = [
     "eBay Auctions",
     "Recognition",
     "Market",
+    "Models",
     "Operations",
 ]
 # Lucide icon per nav destination (see ui/icons.py).
@@ -67,6 +69,7 @@ NAV_ICONS = {
     "eBay Auctions": "gavel",
     "Recognition": "scan-line",
     "Market": "trending-up",
+    "Models": "cpu",
     "Operations": "sliders-horizontal",
 }
 # Derived, not hardcoded: inserting a destination silently invalidated literals.
@@ -142,6 +145,7 @@ class MainWindow(QMainWindow):
             ),
             ("Recognition", lambda: RecognitionView(conn, prewarm=True)),
             ("Market", lambda: MarketView(conn)),
+            ("Models", lambda: ModelsView(conn)),
             ("Operations", lambda: OperationsView(conn)),
         )
         # Built (and stacked) in NAV_ITEMS order — the nav indexes into the stack.
@@ -163,6 +167,7 @@ class MainWindow(QMainWindow):
         self._recognition = views["Recognition"]
         self._market = views["Market"]
         self._operations = views["Operations"]
+        self._models = views["Models"]
 
         # Refresh-on-demand: a screen only re-refreshes when the data behind it
         # has actually changed. `_data_version` bumps on every mutation source
@@ -179,6 +184,9 @@ class MainWindow(QMainWindow):
         self._inventory.changed.connect(self._on_ledger_changed)
         # An import or a price refresh changes what every read screen shows.
         self._operations.changed.connect(self._on_ledger_changed)
+        # A finished model job changes what Recognition can propose — a wider
+        # catalog index, a retrained detector, a refitted photo map.
+        self._models.changed.connect(self._on_ledger_changed)
         self._history.edit_requested.connect(self._start_edit)
         self._history.new_transaction_requested.connect(
             lambda: self._nav.setCurrentRow(_TRANSACTION_INDEX)

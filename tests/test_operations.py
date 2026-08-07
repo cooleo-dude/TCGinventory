@@ -23,7 +23,9 @@ def _iso(days_ago: float) -> str:
 def test_registry_is_internally_consistent():
     """Every entry is addressable, grouped and complete — the guard that keeps a
     future operation from being half-added."""
-    group_ids = {g.id for g in ops.GROUPS}
+    # Both screens draw from this one registry, so an entry may belong to
+    # either — what matters is that it belongs somewhere declared.
+    group_ids = {g.id for g in ops.GROUPS} | {g.id for g in ops.MODEL_GROUPS}
     seen: set[str] = set()
     for op in ops.OPERATIONS:
         assert op.id not in seen, f"duplicate operation id {op.id}"
@@ -36,36 +38,6 @@ def test_registry_is_internally_consistent():
     assert ops.BY_ID.keys() == seen
     # At most one accent-filled button on the screen.
     assert sum(1 for op in ops.OPERATIONS if op.primary) <= 1
-
-
-def test_each_recognition_model_has_its_own_section():
-    """One section per concern: the environment that trains the models is machine
-    setup, and the three models have separate data, metrics and lifecycles. The
-    identifier gets no *Train* button — a labelled crop is its training step —
-    but it does get jobs of its own, which need no training environment: indexing
-    the catalog, and fitting the photo-to-render map from catalog art alone.
-    """
-    assert [op.id for op in ops.in_group("training_env")] == [
-        "models.training_env",
-        "models.training_env_gpu",
-        "models.training_env_remove",
-    ]
-    assert [op.id for op in ops.in_group("model_regions")] == ["models.detector.train"]
-    assert [op.id for op in ops.in_group("model_condition")] == [
-        "models.condition.train"
-    ]
-    assert [op.id for op in ops.in_group("model_identity")] == [
-        "identity.index_catalog",
-        "identity.reclaim",
-        "identity.fit_projection",
-        "identity.forget_projection",
-        "vision.reindex",
-    ]
-    # Both trainers report their age, so a model left alone reads as stale.
-    for op_id in ("models.detector.train", "models.condition.train"):
-        op = ops.BY_ID[op_id]
-        assert op.caption == "Last trained"
-        assert op.stale_after_days == 14
 
 
 def test_run_log_records_last_run_and_prunes(conn):
@@ -201,8 +173,9 @@ def test_sections_do_not_mix_unrelated_jobs():
         "catalog.update_en",
         "catalog.update_jp",
     }
-    # Every operation still lands in a declared section.
-    known = {g.id for g in ops.GROUPS}
+    # Every operation still lands in a declared section, on one screen or
+    # the other.
+    known = {g.id for g in ops.GROUPS} | {g.id for g in ops.MODEL_GROUPS}
     assert all(op.group in known for op in ops.OPERATIONS)
 
 

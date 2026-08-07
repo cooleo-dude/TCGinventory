@@ -338,10 +338,10 @@ def test_the_tile_quotes_held_out_accuracy_once_fitted(monkeypatch, tmp_path):
 
 
 def test_removing_the_map_puts_ranking_back_on_the_raw_model(tmp_path):
-    from tcginventory.ui.views.operations import _forget_photo_projection
+    from tcginventory.services.modeljobs import forget_photo_projection
 
-    assert _forget_photo_projection(None) == "no photo matching was fitted"
+    assert forget_photo_projection(None) == "no photo matching was fitted"
     ip.save(_rotation(8))
     assert ip.load() is not None
-    assert "removed" in _forget_photo_projection(None)
+    assert "removed" in forget_photo_projection(None)
     assert ip.load() is None  # and suggestions fall back to the encoder
