@@ -63,12 +63,22 @@ item in the app.
   architecture change touching the splash contract and the nav indexes), and a
   performance-regression test (the suite runs `-n auto`; a timing assertion in it
   would be flaky). Results go here instead.
-- **Research is bounded rather than open-ended.** Three in-repo questions first —
-  can it be cached, can it move behind `_worker.TaskWorker`, can SQLite do it —
-  each with precedent and no new dependency. Only then outward, and then the
-  proposal must price the `packaging/tcginventory.spec` `hiddenimports` entry and
-  the frozen boot. In an offline PyInstaller app most library answers cannot ship,
-  and a worse-on-paper stdlib answer usually wins.
+- **Research is bounded, and it ends in a measurement.** Three in-repo questions
+  first — can it be cached, can it move behind `_worker.TaskWorker`, can SQLite
+  do it — each with precedent and no new dependency, each backed by a table of
+  concrete mechanisms (covering/partial/expression indexes, FTS5, `executemany`,
+  `blobopen`; streaming instead of `fetchall`, `__slots__`, numpy views;
+  `canFetchMore`, `dataChanged` over `beginResetModel`). Only then outward, and
+  then the candidate must pass packaging, offline, layer, platform and
+  maintenance tests explicitly. A `capabilities` probe reports what is already
+  paid for, because most "use library X" ideas are something SQLite, numpy,
+  Pillow or Qt already ships — and it catches two-sided constraints a naive
+  benchmark misses: **Pillow writes AVIF and Qt cannot read it**, so the
+  smallest format is not a usable one. Above all, **a mechanism is not reported
+  until a spike has run it against staged real data** and printed a before and
+  an after. The worked example in the skill makes the point against itself: 300
+  single-row lookups replaced by one `IN (…)` query measured 1.35 ms → 0.35 ms —
+  3.8× faster, one millisecond, not worth shipping.
 
 ### 2026-08-07 — Recognition: a mode trap, not a broken Delete
 

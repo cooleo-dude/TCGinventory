@@ -176,6 +176,38 @@ Measured facts that bound the obvious ideas:
 `data/db.py:29-32` sets `journal_mode = WAL` and `foreign_keys = ON`, and
 nothing else. No `synchronous`, `cache_size`, `mmap_size` or `temp_store`.
 
+## Capabilities — what is available without a new dependency
+
+From `perf.py capabilities`. Re-run it; these move with the venv.
+
+**SQLite 3.49.1** (Python 3.12.10 binding):
+
+| Feature | |
+|---|---|
+| FTS5 full-text | yes |
+| R*Tree | yes |
+| JSON functions | yes |
+| generated columns | yes |
+| `WITHOUT ROWID` | yes |
+| expression indexes | yes |
+| incremental BLOB I/O (`blobopen`) | yes |
+| `dbstat` virtual table | **no** — per-table page accounting unavailable, so the harness estimates payload with `LENGTH()` |
+| STAT4 | **no** — `ANALYZE` gives counts, not histograms |
+
+**Already hard dependencies, free to use:** numpy 2.5.1, Pillow 12.3.0,
+PySide6 6.11.1, httpx 0.28.1, onnxruntime 1.27.0.
+
+**Image formats are two-sided.** Pillow writes WebP, JPEG and AVIF. Qt reads PNG,
+JPEG and WebP but **cannot read AVIF or JPEG-XL**. Only a format both sides
+handle is usable — AVIF would produce smaller files the UI cannot display.
+
+## Worked spike
+
+Against the staged 53,289-row catalog: 300 single-row `WHERE card_id = ?`
+lookups measured **1.35 ms**; the same work as one `IN (…)` query measured
+**0.35 ms**. 3.8× faster, one millisecond saved. A correct optimization that is
+not worth shipping — which is the result the sweep exists to be able to state.
+
 ## Query plans
 
 Every hot `card_catalog` query is index-backed. The two `SCAN`s are both

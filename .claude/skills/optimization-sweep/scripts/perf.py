@@ -9,6 +9,7 @@ a table can be tiny on disk and still dominate a refresh.
     perf.py storage                          bytes on disk: databases, caches, indexes
     perf.py profile <View>                   cProfile one view's build and refresh
     perf.py plans                            EXPLAIN QUERY PLAN over the big tables
+    perf.py capabilities                     what is available without a new dependency
     perf.py all                              latency + memory + storage
 
 Never opens the live database. ``latency``/``memory``/``profile``/``plans`` copy
@@ -539,6 +540,83 @@ def cmd_plans(args) -> None:
         )
 
 
+def cmd_capabilities(args) -> None:
+    """What this app can already do without a new dependency.
+
+    The research half needs grounding as much as the measurement half. Most
+    "use library X" ideas die on packaging; most of the rest turn out to be
+    something numpy, Pillow, Qt or SQLite already ships. Probe, don't assume —
+    and note the absences, because a missing compile option is the difference
+    between a good idea and an afternoon lost.
+    """
+    import sqlite3 as sq
+
+    print(f"python      {sys.version.split()[0]}")
+    conn = sq.connect(":memory:")
+    print(f"sqlite      {sq.sqlite_version}")
+
+    options = [r[0] for r in conn.execute("PRAGMA compile_options")]
+    for label, needle in (
+        ("FTS5 full-text", "ENABLE_FTS5"),
+        ("R*Tree", "ENABLE_RTREE"),
+        ("dbstat vtab", "ENABLE_DBSTAT_VTAB"),
+        ("STAT4 planner stats", "ENABLE_STAT4"),
+        ("math functions", "ENABLE_MATH_FUNCTIONS"),
+    ):
+        present = any(needle in option for option in options)
+        print(f"   {'yes' if present else 'NO ':3s}  {label}")
+
+    probes = [
+        ("JSON functions", "SELECT json_extract('{\"a\":1}', '$.a')"),
+        ("generated columns", "CREATE TABLE _g(a INT, b INT AS (a*2))"),
+        ("WITHOUT ROWID", "CREATE TABLE _w(k TEXT PRIMARY KEY, v INT) WITHOUT ROWID"),
+        ("expression indexes", "CREATE TABLE _e(x TEXT)"),
+    ]
+    for label, sql in probes:
+        try:
+            conn.execute(sql)
+            print(f"   yes  {label}")
+        except sq.Error as exc:
+            print(f"   NO   {label} ({exc})")
+    print(f"   {'yes' if hasattr(conn, 'blobopen') else 'NO '}  incremental BLOB I/O")
+    conn.close()
+
+    print("\nalready a hard dependency — free to use")
+    for module in ("numpy", "PIL", "PySide6", "httpx", "onnxruntime"):
+        try:
+            mod = __import__(module)
+            print(f"   {module:14s} {getattr(mod, '__version__', '?')}")
+        except ImportError:
+            print(f"   {module:14s} MISSING")
+
+    try:
+        from PIL import features
+
+        pillow = [f for f in ("webp", "jpg", "avif", "zlib") if features.check(f)]
+        print(f"   Pillow writes  {', '.join(pillow)}")
+    except Exception as exc:
+        print(f"   Pillow probe failed: {exc}")
+
+    try:
+        _qt_app()
+        from PySide6.QtGui import QImageReader, QImageWriter
+
+        readable = {bytes(f).decode() for f in QImageReader.supportedImageFormats()}
+        writable = {bytes(f).decode() for f in QImageWriter.supportedImageFormats()}
+        interesting = ("png", "jpg", "webp", "avif", "jxl")
+        both = [f for f in interesting if f in readable and f in writable]
+        neither = [f for f in interesting if f not in readable]
+        print(f"   Qt read+write  {', '.join(both)}")
+        print(f"   Qt CANNOT read {', '.join(neither)}")
+        print(
+            "\n   An image format is only usable if BOTH Pillow and Qt handle it.\n"
+            "   Pillow writes AVIF and Qt cannot read it — smaller files the UI\n"
+            "   would not be able to display."
+        )
+    except Exception as exc:
+        print(f"   Qt probe failed: {exc}")
+
+
 def cmd_all(args) -> None:
     """Run each axis in a fresh subprocess.
 
@@ -577,6 +655,9 @@ def main() -> None:
     sub.add_parser("plans", help="query plans over the big tables").set_defaults(
         func=cmd_plans
     )
+    sub.add_parser(
+        "capabilities", help="what is available without a new dependency"
+    ).set_defaults(func=cmd_capabilities)
     sub.add_parser("all", help="latency + memory + storage").set_defaults(func=cmd_all)
 
     profile = sub.add_parser("profile", help="cProfile one view")

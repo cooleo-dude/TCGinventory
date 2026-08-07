@@ -2,7 +2,7 @@
 name: optimization-sweep
 description: Find and fix real performance costs in TCGinventory — wall-clock latency, resident memory, and bytes on disk. Use when asked to make the app faster, fix a slow window or startup, reduce memory or RAM use, shrink the database or image cache, hunt N+1 queries or missing indexes, or profile something. Also use when the user types /optimization-sweep.
 argument-hint: <area to scope the sweep, optional> — e.g. the Models window, startup, vision.db, the image cache
-allowed-tools: [Read, Grep, Glob, Bash, PowerShell, Edit, Write]
+allowed-tools: [Read, Grep, Glob, Bash, PowerShell, Edit, Write, WebSearch, WebFetch]
 ---
 
 # Optimization sweep
@@ -60,7 +60,7 @@ Search with the **Grep tool**, not shell pipelines — it honours `.gitignore`, 
 ```
 
 Subcommands, when you want one axis: `latency [--views|--services]`, `memory`,
-`storage`, `plans`, `profile <View>`, `all`.
+`storage`, `plans`, `profile <View>`, `capabilities`, `all`.
 
 The harness copies `inventory.db` to a temp file and points `TCGINVENTORY_DB` at
 the copy, so it never holds a handle on the file the app writes to. `storage`
@@ -238,39 +238,208 @@ recommendation to the user, not an autonomous edit.
 
 ---
 
-## Step 4 — The research half, bounded
+## Step 4 — Research: finding a better mechanism
 
-When the shapes above do not cover a target, research a better mechanism — but
-in a fixed order, because this is an **offline, single-user, PyInstaller-frozen
-desktop app** and most of what a general search returns cannot ship here.
+Step 3 covers the shapes already seen here. When a target is not one of them,
+the job changes from *recognition* to *research*: find a better way to do the
+thing, and prove it. This half has the same discipline as the first — **research
+ends in a measured prototype, never in an opinion.** A mechanism you have not run
+against real data is a hypothesis, and this skill does not report hypotheses as
+findings.
 
-Ask these three first. All three have precedent in this repo and none of them
-adds a dependency:
+### 4a. First, check the question is still open
 
-1. **Can the result be cached?** Session cache, on-disk cache, or a column.
-   Precedents: `ui/thumbcache.py`, `services/cardimages.py`'s lazy on-disk cache
-   (ADR 2026-07-14), the cached probes in `services/training.py`.
-2. **Can it move off the UI thread?** `ui/views/_worker.py`'s `TaskWorker` is the
-   standard. Anything that blocks a repaint and is not needed for the first
-   frame is a candidate.
-3. **Can SQLite do it instead of Python?** An aggregate, a join or an index in
-   place of a loop. Precedents: `0013_card_catalog_indexes.sql`,
-   `0018_lot_consumption_lot_index.sql`. Confirm with
-   `perf.py plans` — and remember an index costs write time and disk.
+Three greps, in this order. Most "why doesn't it just…" ideas in this repo were
+considered and written down:
 
-Only when all three fail do you look outward. Then the proposal must state:
+```
+Grep: <topic>  in docs/decisions.md    # settled? read the ADR before proposing
+Grep: <topic>  in specs/05-roadmap.md  # already on the backlog? say so, don't re-propose
+Grep: <topic>  in src/tcginventory/    # already half-built somewhere?
+```
 
-- **the packaging cost** — a new runtime dependency has to survive
-  `packaging/tcginventory.spec` (`hiddenimports`), the frozen boot, and the
-  125 MB exe budget. `numpy` and `Pillow` are already hard dependencies and are
-  free to use.
-- **the offline constraint** — no new network calls in a path a user waits on.
-- **the layer it lands in** — `domain/` and `services/` are Qt-free and
-  `tests/test_headless.py` enforces it.
+`docs/decisions.md` is the important one. Proposing something an ADR explicitly
+rejected — with reasons you have not read — is worse than proposing nothing.
 
-Check what is already paid for before adding anything. A stdlib answer
-(`functools.lru_cache`, `sqlite3` pragmas, `array`, `memoryview`) that is worse
-on paper usually wins here once packaging is priced in.
+### 4b. Know what is already paid for
+
+```powershell
+.\.venv\Scripts\python.exe .claude\skills\optimization-sweep\scripts\perf.py capabilities
+```
+
+Most "we should use library X" ideas turn out to be something numpy, Pillow, Qt
+or SQLite already ships. As probed on 2026-08-07 — re-run, do not trust this
+list:
+
+- **SQLite 3.49.1** with FTS5, R*Tree, JSON functions, generated columns,
+  `WITHOUT ROWID`, expression indexes and incremental BLOB I/O
+  (`Connection.blobopen`). **No `dbstat` vtab and no STAT4** — so per-table page
+  accounting is unavailable (the harness estimates payload with `LENGTH()`
+  instead) and `ANALYZE` gives the planner counts without histograms.
+- **numpy 2.5.1, Pillow 12.3.0, PySide6 6.11.1, httpx 0.28.1,
+  onnxruntime 1.27.0** — all hard dependencies already, all free to use.
+- **Image formats are a two-sided constraint.** Pillow writes WebP, JPEG *and
+  AVIF*; Qt reads PNG, JPEG and WebP but **cannot read AVIF or JPEG-XL**. A
+  format is only usable if both sides handle it — AVIF would give smaller files
+  the UI cannot display. This is exactly the kind of trap that a benchmark
+  comparing compression ratios alone will walk straight into.
+
+### 4c. The three in-repo questions
+
+Ask these before looking outward. Each has precedent here and none adds a
+dependency, so each is cheap to try and cheap to revert.
+
+**1. Can the result be cached?** — the most common answer.
+
+| Kind | Use when | Precedent |
+|---|---|---|
+| `functools.lru_cache` on a pure function | inputs repeat within a run | — |
+| module-level memo with an explicit invalidator | a probe whose inputs rarely change | `services/training.py`'s cached probes |
+| `QPixmapCache` | decoded images | `ui/thumbcache.py` (ADR 2026-08-04) |
+| on-disk cache keyed by id | expensive to fetch, cheap to store | `services/cardimages.py` (ADR 2026-07-14) |
+| a stored column | derived from data that changes on write | `catalog_price_latest` |
+
+The hard part is never the cache, it is the invalidation. Say in the proposal
+what makes the entry stale and who clears it. A cache with no answer to that is
+a bug with better latency.
+
+**2. Can it move off the UI thread?** `ui/views/_worker.py`'s `TaskWorker(db_path,
+task)` runs `task(conn) -> sentence` with its own connection — the repo standard
+for "call a service, report a sentence". Anything blocking a repaint that is not
+needed for the first frame is a candidate. Two rules: an exception crossing a
+`QThread` boundary takes the app down, and a SQLite connection belongs to the
+thread that made it — hence the separate connection.
+
+**3. Can SQLite do it instead of Python?** Confirm any answer with
+`perf.py plans` before and after.
+
+| Mechanism | Use when |
+|---|---|
+| an index | a `SCAN` on a table over ~20k rows |
+| a **covering** index | the query reads only indexed columns — no row lookup at all |
+| a **partial** index (`WHERE …`) | you filter on a sparse condition; smaller and cheaper to maintain. Precedent: `idx_lot_sku` |
+| an **expression** index | you filter on `lower(x)` or a computed form |
+| a composite index | you filter on A and sort by B — column order matters |
+| `GROUP BY` / aggregate | a Python loop is summing rows |
+| one query with `IN (…)` or a join | N single-row lookups in a loop |
+| `executemany` in one transaction | N inserts, each currently its own commit |
+| FTS5 | a `LIKE '%…%'` scan over a large text column |
+| `WITHOUT ROWID` | a narrow table keyed by a text primary key |
+| `blobopen` | reading part of a large BLOB without materialising it |
+| `ANALYZE` / `PRAGMA optimize` | the planner is choosing badly |
+
+Every index costs write time and disk. `perf.py storage` flags redundant ones,
+and adding one is a forward-only migration like any other.
+
+### 4d. Mechanism repertoire for the other two axes
+
+**Memory.**  Do not materialise what you can stream — a generator or a
+`fetchmany` loop instead of `fetchall` on the 49k/224k-row tables. `__slots__` on
+a dataclass instantiated per row. `array`/`memoryview` instead of a list of
+Python floats. numpy views instead of copies (`astype` always copies; in-place
+ops do not). Load a model lazily on first real use rather than prewarming it.
+For a Qt model over a large table, `canFetchMore`/`fetchMore` populates
+incrementally instead of holding every row.
+
+**Storage.**  Narrow the dtype (float32 → float16 → int8) when accuracy is
+*measured* to survive. Change container format when both writer and reader
+support it. Content-address duplicates rather than storing them twice. Move a
+large re-derivable BLOB out of the ledger so it stops being backed up. Add a
+retention policy to an append-only table. Drop a redundant index. Note that
+`VACUUM` only helps when `PRAGMA freelist_count` is non-zero — today it is zero
+in all four databases.
+
+**Latency in Qt.**  Compute display values once in `set_rows()` and index into
+them from `data()`. `dataChanged` over a column beats `beginResetModel` (which
+loses selection and scroll — see `set_trends` in `inventory_model.py`).
+`setUniformRowHeights` on a tree with fixed rows. Keep delegate `paint()` free of
+allocation. Batch signal emissions rather than emitting per row.
+
+### 4e. Going outward
+
+Only when 4c and 4d are exhausted. Then a candidate must pass **all** of these,
+and the proposal must say so explicitly for each:
+
+1. **Packaging.** A new runtime dependency has to survive
+   `packaging/tcginventory.spec` (`hiddenimports`), boot inside the frozen
+   onedir build, and fit the ~125 MB exe budget. State the added size.
+2. **Offline.** No new network call on a path a user waits on. The app has no
+   external price feeds in V1 by design.
+3. **Layer.** `domain/` and `services/` are Qt-free; `tests/test_headless.py`
+   enforces it. A library that drags in Qt cannot live in a service.
+4. **Platform.** Windows is the primary target and macOS is a real dev box. A
+   wheel that is Linux-only, or needs a compiler, is not a candidate.
+5. **Maintenance.** One person maintains this app offline. A dependency that
+   needs pinning, patching or a build step costs more than it saves.
+
+When you do search, search for the *mechanism*, not the endorsement — "how does
+X work / what does it cost", not "best library for X". Prefer primary sources:
+the SQLite documentation, Qt class documentation, a library's own changelog.
+Treat benchmark blog posts as leads, never as evidence: none of them ran against
+53,289 catalog rows on this machine, and you can.
+
+A stdlib or already-present answer that looks worse on paper usually wins here
+once packaging is priced in.
+
+### 4f. The spike — the part that makes it research
+
+Before proposing any mechanism, build the smallest thing that measures it,
+against **real staged data**, and report the number. Write the spike in the
+scratchpad, never in `src/`.
+
+The harness already knows how to stage a copy safely; reuse it rather than
+opening the live database:
+
+```python
+# scratchpad/spike_<idea>.py
+import sys, tempfile, time
+from pathlib import Path
+sys.path.insert(0, r".claude\skills\optimization-sweep\scripts")
+import perf  # _stage_db copies the live DB and repoints TCGINVENTORY_DB
+
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+    staged = perf._stage_db(Path(tmp))
+    conn = perf._conn(staged)          # NOT db.connect() — that defaults to :memory:
+    # measure the current way, then the proposed way, on the same connection
+```
+
+For a storage idea, sample rather than convert everything — 25 files was enough
+to size the PNG→WebP question to within a few percent, and it cost seconds
+instead of an hour.
+
+A worked example, run against the staged 53,289-row catalog: replacing **300
+single-row lookups** with one `IN (…)` query measured **1.35 ms → 0.35 ms**. A
+3.8× speedup — and one millisecond. That is the whole discipline in one result:
+the mechanism was genuinely better, and shipping it would have been a waste.
+Write the number down and move on.
+
+Rules for a spike:
+
+- Compare against the **current** implementation on the same data in the same
+  run. A number with nothing beside it means nothing.
+- Sample honestly and say the sample size.
+- If the mechanism trades accuracy for size or speed — quantisation, a lossy
+  format, a cache with a staleness window — **measure the accuracy too**, or
+  report that you could not and mark the finding blocked.
+- Delete the spike when done. It is evidence, not code.
+
+### 4g. Writing it up
+
+A research finding is reported as a mechanism proposal, not a suggestion:
+
+```
+MECHANISM  <name>
+  problem     <file:line>, costs <measured> on <axis>
+  mechanism   <what it is, in one sentence>
+  spike       <what you ran, on what data, sample size>
+  result      <before> -> <after>, measured
+  cost        <accuracy / packaging / migration / write-time cost, or "none">
+  blocked by  <what must be decided or measured before it can ship, or "nothing">
+```
+
+If the spike came out flat or worse, report it exactly the same way with the
+real numbers. A mechanism ruled out by measurement is a permanent result and
+belongs in the ADR — it stops the next sweep spending its budget there.
 
 ---
 
