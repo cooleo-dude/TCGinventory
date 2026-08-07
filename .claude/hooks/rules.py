@@ -69,6 +69,57 @@ def section_text(path: Path, anchor: str | None) -> str | None:
     return "\n".join(out)
 
 
+def path_matches(path: str, pattern: str) -> bool:
+    """Glob match in which ``**`` spans **zero** or more directories.
+
+    ``fnmatch`` alone is wrong for this. Its ``*`` matches ``/`` as well, so
+    ``src/tcginventory/**/*.py`` demands at least one intermediate directory and
+    silently misses ``src/tcginventory/__init__.py``. Worse,
+    ``src/tcginventory/ui/**/*.py`` missed ``ui/theme.py`` — the very file the
+    THEME-TOKENS rule cites. A rule whose scope cannot match its own source is a
+    rule that never fires, and it fails silently: the critic is simply not
+    dispatched.
+
+    Matching is **case-sensitive** on every platform (`fnmatchcase`, not
+    `fnmatch`, which normalises case on Windows). Paths come from
+    `git diff --name-only`, which reports git's tracked case rather than the
+    filesystem's, so a case-sensitive match is the one that behaves the same on
+    the Windows dev box and anywhere else.
+    """
+    return _match_segments(path.split("/"), _collapse(pattern.split("/")))
+
+
+def _collapse(pattern: list[str]) -> list[str]:
+    """Fold runs of ``**`` into one. ``a/**/**/b`` means exactly ``a/**/b``.
+
+    Not cosmetic. Each ``**`` branches into ``len(parts)+1`` recursive calls, so
+    consecutive ones multiply: measured 0.06s at five in a row and **7.86s at
+    eight** against a 25-segment path. A doubled ``**`` — a typo, or two agents
+    merging edits to the same `scope` array — would hang every `rules.py scope`
+    call, and since every critic shells out to that before judging a diff, the
+    whole review gate would stop responding with no error saying why. Collapsing
+    makes the pathological pattern impossible rather than merely unlikely.
+    """
+    out: list[str] = []
+    for segment in pattern:
+        if segment == "**" and out and out[-1] == "**":
+            continue
+        out.append(segment)
+    return out
+
+
+def _match_segments(parts: list[str], pattern: list[str]) -> bool:
+    if not pattern:
+        return not parts
+    head, rest = pattern[0], pattern[1:]
+    if head == "**":
+        # Zero or more segments: try consuming none, then one, then two, ...
+        return any(_match_segments(parts[i:], rest) for i in range(len(parts) + 1))
+    if not parts or not fnmatch.fnmatchcase(parts[0], head):
+        return False
+    return _match_segments(parts[1:], rest)
+
+
 def seal_of(text: str) -> str:
     return hashlib.sha256(
         "\n".join(t.strip() for t in text.splitlines()).encode()
@@ -151,7 +202,7 @@ def cmd_scope(args) -> int:
         if rule["id"] == "UNENUMERATED":
             continue
         for pattern in rule["scope"]:
-            matched = [p for p in paths if fnmatch.fnmatch(p, pattern)]
+            matched = [p for p in paths if path_matches(p, pattern)]
             if matched:
                 hits.setdefault(rule["lane"], []).append(rule["id"])
                 break

@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -86,6 +87,75 @@ def test_unenumerated_does_not_cite_the_registry_itself(registry):
     the seal can never settle. Caught the first time this was built."""
     rule = next(r for r in registry["rules"] if r["id"] == "UNENUMERATED")
     assert rule["source"]["file"] != ".claude/context/rules.json"
+
+
+@pytest.mark.parametrize(
+    "path, pattern, expected",
+    [
+        # `**` must span ZERO directories as well as many. Both of these were
+        # False under plain fnmatch, so the rules citing them never dispatched.
+        ("src/tcginventory/__init__.py", "src/tcginventory/**/*.py", True),
+        ("src/tcginventory/ui/theme.py", "src/tcginventory/ui/**/*.py", True),
+        ("src/tcginventory/config.py", "src/tcginventory/**/*.py", True),
+        # ... and many.
+        ("src/tcginventory/services/inventory.py", "src/tcginventory/**/*.py", True),
+        ("src/tcginventory/ui/models/x.py", "src/tcginventory/ui/**/*.py", True),
+        # `*` must NOT cross a directory boundary.
+        ("src/tcginventory/ui/theme.py", "src/tcginventory/*.py", False),
+        # Wrong subtree, wrong extension, wrong root.
+        ("src/tcginventory/services/x.py", "src/tcginventory/ui/**/*.py", False),
+        ("src/tcginventory/ui/theme.qss", "src/tcginventory/ui/**/*.py", False),
+        ("docs/decisions.md", "src/tcginventory/**/*.py", False),
+        # Exact paths and directory scopes still work.
+        (
+            "src/tcginventory/services/allocation.py",
+            "src/tcginventory/services/allocation.py",
+            True,
+        ),
+        (
+            "src/tcginventory/data/migrations/0020_x.sql",
+            "src/tcginventory/data/migrations/**",
+            True,
+        ),
+        ("anything/at/all.py", "**", True),
+    ],
+)
+def test_scope_globbing(rules_module, path, pattern, expected):
+    """A rule's scope decides whether its critic is dispatched at all, so a
+    matching bug fails open and fails silently."""
+    assert rules_module.path_matches(path, pattern) is expected
+
+
+def test_repeated_globstars_do_not_blow_up(rules_module):
+    """Consecutive `**` used to branch combinatorially — 7.86s at eight in a row.
+
+    Every critic shells out to `rules.py scope` before judging a diff, so a
+    doubled `**` in a rule's scope would hang the whole review gate with no error
+    saying why. Folding runs of `**` into one makes that impossible.
+    """
+    path = "/".join(f"d{i}" for i in range(25)) + "/x.py"
+    pathological = "/".join(["**"] * 12) + "/*.md"  # deliberately non-matching
+
+    start = time.perf_counter()
+    assert rules_module.path_matches(path, pathological) is False
+    assert time.perf_counter() - start < 1.0, "repeated ** is branching again"
+
+    # Folding must not change what matches.
+    assert rules_module.path_matches("a/b/c.py", "a/**/**/c.py") is True
+    assert rules_module.path_matches("a/c.py", "a/**/**/c.py") is True
+    assert rules_module._collapse(["a", "**", "**", "**", "b"]) == ["a", "**", "b"]
+
+
+def test_every_rule_scope_matches_its_own_source(rules_module, registry):
+    """A rule whose scope cannot match the file it cites would never fire on a
+    change to that file — exactly how THEME-TOKENS was broken."""
+    for rule in registry["rules"]:
+        source = rule["source"]["file"]
+        if not source.startswith("src/"):
+            continue  # rules sourced from docs or specs govern code elsewhere
+        assert any(
+            rules_module.path_matches(source, pattern) for pattern in rule["scope"]
+        ), f"{rule['id']}: scope {rule['scope']} cannot match its source {source}"
 
 
 def _write(tmp_path: Path, payload: dict) -> str:
