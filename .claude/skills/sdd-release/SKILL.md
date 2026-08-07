@@ -36,6 +36,11 @@ The boot check launches the exe against a throwaway `TCGINVENTORY_DATA_DIR`,
 waits, and confirms the process is alive and `inventory.db` exists — i.e. it
 started, migrated and got a window up. It never touches real data.
 
+When `check` refuses on a dirty tree it now also prints **who holds a lease on the
+checkout**, so "clean this up" and "wait for the other session" are
+distinguishable. There is deliberately no flag to skip it: ignoring the dirty tree
+is how that half-finished `history.py` would have shipped.
+
 ## Order
 
 1. **`check`.** Refuses on: a dirty tree, a version inconsistency
@@ -78,6 +83,9 @@ python .claude/hooks/review_gate.py record --scope pr-merge --ref <n>     --verd
 findings, commit, and re-run the panel. Verdicts are bound to a sha, so a new
 commit reopens the gate deliberately: the panel judged something that is no
 longer what would merge.
+
+They are bound to the **session** that recorded them too, so a panel another
+session ran will not open your gate. Run your own.
 
 Relay every finding to the user. A panel whose findings you summarise away is a
 panel that did nothing.

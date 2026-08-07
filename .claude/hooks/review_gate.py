@@ -16,22 +16,32 @@ rather than a habit.
     review_gate.py show
     review_gate.py clear
 
-A verdict is bound to a commit sha. Push another commit and the gate reopens,
-because the panel judged something that is no longer what would merge.
+A verdict is bound to a commit sha **and to the session that recorded it**. Push
+another commit and the gate reopens, because the panel judged something that is no
+longer what would merge. Record from another session and the gate stays shut,
+because that panel judged somebody else's work (ticket 007).
+
+Which repository a call is about comes from the **caller's directory**, never from
+this file's location. One session per worktree means several checkouts of this repo
+exist at once, and `.claude/settings.json` invokes the hook through
+`$CLAUDE_PROJECT_DIR`, which stays at the launch directory when a session moves
+into a worktree. Deriving the repo from `__file__` therefore read the main clone's
+`HEAD` while the agent worked somewhere else entirely — attesting to a commit
+nobody was merging.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
-REVIEWS = REPO / ".claude" / "context" / "reviews"
+FALLBACK_REPO = Path(__file__).resolve().parents[2]
 
 # A verdict of `revise` is not a failure — it is a note the author answers.
 # Only `block` stops the gate.
@@ -45,10 +55,36 @@ GUARDED = (
 )
 
 
-def head() -> str:
+def repo_root(cwd: str | None = None) -> Path:
+    """The checkout this call is about, most trustworthy source first.
+
+    `--show-toplevel` reports the *worktree* root rather than the main clone, which
+    is the whole point: a session working in `.claude/worktrees/x` must record and
+    read verdicts for that tree's HEAD.
+    """
+    for candidate in (cwd, os.environ.get("CLAUDE_PROJECT_DIR")):
+        if not candidate or not Path(candidate).is_dir():
+            continue
+        done = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=candidate,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if done.returncode == 0 and done.stdout.strip():
+            return Path(done.stdout.strip())
+    return FALLBACK_REPO
+
+
+def reviews_dir(repo: Path) -> Path:
+    return repo / ".claude" / "context" / "reviews"
+
+
+def head(repo: Path) -> str:
     done = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"],
-        cwd=REPO,
+        cwd=repo,
         capture_output=True,
         text=True,
         check=False,
@@ -56,8 +92,19 @@ def head() -> str:
     return done.stdout.strip() or "unknown"
 
 
-def verdict_path(sha: str) -> Path:
-    return REVIEWS / f"{sha}.json"
+def branch_of(repo: Path) -> str:
+    done = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return done.stdout.strip() or "unknown"
+
+
+def verdict_path(repo: Path, sha: str) -> Path:
+    return reviews_dir(repo) / f"{sha}.json"
 
 
 # ---- hook mode -------------------------------------------------------------
@@ -68,6 +115,24 @@ def guarded_scope(command: str) -> str | None:
         if pattern.search(command):
             return scope
     return None
+
+
+def owning_session(repo: Path) -> str | None:
+    """Which session holds the lease on `repo`, per `.claude/hooks/_session.py`.
+
+    Imported lazily and defensively **on purpose.** This runs as a `PreToolUse`
+    hook on every shell call, so an ImportError at module scope — a half-applied
+    checkout, a corrupt sibling — would raise on each one and stop all work in the
+    session. A missing registry degrades to an unattributed verdict, which is a
+    weaker guarantee recorded in the open rather than a dead session.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _session
+
+        return _session.owning_session(repo)
+    except Exception:
+        return None
 
 
 def hook() -> int:
@@ -84,8 +149,9 @@ def hook() -> int:
     if scope is None:
         return 0
 
-    sha = head()
-    path = verdict_path(sha)
+    repo = repo_root(event.get("cwd"))
+    sha = head(repo)
+    path = verdict_path(repo, sha)
     if not path.is_file():
         print(
             f"BLOCKED: {scope} at {sha} has no review on record.\n"
@@ -110,6 +176,26 @@ def hook() -> int:
             file=sys.stderr,
         )
         return 2
+
+    # Whose review was it? Two sessions sitting on the same sha — both just
+    # branched from main, neither has committed — otherwise trade verdicts: one
+    # records green for its own diff and opens the gate for the other's unreviewed
+    # work (ticket 007). A verdict recorded before the lease registry existed
+    # carries no session and stays admissible; the guarantee is weaker and the
+    # `session: null` in the artifact says so.
+    recorded = record.get("session")
+    caller = event.get("session_id")
+    if recorded and caller and recorded != caller:
+        print(
+            f"BLOCKED: the verdict for {sha} was recorded by session "
+            f"{recorded[:8]}, not by this one ({caller[:8]}).\n"
+            f"That panel judged a different session's work. Two sessions on the "
+            f"same commit would otherwise open the gate for each other.\n"
+            f"Dispatch the panel for YOUR diff and record it, or work in your own "
+            f"worktree — see `## Working in parallel sessions` in CLAUDE.md.",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 
@@ -127,6 +213,8 @@ def cmd_record(args) -> int:
     if missing:
         raise SystemExit(f"missing verdict for: {', '.join(sorted(missing))}")
 
+    repo = repo_root(os.getcwd())
+
     # A recorded verdict is only worth something if its findings are grounded.
     # Reuse the registry's own validator so the check a critic runs and the check
     # the gate runs cannot diverge.
@@ -134,7 +222,7 @@ def cmd_record(args) -> int:
         done = subprocess.run(
             [
                 sys.executable,
-                str(REPO / ".claude" / "hooks" / "rules.py"),
+                str(repo / ".claude" / "hooks" / "rules.py"),
                 "validate",
                 path,
             ],
@@ -149,9 +237,10 @@ def cmd_record(args) -> int:
                 f".claude/context/rules.json"
             )
 
-    sha = head()
-    REVIEWS.mkdir(parents=True, exist_ok=True)
-    verdict_path(sha).write_text(
+    sha = head(repo)
+    session = owning_session(repo)
+    reviews_dir(repo).mkdir(parents=True, exist_ok=True)
+    verdict_path(repo, sha).write_text(
         json.dumps(
             {
                 "sha": sha,
@@ -160,6 +249,12 @@ def cmd_record(args) -> int:
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "verdicts": verdicts,
                 "findings": [str(p) for p in args.findings],
+                # Whose panel this was. `null` means no lease held this worktree at
+                # record time, so the gate cannot tell sessions apart for this sha —
+                # legible in the artifact rather than assumed.
+                "session": session,
+                "branch": branch_of(repo),
+                "worktree": str(repo),
             },
             indent=2,
         ),
@@ -167,27 +262,32 @@ def cmd_record(args) -> int:
     )
     blocked = [k for k, v in verdicts.items() if v in BLOCKING]
     state = f"BLOCKED on {', '.join(blocked)}" if blocked else "clear"
-    print(f"  recorded {sha}  {args.scope} {args.ref}  — {state}")
+    attribution = f"session {session[:8]}" if session else "unattributed (no lease)"
+    print(f"  recorded {sha}  {args.scope} {args.ref}  — {state}, {attribution}")
     return 1 if blocked else 0
 
 
 def cmd_show(args) -> int:
-    sha = head()
-    path = verdict_path(sha)
-    print(f"  HEAD {sha}")
+    repo = repo_root(os.getcwd())
+    sha = head(repo)
+    path = verdict_path(repo, sha)
+    print(f"  HEAD {sha}  on {branch_of(repo)}  in {repo}")
     if not path.is_file():
         print("  no review on record — the gate will block a merge or a close")
         return 1
     record = json.loads(path.read_text(encoding="utf-8"))
     for lane, value in record["verdicts"].items():
         print(f"    {lane:<12} {value}")
+    session = record.get("session")
     print(f"  {record['scope']} {record['ref']}, recorded {record['at']}")
+    print(f"  by session {session[:8] if session else '— (unattributed)'}")
     return 0
 
 
 def cmd_clear(args) -> int:
+    reviews = reviews_dir(repo_root(os.getcwd()))
     removed = 0
-    for path in REVIEWS.glob("*.json") if REVIEWS.is_dir() else []:
+    for path in reviews.glob("*.json") if reviews.is_dir() else []:
         path.unlink()
         removed += 1
     print(f"  cleared {removed} review(s)")

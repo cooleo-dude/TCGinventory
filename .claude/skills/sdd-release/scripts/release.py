@@ -86,6 +86,34 @@ def last_tag() -> str | None:
 # ---- check -----------------------------------------------------------------
 
 
+def leases_note() -> str:
+    """Say *whose* uncommitted work is blocking the release, if it is not yours.
+
+    A dirty tree is a correct reason to refuse — but on 2026-08-07 the dirt was
+    another session's half-finished `history.py`, and `check` could only report the
+    filenames. Naming the session turns "clean this up" into "wait, or ask them".
+
+    Deliberately not a `--ignore-foreign` escape hatch: skipping the check is how
+    that half-finished file would have shipped in the first place.
+    """
+    lease_tool = REPO / ".claude" / "hooks" / "branch_lease.py"
+    if not lease_tool.is_file():
+        return ""
+    done = subprocess.run(
+        [PYTHON, str(lease_tool), "show"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    lines = [line for line in done.stdout.splitlines() if line.strip()]
+    if done.returncode != 0 or len(lines) < 3:
+        return ""  # no registry, or nobody holds a lease: nothing to add
+    return "\n      sessions holding a lease:\n      " + "\n      ".join(
+        line.strip() for line in lines[2:]
+    )
+
+
 def cmd_check(args) -> int:
     problems: list[str] = []
     ver = version()
@@ -96,6 +124,7 @@ def cmd_check(args) -> int:
         problems.append(
             "working tree is not clean:\n      "
             + "\n      ".join(dirty.splitlines()[:8])
+            + leases_note()
         )
 
     consistency = subprocess.run(

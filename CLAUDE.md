@@ -102,6 +102,52 @@ offline; no external price feeds in V1.
   lot + its now-empty line/txn — writing an audit `delete`; ADR 2026-07-11.)
 - Enforce the invariants in [`specs/02-data-model.md`](specs/02-data-model.md#invariants-must-always-hold).
 
+## Working in parallel sessions
+
+Several Claude sessions work this repo at once, and **a checkout has exactly one
+`HEAD`**. Since the move to a branch + PR flow, that makes the shared working tree
+a resource two sessions cannot both hold.
+
+**If you are going to commit, take your own worktree first — before any edit, not
+after noticing a neighbour.** Call `EnterWorktree`; this paragraph is the project
+instruction that authorises it. A session that only reads can stay in the main
+clone.
+
+```bash
+# what EnterWorktree does, if you need it by hand
+git worktree add -b ticket/007-thing ../tcgi-007 main
+```
+
+- Run the venv from the **main clone** (`.venv/Scripts/python.exe`) with
+  `PYTHONPATH=<worktree>/src`, or the editable install resolves back to the main
+  clone and you will verify the wrong tree.
+- Worktrees isolate code, not the app's SQLite files. Set
+  `TCGINVENTORY_DATA_DIR` before booting the app so two sessions cannot write one
+  ledger; the lease records a suggested path.
+- Remove it when done: `git worktree remove --force <path>`.
+
+This is **enforced**, not advised. `.claude/hooks/branch_lease.py` runs as a
+`PreToolUse` hook and, when another live session holds the same checkout, denies
+the commands that would move its `HEAD` or sweep its files into your commit —
+`checkout`, `switch`, `reset`, `rebase`, `merge`, `stash`, `git add -A`, and
+`git commit` without a pathspec. Alone in your own worktree, none of that fires.
+
+While you are sharing a tree, the safe forms still work: `git add <path>` and
+`git commit -m "…" -- <path>`. Stage only your own files, by explicit path, never
+`git add -A` — on 2026-08-03 an 831-line feature landed under another session's
+commit message that way, and undoing it needs a history rewrite that races their
+live commits.
+
+Inspect and unstick the registry with:
+
+```bash
+python .claude/hooks/branch_lease.py show          # who holds what
+python .claude/hooks/branch_lease.py release --all # the escape hatch
+```
+
+Review verdicts are bound to the session that recorded them, so a panel run by
+another session will not open your gate — see `/sdd-ticket`.
+
 ## Dev environment
 
 - **Python 3.10+.** macOS: 3.10.10 via pyenv. Windows: 3.12.10 via winget

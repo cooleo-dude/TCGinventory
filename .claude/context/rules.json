@@ -254,7 +254,7 @@
       "source": {
         "file": "docs/decisions.md",
         "anchor": null,
-        "excerpt_sha256": "46389d47e11d146b"
+        "excerpt_sha256": "dc8a9de20b5d1263"
       },
       "scope": [
         "src/**/*.py",
@@ -363,7 +363,7 @@
       "source": {
         "file": "docs/decisions.md",
         "anchor": null,
-        "excerpt_sha256": "46389d47e11d146b"
+        "excerpt_sha256": "dc8a9de20b5d1263"
       },
       "scope": [
         "src/tcginventory/ui/models/**/*.py"

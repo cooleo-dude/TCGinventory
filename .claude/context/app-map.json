@@ -374,14 +374,16 @@
   },
 
   "workflow": {
-    "branch": "Commit directly to main. No PR / feature branch by default.",
+    "branch": "Branch + pull request, since 2026-08-07. Never commit directly to main. The branch points at a ticket: ticket/NNN-<slug>, and the PR body carries `Closes #<issue>`.",
+    "isolation": "One session, one worktree, one branch. Take your own worktree with EnterWorktree BEFORE editing if you intend to commit — a checkout has exactly one HEAD, so two sessions sharing one tree put each other's commits on the wrong branch. Enforced by .claude/hooks/branch_lease.py as a PreToolUse hook; see `## Working in parallel sessions` in CLAUDE.md.",
+    "review_gate": "A ticket cannot be closed and a PR cannot be merged without a green critic panel recorded for the current HEAD, by the session that ran it. .claude/hooks/review_gate.py enforces it.",
     "git_identity": "Cooleo <coleleo00@gmail.com>",
     "definition_of_done": [
       "ruff format . and ruff check . are clean",
       "the full pytest suite passes (QT_QPA_PLATFORM=offscreen)",
       "a significant decision is recorded in docs/decisions.md",
       "CLAUDE.md status is updated if a milestone moved",
-      "commit + push to main, then rebuild the exe"
+      "the critic panel is green and recorded, then merge the PR and rebuild the exe"
     ],
     "style": "For open-ended 'how should we model X' questions, discuss tradeoffs in prose and give a recommendation. Reserve pick-lists for crisp, mutually-exclusive choices."
   }
