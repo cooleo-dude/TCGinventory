@@ -33,3 +33,7 @@ htmlcov/
 
 # Review-gate verdicts are per-commit and local.
 .claude/context/reviews/
+
+# One session, one worktree, one branch — EnterWorktree checks out in here.
+# Without this, every session's worktree is untracked noise in every other one.
+.claude/worktrees/

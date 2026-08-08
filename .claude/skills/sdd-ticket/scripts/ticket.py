@@ -2,6 +2,7 @@
 
     ticket.py list                    every ticket, its status and its issue
     ticket.py next                    the number a new ticket should take
+    ticket.py claim <kebab-title>     reserve the next number by creating the file
     ticket.py check                   non-zero if a ticket is malformed or out of sync
     ticket.py push [N ...]            create/update the GitHub issue for a ticket
     ticket.py close N                 mark done and close the mirrored issue
@@ -18,8 +19,10 @@ will not see it — this resolves the absolute path as a fallback.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[4]
@@ -118,10 +121,158 @@ def cmd_list(args) -> int:
     return 0
 
 
+def git(*args: str) -> str:
+    done = subprocess.run(
+        ["git", *args], cwd=REPO, capture_output=True, text=True, check=False
+    )
+    return done.stdout if done.returncode == 0 else ""
+
+
+def taken_numbers() -> set[int]:
+    """Every ticket number ever used, on **any** ref — not just this checkout.
+
+    Two sessions each asked the local directory for the next number, both got
+    `007`, and both filed an issue. The local tickets directory only knows about
+    tickets that have been merged into the branch you are standing on, so a ticket
+    filed an hour ago on someone else's branch is invisible to it.
+
+    `git log --all` covers every local and remote ref, including files since
+    deleted: a number that was ever used is never handed out again.
+    """
+    numbers = {t.number for t in load()}
+    listing = git(
+        "log",
+        "--all",
+        "--name-only",
+        "--pretty=format:",
+        "--",
+        TICKETS.relative_to(REPO).as_posix(),
+    )
+    for line in listing.splitlines():
+        match = _NAME.match(Path(line.strip()).name)
+        if match:
+            numbers.add(int(match.group(1)))
+    return numbers
+
+
+def next_number() -> int:
+    taken = taken_numbers()
+    return (max(taken) + 1) if taken else 1
+
+
 def cmd_next(args) -> int:
-    tickets = load()
-    print(f"{(tickets[-1].number + 1) if tickets else 1:03d}")
+    print(f"{next_number():03d}")
     return 0
+
+
+SKELETON = """# {number:03d} — {title}
+
+```
+status:   open
+kind:     feature
+source:   /task-planning {today}
+issue:    none
+axis:     correctness
+found:    {today}
+saving:   -
+risk:     low — describe why
+```
+
+## The finding
+
+TODO — the finding and its evidence.
+
+## Area of impact
+
+| File | Line | What changes |
+|---|---|---|
+| TODO | — | — |
+
+## Approach
+
+**Chosen:** TODO.
+
+### Rejected alternatives
+
+- TODO — and why not.
+
+## Plan
+
+1. TODO
+
+## Verification
+
+- TODO
+"""
+
+
+def reservations_dir() -> Path:
+    """Where claimed numbers are recorded, shared by every worktree of the repo.
+
+    The git common directory, for the same reason the session registry lives there
+    (`.claude/hooks/_session.py`): each worktree has its own checkout of
+    `.claude/context/`, so a marker written there would be invisible to the other
+    session and prove nothing. This is also never committed — the *tickets* are the
+    durable record; these are just high-water marks.
+    """
+    done = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    common = done.stdout.strip() if done.returncode == 0 else ""
+    root = Path(common) if common else REPO / ".git"
+    if not root.is_absolute():
+        root = REPO / root
+    return root / "tcgi-ticket-numbers"
+
+
+def cmd_claim(args) -> int:
+    """Reserve a *number*, so two sessions cannot both file `007`.
+
+    `next` is a read: between one session reading `007` and writing its file,
+    another session reads `007` too. The reservation has to key on the **number
+    alone** — keying it on the filename lets `007-foo.md` and `007-bar.md` both
+    succeed, which is the collision rather than a fix for it (caught by
+    `test_claim_steps_over_a_number_taken_between_read_and_write`).
+
+    Two layers: a glob rules out numbers already present in this checkout, and an
+    `O_EXCL` marker in the shared git dir closes the window between two concurrent
+    claims. Whoever loses gets `FileExistsError` and takes the next number.
+    """
+    slug = args.slug.strip().strip("-")
+    if not slug:
+        raise SystemExit("give a kebab-case title, e.g. `claim isolate-sessions`")
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    title = slug.replace("-", " ").capitalize()
+    markers = reservations_dir()
+    markers.mkdir(parents=True, exist_ok=True)
+
+    start = next_number()
+    for candidate in range(start, start + 50):
+        if any(TICKETS.glob(f"{candidate:03d}-*.md")):
+            continue  # taken in this checkout, whatever its title
+        try:
+            handle = os.open(
+                markers / f"{candidate:03d}", os.O_CREAT | os.O_EXCL | os.O_WRONLY
+            )
+        except FileExistsError:
+            continue  # another session got this number first
+        os.close(handle)
+
+        path = TICKETS / f"{candidate:03d}-{slug}.md"
+        path.write_text(
+            SKELETON.format(number=candidate, title=title, today=today),
+            encoding="utf-8",
+        )
+        _reindex()
+        print(f"  claimed {candidate:03d}  {path.relative_to(REPO).as_posix()}")
+        print("  fill it in, then `ticket.py check` and `ticket.py push`")
+        return 0
+    raise SystemExit(f"could not claim a number near {start:03d}")
 
 
 def cmd_check(args) -> int:
@@ -261,6 +412,9 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list").set_defaults(func=cmd_list)
     sub.add_parser("next").set_defaults(func=cmd_next)
+    claimer = sub.add_parser("claim")
+    claimer.add_argument("slug", help="kebab-case title, e.g. isolate-sessions")
+    claimer.set_defaults(func=cmd_claim)
     sub.add_parser("check").set_defaults(func=cmd_check)
     pusher = sub.add_parser("push")
     pusher.add_argument("numbers", nargs="*", type=int)

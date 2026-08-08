@@ -4,6 +4,103 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-07 — One session, one worktree, one branch (ticket 008)
+
+- **Decision:** a Claude session that intends to commit takes its **own git
+  worktree** before its first edit, not in reaction to noticing a neighbour. A
+  checkout has exactly one `HEAD`; since the move to a branch + PR flow, two
+  sessions sharing the working tree means one session's `git switch` puts the
+  other's commits on the wrong branch and into the wrong pull request.
+- **Why not serialise instead.** A lock around branch switching would make the
+  second session *wait* rather than corrupt — for hours, since branch ownership is
+  long-lived. Worktrees let both sessions actually run. This also inverts the
+  existing advice, which triggered on *detecting* another agent: detection is late
+  by construction, because by the time a branch has moved under you it has already
+  moved.
+- **Enforced, not advised** — `.claude/hooks/branch_lease.py`, a `PreToolUse` hook
+  in the same shape as the review gate. The condition is exactly one thing:
+  **another live lease on this same worktree.** Alone in your own tree, `git add
+  -A` and branch switching are perfectly safe and nothing fires. So the message it
+  prints is never "be careful", it is "take your own worktree".
+- **The lease registry lives in the git common directory**
+  (`.git/tcgi-sessions/`), the one `.git` every worktree of a repository shares.
+  `.claude/context/` would not do: each worktree has its own checkout of it, so
+  two sessions would each read an empty registry and conclude they were alone —
+  the exact failure the registry exists to detect. Stale leases are reaped after
+  8 hours and released on `SessionEnd`, with `release --all` as a documented
+  escape hatch, because a guard with no override gets switched off wholesale at
+  the first false positive.
+- **It tokenises rather than pattern-matches.** Ticket 003 recorded that the
+  review gate's `GUARDED` regexes are "simultaneously too broad and too narrow" —
+  they blocked a `gh pr create` whose *body prose* contained the word "merge".
+  This guard runs on **every** shell call, where that defect would be far worse,
+  so commands go through `shlex` with `punctuation_chars=True` (which keeps a `;`
+  inside `-m "fix; the thing"` out of the separator set) and are classified by
+  `argv[0]` and the subcommand. Read-only modes of destructive subcommands —
+  `git stash list`, `git clean -n`, `git bisect log` — are explicitly allowed.
+- **Fail open on confusion, closed on the detected condition.** Unparseable
+  stdin, an unbalanced quote, no session id, an unreadable registry: all return 0.
+  A `PreToolUse` hook that raises when it is confused stops every shell call in
+  the session, which is worse than the collision it prevents.
+- **The review gate resolves the repository from the caller's directory** instead
+  of the hook file's location. Latent until now, and live the moment worktrees are
+  adopted: `settings.json` invokes the hook through `$CLAUDE_PROJECT_DIR`, which
+  stays at the launch directory, so the gate would have read the main clone's
+  `HEAD` while the agent worked elsewhere — attesting to a commit nobody was
+  merging. `out_of_scope` and `inherited` take the resolved repo for the same
+  reason.
+- **Session attribution is recorded but does not gate anything, and that is a
+  reversal.** This ticket originally *blocked* a verdict recorded by another
+  session, closing a real hole: a missing verdict used to stop a merge, so a
+  foreign green one wrongly opened it and two sessions on one sha could trade gate
+  passes. The opt-in redesign that landed the same day inverted the gate — a
+  missing verdict now merges cleanly — which removes the hole entirely, because
+  there is no longer anything to gain by trading. Keeping the block would have
+  made a *reviewed* commit harder to merge than an unreviewed one. So `session`
+  and `holders` stay in the artifact as attribution, and only `block` stops the
+  gate. Worth recording as a decision rather than a deletion: the enforcement was
+  correct under fail-closed semantics and became perverse under fail-open ones,
+  which is not a thing you can see by reading either change alone.
+- **The number collision happened while this was being written.** This work filed
+  ticket 007; `main` independently filed *its own* ticket 007
+  (`worker-threads-are-not-parked-at-shutdown`, issue #16) from another session,
+  and the two only met as a merge conflict in the index. That is the failure this
+  bullet describes, demonstrated rather than argued. Main's landed first, so this
+  one renumbered to 008.
+- **Ticket numbers are reserved, not read.** `ticket.py next` was `max(local) + 1`,
+  and the local directory only holds tickets merged into the branch you are
+  standing on. Numbers now come from every ref (`git log --all`), and `claim`
+  reserves one with `O_EXCL`. The first implementation keyed the reservation on the
+  *filename*, so `007-foo.md` and `007-bar.md` both succeeded — the collision
+  rather than a fix for it. The test that forces the race caught it; the
+  reservation keys on the number alone, in the shared git dir.
+- **Verified against a real rival.** A second live session was holding this same
+  checkout, on this same branch, while the work was being done — the guard blocked
+  `git merge` with the other session's id and branch in the message, and left
+  `git add <path>` and reads alone.
+- **The risk critic found three things, all real, all fixed before merge.**
+  (1) *Ambiguous ownership silently reopened the hole.* `owning_session()` returns
+  `None` when **more than one** lease holds a tree, `record` wrote that as
+  `"session": null`, and the gate's `if recorded and …` read null as "nothing to
+  compare" — so in exactly the two-session case this feature targets, either
+  session could use the other's verdict. The artifact now also carries `holders`,
+  and a null session with several holders fails **closed**; a null with none stays
+  admissible as the legacy case. (2) *`cd elsewhere && git commit` was a false
+  positive* — rivals are detected against the tool's starting directory while
+  classification is textual over the whole chain, so a commit in an unrelated
+  scratch repo was blocked. Judging now stops at any directory change. The bypass
+  that opens (`cd . && git switch`) is an accepted trade: this guard exists to stop
+  an *unthinking* `git switch`. Notably the first attempt at this fix tried to
+  resolve the `cd` target and failed, because posix tokenising eats Windows
+  backslashes — the same reason the file reads flags but never path values.
+  (3) *`git pull` was missing* from the HEAD-moving set beside `merge` and
+  `rebase`; `apply` was too. Not excluded deliberately — never considered.
+- **Consequences:** `.claude/worktrees/` is gitignored. Worktrees isolate code but
+  not the app's SQLite files, so the lease records a suggested
+  `TCGINVENTORY_DATA_DIR`. Merge conflicts do not go away — two sessions editing
+  `main_window.py` still conflict, but visibly at merge time instead of silently
+  at commit time.
+
 ### 2026-08-07 — Startup abort: a worker replaced while it was still running
 
 - **Symptom:** the app died ~1s into startup, every time, with no traceback —

@@ -22,22 +22,33 @@ Two jobs in one file:
     review_gate.py show
     review_gate.py clear
 
-A verdict is bound to a commit sha. Push another commit and any objection stops
-applying, because the panel judged something that is no longer what would merge.
+A verdict is bound to a commit sha **and to the session that recorded it**. Push
+another commit and any objection stops applying, because the panel judged something
+that is no longer what would merge. An objection recorded by another session still
+stands against that session's work, not yours — it judged somebody else's diff
+(ticket 008).
+
+Which repository a call is about comes from the **caller's directory**, never from
+this file's location. One session per worktree means several checkouts of this repo
+exist at once, and `.claude/settings.json` invokes the hook through
+`$CLAUDE_PROJECT_DIR`, which stays at the launch directory when a session moves
+into a worktree. Deriving the repo from `__file__` therefore read the main clone's
+`HEAD` while the agent worked somewhere else entirely — attesting to a commit
+nobody was merging.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
-REVIEWS = REPO / ".claude" / "context" / "reviews"
+FALLBACK_REPO = Path(__file__).resolve().parents[2]
 
 # A verdict of `revise` is not a failure — it is a note the author answers.
 # Only `block` stops the gate. `n/a` is a lane the rule registry says this diff
@@ -53,10 +64,36 @@ GUARDED = (
 )
 
 
-def head() -> str:
+def repo_root(cwd: str | None = None) -> Path:
+    """The checkout this call is about, most trustworthy source first.
+
+    `--show-toplevel` reports the *worktree* root rather than the main clone, which
+    is the whole point: a session working in `.claude/worktrees/x` must record and
+    read verdicts for that tree's HEAD.
+    """
+    for candidate in (cwd, os.environ.get("CLAUDE_PROJECT_DIR")):
+        if not candidate or not Path(candidate).is_dir():
+            continue
+        done = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=candidate,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if done.returncode == 0 and done.stdout.strip():
+            return Path(done.stdout.strip())
+    return FALLBACK_REPO
+
+
+def reviews_dir(repo: Path) -> Path:
+    return repo / ".claude" / "context" / "reviews"
+
+
+def head(repo: Path) -> str:
     done = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"],
-        cwd=REPO,
+        cwd=repo,
         capture_output=True,
         text=True,
         check=False,
@@ -64,8 +101,19 @@ def head() -> str:
     return done.stdout.strip() or "unknown"
 
 
-def verdict_path(sha: str) -> Path:
-    return REVIEWS / f"{sha}.json"
+def branch_of(repo: Path) -> str:
+    done = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return done.stdout.strip() or "unknown"
+
+
+def verdict_path(repo: Path, sha: str) -> Path:
+    return reviews_dir(repo) / f"{sha}.json"
 
 
 # ---- hook mode -------------------------------------------------------------
@@ -76,6 +124,37 @@ def guarded_scope(command: str) -> str | None:
         if pattern.search(command):
             return scope
     return None
+
+
+def owning_session(repo: Path) -> str | None:
+    """Which session holds the lease on `repo`, per `.claude/hooks/_session.py`.
+
+    Imported lazily and defensively **on purpose.** This runs as a `PreToolUse`
+    hook on every shell call, so an ImportError at module scope — a half-applied
+    checkout, a corrupt sibling — would raise on each one and stop all work in the
+    session. A missing registry degrades to an unattributed verdict, which is a
+    weaker guarantee recorded in the open rather than a dead session.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _session
+
+        return _session.owning_session(repo)
+    except Exception:
+        return None
+
+
+def lease_holders(repo: Path) -> list[str]:
+    """Every session holding this worktree. See `owning_session` for the lazy
+    import; the distinction between *nobody* and *several* is what makes a null
+    session safe to admit or not."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _session
+
+        return _session.holders(repo)
+    except Exception:
+        return []
 
 
 def hook() -> int:
@@ -92,8 +171,9 @@ def hook() -> int:
     if scope is None:
         return 0
 
-    sha = head()
-    path = verdict_path(sha)
+    repo = repo_root(event.get("cwd"))
+    sha = head(repo)
+    path = verdict_path(repo, sha)
     if not path.is_file():
         # No panel was run, and that is allowed. The critics are opt-in — they
         # cost ~26k tokens per spawn, so they run when someone asks for them, not
@@ -112,26 +192,41 @@ def hook() -> int:
             file=sys.stderr,
         )
         return 2
+
+    # Attribution (`session`, `holders`) is recorded but deliberately does **not**
+    # gate anything, because the opt-in redesign removed the hole it was written
+    # for. Ticket 008 originally blocked a verdict recorded by another session: at
+    # the time a missing verdict *stopped* a merge, so a foreign green one wrongly
+    # opened it and two sessions on one sha could trade gate passes. Now a missing
+    # verdict proceeds — so there is nothing left to trade, and blocking on a
+    # foreign `pass` would make a reviewed commit harder to merge than an unreviewed
+    # one. Only `block` stops the gate; the metadata is there to say whose panel it
+    # was when someone reads the artifact.
     return 0
 
 
 # ---- record / show / clear -------------------------------------------------
 
 
-def out_of_scope(paths: list[str]) -> set[str]:
+def out_of_scope(paths: list[str], repo: Path | None = None) -> set[str]:
     """Required lanes the rule registry says these paths cannot violate.
 
     The registry already knows which rules a set of files can break, so spawning
     a critic to discover that a lane has nothing to judge is ~26k tokens spent to
     re-derive a lookup. With no ``--paths`` given nothing is assumed out of scope,
     so the gate stays as strict as it was.
+
+    `repo` is resolved from the caller's directory like everything else here, so a
+    session working in its own worktree reads that tree's registry rather than the
+    main clone's.
     """
     if not paths:
         return set()
+    repo = repo or repo_root(os.getcwd())
     done = subprocess.run(
         [
             sys.executable,
-            str(REPO / ".claude" / "hooks" / "rules.py"),
+            str(repo / ".claude" / "hooks" / "rules.py"),
             "scope",
             "--json",
             *paths,
@@ -149,7 +244,7 @@ def out_of_scope(paths: list[str]) -> set[str]:
     return REQUIRED - in_scope
 
 
-def inherited(args, judged: dict[str, str]) -> dict[str, str]:
+def inherited(args, judged: dict[str, str], repo: Path | None = None) -> dict[str, str]:
     """Lanes carried forward from an earlier panel on the same PR.
 
     Re-judging a lane whose files did not change is the most expensive thing this
@@ -165,7 +260,7 @@ def inherited(args, judged: dict[str, str]) -> dict[str, str]:
     """
     if not getattr(args, "inherit", None):
         return {}
-    path = verdict_path(args.inherit)
+    path = verdict_path(repo or repo_root(os.getcwd()), args.inherit)
     if not path.is_file():
         raise SystemExit(f"--inherit {args.inherit}: no verdict on record for it")
     prior = json.loads(path.read_text(encoding="utf-8"))
@@ -178,19 +273,20 @@ def inherited(args, judged: dict[str, str]) -> dict[str, str]:
 
 
 def cmd_record(args) -> int:
+    repo = repo_root(os.getcwd())
     verdicts: dict[str, str] = {}
     for raw in args.verdict:
         lane, _, value = raw.partition("=")
         if value not in VALID:
             raise SystemExit(f"{raw!r}: verdict must be one of {sorted(VALID)}")
         verdicts[lane] = value
-    carried = inherited(args, verdicts)
+    carried = inherited(args, verdicts, repo)
     verdicts = {**carried, **verdicts}  # a lane judged this round always wins
     # A lane the registry says this diff cannot violate needs no critic — but it
     # is still recorded, so the artifact shows the whole panel's coverage rather
     # than going quiet about the lanes nobody looked at. Lanes that *are* in
     # scope still need a real verdict below.
-    for lane in sorted(out_of_scope(args.paths) - set(verdicts)):
+    for lane in sorted(out_of_scope(args.paths, repo) - set(verdicts)):
         verdicts[lane] = "n/a"
     missing = REQUIRED - set(verdicts)
     if missing:
@@ -203,7 +299,7 @@ def cmd_record(args) -> int:
         done = subprocess.run(
             [
                 sys.executable,
-                str(REPO / ".claude" / "hooks" / "rules.py"),
+                str(repo / ".claude" / "hooks" / "rules.py"),
                 "validate",
                 path,
             ],
@@ -218,9 +314,11 @@ def cmd_record(args) -> int:
                 f".claude/context/rules.json"
             )
 
-    sha = head()
-    REVIEWS.mkdir(parents=True, exist_ok=True)
-    verdict_path(sha).write_text(
+    sha = head(repo)
+    session = owning_session(repo)
+    owners = lease_holders(repo)
+    reviews_dir(repo).mkdir(parents=True, exist_ok=True)
+    verdict_path(repo, sha).write_text(
         json.dumps(
             {
                 "sha": sha,
@@ -232,6 +330,15 @@ def cmd_record(args) -> int:
                     {"from": args.inherit, "lanes": sorted(carried)} if carried else {}
                 ),
                 "findings": [str(p) for p in args.findings],
+                # Whose panel this was. `null` means the worktree had no single
+                # owner — read `holders` to tell "no registry running" from
+                # "several sessions shared this tree". Attribution only: the gate
+                # stops on a `block` and nothing else, so this is here to answer
+                # "whose review was this?" when someone reads the artifact.
+                "session": session,
+                "holders": owners,
+                "branch": branch_of(repo),
+                "worktree": str(repo),
             },
             indent=2,
         ),
@@ -241,27 +348,40 @@ def cmd_record(args) -> int:
     state = f"BLOCKED on {', '.join(blocked)}" if blocked else "clear"
     if carried:
         state += f", carried {', '.join(sorted(carried))} from {args.inherit}"
-    print(f"  recorded {sha}  {args.scope} {args.ref}  — {state}")
+    if session:
+        attribution = f"session {session[:8]}"
+    elif len(owners) > 1:
+        attribution = (
+            f"UNUSABLE — {len(owners)} sessions share this checkout, so this "
+            f"verdict belongs to none of them. Take your own worktree and re-record."
+        )
+    else:
+        attribution = "unattributed (no lease)"
+    print(f"  recorded {sha}  {args.scope} {args.ref}  — {state}, {attribution}")
     return 1 if blocked else 0
 
 
 def cmd_show(args) -> int:
-    sha = head()
-    path = verdict_path(sha)
-    print(f"  HEAD {sha}")
+    repo = repo_root(os.getcwd())
+    sha = head(repo)
+    path = verdict_path(repo, sha)
+    print(f"  HEAD {sha}  on {branch_of(repo)}  in {repo}")
     if not path.is_file():
         print("  no review on record — the gate will block a merge or a close")
         return 1
     record = json.loads(path.read_text(encoding="utf-8"))
     for lane, value in record["verdicts"].items():
         print(f"    {lane:<12} {value}")
+    session = record.get("session")
     print(f"  {record['scope']} {record['ref']}, recorded {record['at']}")
+    print(f"  by session {session[:8] if session else '— (unattributed)'}")
     return 0
 
 
 def cmd_clear(args) -> int:
+    reviews = reviews_dir(repo_root(os.getcwd()))
     removed = 0
-    for path in REVIEWS.glob("*.json") if REVIEWS.is_dir() else []:
+    for path in reviews.glob("*.json") if reviews.is_dir() else []:
         path.unlink()
         removed += 1
     print(f"  cleared {removed} review(s)")

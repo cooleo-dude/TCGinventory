@@ -16,10 +16,17 @@ Request: **$ARGUMENTS** — if empty, run `list` and report what is outstanding.
 PY=.venv/Scripts/python.exe; T=.claude/skills/sdd-ticket/scripts/ticket.py
 $PY $T list           # every ticket, its status, its issue
 $PY $T next           # the number a new ticket takes
+$PY $T claim my-slug  # reserve that number by creating the file — use this
 $PY $T check          # non-zero if malformed, unindexed or out of sync
 $PY $T push 1         # create or update the GitHub issue
 $PY $T close 1        # mark done and close the issue
 ```
+
+**Use `claim`, not `next`.** `next` is a read, and several sessions work this repo
+at once: two that read `007` a second apart both write `007-*.md` and both file an
+issue. `claim` reserves the number atomically and hands back a skeleton to fill in.
+It also counts numbers used on *every* ref, so a ticket filed on another session's
+branch — invisible to this checkout — is not handed out twice.
 
 ## The one rule
 
@@ -57,8 +64,8 @@ not into this directory.** Minimal-impact wins, alternatives worth weighing and
 
 ## Filing one
 
-1. `ticket.py next` for the number.
-2. Write `.claude/context/tickets/NNN-<kebab-title>.md`. First line
+1. `ticket.py claim <kebab-title>` — reserves the number *and* writes the skeleton.
+2. Fill in `.claude/context/tickets/NNN-<kebab-title>.md`. First line
    `# NNN — Title`, then the front block — `status kind source issue axis found
    saving risk` — then the finding and its evidence, an **area of impact** table
    of real `file:line`, the chosen approach **and the rejected alternatives with
@@ -163,6 +170,12 @@ artifact records which lanes were carried and from where, so the inheritance is
 auditable rather than invisible. Re-judging a lane whose files did not change is
 pure cost: a documentation-only follow-up commit does not need four agents to
 re-read the same `src/` diff.
+
+They are bound to the **session** that recorded them too. Two sessions sitting on
+the same commit — both just branched from `main`, neither has committed yet —
+would otherwise trade verdicts, one recording green for its own diff and opening
+the gate for the other's unreviewed work. Run your own panel; you cannot inherit
+someone else's.
 
 Relay every finding to the user. A panel whose findings you summarise away is a
 panel that did nothing.

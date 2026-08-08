@@ -106,7 +106,15 @@ changes whether the ticket gets written.
 
 ## Step 6 — Working it
 
-The steps in order, then close out per the dossier's **Definition of done**:
+**Take your own worktree before the first edit.** Call `EnterWorktree` — CLAUDE.md's
+`## Working in parallel sessions` section authorises it. Several sessions work this
+repo at once and a checkout has exactly one `HEAD`, so a shared tree puts their
+commits on your branch and into your PR. `.claude/hooks/branch_lease.py` enforces
+this: beside another live session it denies `checkout`, `switch`, `reset`, `rebase`,
+`merge`, `git add -A` and pathspec-less `git commit`. Alone in your own worktree,
+none of it fires.
+
+Then the steps in order, and close out per the dossier's **Definition of done**:
 `ruff format .`, `ruff check .`, the full suite with `QT_QPA_PLATFORM=offscreen`,
 an ADR in `docs/decisions.md` if the decision was significant, `CLAUDE.md` status
 if a milestone moved.
