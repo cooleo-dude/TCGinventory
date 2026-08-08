@@ -149,10 +149,11 @@ be blocked; run the critics if this diff warrants one — and return 0.
 
 ## Plan
 
-0. **Do the `show` fix on its own, first.** Two lines, no design question, and it
-   is the only one of the four holes that misleads a reader *today*: correct the
-   sentence and return 0. A test that `show` succeeds and does not promise a
-   block when no verdict is on record.
+0. ~~**Do the `show` fix on its own, first.**~~ **Done** — `00e53d7..`, PR #24.
+   `cmd_show` states what `hook()` actually does and returns 0 with no panel on
+   record; it also now names the lanes that would block, so a verdict list is
+   never again read without its consequence. Three tests in
+   `tests/test_review_gate.py`. When step 3 lands, add the binding to this output.
 1. ~~Add `tests/test_review_gate.py`. **There is none today**~~ — **done**, by
    ed4131d: 22 tests, including `test_no_panel_on_record_does_not_block`, which is
    the regression floor this ticket's step 0 needs. Steps 2-5 extend that file
@@ -160,8 +161,11 @@ be blocked; run the critics if this diff warrants one — and return 0.
 2. Capture the PR number in `GUARDED`; keep the existing scope detection.
 3. Resolve and store the PR head sha at `record`; fall back to local `HEAD` with
    an explicit `"binding": "local-head"` field in the artifact when `gh` is
-   unavailable, so a weaker guarantee is legible rather than silent.
-4. `hook()` matches ref → recorded verdict → head sha.
+   unavailable, so a weaker guarantee is legible rather than silent. **Decided —
+   see above**; `show` prints the binding too.
+4. `hook()` matches ref → recorded verdict → head sha. A `local-head` artifact
+   attests to the checkout only: it may open the gate when `HEAD` is the PR head
+   and must not otherwise.
 5. Negative tests, per `CHECKER-NEEDS-NEGATIVE-TEST`: a verdict for PR #8 must
    **not** open a merge of PR #9; a verdict whose head sha no longer matches the
    PR must block; a `ticket-close` must still bind to `HEAD`; and
@@ -169,21 +173,39 @@ be blocked; run the critics if this diff warrants one — and return 0.
 
 ## Verification
 
-- `show` with nothing on record: exit 0, and the text says no panel was run
-  rather than promising a block.
+- ~~`show` with nothing on record: exit 0, and the text says no panel was run
+  rather than promising a block.~~ **Done in step 0.**
+- A `local-head` artifact opens the gate when `HEAD` is the PR head, and blocks
+  when it is not. `show` prints the binding either way.
 - Record a verdict for one PR, attempt to merge a different one, confirm it
   blocks. This is the case that passes today and should not.
 - Record, push a commit to the PR, confirm the gate reopens.
 - `ticket-close` behaviour unchanged.
 - Full suite green.
 
-## Open question — for the user
+## Decided — `gh` unreachable at record time
 
-**What should the gate do when `gh` is unreachable at record time?** Failing
-closed makes the gate unusable offline; failing open with a recorded
-`"binding": "local-head"` keeps today's weaker guarantee but makes it visible in
-the artifact. I lean to the second — a legible weak guarantee beats an invisible
-one — but it is a judgement about how much friction the gate is allowed to add.
+**Record it with `"binding": "local-head"` and carry on.** Settled 2026-08-08.
+
+Failing closed was the alternative: refuse to record a verdict the tool cannot
+bind to the PR head. It is the stronger guarantee and the wrong trade here. This
+app is offline-first and single-user, the panel is already opt-in, and the
+failure lands on someone who has *just spent ~100k tokens* running four critics —
+telling them the result cannot be recorded because GitHub is unreachable throws
+that away and teaches them to route around the gate. A gate people disable is
+worth less than a weak one they keep.
+
+So the weak binding is admitted and **named in the artifact**, which is the point:
+today's guarantee is exactly this weak and says nothing at all. Two consequences
+follow, and they are what make it safe rather than merely convenient:
+
+- `hook()` must treat a `local-head` artifact as attesting to the checkout only.
+  It may open the gate when `HEAD` *is* the PR head, and must not when it is not —
+  the case that silently passes today.
+- `show` must print the binding, for the same reason step 0 exists: a weaker
+  guarantee has to be legible at the point someone reads it.
+
+This resolves the ticket's only open question; steps 2-5 are unblocked.
 
 ## Notes
 

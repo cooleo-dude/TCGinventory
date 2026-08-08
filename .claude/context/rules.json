@@ -254,7 +254,7 @@
       "source": {
         "file": "docs/decisions.md",
         "anchor": null,
-        "excerpt_sha256": "25a85f9303e32226"
+        "excerpt_sha256": "3f9401b8ca91cb86"
       },
       "scope": [
         "src/**/*.py",

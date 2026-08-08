@@ -83,6 +83,14 @@ Three ways out, none free, and this is a judgement for whoever works this ticket
    option — but a rule whose source does not state it is arguably not enumerated
    at all, which is the honest reading of its current state.
 
+**It fired again on 2026-08-08**, one day later: an ADR about the review gate
+(ticket 003) broke the seal, was read, found to have nothing to do with negative
+tests, and resealed. That is the second unrelated reseal since PR #20, and the
+reseal was reflex-adjacent — the only thing making it deliberate was a human
+remembering PR #20's reasoning. Each recurrence buys a little more of the
+crying-wolf habit the seal exists to prevent, so this is a cost that compounds
+while the judgement sits open.
+
 **The general lesson for this ticket's sweep (plan step 5):** an ADR-sourced rule
 needs a heading anchor, always. `anchor: null` is only defensible where the file
 *as a whole* embodies the convention — `conftest.py` for `QTHREAD-LIFETIME`,
