@@ -362,8 +362,8 @@
       "violation": "A model whose data() falls through enum comparisons before reaching the sort role, or recomputes the sort key per call.",
       "source": {
         "file": "docs/decisions.md",
-        "anchor": null,
-        "excerpt_sha256": "25a85f9303e32226"
+        "anchor": "### 2026-08-07 \u2014 Startup 2364ms \u2192 1307ms, and a Qt model that was slow for the wrong reason",
+        "excerpt_sha256": "bf6c151d56e4515a"
       },
       "scope": [
         "src/tcginventory/ui/models/**/*.py"
