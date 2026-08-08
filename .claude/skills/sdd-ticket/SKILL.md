@@ -81,30 +81,95 @@ is what the *rejected alternatives* section is for, and it is not optional.
 
 ## The review gate
 
-**A ticket cannot be closed and a PR cannot be merged without a green critic
-panel.** This is enforced, not advised: `.claude/hooks/review_gate.py` runs as a
-`PreToolUse` hook and blocks `gh pr merge` and `ticket.py close` when there is no
-green verdict recorded for the current `HEAD`.
+**The critic panel is opt-in. Do not dispatch it unless the user asks.**
 
-Dispatch the panel with the Agent tool, handing each critic the diff and nothing
-else — they judge the change, never your account of it:
+A spawn costs ~26k tokens before it judges anything, so critics run when someone
+says *"run the critics"* (or names one) — not on every merge, and not because a
+diff looks important. Merging and closing tickets proceed normally without them.
 
-| when | dispatch |
-|---|---|
-| default | `tcgi-invariant-critic`, `tcgi-risk-critic`, `tcgi-test-critic` in parallel |
-| the diff touches `ui/` | add `tcgi-ui-critic` |
-| <=2 files, no migration, no money path, no `ui/` | `tcgi-mini-critic` alone |
+What `.claude/hooks/review_gate.py` still enforces, as a `PreToolUse` hook, is the
+other half: **a panel that was run cannot be quietly ignored.** No verdict on
+record → the merge proceeds. A recorded `block` → the merge stops until the
+finding is fixed and committed, or the objection is cleared deliberately
+(`review_gate.py clear`). Opting in to run the critics is not opting in to obey
+them selectively.
 
-Each ends in a verdict line. Record them:
+If you think a change warrants review, *say so and let the user decide* — a
+sentence recommending it costs nothing; four agents cost ~100k.
+
+### When you are asked to run it: once, on a finished branch
+
+**The panel is the most expensive thing in this repo. Run it last.** A verdict is
+bound to a sha, so every push throws away a completed panel: on 2026-08-07 a PR
+was reviewed three times — twelve agents, ~560k tokens — because the author kept
+pushing between rounds. The code under review never changed after the first.
+
+So before you dispatch anything: land every fix, push, and confirm the branch is
+one you intend not to touch again. `git status` clean, branch pushed, suite green.
+A panel dispatched on a branch you are still editing is a panel you will pay for
+twice.
+
+### Ask the registry who to dispatch — never guess
+
+**A critic spawn costs ~26k tokens before it judges anything**, so the question
+is not "which critics by default" but "which lanes can this diff even violate".
+The registry answers that for free:
+
+```bash
+git diff --name-only origin/main...HEAD          # the changed files
+python .claude/hooks/rules.py scope <those files>
+```
+
+It prints the rules in play per lane and a `dispatch:` line. **Spawn exactly what
+that line names — no more.** If it says *no rules in scope*, spawn **nothing**: a
+docs- or tooling-only PR has no lane to judge, and three agents discovering that
+is ~80k tokens for an answer a script already gave you.
+
+Then record with `--paths`, so lanes the registry ruled out are logged `n/a`
+rather than left missing:
+
+```bash
+python .claude/hooks/review_gate.py record --scope pr-merge --ref <n>     --paths $(git diff --name-only origin/main...HEAD)     --verdict risk=pass --verdict test=pass
+```
+
+Two refinements once you know who to spawn:
+
+- **Small diffs get one agent, not three.** At **≤150 changed lines** with no
+  migration and no money path, `tcgi-mini-critic` covers all four lenses in one
+  spawn. The tier is sized by **lines, not directories** — this is a desktop app,
+  so almost everything touches `ui/`, and a tier that excluded it never fired.
+- **Hand each critic the rule ids `scope` printed for its lane.** It saves them
+  re-deriving what you already computed, which is a real slice of that 26k floor.
+
+Hand them the diff and nothing else — they judge the change, never your account
+of it. Each ends in a verdict line. Record them:
 
 ```bash
 python .claude/hooks/review_gate.py record --scope pr-merge --ref <n>     --verdict invariants=pass --verdict risk=pass --verdict test=pass
 ```
 
+### Re-running: only the lanes that got dirty
+
 `revise` is a note to answer, not a failure. **`block` stops the gate** — fix the
-findings, commit, and re-run the panel. Verdicts are bound to a sha, so a new
-commit reopens the gate deliberately: the panel judged something that is no
-longer what would merge.
+findings, commit, and re-run. Verdicts are bound to a sha, so a new commit
+reopens the gate deliberately: the panel judged something that is no longer what
+would merge.
+
+When you do have to push again, **batch every outstanding fix into one commit**,
+then re-dispatch **only the lanes whose files changed** and carry the rest
+forward:
+
+```bash
+# risk asked for a change in ui/views/inventory.py; nothing else moved
+python .claude/hooks/review_gate.py record --scope pr-merge --ref 6     --verdict risk=pass --inherit <sha of the previous panel>
+```
+
+`--inherit` copies the lanes you did not re-judge from an earlier verdict on the
+**same ref** — never across PRs, and never over a lane you judged this round. The
+artifact records which lanes were carried and from where, so the inheritance is
+auditable rather than invisible. Re-judging a lane whose files did not change is
+pure cost: a documentation-only follow-up commit does not need four agents to
+re-read the same `src/` diff.
 
 They are bound to the **session** that recorded them too. Two sessions sitting on
 the same commit — both just branched from `main`, neither has committed yet —

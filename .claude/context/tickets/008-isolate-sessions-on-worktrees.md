@@ -1,4 +1,4 @@
-# 007 — Isolate each Claude session on its own worktree and branch
+# 008 — Isolate each Claude session on its own worktree and branch
 
 ```
 status:   in-progress
@@ -221,6 +221,23 @@ unconditionally — not in reaction to detecting a neighbour.
 - Observe a real lease file after install to confirm the `PreToolUse` payload
   actually carries `session_id`. The guard degrades to never-block if it does not,
   so this is confirmation rather than a gamble.
+
+## What happened on the way (recorded, because it is the evidence)
+
+- **Hole 4 fired during this ticket.** It was filed as 007; `main` independently
+  filed *its own* 007 (`worker-threads-are-not-parked-at-shutdown`, issue #16)
+  from another session, and the two only met as a merge conflict. Main's landed
+  first, so this renumbered to 008. The collision was not hypothetical.
+- **Hole 1 fired too, and then resolved itself.** A second live session held this
+  same checkout, on this same branch, for most of the work — the guard blocked a
+  `git merge` naming it. By the time `main` was merged in, that session had moved
+  into `.claude/worktrees/chore+cost-discipline`, and the guard cleared on its own.
+- **Hole 2 was closed by someone else's change instead.** The opt-in redesign
+  (PR #18) inverted the gate: a missing verdict now merges cleanly. That removes
+  the verdict-trading hole outright, and made the session *blocking* this ticket
+  added actively harmful — it would have made a reviewed commit harder to merge
+  than an unreviewed one. The blocking was dropped; `session` and `holders` remain
+  as attribution. See the ADR.
 
 ## What the panel found
 

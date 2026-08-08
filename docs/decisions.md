@@ -4,7 +4,7 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
-### 2026-08-07 — One session, one worktree, one branch (ticket 007)
+### 2026-08-07 — One session, one worktree, one branch (ticket 008)
 
 - **Decision:** a Claude session that intends to commit takes its **own git
   worktree** before its first edit, not in reaction to noticing a neighbour. A
@@ -42,18 +42,31 @@ Lightweight ADR-style record of significant decisions. Newest first.
   stdin, an unbalanced quote, no session id, an unreadable registry: all return 0.
   A `PreToolUse` hook that raises when it is confused stops every shell call in
   the session, which is worse than the collision it prevents.
-- **The review gate now binds a verdict to the session that recorded it**, and
-  resolves the repository from the **caller's directory** instead of the hook
-  file's location. The second was latent and would have gone live the moment
-  worktrees were adopted: `settings.json` invokes the hook through
-  `$CLAUDE_PROJECT_DIR`, which stays at the launch directory, so the gate would
-  have read the main clone's `HEAD` while the agent worked elsewhere. The first
-  closes a hole where two sessions on one sha trade verdicts — A records green for
-  its own diff and B's unreviewed work closes a ticket on the strength of it.
-  **Orthogonal to ticket 003**, which rekeys `pr-merge` to the PR head sha and by
-  design leaves `ticket-close` bound to local `HEAD`: 003 answers *which commit*,
-  this answers *whose review*. A verdict with no session stays admissible and says
-  `"session": null`, so the weaker guarantee is legible rather than silent.
+- **The review gate resolves the repository from the caller's directory** instead
+  of the hook file's location. Latent until now, and live the moment worktrees are
+  adopted: `settings.json` invokes the hook through `$CLAUDE_PROJECT_DIR`, which
+  stays at the launch directory, so the gate would have read the main clone's
+  `HEAD` while the agent worked elsewhere — attesting to a commit nobody was
+  merging. `out_of_scope` and `inherited` take the resolved repo for the same
+  reason.
+- **Session attribution is recorded but does not gate anything, and that is a
+  reversal.** This ticket originally *blocked* a verdict recorded by another
+  session, closing a real hole: a missing verdict used to stop a merge, so a
+  foreign green one wrongly opened it and two sessions on one sha could trade gate
+  passes. The opt-in redesign that landed the same day inverted the gate — a
+  missing verdict now merges cleanly — which removes the hole entirely, because
+  there is no longer anything to gain by trading. Keeping the block would have
+  made a *reviewed* commit harder to merge than an unreviewed one. So `session`
+  and `holders` stay in the artifact as attribution, and only `block` stops the
+  gate. Worth recording as a decision rather than a deletion: the enforcement was
+  correct under fail-closed semantics and became perverse under fail-open ones,
+  which is not a thing you can see by reading either change alone.
+- **The number collision happened while this was being written.** This work filed
+  ticket 007; `main` independently filed *its own* ticket 007
+  (`worker-threads-are-not-parked-at-shutdown`, issue #16) from another session,
+  and the two only met as a merge conflict in the index. That is the failure this
+  bullet describes, demonstrated rather than argued. Main's landed first, so this
+  one renumbered to 008.
 - **Ticket numbers are reserved, not read.** `ticket.py next` was `max(local) + 1`,
   and the local directory only holds tickets merged into the branch you are
   standing on. Numbers now come from every ref (`git log --all`), and `claim`
@@ -87,6 +100,37 @@ Lightweight ADR-style record of significant decisions. Newest first.
   `TCGINVENTORY_DATA_DIR`. Merge conflicts do not go away — two sessions editing
   `main_window.py` still conflict, but visibly at merge time instead of silently
   at commit time.
+
+### 2026-08-07 — Startup abort: a worker replaced while it was still running
+
+- **Symptom:** the app died ~1s into startup, every time, with no traceback —
+  `QThread: Destroyed while thread '' is still running` and exit `0xC0000409`
+  (a Windows fast-fail, not a Python exception, so nothing was logged).
+- **Cause:** `Inventory._prefetch_previews` and `History._start_resolver` /
+  `_start_cropper` each called `requestInterruption()` and then **immediately
+  overwrote** `self._worker`. Interruption only raises a flag; the thread runs
+  to its next checkpoint. Overwriting dropped the last Python reference first,
+  so the C++ `QThread` was destroyed underneath a live thread, which Qt answers
+  by aborting the process. Dashboard, Calendar and Shows never had the bug —
+  they *return early* when a worker is running instead of replacing it.
+- **Why now:** latent for as long as the code existed. The optimization sweep
+  cut view build from 2364ms to ~1205ms, and the faster startup meant the second
+  refresh (`_warm_views` then the nav change) now landed while the first worker
+  was still going. The instrumented run shows the shape exactly: four workers
+  created, two of them replacements, then the abort.
+- **Decision:** a shared `retire(worker, parked)` in `ui/views/_worker.py`.
+  It interrupts, parks the worker in a per-view list, and lets `finished`
+  release it. Kept out of the individual views because three sites had the bug
+  and any future worker will want the same. **Not** `wait()` — blocking the UI
+  on a mid-flight image fetch is what the original comment was avoiding, and
+  that trade-off still holds.
+- **Consequences:** interruption stays non-blocking; a retiring worker lives a
+  moment longer than its view's reference to it. Regression test drives the real
+  sequence (start → retire → drop the reference → `gc.collect()`), which aborted
+  the interpreter before the fix.
+- **Worth remembering:** a `QThread` GC'd while running kills the process with
+  no Python-level trace, so it presents as "crashes at startup, no error." The
+  test harness hit the same shape earlier the same day (`_drain_threads`).
 
 ### 2026-08-07 — History gets the auction editor's card preview, and the art memo keeps its URL
 

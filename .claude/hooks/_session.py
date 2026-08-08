@@ -175,14 +175,13 @@ def holders(repo: Path) -> list[str]:
 def owning_session(repo: Path) -> str | None:
     """The session holding this worktree, if exactly one does.
 
-    `None` covers two very different situations, and the caller **must** tell them
-    apart with `holders()`:
+    `None` covers two different situations, and `holders()` tells them apart:
+    **nobody** holds a lease (the registry is not running), or **several** sessions
+    do (ambiguity is not ownership).
 
-    * **nobody** holds a lease — the registry is not running, so verdicts cannot be
-      attributed and the gate has to fall back to its older, weaker guarantee;
-    * **several** sessions hold it — ambiguity is not ownership, and treating that
-      as "unattributed" would make a verdict admissible to every one of them. That
-      is precisely the hole ticket 007 exists to close, so it must fail *closed*.
+    Both are recorded rather than acted on. The review gate stores this as
+    attribution only — it stops a merge on a `block` and nothing else — so a
+    verdict that cannot be attributed is a legible artifact, not a closed gate.
     """
     owners = holders(repo)
     return owners[0] if len(owners) == 1 else None

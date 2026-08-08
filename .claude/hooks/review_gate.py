@@ -1,25 +1,32 @@
-"""Review gate — no merge and no ticket close without a green critic panel.
+"""Review gate — a panel you ran cannot be quietly ignored.
+
+**The critic panel is opt-in.** It costs roughly 26k tokens per agent spawned, so
+it runs when someone asks for it — "run the critics" before a merge — and not
+otherwise. A merge with no panel on record proceeds untouched.
+
+What this gate still guarantees is the other half: once critics *have* judged the
+commit you are about to merge, a `block` stops it. Running the panel and merging
+over its objection takes a deliberate act (`clear`, or another commit), not
+silence.
 
 Two jobs in one file:
 
-* **hook mode** (no arguments, JSON on stdin): a `PreToolUse` hook. If the tool
-  call is a PR merge or a ticket close, it demands a fresh green verdict for the
-  current `HEAD` and blocks the call when there is not one.
+* **hook mode** (no arguments, JSON on stdin): a `PreToolUse` hook. On a PR merge
+  or a ticket close it looks for a verdict for the current `HEAD`; no verdict is
+  fine, a blocking verdict is not.
 * **`record`**: how the panel's verdicts get written, after the agents have run.
 
-The agents cannot trigger themselves — they are definitions the Agent tool
-dispatches. This is the piece that makes "the panel runs before a merge" a fact
-rather than a habit.
-
     review_gate.py record --scope pr-merge --ref 4 \
-        --verdict invariants=pass --verdict risk=pass --verdict test=pass
+        --paths $(git diff --name-only origin/main...HEAD) \
+        --verdict risk=pass --verdict test=pass
     review_gate.py show
     review_gate.py clear
 
 A verdict is bound to a commit sha **and to the session that recorded it**. Push
-another commit and the gate reopens, because the panel judged something that is no
-longer what would merge. Record from another session and the gate stays shut,
-because that panel judged somebody else's work (ticket 007).
+another commit and any objection stops applying, because the panel judged something
+that is no longer what would merge. An objection recorded by another session still
+stands against that session's work, not yours — it judged somebody else's diff
+(ticket 008).
 
 Which repository a call is about comes from the **caller's directory**, never from
 this file's location. One session per worktree means several checkouts of this repo
@@ -44,9 +51,11 @@ from pathlib import Path
 FALLBACK_REPO = Path(__file__).resolve().parents[2]
 
 # A verdict of `revise` is not a failure — it is a note the author answers.
-# Only `block` stops the gate.
+# Only `block` stops the gate. `n/a` is a lane the rule registry says this diff
+# cannot violate: recorded so the panel's coverage stays legible, never spawned.
 BLOCKING = {"block"}
-VALID = {"pass", "revise", "block"}
+VALID = {"pass", "revise", "block", "n/a"}
+REQUIRED = {"invariants", "risk", "test"}
 
 # What the gate guards. Matched against the command text of a Bash/PowerShell call.
 GUARDED = (
@@ -166,84 +175,122 @@ def hook() -> int:
     sha = head(repo)
     path = verdict_path(repo, sha)
     if not path.is_file():
-        print(
-            f"BLOCKED: {scope} at {sha} has no review on record.\n"
-            f"Dispatch the critic panel first — tcgi-invariant-critic, "
-            f"tcgi-risk-critic and tcgi-test-critic (plus tcgi-ui-critic if the "
-            f"diff touches ui/), or tcgi-mini-critic for a small diff — then:\n"
-            f"  python .claude/hooks/review_gate.py record --scope {scope} "
-            f"--ref <n> --verdict invariants=pass --verdict risk=pass "
-            f"--verdict test=pass\n"
-            f"See .claude/agents/ for what each critic judges.",
-            file=sys.stderr,
-        )
-        return 2
+        # No panel was run, and that is allowed. The critics are opt-in — they
+        # cost ~26k tokens per spawn, so they run when someone asks for them, not
+        # on every merge. What this hook still enforces is that a panel you *did*
+        # run cannot be ignored: see below.
+        return 0
 
     record = json.loads(path.read_text(encoding="utf-8"))
     blocked = [k for k, v in record.get("verdicts", {}).items() if v in BLOCKING]
     if blocked:
         print(
-            f"BLOCKED: the panel returned `block` on {', '.join(sorted(blocked))} "
-            f"for {sha}.\nFix the findings, commit, and re-run the panel — the "
-            f"verdict is bound to the sha, so a new commit reopens the gate.",
+            f"BLOCKED: critics were run on {sha} and returned `block` on "
+            f"{', '.join(sorted(blocked))}.\nFix the findings and commit — the "
+            f"verdict is bound to the sha, so a new commit clears the objection. "
+            f"To merge over it deliberately: review_gate.py clear.",
             file=sys.stderr,
         )
         return 2
 
-    # Whose review was it? Two sessions sitting on the same sha — both just
-    # branched from main, neither has committed — otherwise trade verdicts: one
-    # records green for its own diff and opens the gate for the other's unreviewed
-    # work (ticket 007). A verdict recorded before the lease registry existed
-    # carries no session and stays admissible; the guarantee is weaker and the
-    # `session: null` in the artifact says so.
-    recorded = record.get("session")
-    caller = event.get("session_id")
-
-    # A verdict recorded while several sessions held the worktree belongs to none of
-    # them. Admitting it — which a plain `if recorded` does, because the session is
-    # null — hands every one of those sessions a gate pass for work the panel never
-    # saw, reinstating the exact hole this binding closes. Distinguish it from the
-    # legacy "no registry at all" null, which stays admissible.
-    if not recorded and len(record.get("holders", [])) > 1:
-        print(
-            f"BLOCKED: the verdict for {sha} was recorded while "
-            f"{len(record['holders'])} sessions held this checkout, so it cannot be "
-            f"attributed to any of them.\n"
-            f"Take your own worktree (EnterWorktree — see `## Working in parallel "
-            f"sessions` in CLAUDE.md), then re-run the panel and record it there.",
-            file=sys.stderr,
-        )
-        return 2
-
-    if recorded and caller and recorded != caller:
-        print(
-            f"BLOCKED: the verdict for {sha} was recorded by session "
-            f"{recorded[:8]}, not by this one ({caller[:8]}).\n"
-            f"That panel judged a different session's work. Two sessions on the "
-            f"same commit would otherwise open the gate for each other.\n"
-            f"Dispatch the panel for YOUR diff and record it, or work in your own "
-            f"worktree — see `## Working in parallel sessions` in CLAUDE.md.",
-            file=sys.stderr,
-        )
-        return 2
+    # Attribution (`session`, `holders`) is recorded but deliberately does **not**
+    # gate anything, because the opt-in redesign removed the hole it was written
+    # for. Ticket 008 originally blocked a verdict recorded by another session: at
+    # the time a missing verdict *stopped* a merge, so a foreign green one wrongly
+    # opened it and two sessions on one sha could trade gate passes. Now a missing
+    # verdict proceeds — so there is nothing left to trade, and blocking on a
+    # foreign `pass` would make a reviewed commit harder to merge than an unreviewed
+    # one. Only `block` stops the gate; the metadata is there to say whose panel it
+    # was when someone reads the artifact.
     return 0
 
 
 # ---- record / show / clear -------------------------------------------------
 
 
+def out_of_scope(paths: list[str], repo: Path | None = None) -> set[str]:
+    """Required lanes the rule registry says these paths cannot violate.
+
+    The registry already knows which rules a set of files can break, so spawning
+    a critic to discover that a lane has nothing to judge is ~26k tokens spent to
+    re-derive a lookup. With no ``--paths`` given nothing is assumed out of scope,
+    so the gate stays as strict as it was.
+
+    `repo` is resolved from the caller's directory like everything else here, so a
+    session working in its own worktree reads that tree's registry rather than the
+    main clone's.
+    """
+    if not paths:
+        return set()
+    repo = repo or repo_root(os.getcwd())
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(repo / ".claude" / "hooks" / "rules.py"),
+            "scope",
+            "--json",
+            *paths,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if done.returncode != 0:
+        return set()  # registry unreadable — demand the full panel, never less
+    try:
+        in_scope = set(json.loads(done.stdout).get("lanes", {}))
+    except (json.JSONDecodeError, ValueError):
+        return set()
+    return REQUIRED - in_scope
+
+
+def inherited(args, judged: dict[str, str], repo: Path | None = None) -> dict[str, str]:
+    """Lanes carried forward from an earlier panel on the same PR.
+
+    Re-judging a lane whose files did not change is the most expensive thing this
+    gate causes: a verdict is bound to a sha, so every push discards a completed
+    panel. When only some lanes are dirty the author re-dispatches those and
+    carries the rest.
+
+    Two conditions stop that being a loophole. A lane may only be carried within
+    one ``ref``, so a review of PR #6 can never green a lane of PR #9; and a lane
+    judged this round always wins, so inheriting can supply a missing verdict but
+    never overwrite a fresh one. The artifact records what was carried and from
+    where, because an inheritance nobody can audit is not a verdict.
+    """
+    if not getattr(args, "inherit", None):
+        return {}
+    path = verdict_path(repo or repo_root(os.getcwd()), args.inherit)
+    if not path.is_file():
+        raise SystemExit(f"--inherit {args.inherit}: no verdict on record for it")
+    prior = json.loads(path.read_text(encoding="utf-8"))
+    if str(prior.get("ref")) != str(args.ref):
+        raise SystemExit(
+            f"--inherit {args.inherit}: recorded for ref {prior.get('ref')!r}, not "
+            f"{args.ref!r} — a lane may only be carried forward within one PR"
+        )
+    return {k: v for k, v in prior.get("verdicts", {}).items() if k not in judged}
+
+
 def cmd_record(args) -> int:
+    repo = repo_root(os.getcwd())
     verdicts: dict[str, str] = {}
     for raw in args.verdict:
         lane, _, value = raw.partition("=")
         if value not in VALID:
             raise SystemExit(f"{raw!r}: verdict must be one of {sorted(VALID)}")
         verdicts[lane] = value
-    missing = {"invariants", "risk", "test"} - set(verdicts)
+    carried = inherited(args, verdicts, repo)
+    verdicts = {**carried, **verdicts}  # a lane judged this round always wins
+    # A lane the registry says this diff cannot violate needs no critic — but it
+    # is still recorded, so the artifact shows the whole panel's coverage rather
+    # than going quiet about the lanes nobody looked at. Lanes that *are* in
+    # scope still need a real verdict below.
+    for lane in sorted(out_of_scope(args.paths, repo) - set(verdicts)):
+        verdicts[lane] = "n/a"
+    missing = REQUIRED - set(verdicts)
     if missing:
         raise SystemExit(f"missing verdict for: {', '.join(sorted(missing))}")
-
-    repo = repo_root(os.getcwd())
 
     # A recorded verdict is only worth something if its findings are grounded.
     # Reuse the registry's own validator so the check a critic runs and the check
@@ -279,11 +326,15 @@ def cmd_record(args) -> int:
                 "ref": args.ref,
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "verdicts": verdicts,
+                "inherited": (
+                    {"from": args.inherit, "lanes": sorted(carried)} if carried else {}
+                ),
                 "findings": [str(p) for p in args.findings],
                 # Whose panel this was. `null` means the worktree had no single
-                # owner: read `holders` to tell "no registry running" (admissible,
-                # the older weaker guarantee) from "several sessions shared this
-                # tree" (not attributable to any of them, so the gate stays shut).
+                # owner — read `holders` to tell "no registry running" from
+                # "several sessions shared this tree". Attribution only: the gate
+                # stops on a `block` and nothing else, so this is here to answer
+                # "whose review was this?" when someone reads the artifact.
                 "session": session,
                 "holders": owners,
                 "branch": branch_of(repo),
@@ -295,6 +346,8 @@ def cmd_record(args) -> int:
     )
     blocked = [k for k, v in verdicts.items() if v in BLOCKING]
     state = f"BLOCKED on {', '.join(blocked)}" if blocked else "clear"
+    if carried:
+        state += f", carried {', '.join(sorted(carried))} from {args.inherit}"
     if session:
         attribution = f"session {session[:8]}"
     elif len(owners) > 1:
@@ -355,6 +408,24 @@ def main() -> None:
         default=[],
         metavar="PATH",
         help="a critic's JSON verdict; validated against the rule registry",
+    )
+    recorder.add_argument(
+        "--paths",
+        nargs="+",
+        default=[],
+        metavar="PATH",
+        help=(
+            "the diff's changed files — lanes the rule registry puts out of "
+            "scope are recorded n/a instead of needing a critic"
+        ),
+    )
+    recorder.add_argument(
+        "--inherit",
+        metavar="SHA",
+        help=(
+            "carry lanes forward from an earlier verdict on the same ref — for "
+            "lanes whose files did not change since it was recorded"
+        ),
     )
     recorder.set_defaults(func=cmd_record)
     sub.add_parser("show").set_defaults(func=cmd_show)
