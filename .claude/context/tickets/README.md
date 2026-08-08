@@ -92,3 +92,4 @@ record of why the code looks the way it does.
 | [006](006-sub-threshold-optimizations.md) | Two measured optimizations that are real and too small to ship | optimization | #14 | `deferred` |
 | [007](007-worker-threads-are-not-parked-at-shutdown.md) | Worker threads are parked when replaced, but not when the app shuts down | fix | #16 | `open` |
 | [008](008-isolate-sessions-on-worktrees.md) | Isolate each Claude session on its own worktree and branch | feature | #17 | `done` |
+| [009](009-readme-revamp.md) | Rewrite the README to describe the app that actually exists | feature | #22 | `open` |
