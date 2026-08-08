@@ -19,7 +19,7 @@ $PY $T next           # the number a new ticket takes
 $PY $T claim my-slug  # reserve that number by creating the file — use this
 $PY $T check          # non-zero if malformed, unindexed or out of sync
 $PY $T push 1         # create or update the GitHub issue
-$PY $T close 1        # mark done and close the issue
+$PY $T close 1        # close the issue, then remove the ticket file
 ```
 
 **Use `claim`, not `next`.** `next` is a read, and several sessions work this repo
@@ -182,13 +182,31 @@ panel that did nothing.
 
 ## Closing one
 
-`ticket.py close N` sets `status: done` and closes the mirrored issue — the
-gate above must be green first, or the call is blocked. Then edit
-the ticket to record the commit, the PR and the **measured after** — a ticket
-that says what actually happened is the reason the code looks the way it does.
+**Edit the ticket first, then close it.** Record the commit, the PR and the
+**measured after** — a ticket that says what actually happened is the reason the
+code looks the way it does. `close` is what makes that text durable, and it is
+one-way.
+
+`ticket.py close N` then sets `status: done`, pushes the ticket's final text to
+the mirrored issue, closes the issue, and **deletes the ticket file** — the
+directory is the outstanding queue, not an archive. The gate above must be green
+first, or the call is blocked.
+
+Nothing is lost by the delete: the closed issue carries the full final body, and
+the file is in `git log`. The number is never reused, because `next` counts every
+ref including deleted files. But it is one-way, so do not call it on a ticket you
+have not finished writing up.
+
+`close` refuses on a ticket with `issue: none` — the issue is where the record
+lands, so `push N` first.
 
 For a ticket that is abandoned rather than finished, set `status: dropped`, say
-why, and mirror it into `declined.md` so no future sweep re-derives it.
+why, mirror it into `declined.md` so no future sweep re-derives it, and then
+`close N` — it keeps the `dropped` wording and closes the issue as *not planned*
+rather than claiming the work shipped.
+
+Never delete a ticket file by hand: that strands an open issue describing
+finished work, and `check` cannot flag what is no longer there.
 
 ## Notes that will bite you
 
