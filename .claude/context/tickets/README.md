@@ -110,7 +110,7 @@ there is nothing left to check.
 |---|---|---|---|---|
 | [001](001-card-embedding-float16.md) | Store card embeddings as float16 | optimization | #2 | `open` |
 | [002](002-enumerate-the-rule-registry.md) | Enumerate the rule registry to full coverage | feature | #7 | `open` |
-| [003](003-gate-binds-verdict-to-the-wrong-commit.md) | The review gate binds a verdict to the checkout, not to what is being merged | fix | #10 | `open` |
+| [003](003-gate-binds-verdict-to-the-wrong-commit.md) | The review gate's real guarantee is not the one it appears to give | fix | #10 | `open` |
 | [004](004-recognition-prewarm-costs-112mb-at-startup.md) | Recognition prewarm holds 112 MB at startup for everyone | optimization | #12 | `deferred` |
 | [005](005-card-image-cache-is-2.2gb-of-png.md) | The card image cache is 2.2 GB of PNG | optimization | #13 | `deferred` |
 | [006](006-sub-threshold-optimizations.md) | Two measured optimizations that are real and too small to ship | optimization | #14 | `deferred` |

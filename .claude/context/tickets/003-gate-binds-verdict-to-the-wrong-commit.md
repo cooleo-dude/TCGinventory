@@ -1,15 +1,20 @@
-# 003 — The review gate binds a verdict to the checkout, not to what is being merged
+# 003 — The review gate's real guarantee is not the one it appears to give
 
 ```
 status:   open
 kind:     fix
-source:   /sdd-release v0.7.0 run, 2026-08-07
+source:   /sdd-release v0.7.0 run, 2026-08-07; fourth hole from PR #21, 2026-08-08
 issue:    #10
 axis:     correctness
 found:    2026-08-07
 saving:   -  (correctness of the gate itself)
 risk:     medium — the gate is the thing that is wrong, so a bad fix fails open
 ```
+
+Four holes, one theme: what the gate **actually** guarantees and what a reader
+takes it to guarantee have come apart. Three make it weaker than it looks; the
+fourth makes it look stronger. The `show` fix (step 0) is two lines and
+independent of the rest.
 
 ## The finding
 
@@ -66,6 +71,40 @@ boundary is a substring search over a command line.
 Fixing this belongs with the rest of this ticket: the patterns have to be
 rewritten anyway to capture the PR number.
 
+## A fourth hole: `show` reports a guarantee the gate no longer makes
+
+Found merging PR #21 on 2026-08-08. `review_gate.py show` said:
+
+```
+  no review on record — the gate will block a merge or a close
+```
+
+Then `gh pr merge 21 --squash` merged, unblocked. That reads as the gate failing
+open — it was reported as such at first — and it is not. **The gate was right and
+`show` was lying.**
+
+`hook()` returns 0 when no verdict exists (`.claude/hooks/review_gate.py:174`),
+with a comment saying exactly why: the opt-in redesign (ed4131d) made a missing
+panel legal, and only a recorded `block` stops anything. `cmd_show` (`:370`) was
+not updated with it and still prints the pre-opt-in promise. It also **exits 1**
+for that state, so a scripted `show` treats the normal condition as a failure.
+
+Nothing about the merge path is at fault: `GUARDED` matches `gh.exe pr merge …`
+(`\bgh\b` matches inside `gh.exe` — the `\` and `.` are both boundaries), the
+hook is registered for `Bash|PowerShell` in `.claude/settings.json`, it fired,
+and it correctly allowed the call. `test_no_panel_on_record_does_not_block`
+already asserts this.
+
+This belongs in this ticket because it is the same defect class as the other
+three: **the gate's actual guarantee and its apparent guarantee have drifted
+apart.** Here the drift is in the direction that makes the gate look *stronger*
+than it is, which is how a reviewer comes to trust it for something it never
+promised — and it is the cheapest of the four to fix.
+
+The fix is two lines and carries no design question, so it need not wait for the
+rest of this ticket. Say what the gate does — no panel on record, so nothing will
+be blocked; run the critics if this diff warrants one — and return 0.
+
 ## Area of impact
 
 | File | Line | What changes |
@@ -73,8 +112,9 @@ rewritten anyway to capture the PR number.
 | `.claude/hooks/review_gate.py` | 42-45 | `GUARDED` patterns: capture the PR number, and stop matching `gh pr create` whose body mentions merging |
 | `.claude/hooks/review_gate.py` | 73-113 | `hook()` resolves the target of the merge instead of reading local `HEAD` |
 | `.claude/hooks/review_gate.py` | 119-171 | `cmd_record` binds to the PR head sha, not local `HEAD` |
+| `.claude/hooks/review_gate.py` | 364-378 | `cmd_show` states the post-opt-in guarantee and returns 0 with no verdict on record |
 | `.claude/skills/sdd-ticket/SKILL.md`, `.claude/skills/sdd-release/SKILL.md` | — | the recorded panel instructions if the command shape changes |
-| `tests/` | new | there is no test for `review_gate.py` at all today — see below |
+| `tests/test_review_gate.py` | 22 tests | extend; **no longer new** — added by ed4131d, see the plan |
 
 ## Approach
 
@@ -109,10 +149,14 @@ rewritten anyway to capture the PR number.
 
 ## Plan
 
-1. Add `tests/test_review_gate.py`. **There is none today** — the gate was
-   verified by hand with eleven piped-JSON cases that live only in a transcript.
-   Port those, so the fix has something to regress against before it changes
-   anything.
+0. **Do the `show` fix on its own, first.** Two lines, no design question, and it
+   is the only one of the four holes that misleads a reader *today*: correct the
+   sentence and return 0. A test that `show` succeeds and does not promise a
+   block when no verdict is on record.
+1. ~~Add `tests/test_review_gate.py`. **There is none today**~~ — **done**, by
+   ed4131d: 22 tests, including `test_no_panel_on_record_does_not_block`, which is
+   the regression floor this ticket's step 0 needs. Steps 2-5 extend that file
+   rather than create it.
 2. Capture the PR number in `GUARDED`; keep the existing scope detection.
 3. Resolve and store the PR head sha at `record`; fall back to local `HEAD` with
    an explicit `"binding": "local-head"` field in the artifact when `gh` is
@@ -125,6 +169,8 @@ rewritten anyway to capture the PR number.
 
 ## Verification
 
+- `show` with nothing on record: exit 0, and the text says no panel was run
+  rather than promising a block.
 - Record a verdict for one PR, attempt to merge a different one, confirm it
   blocks. This is the case that passes today and should not.
 - Record, push a commit to the PR, confirm the gate reopens.
@@ -141,10 +187,14 @@ one — but it is a judgement about how much friction the gate is allowed to add
 
 ## Notes
 
-- All three holes were found by *using* the gate, not reading it — as was the
+- All four holes were found by *using* the gate, not reading it — as was the
   `**` scope bug fixed in PR #8. Every one was in the dispatch and admission
   machinery rather than in any critic. The critics have been the reliable part;
   the plumbing around them has not.
+- The fourth is a **reporting** bug, not a gating one, and it was first written up
+  as the gate failing open. Worth remembering when reading the other three: check
+  what the code does before believing what it says about itself. In this instance
+  the code was right and the message was wrong.
 - Worth doing **before** the gate is trusted for anything consequential. Right
   now two tickets and one release have passed through it, all reviewed by a human
   who knew its limits.
