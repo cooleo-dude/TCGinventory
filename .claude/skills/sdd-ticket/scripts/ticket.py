@@ -5,11 +5,18 @@
     ticket.py claim <kebab-title>     reserve the next number by creating the file
     ticket.py check                   non-zero if a ticket is malformed or out of sync
     ticket.py push [N ...]            create/update the GitHub issue for a ticket
-    ticket.py close N                 mark done and close the mirrored issue
+    ticket.py close N                 close the issue and remove the ticket file
 
-The local file under ``.claude/context/tickets/`` is canonical: it is versioned,
-it is readable offline, and an agent can act on it with no network and no auth.
-The GitHub issue is a mirror for visibility. When they disagree, the file wins.
+The local file under ``.claude/context/tickets/`` is canonical *while the work is
+outstanding*: it is versioned, it is readable offline, and an agent can act on it
+with no network and no auth. The GitHub issue is a mirror for visibility. When
+they disagree, the file wins.
+
+**The directory holds live work only.** ``close`` pushes the ticket's final text
+to its issue, closes the issue and then deletes the file, so a listing is the
+outstanding queue rather than a growing pile of finished ones. The record
+survives in the closed issue and in ``git log``; the number is never handed out
+again, because ``taken_numbers()`` reads every ref including deleted files.
 
 Needs ``gh`` authenticated for ``push``/``close``; everything else is offline.
 ``gh`` installs into the *machine* PATH, so a shell opened before the install
@@ -291,8 +298,16 @@ def cmd_check(args) -> int:
         if t.number in seen:
             problems.append(f"{where}: number reused from {seen[t.number].name}")
         seen[t.number] = t.path
-        if t.status == "done" and not t.issue:
-            problems.append(f"{where}: done but never mirrored to an issue")
+        # The directory is the outstanding queue. A ticket edited to `done` or
+        # `dropped` by hand never went through `close`, so its issue is still open
+        # and still describes the work as pending.
+        if t.status in ("done", "dropped"):
+            problems.append(
+                f"{where}: {t.status} but still on disk — "
+                f"`close {t.number}` to mirror it and remove the file"
+            )
+        elif t.status == "in-progress" and not t.issue:
+            problems.append(f"{where}: in-progress but never mirrored to an issue")
         if README.is_file() and f"]({t.path.name})" not in README.read_text(
             encoding="utf-8"
         ):
@@ -364,24 +379,82 @@ def cmd_push(args) -> int:
 
 
 def cmd_close(args) -> int:
+    """Mirror the finished ticket to its issue, close the issue, delete the file.
+
+    The order matters. Deleting first, or closing the issue without re-pushing the
+    body, would drop the outcome the ticket was edited to record — the commit, the
+    PR, the measured after — leaving a closed issue that still describes the work
+    as pending. The push is what makes the issue a faithful record before the file
+    that fed it goes away.
+    """
     for t in load():
         if t.number != args.number:
             continue
-        t.set_field("status", "done")
-        _reindex()
-        if t.issue:
-            gh(
+        if not t.issue:
+            raise SystemExit(
+                f"{t.path.name}: no mirrored issue, and closing deletes the file — "
+                f"the issue would be the only surviving copy. "
+                f"Run `push {t.number}` first."
+            )
+        # A ticket already edited to `dropped` is abandoned, not landed: keep that
+        # word, or the record says the work shipped when it never did.
+        dropped = t.status == "dropped"
+        t.set_field("status", "dropped" if dropped else "done")
+        slug = _repo_slug()
+        gh(
+            "issue",
+            "edit",
+            str(t.issue),
+            "--repo",
+            slug,
+            "--title",
+            f"[{t.number:03d}] {t.title}",
+            "--body",
+            t.body(),
+        )
+        tail = (
+            "The issue body above is the final record — the ticket file is removed "
+            "on close, and its history is in `git log`."
+        )
+        # `gh issue close` fails on an issue that is already closed, and that is a
+        # normal state to be in: the PR body said "closes #N", or a previous `close`
+        # died after this point. Failing here would strand the file forever.
+        state = gh(
+            "issue",
+            "view",
+            str(t.issue),
+            "--repo",
+            slug,
+            "--json",
+            "state",
+            "-q",
+            ".state",
+            check=False,
+        )
+        if state.strip().upper() == "CLOSED":
+            print(f"  #{t.issue} was already closed — updated its body")
+        else:
+            close_cmd = [
                 "issue",
                 "close",
                 str(t.issue),
                 "--repo",
-                _repo_slug(),
+                slug,
                 "--comment",
-                "Landed. See the ticket file for the measured result.",
-            )
-            print(f"  closed #{t.issue} and marked {t.path.name} done")
-        else:
-            print(f"  marked {t.path.name} done (no mirrored issue)")
+                (f"Dropped. {tail}" if dropped else f"Landed. {tail}"),
+            ]
+            if dropped:
+                close_cmd += ["--reason", "not planned"]
+            gh(*close_cmd)
+        name = t.path.name
+        t.path.unlink()
+        _reindex()
+        # Staging a path that no longer exists records the deletion; explicit
+        # pathspecs, because `git add -A` is denied while a tree is shared.
+        gone = t.path.relative_to(REPO).as_posix()
+        index = README.relative_to(REPO).as_posix()
+        print(f"  closed #{t.issue} and removed {name}")
+        print(f"  commit it:  git add {gone} {index}")
         return 0
     raise SystemExit(f"no ticket {args.number:03d}")
 

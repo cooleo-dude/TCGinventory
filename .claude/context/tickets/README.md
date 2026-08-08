@@ -77,8 +77,32 @@ plan, and how to verify.
 | `done` | landed; record the commit, the PR and the measured after |
 | `dropped` | abandoned; say why, and mirror it into `declined.md` |
 
-Close a ticket by editing it, never by deleting it. A finished ticket is the
-record of why the code looks the way it does.
+`done` and `dropped` are terminal, and **this directory holds live work only** —
+a listing is the outstanding queue, not a growing pile of finished ones. So they
+are written into the file, and then the file goes.
+
+## Resolving one
+
+Edit the ticket first — the commit, the PR, the **measured after**, or for a
+`dropped` one, why and what would reopen it. *Then* `/sdd-ticket close N`, which:
+
+1. pushes that final text to the mirrored issue, so the issue stops describing
+   the work as pending;
+2. closes the issue (`not planned` for a dropped one);
+3. deletes the ticket file and re-indexes this README.
+
+The order is the point: the issue becomes the durable record a moment before the
+file that fed it is removed. `close` refuses on a ticket with no mirrored issue —
+there would be nowhere for the record to land. `push N` first.
+
+To read a resolved ticket later: the closed GitHub issue carries its full final
+text, and `git log --diff-filter=D --name-only -- .claude/context/tickets/` names
+every file that has been removed. The **number is never reused** — `ticket.py
+next` reads every ref, deleted files included.
+
+Never delete a ticket by hand. That skips the mirror and strands an open issue
+describing work that is finished; `ticket.py check` will not catch it, because
+there is nothing left to check.
 
 ## Index
 
@@ -91,4 +115,3 @@ record of why the code looks the way it does.
 | [005](005-card-image-cache-is-2.2gb-of-png.md) | The card image cache is 2.2 GB of PNG | optimization | #13 | `deferred` |
 | [006](006-sub-threshold-optimizations.md) | Two measured optimizations that are real and too small to ship | optimization | #14 | `deferred` |
 | [007](007-worker-threads-are-not-parked-at-shutdown.md) | Worker threads are parked when replaced, but not when the app shuts down | fix | #16 | `open` |
-| [008](008-isolate-sessions-on-worktrees.md) | Isolate each Claude session on its own worktree and branch | feature | #17 | `done` |
