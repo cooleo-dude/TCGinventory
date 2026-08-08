@@ -367,14 +367,27 @@ def cmd_show(args) -> int:
     path = verdict_path(repo, sha)
     print(f"  HEAD {sha}  on {branch_of(repo)}  in {repo}")
     if not path.is_file():
-        print("  no review on record — the gate will block a merge or a close")
-        return 1
+        # Say what `hook()` will actually do, which since the opt-in redesign is
+        # nothing: a missing panel is the ordinary state, not a fault. The old text
+        # promised a block the gate has not delivered in a long time, which is worse
+        # than saying nothing — it invites trusting the gate for a guarantee it
+        # never makes (ticket 003). Exit 0 for the same reason: a scripted `show`
+        # must not read the normal case as a failure.
+        print("  no panel on record for this commit — nothing will be blocked")
+        print("  a `block` recorded here would stop a merge; none is")
+        return 0
     record = json.loads(path.read_text(encoding="utf-8"))
     for lane, value in record["verdicts"].items():
         print(f"    {lane:<12} {value}")
     session = record.get("session")
     print(f"  {record['scope']} {record['ref']}, recorded {record['at']}")
     print(f"  by session {session[:8] if session else '— (unattributed)'}")
+    blocked = sorted(k for k, v in record["verdicts"].items() if v in BLOCKING)
+    print(
+        f"  a merge of this commit is BLOCKED on {', '.join(blocked)}"
+        if blocked
+        else "  nothing blocking — a merge of this commit proceeds"
+    )
     return 0
 
 

@@ -357,3 +357,43 @@ def test_owning_session_degrades_to_none_without_a_registry(gate, tree, monkeypa
     on every guarded call, and an ImportError at module scope would stop all work."""
     monkeypatch.setenv("TCGI_SESSION_REGISTRY", str(tree / "nope"))
     assert gate.owning_session(tree) is None
+
+
+# -- what `show` claims the gate will do -------------------------------------
+
+
+def test_show_does_not_promise_a_block_it_will_not_deliver(gate, reviews, capsys):
+    """`show` said "no review on record — the gate will block a merge or a close",
+    and then the merge went through. The gate was right: `hook()` has admitted a
+    missing panel since the critics became opt-in. `show` was never updated with it.
+
+    A gate that overstates its own guarantee is worse than one that says nothing —
+    it gets trusted for a promise it does not make (ticket 003, hole four). Asserted
+    on the text because the text is the defect.
+    """
+    assert gate.cmd_show(SimpleNamespace()) == 0, "the normal state is not a failure"
+    said = capsys.readouterr().out
+    assert "will block" not in said, said
+    assert "nothing will be blocked" in said
+
+
+def test_show_names_the_lanes_that_would_block_a_merge(gate, reviews, capsys):
+    """The converse: when a panel *did* block, `show` has to say so plainly. Listing
+    lane verdicts without stating the consequence is what let the old wording sit
+    unnoticed."""
+    _record(gate, expect=1, verdict=["invariants=pass", "risk=block", "test=block"])
+    capsys.readouterr()
+
+    assert gate.cmd_show(SimpleNamespace()) == 0
+    said = capsys.readouterr().out
+    assert "BLOCKED on risk, test" in said, said
+
+
+def test_show_says_a_clean_panel_proceeds(gate, reviews, capsys):
+    _record(gate, verdict=GREEN)
+    capsys.readouterr()
+
+    assert gate.cmd_show(SimpleNamespace()) == 0
+    said = capsys.readouterr().out
+    assert "proceeds" in said
+    assert "BLOCKED" not in said

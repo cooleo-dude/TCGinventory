@@ -2129,3 +2129,47 @@ one in use is `weak`.
 corpus)`. A flat four photos fires after every labelling session once the corpus
 is large, and a flag that fires constantly is one you stop reading. Below the
 threshold the card still says how many are new — as a plain line, not a warning.
+
+## 2026-08-08 — What the review gate says about itself, and what it does offline
+
+Two decisions about `review_gate.py`, both from ticket 003.
+
+### `show` was promising a guarantee the gate stopped making
+
+`review_gate.py show` printed *"no review on record — the gate will block a merge
+or a close"* and exited 1. Then `gh pr merge` merged, unblocked. That looks like
+the gate failing open, and it was first reported that way. It was not.
+
+`hook()` has returned 0 on a missing verdict since the critic panel became opt-in
+(ed4131d): a panel costs ~26k tokens per agent, so it runs when asked, and only a
+recorded `block` stops anything. `show` was simply never updated alongside it.
+
+The rule this leaves behind: **a checker states what it will actually do, and
+exits 0 for its normal state.** Overstating a guarantee is the worse direction to
+be wrong in — an understated gate gets checked, an overstated one gets trusted.
+Exiting 1 on the ordinary case has the same shape, because a script that treats
+"nothing to report" as failure gets its exit code ignored.
+
+`show` now also names the lanes that would block a merge, rather than printing
+lane verdicts and leaving the reader to work out the consequence. That the old
+wording survived a redesign of the very function it describes is the argument for
+stating the consequence and not just the data.
+
+### Offline, the gate records a weak binding rather than refusing
+
+Steps 2-5 of that ticket bind a verdict to the PR's head commit instead of local
+`HEAD`, which needs `gh`. **When `gh` is unreachable, `record` falls back to local
+`HEAD` and writes `"binding": "local-head"` into the artifact.** It does not
+refuse.
+
+Failing closed is the stronger guarantee and the wrong trade here. The app is
+offline-first and single-user, the panel is opt-in, and the failure would land on
+someone who has just spent ~100k tokens running four critics — discarding that
+because GitHub is unreachable teaches people to route around the gate, and a gate
+that gets disabled is worth less than a weak one that gets kept.
+
+What makes it safe is that the weakness is **named**: `hook()` treats a
+`local-head` artifact as attesting to the checkout only — it may open the gate
+when `HEAD` is the PR head, and must not when it is not, which is the case that
+silently passes today — and `show` prints the binding. Today's guarantee is
+already exactly this weak; the difference is that it will say so.
