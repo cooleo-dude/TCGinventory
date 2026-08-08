@@ -91,4 +91,4 @@ record of why the code looks the way it does.
 | [005](005-card-image-cache-is-2.2gb-of-png.md) | The card image cache is 2.2 GB of PNG | optimization | #13 | `deferred` |
 | [006](006-sub-threshold-optimizations.md) | Two measured optimizations that are real and too small to ship | optimization | #14 | `deferred` |
 | [007](007-worker-threads-are-not-parked-at-shutdown.md) | Worker threads are parked when replaced, but not when the app shuts down | fix | #16 | `open` |
-| [008](008-isolate-sessions-on-worktrees.md) | Isolate each Claude session on its own worktree and branch | feature | #17 | `in-progress` |
+| [008](008-isolate-sessions-on-worktrees.md) | Isolate each Claude session on its own worktree and branch | feature | #17 | `done` |

@@ -1,7 +1,7 @@
 # 008 — Isolate each Claude session on its own worktree and branch
 
 ```
-status:   in-progress
+status:   done
 kind:     feature
 source:   /task-planning 2026-08-07
 issue:    #17
@@ -221,6 +221,24 @@ unconditionally — not in reaction to detecting a neighbour.
 - Observe a real lease file after install to confirm the `PreToolUse` payload
   actually carries `session_id`. The guard degrades to never-block if it does not,
   so this is confirmation rather than a gamble.
+
+## Landed
+
+Squash-merged as `18b49a5`, PR #19, issue #17. 854 tests pass; ruff, `rules.py
+check`, `plan.py validate` and `ticket.py check` all green.
+
+**Measured after:** the guard was exercised against a real rival for the whole of
+this ticket's development — it blocked a `git merge` naming the other session's id
+and branch, allowed reads and explicit-pathspec staging throughout, and cleared by
+itself once that session moved into its own worktree. Three findings from the risk
+panel were fixed before merge; one of them (`git pull`) would have let the original
+failure through under a different verb.
+
+**One follow-up, left open:** two rules seal `docs/decisions.md` whole-file
+(`anchor: null`), so every ADR breaks them — three deliberate reseals during this
+one change. `QT-MODEL-SORT-ROLE` is now anchored to the ADR that states it;
+`CHECKER-NEEDS-NEGATIVE-TEST` turns out to cite a document that never states it,
+which is a bigger question and went to ticket 002.
 
 ## What happened on the way (recorded, because it is the evidence)
 

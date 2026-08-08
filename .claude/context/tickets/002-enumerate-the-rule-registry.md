@@ -43,11 +43,58 @@ nothing about *which* invariant broke, and its seal covers the whole section, so
 editing invariant 9 invalidates the seal for a change that had nothing to do with
 invariants 1–8.
 
+## A second finding, from using the registry (added 2026-08-07, ticket 008)
+
+Coverage is not the only ceiling. **Two rules seal `docs/decisions.md` with
+`anchor: null` — the whole file** — so *every* ADR invalidates both, whatever it
+was about. Ticket 008 hit this three times in one change and resealed each time
+after confirming the diff was additive-only. That is the mechanism failing in the
+most corrosive way available to it: not by missing a change, but by crying wolf
+until resealing becomes reflex. `rules.py`'s own docstring says *"Never reseal to
+make a failure go away"*, and a rule that fires on every unrelated edit trains
+exactly that.
+
+**Fixed here:** `QT-MODEL-SORT-ROLE` now anchors to the ADR that states it
+(`### 2026-08-07 — Startup 2364ms → 1307ms, and a Qt model that was slow for the
+wrong reason`) instead of the whole file. Verified by appending an unrelated ADR
+and confirming the seal holds.
+
+**Not fixed, and it is the more interesting half:** `CHECKER-NEEDS-NEGATIVE-TEST`
+cites `docs/decisions.md`, and **no ADR in that file states the rule.** Grepping
+the repo, the only place it is written down is the critic's own definition
+(`.claude/agents/tcgi-test-critic.md:49-52`). So the seal currently guards a
+document that never made the claim — it can detect that *something* changed, but
+never that *the rule* changed, which is the whole point of sealing an excerpt.
+
+Three ways out, none free, and this is a judgement for whoever works this ticket:
+
+1. **Anchor it at the critic definition.** Accurate — that is where the rule is
+   actually written. But the registry exists so critics judge against *it* rather
+   than their own prose; sourcing a rule from the agent that enforces it inverts
+   that, and the seal then just says "the critic still says what the critic says".
+   (Precedent cuts both ways: `QTHREAD-LIFETIME` already seals `tests/conftest.py`
+   and `TESTS-HEADLESS` seals `pyproject.toml`, so non-document sources are
+   established.)
+2. **State the convention once in `CLAUDE.md`** and anchor there. Cleanest
+   conceptually — it is a project-wide testing rule and that is where those live.
+   Costs a new section, and it must go *outside* `## Non-negotiable architecture
+   rules`, since nine invariant rules seal that section and would all break.
+3. **Retire the rule.** It has been cited in real findings, so this is the weakest
+   option — but a rule whose source does not state it is arguably not enumerated
+   at all, which is the honest reading of its current state.
+
+**The general lesson for this ticket's sweep (plan step 5):** an ADR-sourced rule
+needs a heading anchor, always. `anchor: null` is only defensible where the file
+*as a whole* embodies the convention — `conftest.py` for `QTHREAD-LIFETIME`,
+`verdict.schema.json` for `UNENUMERATED`. A 2,000-line append-only log is the
+opposite of that, and any rule added from `decisions.md` without an anchor will
+have the same defect on day one.
+
 ## Area of impact
 
 | File | What changes |
 |---|---|
-| `.claude/context/rules.json` | new rule entries; `INVARIANTS-DOC` split and retired |
+| `.claude/context/rules.json` | new rule entries; `INVARIANTS-DOC` split and retired; `CHECKER-NEEDS-NEGATIVE-TEST` given a source that states it |
 | `.claude/hooks/rules.py` | nothing, if anchors stay section-level — **see the open question** |
 | `.claude/agents/tcgi-*.md` | nothing; they read the registry, they do not restate it |
 | `tests/test_rules.py` | nothing structural; it validates whatever the registry holds |
@@ -89,8 +136,12 @@ recording a one-off decision.
 4. Sweep `CLAUDE.md` for the non-architecture bullets that are genuinely
    checkable, and skip the ones that are guidance.
 5. Sweep `docs/decisions.md` for ADRs stating a durable rule. Most do not — an
-   ADR recording *what was decided once* is not a rule.
-6. For each new rule confirm `rules.py scope` fires on a file that should match
+   ADR recording *what was decided once* is not a rule. **Every rule sourced from
+   this file gets a heading anchor**, per the second finding above; `anchor: null`
+   on an append-only log breaks on every unrelated entry.
+6. Decide `CHECKER-NEEDS-NEGATIVE-TEST`'s source between the three options above,
+   and reseal it against something that actually states the rule.
+7. For each new rule confirm `rules.py scope` fires on a file that should match
    and stays quiet on one that should not. A rule with a scope that matches
    everything is noise with a seal on it.
 
