@@ -81,8 +81,22 @@ offline; no external price feeds in V1.
 
 - **`specs/`** — what we're building and why. Read [`specs/02-data-model.md`](specs/02-data-model.md)
   before touching money/schema logic; it's the heart of the app.
-- **`docs/decisions.md`** — chronological decision log (ADR-style). Skim this
-  first to understand *why* things are the way they are.
+- **`.claude/context/rules.json`** — what **binds**, as a registry: one entry per
+  invariant, each with the files it scopes to and a hash of the text it cites, so
+  `rules.py check` fails when a rule drifts from its source. `rules.py scope
+  <files>` narrows it to a change; a `/task-planning` dossier prints that
+  narrowing for you.
+- **`docs/decisions.md`** — the ADR **archive**: why things are the way they are,
+  and **write-mostly**. Do not read it whole — 89 entries, ~30k tokens, and it is
+  append-only, so that cost only rises. It is also not ordered, whatever its
+  header claims. Reach one entry by anchor instead:
+
+  ```bash
+  python .claude/hooks/rules.py show <RULE-ID>   # the section a rule is sourced from
+  ```
+
+  Still record significant decisions here. Reading it whole is what stopped;
+  writing to it did not.
 
 ## Non-negotiable architecture rules
 
