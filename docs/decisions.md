@@ -4,6 +4,66 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-09 — The rule registry names the invariant that broke (ticket 002)
+
+- **Decision:** `INVARIANTS-DOC` is retired and replaced by **nine rules, one per
+  numbered invariant** in `specs/02-data-model.md` — `INV-ONHAND-SUM`,
+  `INV-CONSUMPTION-BALANCE`, `INV-REMAINING-BOUNDS`, `INV-REALIZED-RECONCILES`,
+  `INV-EDIT-ATOMIC`, `INV-CONSIDERATION-BALANCE`, `INV-LOT-INTENT-REQUIRED`,
+  `INV-RIPPING-NEVER-CONSUMED`, `INV-MISSING-EXCLUDED`. A finding now says *which*
+  invariant broke instead of gesturing at a section containing nine of them.
+- **Scopes are narrowed to what can actually break each one**, which is the half
+  that pays. The catch-all was scoped `src/tcginventory/**/*.py`, so it fired on
+  every UI file — a view that cannot issue SQL cannot break a ledger invariant.
+  `ui/views/history.py` now draws zero `INV-*` rules; `services/allocation.py`
+  draws exactly the two it can violate (4 and 6) rather than all nine.
+- **The seals stay per-section, deliberately.** All nine hash the same block, so a
+  spec edit invalidates all nine at once. That was the ticket's open question and
+  the answer is that it is honest rather than annoying: unlike `docs/decisions.md`,
+  which unrelated work appends to weekly, the invariants block changes only when
+  the ledger model does — and on that day, re-reading all nine is the correct
+  response. Teaching `section_text()` to anchor on a list item would add a schema
+  field and a branch to the one function every rule depends on, to soften an alarm
+  that should ring.
+- **Three rules cited sources that never stated them.** The ticket found one
+  (`CHECKER-NEEDS-NEGATIVE-TEST`, sealing all of `decisions.md`); checking the
+  others found two more. `## Non-negotiable architecture rules` is seven bullets
+  and says nothing about migrations or tests, yet `MIGRATIONS-FORWARD-ONLY` and
+  `TEST-PROVES-BEHAVIOUR` both sealed it. A seal over prose that never made the
+  claim can detect that *something* changed but never that *the rule* changed,
+  which is the entire point of sealing an excerpt.
+  - `MIGRATIONS-FORWARD-ONLY` → `specs/01-architecture.md § Data storage &
+    migrations`, which states it verbatim. No new prose needed; it was simply
+    pointed at the wrong file.
+  - Both test rules → a new `## Testing rules` section in `CLAUDE.md`. Placed
+    **outside** the non-negotiable block on purpose: eight rules share that one
+    seal, so editing it would have forced eight reseals for an unrelated addition.
+    Verified the existing seal `ac6adee038463cef` is byte-identical afterwards.
+  - Rejected: anchoring at the critic's own definition. The registry exists so
+    critics judge against *it* rather than their own prose, and such a seal only
+    asserts that the critic still says what the critic says.
+- **`anchor: null` on an append-only log is now rejected by `check`**, not left to
+  be remembered. `rules.py anchor_problems()` fails any rule sourced from
+  `docs/decisions.md` without a heading anchor. The ticket recorded this as a
+  lesson for whoever swept next; a lesson in a ticket is not a mechanism, and this
+  defect had already produced two reflex reseals in two days.
+- **Added:** `UNIFIED-POSTING` (the one non-negotiable bullet nothing cited — type
+  is inferred from which sides carry cards, never passed in), `ICONS-LUCIDE`, and
+  `WORKER-RETIRE-NOT-REPLACE` from the 2026-08-07 startup-abort ADR. That last one
+  is a genuine gap beside `QTHREAD-LIFETIME`: ownership and awaiting are not the
+  same rule as *never overwrite a worker that may still be running*, which was the
+  actual bug in three call sites.
+- **Not added, and the count in the ticket was wrong.** It recorded five
+  unenumerated `shared_ui` conventions; only `icons` states a rule. `charts`,
+  `table_delegates` and `dialogs` are bare file lists, and `qt_models` is already
+  covered by `QT-MODEL-SORT-ROLE`. Writing convention text into `app-map.json` so
+  that something existed to seal would invert the registry's one discipline — it
+  is an index, never the source. 24 rules → 35.
+- **Consequences:** `rules.py scope` is meaningfully more selective, which matters
+  because it decides how many critics get spawned. No app code changed; no
+  migration. The nine share a seal, so expect nine reseals the day the invariants
+  section is edited — that is the design, not drift.
+
 ### 2026-08-07 — One session, one worktree, one branch (ticket 008)
 
 - **Decision:** a Claude session that intends to commit takes its **own git

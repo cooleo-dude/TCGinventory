@@ -1,7 +1,7 @@
 # 002 — Enumerate the rule registry to full coverage
 
 ```
-status:   open
+status:   in-progress
 kind:     feature
 source:   /sdd-review build-out, 2026-08-07
 issue:    #7
@@ -162,7 +162,22 @@ recording a one-off decision.
 - Dispatch the panel over a known-bad diff and confirm a finding cites the
   specific new rule rather than the retired catch-all.
 
-## Open question — for the user, not the implementer
+## Open question — ANSWERED 2026-08-09: per-section
+
+Decided by the user: keep per-section seals. Nine simultaneous reseals after a
+spec edit is honest — the invariants block changes only when the ledger model
+does, unlike `decisions.md`, which unrelated work appends to weekly. Teaching
+`section_text()` to anchor on a list item was judged not worth a schema field and
+a branch in the one function every rule depends on. Reasoning recorded in the ADR.
+
+Two corrections found while implementing, both in the ticket's own measurements:
+**three** rules cited sources that never stated them, not one
+(`MIGRATIONS-FORWARD-ONLY` and `TEST-PROVES-BEHAVIOUR` seal a CLAUDE.md section
+that mentions neither migrations nor tests); and only **one** of the five
+"unenumerated `shared_ui` conventions" actually states a rule — the rest are bare
+file lists.
+
+**Original question, for the record:**
 
 **Should the seal be per-invariant rather than per-section?** Splitting
 `INVARIANTS-DOC` nine ways gives nine rules that all seal *the same section*, so

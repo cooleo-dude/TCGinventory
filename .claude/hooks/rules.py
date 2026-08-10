@@ -126,6 +126,33 @@ def seal_of(text: str) -> str:
     ).hexdigest()[:16]
 
 
+#: Files unrelated work appends to. A rule sourced from one must cite a heading.
+APPEND_ONLY_SOURCES = ("docs/decisions.md",)
+
+
+def anchor_problems(data: dict) -> list[str]:
+    """A rule sourced from an append-only log must anchor at a heading.
+
+    ``anchor: null`` seals the whole file. That is right where the file as a whole
+    embodies the convention — ``tests/conftest.py`` for QTHREAD-LIFETIME,
+    ``verdict.schema.json`` for UNENUMERATED — and corrosive on a 2,000-line log
+    that unrelated work appends to weekly: the seal breaks on every entry that had
+    nothing to do with the rule, and resealing becomes reflex. This module's own
+    instruction — *never reseal to make a failure go away* — only survives while
+    the failures mean something, so the shape that trains the opposite habit is
+    rejected here rather than left to be remembered.
+    """
+    problems: list[str] = []
+    for rule in data["rules"]:
+        source = rule["source"]
+        if source["file"] in APPEND_ONLY_SOURCES and source.get("anchor") is None:
+            problems.append(
+                f"{rule['id']}: {source['file']} is append-only — seal a heading, "
+                f"not the whole file (anchor is null)"
+            )
+    return problems
+
+
 def cmd_check(args) -> int:
     data = load()
     problems: list[str] = []
@@ -168,6 +195,8 @@ def cmd_check(args) -> int:
                 f"({recorded} -> {actual}). Re-read the section, confirm the rule "
                 f"still holds, then `rules.py seal --id {rid}`."
             )
+
+    problems.extend(anchor_problems(data))
 
     # Every lane must map to an agent that exists, or a critic cannot be dispatched.
     for lane, agent in data["lanes"].items():

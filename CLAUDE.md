@@ -102,6 +102,19 @@ offline; no external price feeds in V1.
   lot + its now-empty line/txn — writing an audit `delete`; ADR 2026-07-11.)
 - Enforce the invariants in [`specs/02-data-model.md`](specs/02-data-model.md#invariants-must-always-hold).
 
+## Testing rules
+
+Project-wide, and deliberately kept out of the section above: the eight rules
+sealed against those bullets all break at once when that block is edited, and
+these two are about the suite rather than the architecture.
+
+- **A test must fail if the behaviour it covers regresses.** Asserting the setup
+  does not count, and neither does a test that still passes against a broken
+  implementation. The check is "would this go red on revert?"
+- **A new validator, guard, lint or gate ships with a test proving it fails on
+  bad input.** A `check` subcommand exercised only against the passing case has
+  not been tested; it has been demonstrated.
+
 ## Working in parallel sessions
 
 Several Claude sessions work this repo at once, and **a checkout has exactly one
