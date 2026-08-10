@@ -149,8 +149,51 @@ an ADR in `docs/decisions.md` if the decision was significant, `CLAUDE.md` statu
 if a milestone moved.
 
 Then a branch and a pull request — this repo moved off direct-to-`main` on
-2026-08-07 — with `Closes #<issue>` in the PR body. Rebuild the exe after merge,
-and `/sdd-ticket close <N>` once it lands.
+2026-08-07 — with `Closes #<issue>` in the PR body. Then step 7.
+
+## Step 7 — Closing it out
+
+**A merged PR is not a closed ticket.** The exe the user actually runs is the
+**main clone's** `dist/TCGinventory/TCGinventory.exe`, and it is still the
+pre-change build until you rebuild it *there*. Your worktree's `dist/` is not
+that exe — PyInstaller writes `dist/` under the build root, so a build in
+`.claude/worktrees/<branch>/` is thrown away with the worktree.
+
+In this order:
+
+1. **Merge the PR.** `gh pr merge <N> --squash --delete-branch` (the recent ones
+   land squashed; older history has merge commits). `review_gate.py` guards this
+   command, but only refuses when a panel **you** ran on this sha returned
+   `block` — a ticket with no panel merges, because the critics are opt-in.
+2. **Bring the main clone up to date.** `git -C <main-clone> pull --ff-only`.
+   Skipping this rebuilds the exe from the old `main` and everything below then
+   passes against a build that lacks your change.
+3. **Stop the running exe.** `Stop-Process -Name TCGinventory -Force`, or
+   `taskkill //F //IM TCGinventory.exe`. Killing it to rebuild is expected, and
+   it is not optional: with it running, `--clean` dies with `PermissionError:
+   [WinError 5]` on a locked DLL and leaves the *previous* build in `dist/`.
+4. **Rebuild**, from the main clone root:
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm packaging\tcginventory.spec
+   ```
+
+   Read **PyInstaller's own exit code** — not a trailing `echo`/`tail` in the
+   same command line, which reports `0` over a failed build.
+5. **Confirm the exe's timestamp actually moved**, then boot it against a
+   throwaway `TCGINVENTORY_DATA_DIR` and check the process stays alive and
+   `inventory.db` appears. Because a failed `--clean` leaves the old build in
+   place, a boot check that skips the timestamp proves nothing (2026-08-05).
+6. **Close the ticket** — `/sdd-ticket close <N>` — recording the measured
+   result, not the intent.
+7. **Drop the worktree.** `ExitWorktree` with `action: "remove"`, or by hand:
+   `git worktree remove --force <path>` and `branch_lease.py release`. A worktree
+   left behind keeps a lease and denies the next session commands in this tree.
+
+**One exception, before the merge:** if the change touched packaging inputs —
+`packaging/tcginventory.spec`, a new bundled asset, a model, a hidden import — a
+spec omission only shows up frozen, so build once in the worktree first as a
+smoke test. That build is a check, never the deliverable; steps 1–5 still run.
 
 ## Maintaining the map
 
