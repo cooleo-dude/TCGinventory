@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from tcginventory.services import cardimages
+from tcginventory.services import cardimages, vectors
 from tcginventory.services import identity_projection as ip
 
 
@@ -219,7 +219,9 @@ def _corpus_world(tmp_path):
             img, 1, (0.0, 0.0, 1.0, 1.0), None, CardLabel(card_id=card_id)
         )
         vec = np.asarray(embedder.embed(Image.new("RGB", (10, 10), colour)))
-        repo.put_region_embedding(region, "test:v1", card_id, vec.size, vec.tobytes())
+        repo.put_region_embedding(
+            region, "test:v1", card_id, vec.size, *vectors.pack(vec)
+        )
         targets[card_id] = np.array([1.0, 0.0, 0.0], dtype=np.float32)
     return repo, targets
 

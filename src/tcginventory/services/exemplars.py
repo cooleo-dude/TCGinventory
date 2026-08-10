@@ -18,6 +18,7 @@ import numpy as np
 from PIL import Image
 
 from tcginventory.data.vision import VisionRepository
+from tcginventory.services import vectors
 
 Box = tuple[float, float, float, float]  # normalised (x, y, w, h) in 0..1
 
@@ -65,8 +66,9 @@ def index_regions(
         except (FileNotFoundError, OSError):
             continue
         vec = np.asarray(embedder.embed(crop), dtype=np.float32)
+        blob, dtype = vectors.pack(vec)
         repo.put_region_embedding(
-            region_id, version, card_id, int(vec.shape[0]), vec.tobytes()
+            region_id, version, card_id, int(vec.shape[0]), blob, dtype
         )
         written += 1
     return written

@@ -1044,6 +1044,7 @@ class ModelsView(QWidget):
         row.addWidget(_button("Index the catalog", self._index_catalog))
         row.addWidget(_button("Fit photo matching", self._fit_projection))
         row.addWidget(_button("Re-index labelled crops", self._reindex))
+        row.addWidget(_button("Compact the card index", self._compact_index))
         row.addStretch(1)
         section.body.addWidget(buttons)
 
@@ -1208,6 +1209,9 @@ class ModelsView(QWidget):
 
     def _reindex(self) -> None:
         self._task("vision.reindex", modeljobs.reindex_corpus)
+
+    def _compact_index(self) -> None:
+        self._task("vision.compact_index", modeljobs.compact_index)
 
     def _index_catalog(self) -> None:
         """Ask how much of the catalog to take on: the scopes differ by orders of
@@ -1506,6 +1510,10 @@ def _running_banner(op_id: str) -> QFrame:
             "Downloading and embedding card art. It can be stopped and resumed.",
         ),
         "vision.reindex": ("Re-indexing labelled crops", "Re-embedding the corpus."),
+        "vision.compact_index": (
+            "Compacting the card index",
+            "Re-packing stored fingerprints — seconds, and nothing is re-embedded.",
+        ),
         "models.training_env": (
             "Building the training environment",
             "Downloading the training stack.",

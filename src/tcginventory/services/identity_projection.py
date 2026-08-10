@@ -46,6 +46,7 @@ import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
 
 from tcginventory import config
+from tcginventory.services import vectors
 
 # Pairs per card. Two samples the augmentation space cheaply; the fit is limited
 # by how many *cards* it sees far more than by repeats of the same one.
@@ -283,7 +284,7 @@ def corpus_pairs(repo, model_version: str, targets: dict[str, np.ndarray]):
     hold out a whole photo session at a time.
     """
     rows = repo.conn.execute(
-        "SELECT e.card_id, e.dim, e.vector, i.capture_id "
+        "SELECT e.card_id, e.dim, e.vector, e.dtype, i.capture_id "
         "FROM region_embedding e "
         "JOIN region r ON r.id = e.region_id "
         "JOIN image i ON i.id = r.image_id "
@@ -296,7 +297,10 @@ def corpus_pairs(repo, model_version: str, targets: dict[str, np.ndarray]):
         target = targets.get(row["card_id"])
         if target is None:
             continue  # the card is not in the index, so there is nothing to aim at
-        vec = np.frombuffer(row["vector"], dtype=np.float32)
+        try:
+            vec = vectors.unpack(row["vector"], row["dtype"], int(row["dim"]))
+        except ValueError:  # pragma: no cover - corrupt row
+            continue
         if vec.size != target.size:
             continue
         sources.append(vec)

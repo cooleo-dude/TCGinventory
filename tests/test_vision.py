@@ -336,7 +336,7 @@ def test_save_indexes_labeled_crops_as_exemplars(app, _quiet, tmp_path):
 
     assert vrepo.region_count() == 3
     assert vrepo.region_embedding_count() == 2  # only the two labeled crops
-    cards = sorted(card_id for card_id, _ in vrepo.region_vectors("pixel-32"))
+    cards = sorted(row[0] for row in vrepo.region_vectors("pixel-32"))
     assert cards == ["L", "R"]
 
 

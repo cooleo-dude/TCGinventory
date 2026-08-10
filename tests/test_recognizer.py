@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from tcginventory.data.vision import CardLabel
+from tcginventory.services import vectors
 from tcginventory.services.recognizer import (
     PixelEmbedder,
     Recognizer,
@@ -114,7 +115,7 @@ def test_suggest_caches_exemplar_index_across_boxes(repo, tmp_path):
     rid = repo.add_region(img, 1, (0, 0, 1, 1), None, CardLabel(card_id="A"))
     vec = emb.embed(_pattern_png(tmp_path / "a.png", 2))
     repo.put_region_embedding(
-        rid, emb.version, "A", int(vec.shape[0]), vec.astype("float32").tobytes()
+        rid, emb.version, "A", int(vec.shape[0]), *vectors.pack(vec)
     )
 
     calls = {"n": 0}
@@ -134,7 +135,7 @@ def test_suggest_caches_exemplar_index_across_boxes(repo, tmp_path):
     # Growing the corpus (count changes) invalidates the cache.
     rid2 = repo.add_region(img, 2, (0, 0, 1, 1), None, CardLabel(card_id="A"))
     repo.put_region_embedding(
-        rid2, emb.version, "A", int(vec.shape[0]), vec.astype("float32").tobytes()
+        rid2, emb.version, "A", int(vec.shape[0]), *vectors.pack(vec)
     )
     rec.suggest(_pattern_png(tmp_path / "q3.png", 2), ["A"])
     assert calls["n"] == 2  # rebuilt after the exemplar corpus grew
@@ -149,11 +150,7 @@ def test_suggest_uses_crop_exemplars_over_catalog_reference(repo, tmp_path):
     region_id = repo.add_region(img, 1, (0, 0, 1, 1), None, CardLabel(card_id="B"))
     vec_b = emb.embed(_pattern_png(tmp_path / "b.png", 2))
     repo.put_region_embedding(
-        region_id,
-        emb.version,
-        "B",
-        int(vec_b.shape[0]),
-        vec_b.astype("float32").tobytes(),
+        region_id, emb.version, "B", int(vec_b.shape[0]), *vectors.pack(vec_b)
     )
     refs = {"A": _pattern_png(tmp_path / "a.png", 1)}  # A: catalog reference only
     rec = Recognizer(repo, embedder=emb, reference_image=refs.get)

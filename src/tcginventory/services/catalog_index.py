@@ -35,11 +35,9 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import numpy as np
-
 from tcginventory import config
 from tcginventory.data.vision import VisionRepository
-from tcginventory.services import cardimages
+from tcginventory.services import cardimages, vectors
 
 SCOPE_CACHED = "cached"  # only art already on disk — no network at all
 SCOPE_OWNED = "owned"  # every card in the sets you hold cards from
@@ -282,11 +280,9 @@ def index_catalog(
             else:
                 try:
                     vector = embedder.embed(source)
+                    blob, dtype = vectors.pack(vector)
                     repo.put_embedding(
-                        card_id,
-                        version,
-                        int(vector.shape[0]),
-                        np.asarray(vector, dtype=np.float32).tobytes(),
+                        card_id, version, int(vector.shape[0]), blob, dtype
                     )
                     summary.embedded += 1
                 except Exception as exc:  # one bad image must not end the sweep
