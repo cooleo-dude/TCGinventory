@@ -2341,6 +2341,80 @@ and top-5 agreement with the pre-conversion answers.
   ticket 011 — it is a redesign of the confidence model with its own corpus, and
   bundling it would hold this up.
 
+### 2026-08-10 — The gate admits by PR, not by whatever is checked out (ticket 003)
+
+- **Decision:** `hook()` looks a verdict up by **`(scope, ref)`** — the PR or ticket
+  the command actually names — and `record --scope pr-merge` binds the artifact to
+  the **PR's head commit**, resolved with `gh pr view --json headRefOid`. The sha
+  now decides only one thing: whether the verdict has been *superseded*.
+- **What was broken, and it was worse than "weaker than it looks".** Admission was
+  keyed on `verdict_path(repo, head(repo))` — the local checkout. A panel that
+  blocked PR #8 on the branch tip was therefore invisible from anywhere else, so
+  `gh pr merge 8` from `main` found no artifact and proceeded. Measured before the
+  fix, same PR and same recorded block: **exit 2 from the branch tip, exit 0 from
+  `main`.** The single thing this gate still enforces was bypassed by `cd`.
+- **The ticket framed three holes as "fails open, the merge proceeds"; under
+  opt-in only one of them bites.** A *missing* verdict already merges, so a
+  mis-bound `pass` is indistinguishable from no verdict at all — legal either way.
+  What genuinely broke is a recorded **`block`** becoming findable only by accident.
+  That reframing is why the fix is ref-lookup first and sha-binding second, rather
+  than the reverse.
+- **`ref` was stored and never read.** `cmd_record` wrote it at `:159` and `hook()`
+  ignored it entirely, so the field was decoration. Reading it is most of the fix.
+- **Supersession is decided offline, and fails closed.** The hook has a 20s budget,
+  so it must not call the network — resolving the PR head there was rejected for
+  that reason. Instead the recorded head branch is resolved locally,
+  `refs/remotes/origin/<branch>` first: in the ordinary workflow you push from this
+  machine and then merge, so it is current. **When neither ref resolves the verdict
+  is treated as still applying** — the one place this file deliberately fails
+  closed, because discarding a recorded `block` on the strength of a lookup that
+  did not work is the gate failing open exactly when it should hold.
+- **The ticket's plan step 5 contradicted its own verification list, and the
+  verification list won.** Step 5 asked that a verdict whose sha no longer matches
+  "must block"; the verification list asked that pushing a commit "reopens" the
+  gate. Under opt-in the second is right — blocking on staleness would make a
+  *reviewed-then-amended* PR harder to merge than one nobody reviewed, which is the
+  perversity ticket 008 already reversed once. Worth recording because step 5's
+  wording is the pre-opt-in assumption surviving inside the plan of the very ticket
+  whose fourth hole is that same assumption surviving inside `show`.
+- **Classification is by argv, not by substring.** `GUARDED`'s
+  `\bgh\b[^\n]*\bpr\b[^\n]*\bmerge\b` blocked a `gh pr create` whose *body prose*
+  contained "merge" — and the workaround was `--body-file`, i.e. a guard teaching
+  people to route around it. Commands are now tokenised and read positionally, so
+  quoted prose is one opaque token and `merge` only counts in the action position.
+  Capturing the ref needed argv parsing anyway, so both halves are the same change.
+- **The tokeniser moved to a leaf module, `_shell.py`.** `branch_lease.py` already
+  had it, and the precedent set a day earlier by ticket 010 is import-over-copy
+  (`plan.py` imports `rules.path_matches` rather than duplicating its three
+  hard-won bug fixes). But importing it *from `branch_lease`* would drag `_session`
+  into `review_gate`'s import path — measured 26.6ms and a registry read — and
+  `review_gate` deliberately imports `_session` lazily inside a `try`, because a
+  module-scope `ImportError` in a `PreToolUse` hook raises on every shell call in
+  the session. A leaf keeps both properties.
+- **`show` had to be rewritten, not extended, and running it is what caught that.**
+  The first version listed the other verdicts and then printed "nothing will be
+  blocked" underneath a live block — hole four reintroduced in the same commit that
+  fixed the rest of it. It now reports every artifact in the checkout with its
+  binding and whether it is superseded, and states the consequence per artifact.
+- **Two rules added to the registry, because nothing enumerated any of this.**
+  `rules.py scope .claude/hooks/review_gate.py` returned exactly one rule
+  (`CHECKER-NEEDS-NEGATIVE-TEST`) — and since ticket 010 the registry is the *only*
+  thing `plan.py` reads, so an unenumerated discipline is now invisible to every
+  future brief rather than merely absent from critic dispatch. `HOOK-FAILS-OPEN`
+  ("fail open on confusion, closed on the detected condition") and
+  `HOOK-CLASSIFIES-ARGV` both bind `.claude/hooks/**/*.py`. 35 rules → 37.
+- **Verified end to end against real `gh`, not only against stubs.** Every test
+  stubs `pr_head` for hermeticity, so the live path was exercised by hand: PR #27's
+  head resolved to `92ef5c3` on `chore/close-ticket-002` while local `HEAD` was
+  `58dbf29` — the hole, visible in one line — and a block recorded for #27 stopped
+  `gh pr merge 27` from that checkout while leaving `gh pr merge 99` alone.
+- **Consequences:** `record` must run *after* the branch is pushed, or it binds to a
+  PR head that does not include the last commit; `/sdd-ticket` says so now.
+  `--inherit <sha>` is unchanged — artifacts stay keyed on a sha filename, so the
+  per-round audit trail and the documented flag both survive. `ticket-close` still
+  binds to local `HEAD` on purpose: closing a ticket is a statement about work that
+  has already landed, so the checkout is the right referent.
+
 ### 2026-08-10 — A window must be named, not mentioned (ticket 011)
 
 - **Decision:** `plan.py` scores a window at full confidence only when the

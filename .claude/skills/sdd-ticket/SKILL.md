@@ -109,6 +109,14 @@ one you intend not to touch again. `git status` clean, branch pushed, suite gree
 A panel dispatched on a branch you are still editing is a panel you will pay for
 twice.
 
+**Push before you `record`, and it is no longer merely tidy.** `record --scope
+pr-merge` resolves the PR's head commit from GitHub and binds the verdict to
+*that* — not to your local `HEAD` (ticket 003; it used to bind to the checkout,
+which meant a `block` recorded anywhere but the PR's branch was invisible to the
+merge it was about). An unpushed commit is therefore not part of what the verdict
+covers. `record` prints what it bound to, and `show` repeats it: `pr-head` is the
+real guarantee, `local-head` the weaker fallback when `gh` cannot be reached.
+
 ### Ask the registry who to dispatch — never guess
 
 **A critic spawn costs ~26k tokens before it judges anything**, so the question

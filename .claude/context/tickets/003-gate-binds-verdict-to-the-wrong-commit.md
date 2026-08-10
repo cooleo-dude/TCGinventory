@@ -1,7 +1,7 @@
 # 003 — The review gate's real guarantee is not the one it appears to give
 
 ```
-status:   open
+status:   in-progress
 kind:     fix
 source:   /sdd-release v0.7.0 run, 2026-08-07; fourth hole from PR #21, 2026-08-08
 issue:    #10
@@ -15,6 +15,49 @@ Four holes, one theme: what the gate **actually** guarantees and what a reader
 takes it to guarantee have come apart. Three make it weaker than it looks; the
 fourth makes it look stronger. The `show` fix (step 0) is two lines and
 independent of the rest.
+
+## Outcome — steps 2-5 done 2026-08-10
+
+ADR: *2026-08-10 — The gate admits by PR, not by whatever is checked out*.
+All four holes are now closed (step 0 landed earlier in PR #24).
+
+**Measured after:** full suite green offscreen (**935 tests, exit 0**), `ruff check`
+clean, `rules.py check` ok at 37 rules, `plan.py validate` ok.
+
+**The reframing that shaped the fix.** This ticket described three holes as "fails
+open — the merge proceeds". Under the opt-in redesign only one of them bites: a
+*missing* verdict already merges, so a mis-bound `pass` is indistinguishable from no
+verdict at all. What genuinely broke is a recorded **`block`** becoming findable only
+by accident. Demonstrated before the fix, same PR and same recorded block: **exit 2
+from the branch tip, exit 0 from `main`.** So the fix is ref-lookup first, sha-binding
+second — the reverse of the emphasis here.
+
+**Plan step 5 contradicted this ticket's own verification list.** Step 5 asked that a
+verdict whose sha no longer matches "must block"; the verification list asked that
+pushing a commit "reopens" the gate. The verification list won — blocking on staleness
+would make a reviewed-then-amended PR harder to merge than an unreviewed one, the
+perversity ticket 008 already reversed once. Step 5's wording is the pre-opt-in
+assumption surviving inside the plan of the ticket whose fourth hole is that same
+assumption surviving inside `show`.
+
+**Not in the plan, and needed:**
+
+- `show` had to be **rewritten rather than extended**. The first attempt listed the
+  other verdicts and then printed "nothing will be blocked" underneath a live block —
+  hole four reintroduced in the commit fixing the rest. Caught by running it.
+- The tokeniser went to a new leaf `_shell.py`, not imported from `branch_lease`:
+  that would drag `_session` into `review_gate`'s import path (26.6ms + a registry
+  read), and `review_gate` imports `_session` lazily on purpose because a
+  module-scope `ImportError` in a `PreToolUse` hook raises on every shell call.
+- **Two registry rules added.** `rules.py scope .claude/hooks/review_gate.py`
+  returned exactly one rule, and since ticket 010 the registry is the only thing
+  `plan.py` reads — so an unenumerated discipline is invisible to every future brief.
+  `HOOK-FAILS-OPEN` and `HOOK-CLASSIFIES-ARGV`, both scoped `.claude/hooks/**/*.py`.
+
+**Verified against real `gh`, not only stubs** (every test stubs `pr_head` for
+hermeticity): PR #27 resolved to head `92ef5c3` on `chore/close-ticket-002` while
+local `HEAD` was `58dbf29` — the hole in one line — and a block recorded for #27
+stopped `gh pr merge 27` from that checkout while leaving `gh pr merge 99` alone.
 
 ## The finding
 

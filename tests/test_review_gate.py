@@ -49,7 +49,22 @@ def reviews(gate, tmp_path, monkeypatch):
     monkeypatch.setattr(gate, "branch_of", lambda repo=None: "ticket/008")
     monkeypatch.setattr(gate, "owning_session", lambda repo=None: "session-a")
     monkeypatch.setattr(gate, "lease_holders", lambda repo=None: ["session-a"])
+    # `pr_head` shells out to `gh`, so it must be stubbed or the suite would depend
+    # on the network and on whoever is authenticated. `None` is the documented
+    # offline fallback (ADR 2026-08-08): bind to local HEAD and name the weakness.
+    # Tests that want the strong binding override this explicitly.
+    monkeypatch.setattr(gate, "pr_head", lambda repo, ref: None)
     return tmp_path
+
+
+def _stdin(monkeypatch, command: str) -> None:
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+        ),
+    )
 
 
 def _args(**over):
@@ -80,16 +95,59 @@ GREEN = ["invariants=pass", "risk=pass", "test=pass"]
 
 
 @pytest.mark.parametrize(
-    "command, scope",
+    "command, expected",
     [
-        ("gh pr merge 6 --squash", "pr-merge"),
-        ("python .claude/skills/sdd-ticket/scripts/ticket.py close 3", "ticket-close"),
+        # The ref is what binds a verdict to the thing being merged, so it has to
+        # come out of the right argv position in every shape gh accepts.
+        ("gh pr merge 6 --squash", ("pr-merge", "6")),
+        ("gh pr merge --squash 6", ("pr-merge", "6")),
+        ("gh.exe pr merge 26 --squash --delete-branch", ("pr-merge", "26")),
+        ("gh pr merge", ("pr-merge", None)),
+        (
+            "python .claude/skills/sdd-ticket/scripts/ticket.py close 3",
+            ("ticket-close", "3"),
+        ),
+        (
+            ".venv/Scripts/python.exe .claude/skills/sdd-ticket/scripts/ticket.py"
+            " close 12",
+            ("ticket-close", "12"),
+        ),
+        # A flag's *value* is not the ref. `--subject "close 9"` used to be the kind
+        # of thing a substring search would read as a close of ticket 9.
+        ('gh pr merge --subject "close 9" 6', ("pr-merge", "6")),
         ("git status", None),
         ("gh pr view 6 --json state", None),
+        # Chained commands: the merge is still found after a separator.
+        ("git add x && gh pr merge 6", ("pr-merge", "6")),
     ],
 )
-def test_guarded_scope_matches_what_it_should(gate, command, scope):
-    assert gate.guarded_scope(command) == scope
+def test_guarded_reads_the_scope_and_ref_from_argv(gate, command, expected):
+    assert gate.guarded(command) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # THE false positive, from ticket 003: a `gh pr create` whose body prose
+        # mentions merging. Nothing is being merged. The old pattern was
+        # `\bgh\b[^\n]*\bpr\b[^\n]*\bmerge\b` over the raw string, so this blocked —
+        # and the workaround was `--body-file`, i.e. a guard teaching people to
+        # route around it.
+        'gh pr create --title "x" --body "opens the gate for merging any other PR"',
+        'gh pr create --body "this closes the hole where ticket.py close bypassed it"',
+        # A merge named inside quoted prose is prose, not an invocation.
+        'echo "gh pr merge 6"',
+        'git commit -m "gh pr merge 6 was blocked here"',
+    ],
+)
+def test_prose_that_mentions_merging_is_not_a_merge(gate, command):
+    assert gate.guarded(command) is None
+
+
+def test_an_untokenisable_command_is_not_judged(gate):
+    """Fail open on our own confusion. An unbalanced quote reaches this hook on
+    every shell call; raising here would stop all work in the session."""
+    assert gate.guarded('gh pr merge 6 --body "unbalanced') is None
 
 
 def test_no_panel_on_record_does_not_block(gate, reviews, monkeypatch):
@@ -397,3 +455,178 @@ def test_show_says_a_clean_panel_proceeds(gate, reviews, capsys):
     said = capsys.readouterr().out
     assert "proceeds" in said
     assert "BLOCKED" not in said
+
+
+# -- what the verdict is bound to (ticket 003) --------------------------------
+
+
+def _artifact(reviews: Path, **over) -> dict:
+    """A verdict on disk, keyed the way `cmd_record` keys one."""
+    payload = {
+        "sha": "branchtip",
+        "scope": "pr-merge",
+        "ref": "8",
+        "binding": "pr-head",
+        "head_branch": "ticket/008",
+        "verdicts": {"invariants": "block", "risk": "pass", "test": "pass"},
+    }
+    payload.update(over)
+    (reviews / f"{payload['sha']}.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+    return payload
+
+
+def test_a_block_is_not_bypassed_by_standing_somewhere_else(gate, reviews, monkeypatch):
+    """The hole this ticket exists for, and the regression floor for the fix.
+
+    Admission used to be keyed on the local `HEAD` — `verdict_path(repo, head(repo))`.
+    A panel that blocked PR #8 on the branch tip was therefore invisible from any
+    other directory, most obviously `main`: the lookup missed and the merge went
+    through. Measured before the fix, same PR and same recorded block: exit 2 from
+    the branch tip, exit 0 from main.
+    """
+    _artifact(reviews)
+    # Standing on main; the PR's branch still points at the reviewed commit.
+    monkeypatch.setattr(gate, "head", lambda repo=None: "mainsha")
+    monkeypatch.setattr(gate, "branch_of", lambda repo=None: "main")
+    monkeypatch.setattr(gate, "rev_parse", lambda repo, rev: "branchtip0000")
+    _stdin(monkeypatch, "gh pr merge 8 --squash")
+    assert gate.hook() == 2
+
+
+def test_a_verdict_for_one_pr_does_not_answer_another(gate, reviews, monkeypatch):
+    """`cmd_record` stored `ref` and `hook()` never read it, so admission ignored
+    which PR a verdict was about. A block on #8 must not stop #9 either."""
+    _artifact(reviews, ref="8")
+    monkeypatch.setattr(gate, "head", lambda repo=None: "mainsha")
+    monkeypatch.setattr(gate, "rev_parse", lambda repo, rev: "branchtip0000")
+    _stdin(monkeypatch, "gh pr merge 9 --squash")
+    assert gate.hook() == 0, "a verdict for PR #8 spoke for PR #9"
+
+
+def test_a_new_commit_on_the_pr_supersedes_the_objection(gate, reviews, monkeypatch):
+    """A verdict is bound to a commit so that pushing a fix clears the block: the
+    panel judged something that is no longer what would merge. That predates this
+    ticket, and the ticket's verification list asks for it explicitly."""
+    _artifact(reviews)
+    monkeypatch.setattr(gate, "head", lambda repo=None: "mainsha")
+    monkeypatch.setattr(gate, "rev_parse", lambda repo, rev: "aNewerCommit")
+    _stdin(monkeypatch, "gh pr merge 8 --squash")
+    assert gate.hook() == 0
+
+
+def test_an_unresolvable_branch_keeps_a_recorded_block(gate, reviews, monkeypatch):
+    """The one place this file fails closed, deliberately.
+
+    Supersession is decided offline, so the branch may not resolve at all — a fresh
+    clone, a pruned local ref. Discarding a `block` because a lookup did not work
+    would be the gate failing open at exactly the moment it is meant to hold.
+    """
+    _artifact(reviews)
+    monkeypatch.setattr(gate, "head", lambda repo=None: "mainsha")
+    monkeypatch.setattr(gate, "rev_parse", lambda repo, rev: None)
+    _stdin(monkeypatch, "gh pr merge 8 --squash")
+    assert gate.hook() == 2
+
+
+def test_a_local_head_artifact_speaks_only_for_its_own_commit(
+    gate, reviews, monkeypatch
+):
+    """The weak binding, named and contained (ADR 2026-08-08): it may block the
+    commit it was recorded on and must not block any other — the case that passed
+    silently before."""
+    _artifact(reviews, binding="local-head", head_branch=None, sha="cafe123")
+    _stdin(monkeypatch, "gh pr merge 8 --squash")
+    assert gate.hook() == 2, "it must speak for the commit it was recorded on"
+
+    monkeypatch.setattr(gate, "head", lambda repo=None: "movedon")
+    _stdin(monkeypatch, "gh pr merge 8 --squash")
+    assert gate.hook() == 0, "it must not speak for any other commit"
+
+
+def test_record_binds_a_pr_merge_to_the_pr_head(gate, reviews, monkeypatch):
+    monkeypatch.setattr(
+        gate, "pr_head", lambda repo, ref: ("abc1234def5678", "ticket/003")
+    )
+    assert gate.cmd_record(_args(ref="26", verdict=GREEN)) == 0
+    record = json.loads((reviews / "abc1234.json").read_text(encoding="utf-8"))
+    assert record["binding"] == "pr-head"
+    assert record["head_branch"] == "ticket/003"
+    assert record["sha"] == "abc1234", "keyed on the PR head, not on local HEAD"
+    assert not (reviews / "cafe123.json").exists()
+
+
+def test_record_falls_back_to_local_head_when_gh_cannot_answer(gate, reviews):
+    """Offline it records the weaker binding rather than refusing: the failure would
+    land on someone who has just spent ~100k tokens on the panel, and a gate people
+    disable is worth less than a weak one they keep."""
+    record = _record(gate, verdict=GREEN)
+    assert record["binding"] == "local-head"
+    assert record["sha"] == "cafe123"
+
+
+def test_a_ticket_close_still_binds_to_local_head(gate, reviews, monkeypatch):
+    """Closing a ticket is a statement about work that has already landed, so the
+    checkout is the right referent — `pr_head` must not even be consulted."""
+    monkeypatch.setattr(
+        gate,
+        "pr_head",
+        lambda repo, ref: pytest.fail("ticket-close must not resolve a PR head"),
+    )
+    record = _record(gate, scope="ticket-close", ref="3", verdict=GREEN)
+    assert record["binding"] == "local-head"
+    assert record["sha"] == "cafe123"
+
+
+def test_a_blocking_ticket_close_still_stops_at_its_own_commit(
+    gate, reviews, monkeypatch
+):
+    _artifact(
+        reviews,
+        scope="ticket-close",
+        ref="3",
+        binding="local-head",
+        head_branch=None,
+        sha="cafe123",
+    )
+    _stdin(monkeypatch, "python .claude/skills/sdd-ticket/scripts/ticket.py close 3")
+    assert gate.hook() == 2
+    monkeypatch.setattr(gate, "head", lambda repo=None: "movedon")
+    _stdin(monkeypatch, "python .claude/skills/sdd-ticket/scripts/ticket.py close 3")
+    assert gate.hook() == 0, "the work it judged is no longer what is checked out"
+
+
+def test_show_names_the_binding(gate, reviews, capsys):
+    _record(gate, verdict=GREEN)
+    capsys.readouterr()
+    assert gate.cmd_show(SimpleNamespace()) == 0
+    said = capsys.readouterr().out
+    assert "local-head" in said and "no other" in said
+
+
+def test_show_reports_a_verdict_that_is_not_on_local_head(gate, reviews, capsys):
+    """`show` must not go quiet about the verdict that is about to block a merge:
+    reporting only the local-HEAD artifact would reopen the drift step 0 closed.
+
+    The first version of this function did list it and then printed "nothing will be
+    blocked" underneath, which is why the consequence is asserted here too.
+    """
+    _artifact(reviews)
+    capsys.readouterr()
+    assert gate.cmd_show(SimpleNamespace()) == 0
+    said = capsys.readouterr().out
+    assert "pr-merge 8" in said and "invariants   block" in said, said
+    assert "a merge of pr-merge 8 is BLOCKED on invariants" in said, said
+    assert "nothing blocking" not in said, said
+
+
+def test_same_commit_compares_by_prefix(gate):
+    """`git rev-parse --short` abbreviates and `gh` returns the full oid. Comparing
+    them for equality would mark every verdict superseded — the gate failing open
+    while looking like it works."""
+    assert gate.same_commit("abc1234", "abc1234def5678901234")
+    assert gate.same_commit("abc1234def5678901234", "abc1234")
+    assert not gate.same_commit("abc1234", "abd1234")
+    assert not gate.same_commit("", "abc1234")
+    assert not gate.same_commit("abc1234", None)
