@@ -113,4 +113,3 @@ there is nothing left to check.
 | [005](005-card-image-cache-is-2.2gb-of-png.md) | The card image cache is 2.2 GB of PNG | optimization | #13 | `deferred` |
 | [006](006-sub-threshold-optimizations.md) | Two measured optimizations that are real and too small to ship | optimization | #14 | `deferred` |
 | [007](007-worker-threads-are-not-parked-at-shutdown.md) | Worker threads are parked when replaced, but not when the app shuts down | fix | #16 | `open` |
-| [012](012-celebrations-classic-collection-numbers.md) | Celebrations Classic Collection autofill has no price, image or link | fix | #36 | `open` |
