@@ -3,6 +3,7 @@
     rules.py check              every source, anchor and seal still resolves
     rules.py list [--lane L]    what the critics may judge against
     rules.py scope <path ...>   which rules apply to these files
+    rules.py show <ID>          one rule, plus the section it is sourced from
     rules.py seal [--id ID]     (re)record the excerpt hash after a spec edit
     rules.py validate <file>    check a critic's JSON verdict against the schema
 
@@ -23,9 +24,13 @@ import argparse
 import fnmatch
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+# `show` is a bounded read by construction — see cmd_show.
+SHOW_LINES = 80
+MAX_LINE = 400
 RULES = REPO / ".claude" / "context" / "rules.json"
 SCHEMA = REPO / ".claude" / "context" / "verdict.schema.json"
 
@@ -260,6 +265,59 @@ def cmd_scope(args) -> int:
     return 0
 
 
+def cmd_show(args) -> int:
+    """One rule in full, including the section it is sourced from.
+
+    This is what makes the decision log affordable. Planning reads the *registry*
+    — bounded, scoped, sealed — and never the 89-entry log, whose cost grows with
+    the age of the project. When an agent needs the reasoning behind a rule
+    rather than the rule itself, it follows the rule's anchor to exactly one
+    section instead of reading the whole file.
+    """
+    data = load()
+    rule = next((r for r in data["rules"] if r["id"] == args.id), None)
+    if rule is None:
+        known = ", ".join(sorted(r["id"] for r in data["rules"]))
+        print(f"  no rule {args.id!r}. Known ids: {known}")
+        return 1
+
+    source = rule["source"]
+    print(f"  {rule['id']}  ({rule['lane']}, max {rule['severity_max']})")
+    print(f"  rule      {rule['rule']}")
+    print(f"  violation {rule['violation']}")
+    print(f"  scope     {', '.join(rule['scope'])}")
+    anchor = source.get("anchor")
+    where = f"{source['file']}  ·  {anchor}" if anchor else f"{source['file']} (whole)"
+    print(f"  source    {where}")
+
+    path = REPO / source["file"]
+    if not path.exists():
+        print(f"\n  (source file missing: {source['file']})")
+        return 1
+    text = section_text(path, anchor)
+    if text is None:
+        print(f"\n  (anchor not found in {source['file']} — run rules.py check)")
+        return 1
+
+    # Bounded, always. Some anchors are JSON subtrees rather than prose headings
+    # — `windows` in app-map.json is a single ~15k-token line — and a command
+    # whose whole purpose is to replace a 30k-token read must not become one.
+    lines = text.splitlines()
+    cap = getattr(args, "lines", None) or SHOW_LINES
+    shown = 0
+    print()
+    for line in lines:
+        if shown >= cap:
+            print(f"  | … {len(lines) - shown} more line(s)")
+            print(f"\n  Full section: {source['file']}  ·  {anchor or '(whole file)'}")
+            break
+        if len(line) > MAX_LINE:
+            line = line[:MAX_LINE] + f"… (+{len(line) - MAX_LINE} chars)"
+        print(f"  | {line}")
+        shown += 1
+    return 0
+
+
 def cmd_seal(args) -> int:
     data = load()
     changed = 0
@@ -341,6 +399,16 @@ def cmd_validate(args) -> int:
 
 
 def main() -> None:
+    # Anchors are section headings, and this repo's headings carry em dashes and
+    # arrows. The Windows console defaults to cp1252, which cannot encode them —
+    # `show` is the first command to print an anchor routinely, so it is the
+    # first to have crashed on one. Replace rather than raise: a mangled dash is
+    # a far better outcome than a traceback in a tool the review gate shells out
+    # to.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check").set_defaults(func=cmd_check)
@@ -356,6 +424,15 @@ def main() -> None:
         "which critics to spawn",
     )
     scoper.set_defaults(func=cmd_scope)
+    shower = sub.add_parser("show")
+    shower.add_argument("id")
+    shower.add_argument(
+        "--lines",
+        type=int,
+        default=SHOW_LINES,
+        help=f"cap the cited section at N lines (default {SHOW_LINES})",
+    )
+    shower.set_defaults(func=cmd_show)
     sealer = sub.add_parser("seal")
     sealer.add_argument("--id")
     sealer.set_defaults(func=cmd_seal)

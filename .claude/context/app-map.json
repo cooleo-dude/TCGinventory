@@ -241,7 +241,10 @@
         "Tagged cards keep their line colour; an untagged preview line is dropped on click-off.",
         "Empty charts are normal until a market sweep has run from Operations."
       ],
-      "specs": ["docs/decisions.md 2026-07-16, 2026-07-10 (live market pricing via tcgcsv)"]
+      "specs": [
+        "docs/decisions.md § ### 2026-07-10 — Live market pricing via tcgcsv + price history",
+        "docs/decisions.md § ### 2026-07-16 — Catalog-wide price history (market outlook)"
+      ]
     },
 
     "auctions": {
@@ -264,7 +267,10 @@
         "Autofill prefers a live price over cached history (ADR 2026-07-28).",
         "Default sales-tax rate is 6%."
       ],
-      "specs": ["docs/decisions.md 2026-07-16 (eBay auction max-bid planner)"]
+      "specs": [
+        "docs/decisions.md § ### 2026-07-16 — eBay auction max-bid planner (new screen, ephemeral store)",
+        "docs/decisions.md § ### 2026-07-16 — Auction editor: multi-card display reuses Price Lookup's gallery"
+      ]
     },
 
     "recognition": {
@@ -330,7 +336,11 @@
         "A finished run opens a window, not a toast (ADR 2026-08-07). Do not regress that to a status message.",
         "Do not re-introduce a retrain loop — a job that is running must say so."
       ],
-      "specs": ["specs/06-recognition.md", "docs/decisions.md 2026-08-06/07 (Models becomes a destination)"]
+      "specs": [
+        "specs/06-recognition.md",
+        "docs/decisions.md § ## 2026-08-06 — Models becomes a destination of its own",
+        "docs/decisions.md § ## 2026-08-06 — Models becomes its own destination; the loss curve becomes real"
+      ]
     },
 
     "operations": {
@@ -353,7 +363,10 @@
         "Restore is not implemented — it is M-Ops2. Backup only.",
         "A `models` group is reserved in the registry for metrics/triggers."
       ],
-      "specs": ["specs/03-features.md (F-OP-*)", "docs/decisions.md (M-Ops1)"]
+      "specs": [
+        "specs/03-features.md (F-OP-*)",
+        "docs/decisions.md § ### 2026-08-04 — Operations window (M-Ops1): the File menu becomes a screen"
+      ]
     }
   },
 
@@ -366,7 +379,7 @@
     "specs/04-ui-ux.md": "Screens, navigation, interaction rules, accessibility (colour is never the only cue).",
     "specs/05-roadmap.md": "Milestones + the post-V1 backlog.",
     "specs/06-recognition.md": "The card image-recognition + learning engine.",
-    "docs/decisions.md": "Chronological ADR log, NEWEST FIRST. Skim before proposing anything structural.",
+    "docs/decisions.md": "ADR archive — write-mostly, and NOT ordered (it claims newest-first but the tail runs the other way). Never read it whole: what binds lives in .claude/context/rules.json, and a rule's reasoning is one section via `.claude/hooks/rules.py show <ID>`.",
     "docs/glossary.md": "Domain vocabulary.",
     "docs/user-guide.md": "End-user documentation.",
     "docs/cost-basis-examples.md": "Worked cost-basis examples.",

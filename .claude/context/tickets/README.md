@@ -114,3 +114,5 @@ there is nothing left to check.
 | [005](005-card-image-cache-is-2.2gb-of-png.md) | The card image cache is 2.2 GB of PNG | optimization | #13 | `deferred` |
 | [006](006-sub-threshold-optimizations.md) | Two measured optimizations that are real and too small to ship | optimization | #14 | `deferred` |
 | [007](007-worker-threads-are-not-parked-at-shutdown.md) | Worker threads are parked when replaced, but not when the app shuts down | fix | #16 | `open` |
+| [010](010-planning-reads-the-registry-not-the-log.md) | Planning reads the rule registry, not the decision log | optimization | none | `done` |
+| [011](011-plan-resolves-the-wrong-window-confidently.md) | `plan.py` resolves the wrong window, confidently | fix | none | `open` |

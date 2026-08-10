@@ -2233,3 +2233,37 @@ What makes it safe is that the weakness is **named**: `hook()` treats a
 when `HEAD` is the PR head, and must not when it is not, which is the case that
 silently passes today — and `show` prints the binding. Today's guarantee is
 already exactly this weak; the difference is that it will say so.
+
+### 2026-08-10 — Planning reads the rule registry; this file is an archive (ticket 010)
+
+- **Decision:** `plan.py` no longer lists `docs/decisions.md` as a required read.
+  What binds comes from `.claude/context/rules.json`, scoped to the files the
+  task touches. Measured across all 11 windows: **~31.9k → ~2.8k tokens, −91.3%**.
+- **Why the registry and not a smaller log.** A log is append-only — a reversal
+  adds a second entry and both stay — so it is O(project age) and no amount of
+  shrinking entries changes the slope. A registry is superseded in place (two
+  contradictory rules is a bug, two contradictory ADRs is just history), so it
+  grows with the app's distinct invariants and then plateaus: 35 rules today.
+  An index of ADR titles was measured at 893 words and **rejected** — a 25×
+  improvement that is still O(entries), and with no integrity check.
+- **Keyword-scoping the log was rejected on measurement.** Its entries are prose
+  that mentions everything: 51/89 match recognition terms, 52/89 ui/theme, 47/89
+  money/schema. The log cannot be narrowed; the registry already is.
+- **This file is now write-mostly.** Its length and its ordering stopped
+  mattering, which is just as well — it claims "newest first" and is not: there
+  are 8 monotonicity breaks and the tail runs oldest-first. Nothing scans it, so
+  that is no longer worth a reorder.
+- **It is still reachable, by anchor.** `rules.py show <ID>` prints the one
+  section a rule cites, capped at 80 lines — some anchors are JSON subtrees, and
+  a command that replaces a 30k-token read must not become one. Four windows whose
+  design lives here rather than in a spec now cite an **exact heading**, resolved
+  to a line range in the reading list; `plan.py validate` fails if one is missing
+  an anchor or the heading moves. Matching by date was tried first and is far too
+  coarse — `2026-07-10` alone carries ten entries.
+- **Two `plan.py` defects surfaced by running it on this very ticket.** Its
+  request resolved to **History**, exit 0, because "decision **log**" hit that
+  window's 3-letter alias; and `MONEY_WORDS`' `p/?l` collapsed to a bare `pl`,
+  so `\bp/?l\w*` matched **"planning"** and put `specs/02-data-model.md` at the
+  top of the reading list. The regex is fixed here. The resolution floor is
+  ticket 011 — it is a redesign of the confidence model with its own corpus, and
+  bundling it would hold this up.
