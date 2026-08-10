@@ -30,6 +30,15 @@ RULES_REL = Path(".claude/context/rules.json")
 HOOKS_REL = Path(".claude/hooks")
 SEPARATORS = re.compile(r"\s*(?:—|–|--|-|:|—)\s+")
 DEPTHS = ("quick", "standard", "deep")
+# An alias only *mentioned* inside a sentence must be at least this long to
+# resolve a window. Measured against a 17-case corpus (tests/test_app_map.py):
+# every alias of 5 characters or fewer is an ordinary English word — log, ops,
+# tx, ml, post, sale, write, shows, audit, month, price, stock, home, grid —
+# while 6+ holds the specific ones: vision, camera, photos, corpus, bidding,
+# signals, metrics. 6 is the least restrictive threshold that scores 17/17;
+# raising it to 7 would also pass the corpus but would stop `vision` and
+# `camera` resolving, which are exactly the mentions that should.
+MIN_INCIDENTAL_ALIAS = 6
 # Any of these in the request means the money/schema rules are in play.
 # `p/l` and `p&l` are spelled out rather than folded into the `\w*` alternation
 # below: the old `p/?l` made the optional slash collapse to a bare `pl`, and with
@@ -184,8 +193,35 @@ def split_request(request: str) -> tuple[str, str, str]:
     return body, body, depth
 
 
+def names_a_window(head: str, whole: str, name: str) -> bool:
+    """The request **names** this window, rather than mentioning it in passing.
+
+    A distinct head — the ``"Inventory — add a filter"`` form — that *is* the
+    alias, or opens or closes with it. When the request carries no separator,
+    ``split_request`` returns the whole sentence as the head, and a sentence is
+    not a naming however many aliases happen to fall inside it.
+    """
+    if head.strip().lower() == whole.strip().lower():
+        return False  # no separator: the "head" is the entire request
+    h = head.strip().lower()
+    return h == name or h.startswith(f"{name} ") or h.endswith(f" {name}")
+
+
 def resolve_window(head: str, whole: str, data: dict) -> tuple[str | None, list[str]]:
-    """Score every window against the request; return (key, ambiguous_keys)."""
+    """Score every window against the request; return (key, ambiguous_keys).
+
+    Two tiers, and the split between them is the whole point. A request that
+    **names** a window is taken at face value. A request that merely *contains*
+    a word which happens to be an alias has to clear ``MIN_INCIDENTAL_ALIAS``,
+    because the short aliases are ordinary English: ``log``, ``post``, ``write``,
+    ``shows``, ``audit``, ``month``, ``price``, ``stock``, ``grid``, ``home``.
+
+    Ticket 010's own request — *"…not the decision log"* — used to resolve to
+    **History** and exit 0, giving a confident dossier about the transaction
+    ledger for a task that touched no app code. Exit 2 costs one re-run and
+    prints every window; exit 0 wrong is trusted by everything downstream, so
+    refusing is strictly the better way to be wrong.
+    """
     scores: dict[str, int] = {}
     head_l = head.lower()
     whole_l = whole.lower()
@@ -196,10 +232,13 @@ def resolve_window(head: str, whole: str, data: dict) -> tuple[str | None, list[
         for name in names:
             if not name:
                 continue
-            pattern = re.compile(rf"\b{re.escape(name)}\b")
-            if pattern.search(head_l):
+            if names_a_window(head, whole, name):
                 best = max(best, 100 + len(name))
-            elif pattern.search(whole_l):
+                continue
+            if len(name) < MIN_INCIDENTAL_ALIAS:
+                continue  # a word, not a name — see the constant
+            pattern = re.compile(rf"\b{re.escape(name)}\b")
+            if pattern.search(head_l) or pattern.search(whole_l):
                 best = max(best, 40 + len(name))
         if best:
             scores[key] = best
@@ -627,6 +666,14 @@ def main(argv: list[str]) -> int:
             )
         else:
             print(f"could not resolve a window from: {request!r}", file=sys.stderr)
+            print(
+                "\nA window mentioned in passing does not resolve one — the short "
+                "aliases (log, post, write, shows, audit) are ordinary words. Name "
+                'it explicitly as "<window> — <task>", or if this is cross-cutting '
+                "work with no window (tooling, migrations, packaging), that is what "
+                "this exit code is for: run `plan.py validate` instead.",
+                file=sys.stderr,
+            )
         print("", file=sys.stderr)
         cmd_windows(data)
         return 2

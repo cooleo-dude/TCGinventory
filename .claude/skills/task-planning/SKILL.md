@@ -35,7 +35,14 @@ in the file claimed. Handle its exit code:
 Other subcommands: `plan.py validate` (drift check alone) and `plan.py windows`
 (list destinations + aliases).
 
-**Cross-cutting work with no window** — migrations, theme, packaging,
+**A window must be *named*, not merely mentioned.** `"Inventory — add a filter"`
+resolves; so does a mention specific enough to mean it (`recognition`,
+`dashboard`, `calendar`). A sentence that merely contains a short alias does
+**not** — `log`, `post`, `write`, `shows`, `audit`, `month`, `price`, `stock`
+are ordinary English words, and treating them as names produced a confident
+dossier for the wrong screen. If you meant a window, say `"<window> — <task>"`.
+
+**Cross-cutting work with no window** — migrations, theme, packaging, tooling,
 services-only changes — will exit `2`. That is correct. Run `plan.py validate`
 instead and read the `architecture`, `databases` and `shared_ui` sections of the
 map directly. Say in your brief that you did this and why.

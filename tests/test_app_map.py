@@ -61,6 +61,62 @@ def test_every_window_resolves_from_its_own_aliases(plan, app_map):
             )
 
 
+# A window NAMED resolves; a window MENTIONED does not (ticket 011). The corpus
+# that picked the model, kept as the test rather than re-derived. `None` means
+# the script must refuse and exit 2 — which prints every window and costs one
+# re-run, where a confident wrong dossier is trusted by everything downstream.
+RESOLUTION_CORPUS = [
+    # named in a distinct head — taken at face value, no floor
+    ("Inventory — add a filter for graded cards", "inventory"),
+    ("Recognition — box proposals are off by a pixel", "recognition"),
+    ("Dashboard: the money-movement chart is empty", "dashboard"),
+    ("Operations — add a tile for compacting the index", "operations"),
+    ("History — void should keep the row visible", "history"),
+    # mentioned, but the alias is specific enough to mean it
+    ("add a column to the inventory grid", "inventory"),
+    ("fix the recognition suggestions for japanese cards", "recognition"),
+    ("the dashboard tiles should refresh after a void", "dashboard"),
+    ("speed up the calendar month view", "calendar"),
+    ("ticket 012 — the auctions max bid is wrong", "auctions"),
+    ("ticket 004 — recognition prewarm costs 112mb at startup", "recognition"),
+    # mentioned only by a word that happens to be an alias — must refuse
+    ("ticket 010 — planning reads the rule registry, not the decision log", None),
+    ("ticket 007 — worker threads are not parked at shutdown", None),
+    ("the tile shows a status while it runs", None),  # shows -> calendar
+    ("write the migration for the new column", None),  # write -> transaction
+    ("post a message to the log when a job fails", None),  # post/log
+    ("audit the startup path for slow imports", None),  # audit -> history
+]
+
+
+@pytest.mark.parametrize("request_text,expected", RESOLUTION_CORPUS)
+def test_a_window_must_be_named_not_merely_mentioned(
+    plan, app_map, request_text, expected
+):
+    """Ticket 011's negative cases are the point of the change.
+
+    Before it, `"…not the decision log"` resolved to History and exited 0 — a
+    dossier about the transaction ledger for a task touching no app code.
+    """
+    head, _task, _depth = plan.split_request(request_text)
+    got, ambiguous = plan.resolve_window(head, request_text, app_map)
+    assert got == expected, (
+        f"{request_text!r} -> {got or ('ambiguous: ' + str(ambiguous))}, "
+        f"expected {expected}"
+    )
+
+
+def test_the_floor_applies_to_plain_sentences_not_only_separated_ones(plan, app_map):
+    """The bug the first attempt missed: `split_request` returns the whole
+    sentence as the head when there is no separator, so a head-vs-body floor
+    never fires on the commonest request shape."""
+    head, _task, _depth = plan.split_request("write the migration for the new column")
+    assert head == "write the migration for the new column"  # head IS the whole thing
+    assert not plan.names_a_window(head, head, "write")
+    # and the same word in a real head does name the window
+    assert plan.names_a_window("write", "write — do a thing", "write")
+
+
 def test_depth_and_task_are_parsed_off_the_request(plan):
     head, task, depth = plan.split_request(
         "inventory — add a 'days held' column | depth: deep"
