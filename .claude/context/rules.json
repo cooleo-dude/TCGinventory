@@ -1,5 +1,5 @@
 {
-  "_about": "The closed set of rules the review critics may judge against. A finding must cite a rule id from this file; anything else is inadmissible. Each rule points at the document that actually states it \u2014 this registry is an index, never the source. `.claude/skills/sdd-review/scripts/rules.py check` (and tests/test_rules.py) proves every source file, anchor and excerpt still matches, so a spec edit that changes what a rule means fails the suite instead of rotting silently.",
+  "_about": "The closed set of rules the review critics may judge against. A finding must cite a rule id from this file; anything else is inadmissible. Each rule points at the document that actually states it \u2014 this registry is an index, never the source. `.claude/hooks/rules.py check` (and tests/test_rules.py) proves every source file, anchor and excerpt still matches, so a spec edit that changes what a rule means fails the suite instead of rotting silently.",
   "version": 1,
   "excerpt_note": "excerpt_sha256 is the sha256 of the cited section's text \u2014 from its anchor line up to the next heading of the same level, whitespace-stripped. Regenerate deliberately with `rules.py reseal <id>` after confirming the rule still says what the registry claims.",
   "lanes": {
@@ -97,9 +97,9 @@
       "rule": "Migrations are forward-only and append-only: add a new numbered file in data/migrations/, never edit a shipped one.",
       "violation": "A modification to an existing file under data/migrations/, or a numbered migration aimed at a database other than inventory.db.",
       "source": {
-        "file": "CLAUDE.md",
-        "anchor": "## Non-negotiable architecture rules",
-        "excerpt_sha256": "ac6adee038463cef"
+        "file": "specs/01-architecture.md",
+        "anchor": "## Data storage & migrations",
+        "excerpt_sha256": "5add4d2d60b3d743"
       },
       "scope": [
         "src/tcginventory/data/migrations/**",
@@ -139,17 +139,169 @@
       "severity_max": "block"
     },
     {
-      "id": "INVARIANTS-DOC",
+      "id": "INV-ONHAND-SUM",
       "lane": "invariants",
-      "rule": "The ledger invariants in specs/02-data-model.md must always hold.",
-      "violation": "A change that breaks any numbered invariant in that section and is not covered by a more specific rule here.",
+      "rule": "Invariant 1: the sum of lot.remaining_qty for an item equals the units currently on hand for that item.",
+      "violation": "An on-hand quantity derived from anything other than the sum over open lots, or a write that moves remaining_qty without a corresponding lot effect.",
       "source": {
         "file": "specs/02-data-model.md",
         "anchor": "## Invariants (must always hold)",
         "excerpt_sha256": "628505bbda028f63"
       },
       "scope": [
-        "src/tcginventory/**/*.py"
+        "src/tcginventory/data/repositories.py",
+        "src/tcginventory/services/transactions.py",
+        "src/tcginventory/services/inventory.py",
+        "src/tcginventory/services/importexport.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "INV-CONSUMPTION-BALANCE",
+      "lane": "invariants",
+      "rule": "Invariant 2: for any `out` line, the sum of lot_consumption.quantity equals transaction_line.quantity.",
+      "violation": "A disposal writing a line without consuming lots to match it, or a multi-lot drawdown left short when one lot runs out mid-line.",
+      "source": {
+        "file": "specs/02-data-model.md",
+        "anchor": "## Invariants (must always hold)",
+        "excerpt_sha256": "628505bbda028f63"
+      },
+      "scope": [
+        "src/tcginventory/data/repositories.py",
+        "src/tcginventory/services/transactions.py",
+        "src/tcginventory/services/importexport.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "INV-REMAINING-BOUNDS",
+      "lane": "invariants",
+      "rule": "Invariant 3: a lot's remaining_qty never goes negative and never exceeds its original quantity.",
+      "violation": "A drawdown with no oversell guard, or a void/restore path returning more units to a lot than it consumed.",
+      "source": {
+        "file": "specs/02-data-model.md",
+        "anchor": "## Invariants (must always hold)",
+        "excerpt_sha256": "628505bbda028f63"
+      },
+      "scope": [
+        "src/tcginventory/data/repositories.py",
+        "src/tcginventory/services/transactions.py",
+        "src/tcginventory/services/importexport.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "INV-REALIZED-RECONCILES",
+      "lane": "invariants",
+      "rule": "Invariant 4: realized P/L across all lines reconciles with the lot cost actually drawn down.",
+      "violation": "Realized P/L computed from anything but proceeds minus the basis of the lots consumed, or an aggregate that counts a voided line.",
+      "source": {
+        "file": "specs/02-data-model.md",
+        "anchor": "## Invariants (must always hold)",
+        "excerpt_sha256": "628505bbda028f63"
+      },
+      "scope": [
+        "src/tcginventory/services/transactions.py",
+        "src/tcginventory/services/reporting.py",
+        "src/tcginventory/services/allocation.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "INV-EDIT-ATOMIC",
+      "lane": "invariants",
+      "rule": "Invariant 5: voiding or editing a posted transaction reverses its lot effects atomically \u2014 edit is reverse + re-post inside one DB transaction.",
+      "violation": "A void or edit whose reversal and re-post can commit separately, or a failure path that leaves lots drawn down for a line that is now void.",
+      "source": {
+        "file": "specs/02-data-model.md",
+        "anchor": "## Invariants (must always hold)",
+        "excerpt_sha256": "628505bbda028f63"
+      },
+      "scope": [
+        "src/tcginventory/services/transactions.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "INV-CONSIDERATION-BALANCE",
+      "lane": "invariants",
+      "rule": "Invariant 6: per transaction, sum(incoming lot.unit_cost_cents * quantity) equals net_consideration_in, residual absorbed on the largest-value incoming line; the outgoing side reconciles symmetrically against net_consideration_out, with any indivisible per-unit residual absorbed by splitting the out line.",
+      "violation": "A split whose parts do not re-sum to the total, a dropped or redistributed rounding residual, or an out-line residual handled by anything other than splitting the line.",
+      "source": {
+        "file": "specs/02-data-model.md",
+        "anchor": "## Invariants (must always hold)",
+        "excerpt_sha256": "628505bbda028f63"
+      },
+      "scope": [
+        "src/tcginventory/services/allocation.py",
+        "src/tcginventory/services/transactions.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "INV-LOT-INTENT-REQUIRED",
+      "lane": "invariants",
+      "rule": "Invariant 7: every lot has a non-null intent (personal | resale | ripping) and a non-null acquired_market_value_cents.",
+      "violation": "A lot insert leaving either column NULL, or a migration adding a lot-creating path that does not populate them.",
+      "source": {
+        "file": "specs/02-data-model.md",
+        "anchor": "## Invariants (must always hold)",
+        "excerpt_sha256": "628505bbda028f63"
+      },
+      "scope": [
+        "src/tcginventory/data/repositories.py",
+        "src/tcginventory/data/migrations/**",
+        "src/tcginventory/services/transactions.py",
+        "src/tcginventory/services/importexport.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "INV-RIPPING-NEVER-CONSUMED",
+      "lane": "invariants",
+      "rule": "Invariant 8: ripping lots are never consumed by a disposal \u2014 they cannot appear on an `out` line \u2014 and are always valued at $0 market, so unrealized loss equals cost basis.",
+      "violation": "An open-lot query for disposal that does not exclude intent 'ripping', or a valuation path pricing a ripping lot above zero.",
+      "source": {
+        "file": "specs/02-data-model.md",
+        "anchor": "## Invariants (must always hold)",
+        "excerpt_sha256": "628505bbda028f63"
+      },
+      "scope": [
+        "src/tcginventory/data/repositories.py",
+        "src/tcginventory/services/transactions.py",
+        "src/tcginventory/services/inventory.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "INV-MISSING-EXCLUDED",
+      "lane": "invariants",
+      "rule": "Invariant 9: a lot flagged `missing` is excluded from on-hand quantity and is never consumed, and is valued at $0 market while keeping its cost basis. Clearing the flag restores it exactly.",
+      "violation": "An on-hand or disposal query not filtering `missing = 0`, a valuation pricing a missing lot above zero, or an unflag path that does not restore the prior state exactly.",
+      "source": {
+        "file": "specs/02-data-model.md",
+        "anchor": "## Invariants (must always hold)",
+        "excerpt_sha256": "628505bbda028f63"
+      },
+      "scope": [
+        "src/tcginventory/data/repositories.py",
+        "src/tcginventory/services/transactions.py",
+        "src/tcginventory/services/inventory.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "UNIFIED-POSTING",
+      "lane": "invariants",
+      "rule": "One unified transaction posting algorithm handles purchase/sale/trade; `type` is inferred from which sides carry cards, never passed in by the caller.",
+      "violation": "A second posting path for one transaction kind, or a caller that decides the type itself instead of letting _infer_type derive it from the give/receive sides.",
+      "source": {
+        "file": "CLAUDE.md",
+        "anchor": "## Non-negotiable architecture rules",
+        "excerpt_sha256": "ac6adee038463cef"
+      },
+      "scope": [
+        "src/tcginventory/services/**/*.py"
       ],
       "severity_max": "block"
     },
@@ -200,6 +352,21 @@
       "severity_max": "revise"
     },
     {
+      "id": "WORKER-RETIRE-NOT-REPLACE",
+      "lane": "risk",
+      "rule": "A running worker is never overwritten. Interrupt and park it with retire(worker, parked) from ui/views/_worker.py, or return early while one is in flight.",
+      "violation": "Assigning over a worker attribute that may still be running \u2014 requestInterruption() followed by a reassignment is the exact shape that aborts the process, since interruption only raises a flag.",
+      "source": {
+        "file": "docs/decisions.md",
+        "anchor": "### 2026-08-07 \u2014 Startup abort: a worker replaced while it was still running",
+        "excerpt_sha256": "26c0cc33cb8496bd"
+      },
+      "scope": [
+        "src/tcginventory/ui/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
       "id": "LEDGER-VS-DERIVED",
       "lane": "risk",
       "rule": "Only inventory.db is the ledger; vision.db, auctions.db and pricehistory.db are derived or ephemeral and are not migrated by data/migrator.py.",
@@ -237,8 +404,8 @@
       "violation": "A behavioural change with no test that would go red on revert, or a test that passes against a broken implementation.",
       "source": {
         "file": "CLAUDE.md",
-        "anchor": "## Non-negotiable architecture rules",
-        "excerpt_sha256": "ac6adee038463cef"
+        "anchor": "## Testing rules",
+        "excerpt_sha256": "4af55f041c69379d"
       },
       "scope": [
         "src/**/*.py",
@@ -252,9 +419,9 @@
       "rule": "A new validator, guard, lint or gate ships with a test proving it fails on bad input.",
       "violation": "A check subcommand or guard exercised only against the passing case.",
       "source": {
-        "file": "docs/decisions.md",
-        "anchor": null,
-        "excerpt_sha256": "3f9401b8ca91cb86"
+        "file": "CLAUDE.md",
+        "anchor": "## Testing rules",
+        "excerpt_sha256": "4af55f041c69379d"
       },
       "scope": [
         "src/**/*.py",
@@ -349,6 +516,21 @@
         "file": ".claude/context/app-map.json",
         "anchor": "shared_ui.card_preview",
         "excerpt_sha256": "8320b268e631699f"
+      },
+      "scope": [
+        "src/tcginventory/ui/**/*.py"
+      ],
+      "severity_max": "revise"
+    },
+    {
+      "id": "ICONS-LUCIDE",
+      "lane": "ui",
+      "rule": "Icons are Lucide SVGs from ui/assets/icons/, tinted at call time via icons.icon(name, color, size).",
+      "violation": "A QIcon built from a path or resource directly, an emoji or text glyph standing in for an icon, or an icon colour that is not a theme token.",
+      "source": {
+        "file": ".claude/context/app-map.json",
+        "anchor": "shared_ui.icons",
+        "excerpt_sha256": "0367e52569416598"
       },
       "scope": [
         "src/tcginventory/ui/**/*.py"

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -156,6 +157,66 @@ def test_every_rule_scope_matches_its_own_source(rules_module, registry):
         assert any(
             rules_module.path_matches(source, pattern) for pattern in rule["scope"]
         ), f"{rule['id']}: scope {rule['scope']} cannot match its source {source}"
+
+
+def test_append_only_sources_are_anchored_at_a_heading(rules_module, registry):
+    """A rule sourced from `docs/decisions.md` must cite a heading, not the file.
+
+    `anchor: null` seals everything, so every unrelated ADR breaks the seal and
+    gets resealed — which is how "never reseal to make a failure go away" decays
+    into reflex. Two rules were shaped that way and both fired on ADRs that had
+    nothing to do with them before this was enforced.
+    """
+    assert rules_module.anchor_problems(registry) == []
+
+
+def test_an_unanchored_append_only_source_is_rejected(rules_module):
+    """The negative case for the guard above — proving it can actually fail."""
+    bad = {
+        "rules": [
+            {
+                "id": "SOME-RULE",
+                "source": {"file": "docs/decisions.md", "anchor": None},
+            }
+        ]
+    }
+    problems = rules_module.anchor_problems(bad)
+    assert len(problems) == 1 and "SOME-RULE" in problems[0]
+
+    # A heading anchor on the same file is fine, and so is a null anchor on a
+    # file that is not append-only — `conftest.py` embodies its rule wholesale.
+    bad["rules"][0]["source"]["anchor"] = "### 2026-08-07 — Something"
+    assert rules_module.anchor_problems(bad) == []
+    assert (
+        rules_module.anchor_problems(
+            {
+                "rules": [
+                    {"id": "X", "source": {"file": "tests/conftest.py", "anchor": None}}
+                ]
+            }
+        )
+        == []
+    )
+
+
+def test_every_numbered_invariant_has_its_own_rule(rules_module, registry):
+    """The registry must name the invariant that broke, not gesture at the section.
+
+    `INVARIANTS-DOC` was one catch-all over nine distinct invariants: a finding
+    citing it said almost nothing about which one broke. If the spec grows a tenth
+    invariant, this goes red rather than letting it sit unenumerated.
+    """
+    spec = (ROOT / "specs/02-data-model.md").read_text(encoding="utf-8")
+    section = spec.split("## Invariants (must always hold)")[1].split("\n## ")[0]
+    numbered = [
+        line for line in section.splitlines() if re.match(r"^\d+\. ", line.strip())
+    ]
+    inv_rules = [r for r in registry["rules"] if r["id"].startswith("INV-")]
+    assert len(inv_rules) == len(numbered), (
+        f"{len(numbered)} numbered invariants in the spec but {len(inv_rules)} "
+        f"INV-* rules in the registry"
+    )
+    assert not any(r["id"] == "INVARIANTS-DOC" for r in registry["rules"])
 
 
 def _write(tmp_path: Path, payload: dict) -> str:
