@@ -243,6 +243,11 @@ def test_full_number_combines_number_with_set_total():
     # unknown total or missing number degrade gracefully.
     assert card("124", None).full_number == "124"
     assert card(None, 142).full_number is None
+    # A number the source already denominated keeps its own denominator — the
+    # set total is not this card's ("8/82/25" would be nonsense). Covers the JP
+    # rows and the Celebrations Classic Collection reprints.
+    assert card("8/82", 25).full_number == "8/82"
+    assert card("046/081", None).full_number == "046/081"
 
 
 def test_update_catalog_stores_printed_total(conn):
@@ -397,3 +402,65 @@ def test_missing_tcgdex_images_are_filled_from_github(conn):
     (card,) = CardCatalogRepository(conn).find_by_name("Abomasnow")
     assert card.image_small == "https://images.pokemontcg.io/swsh10tg/TG01.png"
     assert card.number == "TG01"
+
+
+def _classic_collection_fetch(url: str):
+    # TCGdex side: the synthetic "CC005" index, and no art for the set at all.
+    if url.endswith("/sets"):
+        return [{"id": "cel25cc", "name": "Celebrations Classic Collection"}]
+    if url.endswith("/sets/cel25cc"):
+        return {
+            "id": "cel25cc",
+            "name": "Celebrations Classic Collection",
+            "abbreviation": {"official": "CEL:CC"},
+            "cardCount": {"official": 25, "total": 25},
+            "cards": [
+                {
+                    "id": "cel25cc-CC005",
+                    "localId": "CC005",
+                    "name": "Dark Gyarados",
+                    "image": None,
+                }
+            ],
+        }
+    # pokemontcg.io dump side: same card under its *printed* numerator, "8".
+    if url.endswith("/sets/en.json"):
+        return [
+            {
+                "id": "cel25c",
+                "name": "Celebrations: Classic Collection",
+                "printedTotal": 25,
+            }
+        ]
+    if url.endswith("/cards/en/cel25c.json"):
+        return [
+            {
+                "id": "cel25c-8_A",
+                "name": "Dark Gyarados",
+                "number": "8",
+                "images": {"small": "https://images.pokemontcg.io/cel25c/8_A.png"},
+            }
+        ]
+    raise AssertionError(f"unexpected url: {url}")
+
+
+def test_classic_collection_stores_the_printed_collector_number(conn):
+    # TCGdex numbers this set "CC001…CC025", which is printed on no card and
+    # matches no price source. Every card keeps its original set's number, so
+    # the pull must store "8/82" — that is what tcgcsv prices Dark Gyarados by.
+    update_catalog(conn, fetch_json=_classic_collection_fetch)
+    repo = CardCatalogRepository(conn)
+    (card,) = repo.find_by_name("Dark Gyarados")
+    assert card.number == "8/82"
+    # The set's own total (25) must not be appended, and the "CC" prefix must
+    # not drive a subset denominator — the row showed "CC005/CC25" before.
+    assert card.full_number == "8/82"
+    assert repo.display_number(card) == "8/82"
+
+
+def test_classic_collection_art_joins_on_the_printed_numerator(conn):
+    # The dump denominates differently ("8" vs the stored "8/82"), so the image
+    # fallback has to join on the numerator or the whole set stays art-less.
+    update_catalog(conn, fetch_json=_classic_collection_fetch)
+    (card,) = CardCatalogRepository(conn).find_by_name("Dark Gyarados")
+    assert card.image_small == "https://images.pokemontcg.io/cel25c/8_A.png"
