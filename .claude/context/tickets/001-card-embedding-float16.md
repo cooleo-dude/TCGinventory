@@ -1,15 +1,47 @@
 # 001 — Store card embeddings as float16
 
 ```
-status:   open
+status:   done
 kind:     optimization
 source:   /optimization-sweep research pass (Step 7)
 issue:    #2
 axis:     storage
 found:    2026-08-07
-saving:   38.0 MB of vision.db (104.3 MB -> ~66 MB); 38 MB of RAM per loaded index
+saving:   MEASURED: vision.db 104,292,352 -> 53,006,336 bytes (-49.2%); payload
+          76.11 -> 38.06 MB. NOT a RAM saving — see the correction below.
 risk:     medium — changes a stored binary format; needs a migration + a marker
+branch:   ticket/001-card-embedding-float16
 ```
+
+## Result
+
+Landed 2026-08-09. Conversion of the real corpus took **2.1 s** for 49,733
+vectors (49,551 card + 182 region), and the agreement check was **100.00% top-1
+and 100.00% top-5** over 482 probes — 182 real photo crops plus 300 noised
+catalog renders, all against the full index, compared against answers snapshotted
+before the conversion.
+
+Three things in this ticket were wrong, and are worth carrying forward:
+
+1. **The impact table missed a reader.** `services/identity_eval.py:110-129`
+   (`load_pool`) decoded `card_embedding` with a hard-coded float32 — and it is
+   also the exact site step 6 describes as "where the pool is materialised".
+2. **The RAM claim contradicts the plan.** Step 6 says keep the working matrix
+   float32, so a loaded index is still 76.1 MB in RAM. This is a disk win only.
+   `perf.py memory` will not move.
+3. **VACUUM alone reclaims nothing here.** `open_vision` sets WAL, so the rebuilt
+   pages sit in the `-wal` file and the main file is not truncated until a
+   checkpoint. The conversion ends with `PRAGMA wal_checkpoint(TRUNCATE)`.
+
+The file shrank further than the predicted ~66 MB because the VACUUM also
+reclaimed pre-existing free pages, not only the 38 MB of halved payload.
+
+**Also note the failure mode that made the marker mandatory:** a reader left on
+float32 returns a half-length vector, and both scoring paths *skip* mismatched
+vectors rather than raising. A missed reader would have produced an identifier
+that silently suggested nothing. `vectors.unpack` now raises on a `dim`
+disagreement, and a test asserts no module outside `services/vectors.py` decodes
+an embedding.
 
 ## The finding
 

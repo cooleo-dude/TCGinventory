@@ -7,7 +7,7 @@ import pytest
 from PIL import Image
 
 from tcginventory.data.vision import CardLabel
-from tcginventory.services import exemplars, inference
+from tcginventory.services import exemplars, inference, vectors
 from tcginventory.services.recognizer import PixelEmbedder, Recognizer
 
 
@@ -31,7 +31,7 @@ def test_run_inference_identifies_confident_and_flags_low_confidence(repo, tmp_p
     img = repo.add_image(cap, "s", scene, width=160, height=80)
     region_id = repo.add_region(img, 1, left_box, None, CardLabel(card_id="A"))
     repo.put_region_embedding(
-        region_id, emb.version, "A", int(vec.shape[0]), vec.astype("float32").tobytes()
+        region_id, emb.version, "A", int(vec.shape[0]), *vectors.pack(vec)
     )
 
     def resolve(card_id):

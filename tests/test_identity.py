@@ -24,7 +24,7 @@ from tcginventory.data.vision import (
     open_vision,
 )
 from tcginventory.domain.models import CatalogCard
-from tcginventory.services import cardimages
+from tcginventory.services import cardimages, vectors
 from tcginventory.services import identity_eval as ie
 from tcginventory.services import identity_patches as ip
 
@@ -265,7 +265,7 @@ def _seed_pool(conn, repo, cards, version="test:v1"):
     )
     for cid, _name, rgb in cards:
         vec = _vector(_solid(rgb))
-        repo.put_embedding(cid, version, vec.size, vec.tobytes())
+        repo.put_embedding(cid, version, vec.size, *vectors.pack(vec))
 
 
 def _label(repo, card_id: str, rgb: tuple[int, int, int], tmp_path, number: int = 1):
@@ -417,10 +417,10 @@ def test_the_projection_applies_to_renders_but_not_to_exemplars(env):
         img, 1, (0.0, 0.0, 1.0, 1.0), None, CardLabel(card_id="exemplar-card")
     )
     repo.put_region_embedding(
-        region, "fixed:v1", "exemplar-card", 4, query_vec.tobytes()
+        region, "fixed:v1", "exemplar-card", 4, *vectors.pack(query_vec)
     )
     turned = ip.apply(query_vec, rotation)
-    repo.put_embedding("render-card", "fixed:v1", 4, turned.tobytes())
+    repo.put_embedding("render-card", "fixed:v1", 4, *vectors.pack(turned))
 
     scene = tmp_path / "q.png"
     _card_image("1/1").save(scene)

@@ -30,7 +30,7 @@ def test_ingest_labeled_scene_writes_regions_and_exemplars(repo, tmp_path):
     assert result.exemplars == 1  # only the identified one gets an exemplar
     assert repo.region_count() == 2
     assert repo.region_embedding_count() == 1
-    assert [c for c, _ in repo.region_vectors("pixel-24")] == ["A"]
+    assert [r[0] for r in repo.region_vectors("pixel-24")] == ["A"]
     assert repo.image_count() == 1
 
 

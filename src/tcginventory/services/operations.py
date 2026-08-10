@@ -286,6 +286,21 @@ OPERATIONS: tuple[Operation, ...] = (
         kind=KIND_BACKGROUND,
         caption="Corpus",
     ),
+    Operation(
+        id="vision.compact_index",
+        group="model_identity",
+        title="Compact the card index",
+        blurb=(
+            "Halves the space the card index takes on disk and in memory by "
+            "storing each card's fingerprint at half precision. Measured to pick "
+            "the same match every time, so recognition is unaffected. Takes "
+            "seconds — nothing is re-embedded."
+        ),
+        verb="Compact",
+        icon="database",
+        kind=KIND_BACKGROUND,
+        caption="Card index",
+    ),
     # -- Models & signals ---------------------------------------------------
     Operation(
         id="models.training_env",
@@ -546,6 +561,50 @@ def corpus_facts(vision_conn=None) -> tuple[int, int, int]:
             conn.close()
 
 
+def _compact_index_status() -> Status:
+    """What the stored index costs, and whether compacting would help.
+
+    Reports the dtypes actually on disk rather than a last-run timestamp: a file
+    can be half-converted (an interrupted run is deliberately safe), and "3,200
+    still at full precision" is the useful thing to say about one.
+    """
+    from tcginventory.data.vision import open_vision, vision_path
+    from tcginventory.services import vectors
+
+    path = vision_path()
+    if not path.exists():
+        return Status("no card index yet", NEVER)
+    try:
+        size = human_bytes(path.stat().st_size)
+        conn = open_vision()
+        try:
+            counts = {
+                str(row[0] or vectors.LEGACY_DTYPE): int(row[1])
+                for row in conn.execute(
+                    "SELECT dtype, COUNT(*) FROM card_embedding GROUP BY dtype"
+                )
+            }
+        finally:
+            conn.close()
+    except Exception:  # pragma: no cover - unreadable corpus reads as absent
+        return Status("no card index yet", NEVER)
+
+    total = sum(counts.values())
+    if not total:
+        return Status("no card index yet", NEVER)
+    legacy = total - counts.get(vectors.STORAGE_DTYPE, 0)
+    if not legacy:
+        return Status(f"{total:,} cards · {size} · compact", READY)
+    return Status(
+        f"{total:,} cards · {size}",
+        STALE,
+        detail=(
+            f"{legacy:,} vector(s) still at full precision — compacting would "
+            "roughly halve what the index costs on disk and in memory"
+        ),
+    )
+
+
 def human_bytes(size: int) -> str:
     value = float(size)
     for unit in ("B", "KB", "MB", "GB"):
@@ -653,6 +712,9 @@ def status_for(conn, op: Operation, *, history_conn=None) -> Status:
                 else "Labelled cards exist but none are indexed — re-index to use them"
             ),
         )
+
+    if op.id == "vision.compact_index":
+        return _compact_index_status()
 
     if op.id == "db.vacuum":
         from tcginventory import config

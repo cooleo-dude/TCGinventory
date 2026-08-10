@@ -30,7 +30,7 @@ def test_reindex_all_embeds_labeled_regions_and_is_idempotent(repo, tmp_path):
     assert repo.region_embedding_count() == 2
     assert exemplars.reindex_all(repo, emb) == 0  # skip-existing → no re-embed
 
-    cards = sorted(card_id for card_id, _ in repo.region_vectors(emb.version))
+    cards = sorted(row[0] for row in repo.region_vectors(emb.version))
     assert cards == ["A", "B"]
 
 

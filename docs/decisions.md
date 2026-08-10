@@ -2234,6 +2234,79 @@ when `HEAD` is the PR head, and must not when it is not, which is the case that
 silently passes today — and `show` prints the binding. Today's guarantee is
 already exactly this weak; the difference is that it will say so.
 
+## 2026-08-09 — Embeddings are stored at half precision, and say so
+
+`card_embedding.vector` was 76.1 MB of a 104.3 MB `vision.db` — the largest
+single thing in the file. The vectors are L2-normalised DINOv2-small outputs
+compared only by cosine ranking, so float32's dynamic range buys nothing, and
+measurement says it buys nothing *in fact*: over all 49,551 vectors, 482 probes
+(182 real photo crops and 300 noised catalog renders) picked the **identical**
+best match and the identical top-5 after conversion. **Stored vectors are now
+float16.**
+
+**int8 stays rejected.** It moves 3% of top-1 answers. Identification is at ~45%
+top-1 (ADR 2026-08-05); spending three points of agreement for a further 19 MB is
+not a trade worth making, and nothing should revisit it without a full benchmark.
+
+### The dtype is written down, not inferred
+
+Each row carries a `dtype` column defaulting to `'float32'`. Three things follow,
+and they are the reason this shape was chosen over casting in place unmarked:
+
+* an existing file keeps reading before it is converted;
+* an **interrupted** conversion leaves a mixed table that is still correct, which
+  is what makes the job safe to stop and safe to re-run;
+* a rollback is a cast in the other direction.
+
+Inferring the dtype from blob length was the obvious alternative and is a trap:
+it works exactly until a model with a different `dim` lands, and then it is
+silently wrong. `services/vectors.py` is now the only module that names a storage
+dtype — `data/vision.py` keeps passing bytes, because numpy stays in the service
+layer.
+
+### Why a marker mattered more than it looks
+
+The old readers each did `np.frombuffer(blob, dtype=np.float32)`. Point one of
+them at float16 bytes and it returns a **half-length** vector — and both scoring
+paths *skip* mismatched vectors rather than raising (`identity_eval.load_pool`
+drops rows whose size disagrees with `dim`; `Recognizer.suggest` compares
+`vec.shape == probe.shape`). A missed reader would therefore have produced an
+identifier that quietly suggested nothing, with no traceback anywhere. So
+`unpack` takes the row's `dim` and *raises* on disagreement, and a test asserts
+no module outside `vectors.py` decodes an embedding at all. The ticket's own
+impact table missed one such reader (`identity_eval.load_pool`), which is the
+evidence that a five-place implicit convention was the actual defect.
+
+### Dequantise once, at the pool, and mind the WAL
+
+Vectors are read back as float32 wherever the pool is materialised, never per
+query: numpy emulates float16 arithmetic, and a per-query cast measured 111 ms
+against 74 ms — slower than doing nothing. **The consequence is that this is a
+disk win, not a memory one:** a loaded index is still 76.1 MB of float32 in RAM,
+and the ticket's claim of "38 MB of RAM per loaded index" contradicted its own
+instruction to keep the working matrix float32. Only the disk and the page cache
+shrink.
+
+`VACUUM` alone also did nothing visible: `open_vision` sets WAL, so the rebuilt
+pages sit in the `-wal` file until a checkpoint and the main file never shrinks.
+The conversion ends with `PRAGMA wal_checkpoint(TRUNCATE)`. A test asserts the
+file on disk actually got smaller, because that is the whole point and it is the
+part that silently didn't happen.
+
+### It is a tile, not a startup migration
+
+Conversion is a *Compact the card index* operation in the `model_identity` group
+— one registry entry and one `(conn) -> sentence` runner, per M-Ops1. Running it
+inside `open_vision` would put a 76 MB read-modify-write behind the splash on
+every boot forever to save one click once. The cost of the choice is that the
+saving is opt-in: an un-compacted install keeps its bytes and the tile says so,
+reporting the dtypes actually on disk rather than a last-run timestamp, since a
+half-converted file is a legitimate state.
+
+Measured on the real corpus: **104,292,352 → 53,006,336 bytes** in 2.1 s for
+49,733 vectors, payload 76.11 → 38.06 MB, zero free pages left, and 100.00% top-1
+and top-5 agreement with the pre-conversion answers.
+
 ### 2026-08-10 — Planning reads the rule registry; this file is an archive (ticket 010)
 
 - **Decision:** `plan.py` no longer lists `docs/decisions.md` as a required read.

@@ -33,6 +33,7 @@ from tcginventory.data.vision import (
     ModelRunRepository,
     VisionRepository,
 )
+from tcginventory.services import vectors
 from tcginventory.services.exemplars import crop_region
 
 TOP_K = 5
@@ -110,23 +111,29 @@ def collect_queries(repo: VisionRepository, embedder) -> list[Query]:
 def load_pool(
     repo: VisionRepository, model_version: str
 ) -> tuple[list[str], np.ndarray]:
-    """The catalog index as (card_ids, matrix). One matmul searches all of it."""
+    """The catalog index as (card_ids, matrix). One matmul searches all of it.
+
+    This is where stored vectors become the working matrix, so it is where the
+    dequantisation happens — **once**, for the whole pool. Casting per query
+    instead measured 111 ms against 74 ms; see :mod:`services.vectors`.
+    """
     rows = repo.conn.execute(
-        "SELECT card_id, dim, vector FROM card_embedding WHERE model_version = ? "
-        "ORDER BY card_id",
+        "SELECT card_id, dim, vector, dtype FROM card_embedding "
+        "WHERE model_version = ? ORDER BY card_id",
         (model_version,),
     ).fetchall()
     ids: list[str] = []
-    vectors: list[np.ndarray] = []
+    rows_out: list[np.ndarray] = []
     for row in rows:
-        vec = np.frombuffer(row["vector"], dtype=np.float32)
-        if vec.size != int(row["dim"]):  # pragma: no cover - corrupt row
+        try:
+            vec = vectors.unpack(row["vector"], row["dtype"], int(row["dim"]))
+        except ValueError:  # pragma: no cover - corrupt row
             continue
         ids.append(row["card_id"])
-        vectors.append(vec)
-    if not vectors:
+        rows_out.append(vec)
+    if not rows_out:
         return [], np.zeros((0, 0), dtype=np.float32)
-    return ids, np.vstack(vectors)
+    return ids, np.vstack(rows_out)
 
 
 def evaluate(

@@ -81,8 +81,9 @@ CREATE INDEX IF NOT EXISTS idx_region_card ON region(card_id);
 CREATE TABLE IF NOT EXISTS card_embedding (
     card_id       TEXT    NOT NULL,
     model_version TEXT    NOT NULL,      -- embedder identity; changing it re-embeds
-    dim           INTEGER NOT NULL,
-    vector        BLOB    NOT NULL,      -- float32 bytes, L2-normalised
+    dim           INTEGER NOT NULL,      -- ELEMENTS, not bytes (see dtype)
+    vector        BLOB    NOT NULL,      -- L2-normalised, packed as `dtype`
+    dtype         TEXT    NOT NULL DEFAULT 'float32',  -- how to read `vector`
     created_at    TEXT    NOT NULL,
     PRIMARY KEY (card_id, model_version)
 );
@@ -90,8 +91,9 @@ CREATE TABLE IF NOT EXISTS region_embedding (
     region_id     INTEGER NOT NULL REFERENCES region(id) ON DELETE CASCADE,
     model_version TEXT    NOT NULL,      -- embedder identity; changing it re-embeds
     card_id       TEXT    NOT NULL,      -- the region's label (denormalised)
-    dim           INTEGER NOT NULL,
-    vector        BLOB    NOT NULL,      -- float32 bytes, L2-normalised crop embedding
+    dim           INTEGER NOT NULL,      -- ELEMENTS, not bytes (see dtype)
+    vector        BLOB    NOT NULL,      -- L2-normalised crop embedding, as `dtype`
+    dtype         TEXT    NOT NULL DEFAULT 'float32',  -- how to read `vector`
     created_at    TEXT    NOT NULL,
     PRIMARY KEY (region_id, model_version)
 );
@@ -206,6 +208,20 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE model_run ADD COLUMN fitness REAL")
     if "split_policy" not in run_cols:
         conn.execute("ALTER TABLE model_run ADD COLUMN split_policy TEXT")
+
+    # How to read `vector` (2026-08-09). Embeddings were float32-only until
+    # float16 halved them at no measured cost, and the dtype was implicit in
+    # every reader's `np.frombuffer(..., np.float32)`. Defaulting to 'float32'
+    # is what lets an existing file keep reading while it is converted a table
+    # at a time — a half-converted table is mixed, and mixed is still correct.
+    # Nothing infers the dtype from blob length; a model with a different `dim`
+    # would make that guess wrong. See services/vectors.py.
+    for table in ("card_embedding", "region_embedding"):
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if "dtype" not in cols:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN dtype TEXT NOT NULL DEFAULT 'float32'"
+            )
 
 
 def _migrate_run_log(conn: sqlite3.Connection) -> None:
@@ -379,12 +395,22 @@ class VisionRepository:
 
     # -- reference-embedding cache (bytes in/out; numpy stays in the service) --
 
-    def get_embedding(self, card_id: str, model_version: str) -> bytes | None:
+    def get_embedding(
+        self, card_id: str, model_version: str
+    ) -> tuple[bytes, str] | None:
+        """The stored ``(vector-bytes, dtype)``, or ``None``.
+
+        The dtype comes back with the bytes because they are meaningless apart:
+        reading a float16 blob as float32 yields a half-length vector that the
+        scoring paths *skip* rather than reject. Decode with
+        ``services.vectors.unpack``.
+        """
         row = self.conn.execute(
-            "SELECT vector FROM card_embedding WHERE card_id = ? AND model_version = ?",
+            "SELECT vector, dtype FROM card_embedding "
+            "WHERE card_id = ? AND model_version = ?",
             (card_id, model_version),
         ).fetchone()
-        return bytes(row["vector"]) if row is not None else None
+        return (bytes(row["vector"]), row["dtype"]) if row is not None else None
 
     def put_embedding(
         self,
@@ -392,14 +418,16 @@ class VisionRepository:
         model_version: str,
         dim: int,
         vector: bytes,
+        dtype: str,
         now: str | None = None,
     ) -> None:
         with self.conn:
             self.conn.execute(
                 "INSERT INTO card_embedding (card_id, model_version, dim, vector, "
-                "created_at) VALUES (?,?,?,?,?) ON CONFLICT(card_id, model_version) "
-                "DO UPDATE SET dim = excluded.dim, vector = excluded.vector",
-                (card_id, model_version, dim, vector, now or _now()),
+                "dtype, created_at) VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(card_id, model_version) DO UPDATE SET "
+                "dim = excluded.dim, vector = excluded.vector, dtype = excluded.dtype",
+                (card_id, model_version, dim, vector, dtype, now or _now()),
             )
 
     def embedding_count(self) -> int:
@@ -414,16 +442,17 @@ class VisionRepository:
         card_id: str,
         dim: int,
         vector: bytes,
+        dtype: str,
         now: str | None = None,
     ) -> None:
         with self.conn:
             self.conn.execute(
                 "INSERT INTO region_embedding (region_id, model_version, card_id, "
-                "dim, vector, created_at) VALUES (?,?,?,?,?,?) "
+                "dim, vector, dtype, created_at) VALUES (?,?,?,?,?,?,?) "
                 "ON CONFLICT(region_id, model_version) DO UPDATE SET "
                 "card_id = excluded.card_id, dim = excluded.dim, "
-                "vector = excluded.vector",
-                (region_id, model_version, card_id, dim, vector, now or _now()),
+                "vector = excluded.vector, dtype = excluded.dtype",
+                (region_id, model_version, card_id, dim, vector, dtype, now or _now()),
             )
 
     def has_region_embedding(self, region_id: int, model_version: str) -> bool:
@@ -439,13 +468,20 @@ class VisionRepository:
     def region_embedding_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM region_embedding").fetchone()[0]
 
-    def region_vectors(self, model_version: str) -> list[tuple[str, bytes]]:
-        """All exemplar (card_id, vector-bytes) pairs for a model version."""
+    def region_vectors(self, model_version: str) -> list[tuple[str, bytes, str, int]]:
+        """All exemplar ``(card_id, vector-bytes, dtype, dim)`` for a version.
+
+        Decode with ``services.vectors.unpack`` — the dtype and dim travel with
+        the bytes so a caller cannot read them as the wrong type.
+        """
         rows = self.conn.execute(
-            "SELECT card_id, vector FROM region_embedding WHERE model_version = ?",
+            "SELECT card_id, vector, dtype, dim FROM region_embedding "
+            "WHERE model_version = ?",
             (model_version,),
         ).fetchall()
-        return [(r["card_id"], bytes(r["vector"])) for r in rows]
+        return [
+            (r["card_id"], bytes(r["vector"]), r["dtype"], int(r["dim"])) for r in rows
+        ]
 
     def labeled_regions(self) -> list[sqlite3.Row]:
         """Regions carrying a catalog id, joined with their image path/size —

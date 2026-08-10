@@ -24,6 +24,7 @@ from tcginventory.data.migrator import migrate  # noqa: E402
 from tcginventory.data.repositories import CardCatalogRepository  # noqa: E402
 from tcginventory.data.vision import VisionRepository, open_vision  # noqa: E402
 from tcginventory.domain.models import CatalogCard  # noqa: E402
+from tcginventory.services import vectors  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -78,7 +79,7 @@ def _bilingual_catalog(conn, repo, version="test:v1"):
     )
     for i, cid in enumerate(("en-1", "en-2", "jp-1")):
         vec = np.full(4, i + 1, dtype=np.float32)
-        repo.put_embedding(cid, version, vec.size, vec.tobytes())
+        repo.put_embedding(cid, version, vec.size, *vectors.pack(vec))
 
 
 def test_a_box_ranks_against_its_own_language(app, tmp_path):

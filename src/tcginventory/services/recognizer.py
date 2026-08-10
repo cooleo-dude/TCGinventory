@@ -33,6 +33,7 @@ from PIL import Image
 
 from tcginventory import config
 from tcginventory.data.vision import VisionRepository
+from tcginventory.services import vectors
 
 try:
     import onnxruntime as _ort
@@ -268,14 +269,14 @@ class Recognizer:
         exemplars = self._exemplars_by_card(set(candidates))
         scored: list[Suggestion] = []
         for card_id in candidates:
-            vectors = exemplars.get(card_id)
+            refs = exemplars.get(card_id)
             probe = query
-            if not vectors:
+            if not refs:
                 ref = self._reference_vector(card_id)
-                vectors = [ref] if ref is not None else []
+                refs = [ref] if ref is not None else []
                 probe = as_render
             best: float | None = None
-            for vec in vectors:
+            for vec in refs:
                 if vec.shape == probe.shape:
                     score = float(np.dot(probe, vec))
                     if best is None or score > best:
@@ -321,10 +322,8 @@ class Recognizer:
         key = (version, self._repo.region_embedding_count())
         if self._exemplar_index is None or self._exemplar_key != key:
             index: dict[str, list[np.ndarray]] = {}
-            for card_id, blob in self._repo.region_vectors(version):
-                index.setdefault(card_id, []).append(
-                    np.frombuffer(blob, dtype=np.float32)
-                )
+            for card_id, blob, dtype, dim in self._repo.region_vectors(version):
+                index.setdefault(card_id, []).append(vectors.unpack(blob, dtype, dim))
             self._exemplar_index = index
             self._exemplar_key = key
         return self._exemplar_index
@@ -333,15 +332,17 @@ class Recognizer:
         version = self._embedder.version
         cached = self._repo.get_embedding(card_id, version)
         if cached is not None:
-            return np.frombuffer(cached, dtype=np.float32)
+            blob, dtype = cached
+            return vectors.unpack(blob, dtype)
         path = self._reference_image(card_id) if self._reference_image else None
         if not path or not Path(path).exists():
             return None
         vec = self._embedder.embed(path)
-        self._repo.put_embedding(
-            card_id, version, int(vec.shape[0]), vec.astype(np.float32).tobytes()
-        )
-        return vec
+        blob, dtype = vectors.pack(vec)
+        self._repo.put_embedding(card_id, version, int(vec.shape[0]), blob, dtype)
+        # Return what was *stored*, not what was computed, so a card scores the
+        # same whether this call embedded it or a later one read it back.
+        return vectors.unpack(blob, dtype)
 
 
 def catalog_reference_resolver(conn: sqlite3.Connection):

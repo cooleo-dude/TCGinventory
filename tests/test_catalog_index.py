@@ -15,7 +15,7 @@ from tcginventory.data.migrator import migrate
 from tcginventory.data.repositories import CardCatalogRepository, ItemRepository
 from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
 from tcginventory.domain.models import CatalogCard
-from tcginventory.services import cardimages
+from tcginventory.services import cardimages, vectors
 from tcginventory.services import catalog_index as ci
 
 
@@ -342,7 +342,7 @@ def _bilingual(conn):
 def _index(repo, card_ids, version="test:v1"):
     for i, cid in enumerate(card_ids):
         vec = np.full(4, i + 1, dtype=np.float32)
-        repo.put_embedding(cid, version, vec.size, vec.tobytes())
+        repo.put_embedding(cid, version, vec.size, *vectors.pack(vec))
 
 
 def test_the_pool_is_what_has_been_indexed(env):

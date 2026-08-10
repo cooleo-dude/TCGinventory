@@ -242,7 +242,7 @@ def test_transaction_autofill_writes_confirmed_cards_back_to_corpus(
     # The one confirmed, identified card was fed back: a region + a crop exemplar.
     assert vrepo.region_count() == 1
     assert vrepo.region_embedding_count() == 1
-    assert [c for c, _ in vrepo.region_vectors("pixel-24")] == ["cel-4"]
+    assert [r[0] for r in vrepo.region_vectors("pixel-24")] == ["cel-4"]
     view.deleteLater()
 
 
