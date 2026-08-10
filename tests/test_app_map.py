@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -98,8 +99,134 @@ def test_money_and_schema_flags_fire_on_the_right_words(plan):
     assert not plan.SCHEMA_WORDS.search("tint the nav icon on hover")
 
 
+def test_the_money_flag_does_not_fire_on_plan_shaped_words(plan):
+    """`p/?l` used to collapse to a bare `pl`, and with the trailing `\\w*` it
+    matched `plan`, `planning`, `please` and `platform` — putting
+    specs/02-data-model.md at the top of the reading list for any task with the
+    word "planning" in it. P/L itself must still match."""
+    for word in ("planning", "plan the work", "please do it", "platform"):
+        assert not plan.MONEY_WORDS.search(word), word
+    for word in ("the p/l chart", "P/L", "p&l"):
+        assert plan.MONEY_WORDS.search(word), word
+
+
 def test_next_migration_follows_the_directory(plan):
     nxt = plan.next_migration(ROOT)
     existing = sorted((ROOT / "src/tcginventory/data/migrations").glob("*.sql"))
     assert nxt.isdigit() and len(nxt) == 4
     assert not any(f.name.startswith(nxt) for f in existing)
+
+
+# -- the dossier reads the rule registry, not the decision log (ticket 010) --
+
+
+def test_the_decision_log_is_never_read_whole(plan, app_map):
+    """It is 89 entries and ~30k tokens, it is append-only so that cost only
+    rises, and it answers the wrong question. What binds comes from the registry.
+
+    Four windows do have their design in the log rather than in a spec file —
+    those stay, but as bounded section reads with a line range, never the file.
+    """
+    for key, win in app_map["windows"].items():
+        rows = plan.reading_list(ROOT, app_map, win, "deep", "money and schema")
+        for path, why, _ok in rows:
+            if path == "docs/decisions.md":
+                assert re.search(r"lines \d+-\d+", why), f"{key}: whole-file read"
+        out = plan.render(ROOT, app_map, key, "adjust a column", "standard", key)
+
+    # Writing one is still expected — only the whole-file *read* is gone.
+    assert "recorded in docs/decisions.md" in out
+
+
+def test_a_window_whose_design_is_an_adr_gets_the_section_not_the_file(plan, app_map):
+    """price_lookup and auctions have no spec of their own; the map names which
+    ADR entries carry their design, by date."""
+    win = app_map["windows"]["price_lookup"]
+    rows = plan.reading_list(ROOT, app_map, win, "standard", "market chart")
+    adr = [(p, why) for p, why, _ok in rows if p == "docs/decisions.md"]
+    assert adr, "price_lookup's design ADRs vanished from the reading list"
+    for _path, why in adr:
+        start, end = map(int, re.search(r"lines (\d+)-(\d+)", why).groups())
+        assert 0 < start < end
+    log = (ROOT / "docs/decisions.md").read_text(encoding="utf-8").splitlines()
+    spans = sum(
+        int(re.search(r"lines (\d+)-(\d+)", why).group(2))
+        - int(re.search(r"lines (\d+)-(\d+)", why).group(1))
+        for _p, why in adr
+    )
+    assert spans < len(log) / 4, "the 'sections' cover most of the file"
+
+
+def test_validate_rejects_an_unanchored_or_moved_adr_reference(plan, app_map):
+    """The negative case for the anchor guard.
+
+    Same discipline the rule registry already applies to this file: cite a
+    heading, never the whole thing. Without the check, renaming an ADR heading
+    silently drops a window's design note instead of failing.
+    """
+    import copy
+
+    bad = copy.deepcopy(app_map)
+    bad["windows"]["operations"]["specs"] = ["docs/decisions.md (M-Ops1)"]
+    problems = plan.validate(ROOT, bad)
+    assert any("no '§' anchor" in p for p in problems), problems
+
+    moved = copy.deepcopy(app_map)
+    moved["windows"]["operations"]["specs"] = [
+        "docs/decisions.md § ### 2026-08-04 — A heading nobody ever wrote"
+    ]
+    problems = plan.validate(ROOT, moved)
+    assert any("ADR heading not found" in p for p in problems), problems
+
+    # And the real map is clean.
+    assert not [p for p in plan.validate(ROOT, app_map) if "ADR" in p or "anchor" in p]
+
+
+def test_scoped_rules_keeps_what_applies_and_drops_what_does_not(plan):
+    """The whole value is the scoping. A rules block that returns everything is
+    the log's problem wearing a different hat."""
+    ui_model = ["src/tcginventory/ui/models/inventory_model.py"]
+    service = ["src/tcginventory/services/recognizer.py"]
+
+    in_ui, _ = plan.scoped_rules(ROOT, ui_model)
+    in_svc, _ = plan.scoped_rules(ROOT, service)
+    ids = lambda by_lane: {r["id"] for rules in by_lane.values() for r in rules}  # noqa: E731
+
+    # QT-MODEL-SORT-ROLE is scoped src/tcginventory/ui/models/**/*.py
+    assert "QT-MODEL-SORT-ROLE" in ids(in_ui)
+    assert "QT-MODEL-SORT-ROLE" not in ids(in_svc)
+    # QT-FREE-CORE binds the service layer and must survive the narrowing
+    assert "QT-FREE-CORE" in ids(in_svc)
+
+
+def test_scoped_rules_never_offers_the_registrys_own_escape_hatch(plan):
+    """UNENUMERATED is scoped `**` and would match every path. It is a licence
+    for a critic to raise something novel, not a rule anyone can violate."""
+    by_lane, _ = plan.scoped_rules(ROOT, ["src/tcginventory/services/pricing.py"])
+    assert "UNENUMERATED" not in {r["id"] for rs in by_lane.values() for r in rs}
+
+
+def test_a_path_no_rule_claims_is_reported_not_passed_over(plan):
+    """An empty rules block and 'the registry does not cover this' look identical
+    to a reader and mean opposite things."""
+    _by_lane, unclaimed = plan.scoped_rules(ROOT, ["docs/user-guide.md"])
+    assert unclaimed == ["docs/user-guide.md"]
+
+
+def test_a_missing_registry_stops_the_run_rather_than_printing_no_rules(plan, tmp_path):
+    """The one way this change can be dangerously wrong: a dossier that silently
+    prints no rules reads as 'nothing binds here'."""
+    with pytest.raises(SystemExit, match="rule registry is missing"):
+        plan.load_rules(tmp_path)
+
+    (tmp_path / ".claude" / "context").mkdir(parents=True)
+    (tmp_path / plan.RULES_REL).write_text("{not json", encoding="utf-8")
+    with pytest.raises(SystemExit, match="not valid JSON"):
+        plan.load_rules(tmp_path)
+
+
+def test_the_dossier_names_the_rules_and_how_to_read_their_reasoning(plan, app_map):
+    out = plan.render(ROOT, app_map, "inventory", "add a column", "standard", "inv")
+    assert "## Rules in scope" in out
+    assert "MONEY-CENTS" in out  # named by id, so it can be looked up
+    assert "rules.py show" in out  # and the log stays reachable by anchor

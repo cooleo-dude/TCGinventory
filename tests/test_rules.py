@@ -13,6 +13,7 @@ an agent runs and the check the suite runs cannot diverge.
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import re
@@ -197,6 +198,54 @@ def test_an_unanchored_append_only_source_is_rejected(rules_module):
         )
         == []
     )
+
+
+def test_show_prints_the_one_section_a_rule_is_sourced_from(
+    rules_module, registry, capsys
+):
+    """This is what makes the decision log affordable to keep.
+
+    Planning reads the registry and never the 89-entry log; when the reasoning
+    behind a rule is actually wanted, `show` follows the anchor to exactly one
+    section instead of the whole file (ticket 010).
+    """
+    adr_rules = [
+        r for r in registry["rules"] if r["source"]["file"] == "docs/decisions.md"
+    ]
+    assert adr_rules, "expected at least one rule anchored into the decision log"
+    rule = adr_rules[0]
+
+    code = rules_module.cmd_show(argparse.Namespace(id=rule["id"]))
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert rule["id"] in out and rule["rule"][:40] in out
+    assert rule["source"]["anchor"] in out
+    # the cited section, and only it — not the next ADR along
+    body = out.split(rule["source"]["anchor"])[-1]
+    assert body.count("\n| ### ") == 0, "show spilled past its own section"
+    whole_log = (ROOT / "docs/decisions.md").read_text(encoding="utf-8")
+    assert len(out) < len(whole_log) / 4
+
+
+def test_show_stays_bounded_even_on_a_giant_section(rules_module, capsys):
+    """A command whose purpose is to replace a 30k-token read must not become
+    one. Some anchors are JSON subtrees, not prose headings — `windows` in
+    app-map.json is a single ~20k-character line."""
+    code = rules_module.cmd_show(argparse.Namespace(id="BLAST-RADIUS"))
+    out = capsys.readouterr().out
+    assert code == 0
+    assert len(out) < 4000, f"show printed {len(out)} chars"
+    assert "more line(s)" in out or "chars)" in out  # it says what it withheld
+
+
+def test_show_rejects_an_unknown_id(rules_module, capsys):
+    """The negative case: a typo must fail loudly and list what does exist,
+    rather than printing nothing and exiting clean."""
+    code = rules_module.cmd_show(argparse.Namespace(id="NO-SUCH-RULE"))
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "no rule" in out and "MONEY-CENTS" in out
 
 
 def test_every_numbered_invariant_has_its_own_rule(rules_module, registry):

@@ -44,11 +44,30 @@ map directly. Say in your brief that you did this and why.
 
 Read every row of its **Required reads** table, in order. It is already sorted by
 priority and depth, and each row says why it is there. Skipping a row because it
-"looks unrelated" is how the gotchas get violated.
+"looks unrelated" is how the gotchas get violated. A row that names a **line
+range** is a section read — read those lines, not the file.
 
-Then check `docs/decisions.md` (newest first) for an ADR that already settled part
-of this task — the dossier lists the relevant ones, but the log moves faster than
-the map.
+**Do not read `docs/decisions.md` looking for what binds.** It is 89 entries and
+~30k tokens, it is append-only so that cost only rises, and it answers the wrong
+question. What binds is the dossier's **Rules in scope** block, taken from
+`.claude/context/rules.json` and narrowed to the files this task touches: every
+rule there carries a `scope` glob and an `excerpt_sha256` seal, so it cannot
+drift from the text it cites without `rules.py check` going red.
+
+When you want the *reasoning* behind a rule rather than the rule itself:
+
+```bash
+python .claude/hooks/rules.py show <RULE-ID>
+```
+
+That prints the one section the rule is sourced from — which for a couple of
+rules is an ADR. That is how the decision log is read now: by anchor, bounded,
+and only when a rule is actually in your way.
+
+If the dossier says a path is **not claimed by any rule**, that is a real
+statement and not an oversight: judge those files on the specs and `CLAUDE.md`,
+and if something there *should* bind, say so in your brief — the registry's own
+`UNENUMERATED` id exists for exactly that.
 
 ## Step 3 — Write the brief
 
@@ -67,10 +86,13 @@ delegate, any migration, any *other* window that reads the same tables, and the
 tests that must change. State plainly whether a new migration is needed.
 
 ### 3. Rules this task must not break
-Only the ones actually at stake — from the dossier's *Rules that always bind*,
-its window **gotchas**, and `specs/02-data-model.md`. Three to six lines. Quote
-the gotcha and say why it applies. If nothing beyond the boilerplate applies, say
-that.
+Only the ones actually at stake — from the dossier's **Rules in scope** block,
+its window **gotchas**, and `specs/02-data-model.md`. Three to six lines. **Cite
+each by its rule id** (`MONEY-CENTS`, `QT-FREE-CORE`) so the reader can run
+`rules.py show` on it, quote the gotcha, and say why it applies. The block lists
+everything the scope globs match, which is deliberately a superset — your job is
+to name the few that this change can actually violate, not to restate the block.
+If nothing beyond the boilerplate applies, say that.
 
 ### 4. Plan
 Numbered steps in dependency order, each naming the file it lands in. Services
