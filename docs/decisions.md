@@ -2267,3 +2267,30 @@ already exactly this weak; the difference is that it will say so.
   top of the reading list. The regex is fixed here. The resolution floor is
   ticket 011 — it is a redesign of the confidence model with its own corpus, and
   bundling it would hold this up.
+
+### 2026-08-10 — A window must be named, not mentioned (ticket 011)
+
+- **Decision:** `plan.py` scores a window at full confidence only when the
+  request **names** it — a distinct head that is, opens with, or closes with the
+  alias. An alias merely appearing inside a sentence must be **≥6 characters**
+  to resolve anything. Otherwise: no window, exit 2.
+- **Why 6.** Measured on a 17-case corpus that ships as the test. Every alias of
+  5 characters or fewer is an ordinary English word (`log`, `ops`, `tx`, `ml`,
+  `post`, `sale`, `write`, `shows`, `audit`, `month`, `price`, `stock`, `home`,
+  `grid`); 6+ holds the specific ones (`vision`, `camera`, `photos`, `corpus`,
+  `bidding`, `signals`). 7 and 8 also score 17/17 but would stop `vision` and
+  `camera` resolving, so 6 is the least restrictive that works.
+- **The obvious fix does not work, and measurement is the only reason we know.**
+  A floor on *body* matches scores 12/17 at every threshold, because
+  `split_request` returns the whole sentence as the head when there is no
+  separator — so on the commonest request shape every match is already a "head"
+  match at maximum confidence. The axis is named-vs-mentioned, not head-vs-body.
+- **Refusing is the better way to be wrong.** Exit 2 prints every window and
+  costs one re-run. Exit 0 wrong is trusted by everything downstream: ticket
+  010's own request resolved to **History** and produced a dossier about the
+  transaction ledger, `audit_log`, and a money flag, for a task that touches no
+  app code at all.
+- **Split from ticket 010 deliberately** — that one is mechanical (what the
+  dossier reads), this is behavioural (which window it resolves to) and carries
+  a tuning constant. Bundling would have held a 91% token reduction behind a
+  change that may want adjusting in use.

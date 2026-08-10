@@ -1,7 +1,7 @@
 # 011 — `plan.py` resolves the wrong window, confidently
 
 ```
-status:   open
+status:   done
 kind:     fix
 source:   found by running /task-planning on ticket 010
 issue:    none
@@ -9,7 +9,33 @@ axis:     correctness
 found:    2026-08-09
 saving:   -
 risk:     medium — changes window resolution for every future planning request
+branch:   ticket/011-resolve-window-confidence (stacked on ticket 010)
 ```
+
+## Result
+
+Landed 2026-08-10. The 17-case corpus ships as a `parametrize` in
+`tests/test_app_map.py` and passes 17/17; 897 tests pass overall.
+
+Verified end to end:
+
+| request | exit |
+|---|---|
+| `ticket 010 — planning reads … the decision log` | **2** (was 0 → History) |
+| `write the migration for the new column` | **2** (was 0 → Transaction) |
+| `recognition — validate identity on real crops` | 0 |
+| `add a column to the inventory grid` | 0 |
+
+One correction to the plan below: `resolve_window` is called as
+`resolve_window(head, request, data)` — the second argument is the **whole
+request**, not the tail that `split_request` returns. The simulation used the
+tail, so `names_a_window` detects the "no separator" case itself
+(`head.strip().lower() == whole.strip().lower()`) rather than trusting the
+caller to have split it. Same semantics, but it no longer depends on which of
+the two a caller passes.
+
+`test_every_window_resolves_from_its_own_aliases` passes unchanged, as predicted
+— it uses `"<alias> — do a thing"`, which is the explicit form.
 
 ## The finding
 
