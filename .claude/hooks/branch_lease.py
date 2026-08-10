@@ -52,7 +52,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -60,10 +59,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _session  # noqa: E402  (same directory; the path insert above is required)
+from _shell import SEPARATORS, segments  # noqa: E402  (same)
 
 FALLBACK_REPO = Path(__file__).resolve().parents[2]
 
-SEPARATORS = {";", "&&", "||", "|", "&", "\n"}
+__all__ = ["SEPARATORS", "segments"]
 
 # Subcommands that move `HEAD` or rewrite the working tree under another session.
 # `branch` is not here: creating a branch does not move `HEAD` — only the
@@ -127,33 +127,6 @@ def repo_root(cwd: str | None = None) -> Path:
 
 
 # ---- command classification -------------------------------------------------
-
-
-def segments(command: str) -> list[list[str]]:
-    """Tokenise, then split on shell separators.
-
-    `punctuation_chars=True` is what makes `;` and `&&` their own tokens while
-    leaving a quoted `"fix; the thing"` intact. Backslashes are consumed in posix
-    mode, so a Windows path arrives mangled — harmless, because nothing here reads a
-    path *value*, only subcommands and flags.
-
-    Returns `[]` when the command cannot be tokenised (an unbalanced quote), which
-    the caller treats as "nothing to judge".
-    """
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        tokens = list(lexer)
-    except ValueError:
-        return []
-
-    out: list[list[str]] = [[]]
-    for token in tokens:
-        if token in SEPARATORS:
-            out.append([])
-        else:
-            out[-1].append(token)
-    return [segment for segment in out if segment]
 
 
 def _is_git(argv0: str) -> bool:

@@ -352,6 +352,36 @@
       "severity_max": "revise"
     },
     {
+      "id": "HOOK-FAILS-OPEN",
+      "lane": "risk",
+      "rule": "A PreToolUse hook fails open on its own confusion and closed only on the condition it actually detected. Unparseable stdin, an unbalanced quote, no git, an unreadable registry: return 0.",
+      "violation": "A raise, an unguarded parse, or a network call on the hook path \u2014 it runs before every shell call, so failing closed on confusion stops all work in the session.",
+      "source": {
+        "file": "docs/decisions.md",
+        "anchor": "### 2026-08-07 \u2014 One session, one worktree, one branch (ticket 008)",
+        "excerpt_sha256": "3fe0cc150fbe2253"
+      },
+      "scope": [
+        ".claude/hooks/**/*.py"
+      ],
+      "severity_max": "block"
+    },
+    {
+      "id": "HOOK-CLASSIFIES-ARGV",
+      "lane": "risk",
+      "rule": "A hook decides what a command does from argv positions via _shell.segments(), never by searching the command text.",
+      "violation": "A regex over the raw command string to classify an invocation \u2014 it is simultaneously too broad (quoted prose matches) and too narrow (a variable or an alias does not).",
+      "source": {
+        "file": ".claude/hooks/_shell.py",
+        "anchor": null,
+        "excerpt_sha256": "f06ef6c664d87815"
+      },
+      "scope": [
+        ".claude/hooks/**/*.py"
+      ],
+      "severity_max": "revise"
+    },
+    {
       "id": "WORKER-RETIRE-NOT-REPLACE",
       "lane": "risk",
       "rule": "A running worker is never overwritten. Interrupt and park it with retire(worker, parked) from ui/views/_worker.py, or return early while one is in flight.",

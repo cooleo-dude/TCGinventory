@@ -12,7 +12,7 @@ silence.
 Two jobs in one file:
 
 * **hook mode** (no arguments, JSON on stdin): a `PreToolUse` hook. On a PR merge
-  or a ticket close it looks for a verdict for the current `HEAD`; no verdict is
+  or a ticket close it looks for a verdict **for that PR or ticket**; no verdict is
   fine, a blocking verdict is not.
 * **`record`**: how the panel's verdicts get written, after the agents have run.
 
@@ -22,11 +22,23 @@ Two jobs in one file:
     review_gate.py show
     review_gate.py clear
 
-A verdict is bound to a commit sha **and to the session that recorded it**. Push
-another commit and any objection stops applying, because the panel judged something
-that is no longer what would merge. An objection recorded by another session still
-stands against that session's work, not yours — it judged somebody else's diff
-(ticket 008).
+A verdict is bound to **the commit that would actually merge** — resolved from the
+PR itself at record time, not read off the local checkout. Push another commit and
+any objection stops applying, because the panel judged something that is no longer
+what would merge. An objection recorded by another session still stands against
+that session's work, not yours — it judged somebody else's diff (ticket 008).
+
+Binding to local `HEAD` was the original design and it was wrong in a way that
+emptied the gate: the two agree only when the PR's branch happens to be checked
+out, so from `main` a recorded `block` was keyed on the *base* commit, the lookup
+missed it, and the merge proceeded. The one guarantee this gate still makes was
+bypassed by standing in a different directory. Admission is therefore keyed on
+`(scope, ref)`, and the sha decides only whether the verdict has been superseded.
+
+When `gh` cannot resolve the PR, `record` falls back to local `HEAD` and writes
+`"binding": "local-head"` rather than refusing (ADR 2026-08-08). The weaker
+guarantee is *named*: such an artifact speaks for the commit it was recorded on and
+for no other, and both `record` and `show` say so out loud.
 
 Which repository a call is about comes from the **caller's directory**, never from
 this file's location. One session per worktree means several checkouts of this repo
@@ -42,11 +54,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _shell import program, segments  # noqa: E402  (same directory; see the insert)
 
 FALLBACK_REPO = Path(__file__).resolve().parents[2]
 
@@ -57,11 +72,19 @@ BLOCKING = {"block"}
 VALID = {"pass", "revise", "block", "n/a"}
 REQUIRED = {"invariants", "risk", "test"}
 
-# What the gate guards. Matched against the command text of a Bash/PowerShell call.
-GUARDED = (
-    (re.compile(r"\bgh\b[^\n]*\bpr\b[^\n]*\bmerge\b"), "pr-merge"),
-    (re.compile(r"ticket\.py[^\n]*\bclose\b"), "ticket-close"),
-)
+# Flags of `gh pr merge` that consume the token after them, so a value is never
+# mistaken for the PR number. Short list, and stable — `gh pr merge`'s other flags
+# (`--squash`, `--admin`, `--auto`, `--delete-branch`, …) are all standalone.
+GH_MERGE_VALUE_FLAGS = {
+    "-b",
+    "--body",
+    "-F",
+    "--body-file",
+    "-t",
+    "--subject",
+    "--match-head-commit",
+    "--author-email",
+}
 
 
 def repo_root(cwd: str | None = None) -> Path:
@@ -116,14 +139,177 @@ def verdict_path(repo: Path, sha: str) -> Path:
     return reviews_dir(repo) / f"{sha}.json"
 
 
+def rev_parse(repo: Path, rev: str) -> str | None:
+    done = subprocess.run(
+        ["git", "rev-parse", rev],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return done.stdout.strip() or None if done.returncode == 0 else None
+
+
+def same_commit(a: str | None, b: str | None) -> bool:
+    """Prefix comparison, because one side is abbreviated and the other is not.
+
+    `git rev-parse --short` picks a length that keeps the sha unambiguous *in this
+    repository*, while `gh` returns the full 40-character oid. Comparing them for
+    equality would report every commit as different, which would silently mark
+    every verdict superseded — the gate failing open while looking like it works.
+    """
+    if not a or not b:
+        return False
+    return a.startswith(b) or b.startswith(a)
+
+
+def pr_head(repo: Path, ref: str) -> tuple[str, str] | None:
+    """`(head oid, head branch)` for a PR, or `None` if `gh` cannot say.
+
+    Called only at record time, where a network round-trip is affordable — the
+    author has just spent ~100k tokens on the panel. The hook must never do this:
+    a `PreToolUse` call has a 20s budget, and a gate that intermittently times out
+    is a gate people switch off.
+    """
+    done = subprocess.run(
+        ["gh", "pr", "view", str(ref), "--json", "headRefOid,headRefName"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if done.returncode != 0:
+        return None
+    try:
+        payload = json.loads(done.stdout)
+        return str(payload["headRefOid"]), str(payload["headRefName"])
+    except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+        return None
+
+
 # ---- hook mode -------------------------------------------------------------
 
 
-def guarded_scope(command: str) -> str | None:
-    for pattern, scope in GUARDED:
-        if pattern.search(command):
-            return scope
+def _ref_after(rest: list[str], value_flags: set[str]) -> str | None:
+    """The first bare number in `rest`, skipping flags and the values they take.
+
+    A PR or ticket number is what binds a verdict to the thing being merged, so
+    reading it out of the wrong argv position is worse than not reading it: the
+    gate would look up a verdict for something nobody asked about. Only a plain
+    integer counts — `--match-head-commit <sha>` and a branch name are not refs
+    this gate can key on, and `None` falls back to the weaker lookups in `hook()`.
+    """
+    skip = False
+    for token in rest:
+        if skip:
+            skip = False
+            continue
+        if token.startswith("-"):
+            skip = token in value_flags
+            continue
+        if token.isdigit():
+            return token
     return None
+
+
+def guarded(command: str) -> tuple[str, str | None] | None:
+    """`(scope, ref)` for a command this gate judges, else `None`.
+
+    Classified from **argv positions**, never by searching the command text. The
+    regex this replaced was `\\bgh\\b[^\\n]*\\bpr\\b[^\\n]*\\bmerge\\b`, which was
+    simultaneously too broad and too narrow (ticket 003): it blocked a `gh pr
+    create` whose *body prose* contained the word "merge" — nothing was being
+    merged — and the workaround was `--body-file`, which is a guard teaching people
+    to route around it. Tokenising fixes both ends: quoted prose is one opaque
+    token, and `merge` only counts in the action position.
+    """
+    for argv in segments(command):
+        if not argv:
+            continue
+        name = program(argv[0])
+        words = [t for t in argv[1:] if not t.startswith("-")]
+        if name == "gh" and words[:2] == ["pr", "merge"]:
+            after = argv[argv.index("merge") + 1 :]
+            return "pr-merge", _ref_after(after, GH_MERGE_VALUE_FLAGS)
+        # `ticket.py close N`, however it is invoked — python, a venv interpreter,
+        # or directly. The script path is an argv token, so prose cannot fake it.
+        if any(t.replace("\\", "/").endswith("ticket.py") for t in argv):
+            if "close" in words:
+                after = argv[argv.index("close") + 1 :]
+                return "ticket-close", _ref_after(after, set())
+    return None
+
+
+def artifacts(repo: Path) -> list[dict]:
+    """Every readable verdict in this checkout. Unreadable ones are skipped.
+
+    A corrupt artifact must not raise: this runs inside a `PreToolUse` hook, and
+    an exception here stops every shell call in the session.
+    """
+    out: list[dict] = []
+    reviews = reviews_dir(repo)
+    for path in sorted(reviews.glob("*.json")) if reviews.is_dir() else []:
+        try:
+            out.append(json.loads(path.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, ValueError, OSError):
+            continue
+    return out
+
+
+def matching(repo: Path, scope: str, ref: str | None) -> list[dict]:
+    """The verdicts that speak to *this* merge or close.
+
+    Lookup is by `(scope, ref)` — the hole this closes is that `cmd_record` stored
+    `ref` and `hook()` never read it, so admission was keyed on the local `HEAD`
+    alone. Standing anywhere but the PR's branch, a recorded `block` simply was not
+    found and the merge proceeded: the one thing this gate still enforces was
+    bypassed by `cd`.
+
+    With no ref in the command (`gh pr merge` merges the current branch) fall back
+    to artifacts recorded on this branch, then to the commit we are standing on —
+    the old behaviour, so this path is never weaker than what it replaced.
+    """
+    here = artifacts(repo)
+    if ref is not None:
+        return [
+            r for r in here if r.get("scope") == scope and str(r.get("ref")) == str(ref)
+        ]
+    branch = branch_of(repo)
+    on_branch = [
+        r for r in here if r.get("scope") == scope and r.get("branch") == branch
+    ]
+    if on_branch:
+        return on_branch
+    return [r for r in here if same_commit(str(r.get("sha") or ""), head(repo))]
+
+
+def superseded(repo: Path, record: dict) -> bool:
+    """Has the thing this verdict judged moved on since it was recorded?
+
+    A new commit clears an objection: the panel judged something that is no longer
+    what would merge. That is deliberate and predates this ticket — it is why a
+    verdict is bound to a sha at all.
+
+    The comparison is **offline**, because the hook cannot afford a network call.
+    For a `pr-head` binding the recorded head branch is resolved locally, remote
+    tracking ref first; in the ordinary workflow you push from this machine and
+    then merge, so `origin/<branch>` is current. When neither ref resolves the
+    answer is *not superseded* — the one place this file fails closed, and it is
+    the right direction, because a `block` is already on record and the alternative
+    is discarding it on the strength of a lookup that did not work.
+    """
+    sha = str(record.get("sha") or "")
+    if record.get("binding") == "pr-head":
+        branch = record.get("head_branch")
+        for rev in (f"refs/remotes/origin/{branch}", str(branch)) if branch else ():
+            resolved = rev_parse(repo, rev)
+            if resolved:
+                return not same_commit(resolved, sha)
+        return False
+    # `local-head` (and any artifact written before bindings were named) attests to
+    # the checkout only — per the 2026-08-08 ADR it may speak for the commit it was
+    # recorded on and must not speak for any other.
+    return not same_commit(head(repo), sha)
 
 
 def owning_session(repo: Path) -> str | None:
@@ -167,28 +353,34 @@ def hook() -> int:
     if tool not in ("Bash", "PowerShell"):
         return 0
     command = str(event.get("tool_input", {}).get("command", ""))
-    scope = guarded_scope(command)
-    if scope is None:
+    what = guarded(command)
+    if what is None:
         return 0
+    scope, ref = what
 
     repo = repo_root(event.get("cwd"))
-    sha = head(repo)
-    path = verdict_path(repo, sha)
-    if not path.is_file():
-        # No panel was run, and that is allowed. The critics are opt-in — they
-        # cost ~26k tokens per spawn, so they run when someone asks for them, not
-        # on every merge. What this hook still enforces is that a panel you *did*
-        # run cannot be ignored: see below.
-        return 0
-
-    record = json.loads(path.read_text(encoding="utf-8"))
-    blocked = [k for k, v in record.get("verdicts", {}).items() if v in BLOCKING]
+    # No panel was run, and that is allowed. The critics are opt-in — they cost
+    # ~26k tokens per spawn, so they run when someone asks for them, not on every
+    # merge. What this hook still enforces is that a panel you *did* run cannot be
+    # ignored, and it now finds that panel by the PR it judged rather than by
+    # whichever commit this checkout happens to be sitting on.
+    live = [r for r in matching(repo, scope, ref) if not superseded(repo, r)]
+    blocked = sorted(
+        {
+            lane
+            for r in live
+            for lane, value in r.get("verdicts", {}).items()
+            if value in BLOCKING
+        }
+    )
     if blocked:
+        where = f"{scope} {ref}" if ref else scope
+        shas = ", ".join(sorted({str(r.get("sha", "?")) for r in live}))
         print(
-            f"BLOCKED: critics were run on {sha} and returned `block` on "
-            f"{', '.join(sorted(blocked))}.\nFix the findings and commit — the "
-            f"verdict is bound to the sha, so a new commit clears the objection. "
-            f"To merge over it deliberately: review_gate.py clear.",
+            f"BLOCKED: critics were run on {where} ({shas}) and returned `block` "
+            f"on {', '.join(blocked)}.\nFix the findings and commit — the verdict "
+            f"is bound to the commit that would merge, so a new commit clears the "
+            f"objection. To merge over it deliberately: review_gate.py clear.",
             file=sys.stderr,
         )
         return 2
@@ -314,7 +506,34 @@ def cmd_record(args) -> int:
                 f".claude/context/rules.json"
             )
 
-    sha = head(repo)
+    # Bind to the commit that would actually merge, not to whatever this checkout
+    # is standing on. Those coincide only when the PR's branch happens to be
+    # checked out; from `main` the verdict used to attest to the *base*, and a
+    # recorded `block` was then invisible to the merge it was about.
+    #
+    # `ticket-close` deliberately keeps binding to `HEAD`: closing a ticket is a
+    # statement about work that has already landed, so the checkout *is* the right
+    # referent. Left as a comment rather than an inconsistency someone later
+    # "fixes" into a bug.
+    binding, head_branch = "local-head", None
+    if args.scope == "pr-merge":
+        resolved = pr_head(repo, args.ref)
+        if resolved:
+            oid, head_branch = resolved
+            binding = "pr-head"
+            # Abbreviated for the filename and the printed line; `same_commit`
+            # compares by prefix, so this never has to match git's chosen length.
+            sha = oid[:7]
+        else:
+            sha = head(repo)
+            print(
+                f"  note: `gh` could not resolve PR {args.ref} — binding this "
+                f"verdict to local HEAD only. It will speak for this commit and "
+                f"no other.",
+                file=sys.stderr,
+            )
+    else:
+        sha = head(repo)
     session = owning_session(repo)
     owners = lease_holders(repo)
     reviews_dir(repo).mkdir(parents=True, exist_ok=True)
@@ -324,6 +543,12 @@ def cmd_record(args) -> int:
                 "sha": sha,
                 "scope": args.scope,
                 "ref": args.ref,
+                # Which guarantee this artifact carries, named rather than implied:
+                # `pr-head` was resolved from the PR, `local-head` is the weaker
+                # fallback for an unreachable `gh` (ADR 2026-08-08). `show` prints
+                # it, and `hook()` treats the two differently.
+                "binding": binding,
+                "head_branch": head_branch,
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "verdicts": verdicts,
                 "inherited": (
@@ -357,37 +582,71 @@ def cmd_record(args) -> int:
         )
     else:
         attribution = "unattributed (no lease)"
-    print(f"  recorded {sha}  {args.scope} {args.ref}  — {state}, {attribution}")
+    bound = "the PR head" if binding == "pr-head" else "local HEAD only"
+    print(
+        f"  recorded {sha}  {args.scope} {args.ref}  — {state}, {attribution}"
+        f"\n  bound to {bound} ({binding})"
+    )
     return 1 if blocked else 0
 
 
 def cmd_show(args) -> int:
     repo = repo_root(os.getcwd())
     sha = head(repo)
-    path = verdict_path(repo, sha)
     print(f"  HEAD {sha}  on {branch_of(repo)}  in {repo}")
-    if not path.is_file():
-        # Say what `hook()` will actually do, which since the opt-in redesign is
-        # nothing: a missing panel is the ordinary state, not a fault. The old text
-        # promised a block the gate has not delivered in a long time, which is worse
-        # than saying nothing — it invites trusting the gate for a guarantee it
-        # never makes (ticket 003). Exit 0 for the same reason: a scripted `show`
-        # must not read the normal case as a failure.
-        print("  no panel on record for this commit — nothing will be blocked")
-        print("  a `block` recorded here would stop a merge; none is")
+
+    # Report every artifact in this checkout, not just the one keyed on local HEAD.
+    # `hook()` admits by `(scope, ref)`, so a `show` that only looked at HEAD would
+    # go quiet about the very verdict about to block a merge — the same drift
+    # between what the gate does and what it says that step 0 fixed. Getting this
+    # wrong is easy: the first version of this function listed the other verdicts
+    # and *then* printed "nothing will be blocked" underneath a live block.
+    everything = artifacts(repo)
+    if not everything:
+        # A missing panel is the ordinary state since the opt-in redesign, not a
+        # fault. The pre-opt-in text promised a block the gate had long stopped
+        # delivering, which is worse than saying nothing: it invites trusting the
+        # gate for a guarantee it never makes. Exit 0 for the same reason — a
+        # scripted `show` must not read the normal case as a failure.
+        print("  no panel on record in this checkout — nothing will be blocked")
+        print("  a `block` recorded here would stop the merge it names; none is")
         return 0
-    record = json.loads(path.read_text(encoding="utf-8"))
-    for lane, value in record["verdicts"].items():
-        print(f"    {lane:<12} {value}")
-    session = record.get("session")
-    print(f"  {record['scope']} {record['ref']}, recorded {record['at']}")
-    print(f"  by session {session[:8] if session else '— (unattributed)'}")
-    blocked = sorted(k for k, v in record["verdicts"].items() if v in BLOCKING)
-    print(
-        f"  a merge of this commit is BLOCKED on {', '.join(blocked)}"
-        if blocked
-        else "  nothing blocking — a merge of this commit proceeds"
-    )
+
+    stops: list[str] = []
+    for record in sorted(everything, key=lambda r: str(r.get("sha") or "")):
+        mine = same_commit(str(record.get("sha") or ""), sha)
+        binding = record.get("binding", "local-head")
+        blocked = sorted(
+            k for k, v in record.get("verdicts", {}).items() if v in BLOCKING
+        )
+        stale = superseded(repo, record)
+        where = f"{record.get('scope')} {record.get('ref')}"
+        print(
+            f"    {'HEAD ' if mine else '     '}{where} @{record.get('sha')} "
+            f"[{binding}]{'  — superseded' if stale else ''}"
+        )
+        for lane, value in record.get("verdicts", {}).items():
+            print(f"      {lane:<12} {value}")
+        session = record.get("session")
+        print(
+            f"      recorded {record.get('at')} by session "
+            f"{session[:8] if session else '— (unattributed)'}"
+        )
+        print(
+            f"      bound to the PR head ({record.get('head_branch')})"
+            if binding == "pr-head"
+            else "      bound to local HEAD only — speaks for that commit, no other"
+        )
+        if blocked and not stale:
+            stops.append((where, ", ".join(blocked)))
+
+    for where, lanes in stops:
+        print(f"  a merge of {where} is BLOCKED on {lanes}")
+    if not stops:
+        print(
+            "  nothing blocking — every verdict on record is clear or superseded, "
+            "so a merge proceeds"
+        )
     return 0
 
 
