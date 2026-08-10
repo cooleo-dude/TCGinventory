@@ -90,6 +90,58 @@ def _tcgdex_number(local_id: str | None) -> str | None:
     return str(int(text)) if text.isdigit() else text
 
 
+# TCGdex indexes the Celebrations Classic Collection with a synthetic
+# "CC001"…"CC025" sequence. No card carries that number: every one of the 25 is a
+# reprint that keeps its *original* set's collector number ("Dark Gyarados 8/82"),
+# which is what is printed on the card, what tcgcsv/TCGplayer price it by, and
+# what the pokemontcg.io art dump keys on. Left as TCGdex gives it, the whole set
+# autofills with no price, no product link and no image.
+#
+# A static table rather than a live join: the set is 25 cards, frozen since 2021,
+# and it is the only English set whose TCGdex numbering disagrees with every other
+# source. Authored by joining tcgcsv group 2931's products by name. (Ticket 012.)
+_CLASSIC_COLLECTION_SET = "cel25cc"
+_CLASSIC_COLLECTION_NUMBERS = {
+    "CC001": "2/102",  # Blastoise
+    "CC002": "4/102",  # Charizard
+    "CC003": "15/102",  # Venusaur
+    "CC004": "73/102",  # Imposter Professor Oak
+    "CC005": "8/82",  # Dark Gyarados
+    "CC006": "15/82",  # Here Comes Team Rocket!
+    "CC007": "15/132",  # Rocket's Zapdos
+    "CC008": "24/53",  # _____'s Pikachu
+    "CC009": "20/111",  # Cleffa
+    "CC010": "66/64",  # Shining Magikarp
+    "CC011": "9/95",  # Team Magma's Groudon
+    "CC012": "86/109",  # Rocket's Admin.
+    "CC013": "88/92",  # Mew ex
+    "CC014": "93/101",  # Gardevoir ex (Delta Species)
+    "CC015": "17/17",  # Umbreon Star
+    "CC016": "15/106",  # Claydol
+    "CC017": "109/111",  # Luxray GL LV.X
+    "CC018": "145/147",  # Garchomp C LV.X
+    "CC019": "107/123",  # Donphan (Prime)
+    "CC020": "113/114",  # Reshiram
+    "CC021": "114/114",  # Zekrom
+    "CC022": "54/99",  # Mewtwo EX
+    "CC023": "97/146",  # Xerneas EX
+    "CC024": "76/108",  # M Rayquaza EX
+    "CC025": "60/145",  # Tapu Lele GX
+}
+
+
+def _printed_number(set_id: str, local_id: str | None) -> str | None:
+    """The collector number **printed on the card**, from TCGdex's ``localId``.
+
+    Normally that is the localId itself; the Classic Collection is the one set
+    where TCGdex's index and the printed number differ (see the table above)."""
+    if set_id == _CLASSIC_COLLECTION_SET:
+        printed = _CLASSIC_COLLECTION_NUMBERS.get((local_id or "").strip())
+        if printed:
+            return printed
+    return _tcgdex_number(local_id)
+
+
 def _tcgdex_image(image: str | None) -> str | None:
     """TCGdex serves an *asset base* URL; the concrete file needs a quality +
     extension. Use a small-ish PNG comparable to pokemontcg.io's ``small``."""
@@ -99,6 +151,15 @@ def _tcgdex_image(image: str | None) -> str | None:
 def _norm_join(text: str | None) -> str:
     """Loose key for joining the two sources by identity (case/punctuation-free)."""
     return "".join(ch for ch in (text or "").lower() if ch.isalnum())
+
+
+def _norm_join_number(number: str | None) -> str:
+    """Join key for a collector number: the numerator alone.
+
+    The sources denominate differently — the catalog stores the printed
+    "8/82" for a Classic Collection reprint, the pokemontcg.io dump the bare
+    "8" — so join on the head and let the name and set carry the rest."""
+    return _norm_join((number or "").split("/", 1)[0])
 
 
 def _fetch_map(fetch, urls, workers: int = 16) -> dict:
@@ -143,7 +204,7 @@ def _github_image_index(fetch) -> dict[tuple[str, str, str], str]:
             key = (
                 _norm_join(c.get("name")),
                 _norm_join(set_name),
-                _norm_join(c.get("number")),
+                _norm_join_number(c.get("number")),
             )
             index.setdefault(key, image)
     return index
@@ -163,7 +224,11 @@ def _fill_missing_images(cards, fetch) -> int:
     filled = 0
     for card in missing:
         image = index.get(
-            (_norm_join(card.name), _norm_join(card.set_name), _norm_join(card.number))
+            (
+                _norm_join(card.name),
+                _norm_join(card.set_name),
+                _norm_join_number(card.number),
+            )
         )
         if image:
             card.image_small = image
@@ -231,7 +296,7 @@ def update_catalog(
                     set_id=set_id,
                     set_name=set_name,
                     set_code=set_code,
-                    number=_tcgdex_number(c.get("localId")),
+                    number=_printed_number(set_id, c.get("localId")),
                     rarity=None,
                     supertype=None,
                     image_small=_tcgdex_image(c.get("image")),

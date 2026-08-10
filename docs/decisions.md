@@ -2367,3 +2367,50 @@ and top-5 agreement with the pre-conversion answers.
   dossier reads), this is behavioural (which window it resolves to) and carries
   a tuning constant. Bundling would have held a 91% token reduction behind a
   change that may want adjusting in use.
+
+### 2026-08-10 — The catalog stores the number printed on the card (ticket 012)
+
+- **Decision:** `card_catalog.number` means *the collector number printed on the
+  card*, not the source's index for it. Where TCGdex disagrees, the pull
+  overrides it. Today that is exactly one set: **Celebrations Classic
+  Collection** (`cel25cc`), where TCGdex invents `CC001…CC025` and every one of
+  the 25 cards actually carries its original set's number — Dark Gyarados is
+  `8/82`, from Team Rocket.
+- **What it cost to get this wrong.** The number is the join key for three
+  independent things, so one bad field broke all of them and looked like three
+  bugs. Autofill in the Transaction window resolved no tcgcsv product (so no
+  price, and no product link — the item fell back to a junk `search_url`), the
+  pokemontcg.io art fallback missed (so no preview, for all 25), and the row
+  displayed `CC005/CC25`, a number on no card in existence. It also cost the
+  daily catalog price sweep: `pricehistory.db` held **0 of 25** of this set
+  against 24/25 for the parent Celebrations.
+- **A regression, not a gap.** These cards priced correctly under the old
+  pokemontcg.io catalog, which supplied the printed numerator. Two ledger items
+  entered back then still carried `20/25` and `97/25` — right numerator, parent
+  set's denominator — and were corrected to `20/111` and `97/146` alongside.
+- **Scope was measured, not assumed.** Every English set in the catalog was
+  compared against the pokemontcg.io dump, matching sets by normalized name and
+  then the numbers behind shared card names. Exactly one set disagrees, 24 of 24
+  shared names. That is why this is a 25-row table and not a framework.
+- **A static table, not a live join.** Deriving it from tcgcsv group 2931 at
+  ingest would be self-maintaining and exactly correct, but it puts a network
+  round-trip and a fuzzy name join into the English catalog path to serve one
+  set that has been frozen since 2021, and it fails offline. The table was
+  authored *once* by that join and checked in.
+- **Storing the full `8/82` rather than the bare `8`.** The numerator alone
+  would restore pricing and art — that is what the old catalog effectively did —
+  but the row then reads `8/25`, which is what the two stale ledger items look
+  like. The full form is already the catalog's convention: all 27k Japanese rows
+  store `046/081`. `CatalogCard.full_number` now short-circuits on a number that
+  already carries a denominator, or the set total would append to make
+  `8/82/25`.
+- **Rejected: a name-only fallback in `pricing.py`** when a number matches no
+  product in a resolved group. It would have masked this generically, which is
+  the argument against it — `price_for_card` deliberately commits to "better no
+  link than a wrong one", and a quiet guess is worse than a loud miss.
+- **Still open, deliberately:** `Gardevoir ex` (CC014) remains art-less because
+  pokemontcg.io names it `Gardevoir ex δ`. That is a *name*-normalization
+  mismatch across the two sources, a different root cause from this one, and it
+  affects a handful of cards catalog-wide. It gets its price and product link
+  from this fix regardless, and `cardimages.art_for` covers its art from the
+  TCGplayer product photo once a ledger item exists.

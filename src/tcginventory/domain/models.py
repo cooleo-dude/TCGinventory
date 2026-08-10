@@ -198,6 +198,12 @@ class CatalogCard:
         "124/142". Falls back to the bare number when the total is unknown."""
         if not self.number:
             return None
+        if "/" in self.number:
+            # Already denominated by the source. Japanese rows (from tcgcsv) all
+            # store "046/081", and so do the Celebrations Classic Collection
+            # reprints, whose denominator is their *original* set's — not the
+            # 25 this set counts. Appending the set total would give "8/82/25".
+            return self.number
         if not self.printed_total:
             return self.number
         prefix = ""
