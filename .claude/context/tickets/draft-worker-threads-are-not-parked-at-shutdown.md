@@ -1,10 +1,10 @@
-# 007 — Worker threads are parked when replaced, but not when the app shuts down
+# Worker threads are parked when replaced, but not when the app shuts down
 
 ```
 status:   open
 kind:     fix
 source:   tcgi-risk-critic on PR #6, 2026-08-07
-issue:    #16
+mr:       none
 axis:     correctness
 found:    2026-08-07
 saving:   -  (crash avoidance)
@@ -110,3 +110,7 @@ because the UI is already going away.
   made worse by it.
 - Related: [[003]] — the review gate. Both were found by using the machinery
   rather than reading it.
+
+## Filed before the numbering change
+
+This was issue #16 under the old scheme, where a ticket carried three unrelated numbers (ours, the issue's, the PR's). It now carries one — the merge request's — so `X#` and `X!` are the same work. The old issue is closed and points here; nothing about the finding below changed.
