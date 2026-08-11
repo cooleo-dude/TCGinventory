@@ -263,6 +263,45 @@ def test_the_global_fetch_is_bounded(app, conn, columns):
     assert dashboard._GLOBAL_LIMIT <= 200, "hydrating this many names is the stall"
 
 
+def test_closing_the_window_parks_every_view_that_has_a_worker(app, conn):
+    """`park_workers` without a caller is a promise, not a guard.
+
+    A running QThread that is garbage-collected aborts the process, and `deleteLater`
+    cannot save it because shutdown has no event loop left (`QTHREAD-LIFETIME`). Views
+    already park workers when *replacing* one; the window closing was the gap. This
+    pins the seam, not just the Dashboard — a view that grows a worker later only has
+    to expose the method.
+    """
+    from tcginventory.ui.main_window import MainWindow
+
+    window = MainWindow(conn)
+    parked: list[str] = []
+
+    # A stand-in view, to prove the hook is generic rather than hardcoded to Dashboard.
+    stub = window._stack.widget(0)
+    stub.park_workers = lambda: parked.append("called")
+
+    window.close()
+
+    assert parked == ["called"], "closing the window left a worker running"
+
+
+def test_a_view_that_raises_while_parking_does_not_block_the_close(app, conn):
+    """Teardown must not be the thing that traps the user in the app."""
+    from tcginventory.ui.main_window import MainWindow
+
+    window = MainWindow(conn)
+
+    def boom():
+        raise RuntimeError("no")
+
+    window._stack.widget(0).park_workers = boom
+
+    window.close()  # must not raise
+
+    assert not window.isVisible()
+
+
 def test_the_global_empty_state_names_the_sweep(app, conn, columns):
     """An empty global list means there is no catalog history, which is fixable.
     "No gainers in this range" would send the reader to look at the wrong thing."""

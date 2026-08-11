@@ -345,6 +345,29 @@ class MainWindow(QMainWindow):
         except Exception:
             logging.getLogger(__name__).exception("auto-update reconcile failed")
 
+    def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        """Park every view's background worker before the window goes away.
+
+        A running `QThread` that is garbage-collected aborts the process — no
+        traceback, exit `0xC0000409` — and `deleteLater` cannot help, because by then
+        there is no event loop left to deliver it (`QTHREAD-LIFETIME`). Views park
+        workers when *replacing* one already; shutdown was the gap, which is what
+        ticket `45!` is about.
+
+        This is the generic seam rather than a fix for one view: any view that grows a
+        worker exposes `park_workers()` and is parked here, so the next one does not
+        have to remember to add a hook. Dashboard's catalog ranking is the first.
+        """
+        for index in range(self._stack.count()):
+            view = self._stack.widget(index)
+            park = getattr(view, "park_workers", None)
+            if callable(park):
+                try:
+                    park()
+                except Exception:  # never let teardown block the window closing
+                    logging.getLogger(__name__).exception("parking workers failed")
+        super().closeEvent(event)
+
     def changeEvent(self, event) -> None:
         """Pause the Scrafty mascot while the window isn't focused; resume on
         activation, so it only animates when the app is in front."""
