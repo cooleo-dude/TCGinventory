@@ -60,6 +60,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from tcginventory import config
 from tcginventory.domain.enums import Intent
 from tcginventory.services import cardimages
 from tcginventory.services.cardshows import CardShowService
@@ -72,12 +73,20 @@ from tcginventory.services.reporting import (
 from tcginventory.ui import icons, theme
 from tcginventory.ui.charts import RangedChartView
 from tcginventory.ui.formatting import money
+from tcginventory.ui.views._worker import retire
 
 # Date-range window (days) → the label shown on the range pills / chips.
 _RANGE_LABELS = {30: "1M", 90: "3M", 180: "6M", 270: "9M", 365: "1Y", None: "All time"}
 
 _INTENTS = ["All", "personal", "resale", "ripping"]
 _PAGE = 5  # movers rows shown per "Show 5 more" step
+# How many global movers to fetch per end. The owned scope asks for `limit=None`
+# because 759 held cards are free to rank and render; the catalog is not. At
+# `limit=None` the ranking returned 18,558 rows and the service hydrated a name for
+# every one of them — tens of thousands of catalog queries, and the panel never
+# arrived. Ten pages of "Show 5 more" is more than anyone scrolls, and it keeps the
+# hydration to ~100 lookups, which is what the service was shaped for.
+_GLOBAL_LIMIT = 50
 
 # Chart series → token role.
 _SERIES_COLORS = {
@@ -522,26 +531,85 @@ class _ClickableRow(QWidget):
 
     clicked = Signal()
 
-    def __init__(self, object_name: str, first: bool) -> None:
+    def __init__(
+        self, object_name: str, first: bool, *, clickable: bool = True
+    ) -> None:
         super().__init__()
         self.setObjectName(object_name)
-        self.setCursor(Qt.PointingHandCursor)
+        # A global mover for a card no lot holds goes nowhere — Inventory cannot
+        # select what is not in it. So it keeps the hairline and drops the hand
+        # cursor and the hover wash, because a row that looks like a link and does
+        # nothing is worse than one that plainly is not.
+        self._clickable = clickable
+        if clickable:
+            self.setCursor(Qt.PointingHandCursor)
         # A plain QWidget ignores stylesheet background/border without this, so
         # neither the hairline separator nor the hover wash would paint.
         self.setAttribute(Qt.WA_StyledBackground, True)
         t = theme.active()
         border = "" if first else f"border-top:1px solid {t.line};"
-        self.setStyleSheet(
-            f"QWidget#{object_name}{{{border}border-radius:8px;}}"
+        hover = (
             f"QWidget#{object_name}:hover{{background:{t.accent_soft};}}"
+            if clickable
+            else ""
+        )
+        self.setStyleSheet(
+            f"QWidget#{object_name}{{{border}border-radius:8px;}}{hover}"
         )
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt override)
-        if event.button() == Qt.LeftButton and self.rect().contains(
-            event.position().toPoint()
+        if (
+            self._clickable
+            and event.button() == Qt.LeftButton
+            and self.rect().contains(event.position().toPoint())
         ):
             self.clicked.emit()
         super().mouseReleaseEvent(event)
+
+
+class _GlobalMoversWorker(QThread):
+    """Rank the catalog off the UI thread, with its own two connections.
+
+    ~330ms against the real 49,709-card history, versus the ~759-row query the owned
+    scope runs — so this is not a precaution. It would stall the window on every
+    toggle *and* every range-pill change, and the range selector is shared by the
+    whole highlights strip.
+
+    Both connections are opened **inside** ``run``: a SQLite connection belongs to the
+    thread that made it (`SQLITE-THREAD-AFFINITY`), so handing this the view's
+    connection would be the bug rather than a shortcut.
+    """
+
+    done = Signal(object)  # (since, gainers, losers) — or (since, None, None) on error
+
+    def __init__(self, db_path, since: str | None) -> None:
+        super().__init__()
+        self._db_path = db_path
+        self._since = since
+
+    def run(self) -> None:  # pragma: no cover - exercised via the UI
+        import logging
+
+        from tcginventory.data.db import open_database
+        from tcginventory.data.pricehistory import open_history
+        from tcginventory.services.globalmovers import GlobalMoversService
+
+        try:
+            ledger = open_database(self._db_path)
+            history = open_history()
+            try:
+                gainers, losers = GlobalMoversService(history, ledger).movers(
+                    self._since, limit=_GLOBAL_LIMIT
+                )
+            finally:
+                history.close()
+                ledger.close()
+            if self.isInterruptionRequested():
+                return  # the range or scope moved on; this answer is stale
+            self.done.emit((self._since, gainers, losers))
+        except Exception:
+            logging.getLogger(__name__).exception("global movers failed")
+            self.done.emit((self._since, None, None))
 
 
 class _PagedBox(QFrame):
@@ -573,6 +641,10 @@ class _PagedBox(QFrame):
         head.addWidget(self._dot)
         head.addWidget(self._title)
         head.addStretch(1)
+        # Right-aligned slot for a per-box control. Only the movers use it, and only
+        # for the owned/global scope toggle; the sellers and shows boxes leave it
+        # empty rather than each inventing a header of their own.
+        self._head = head
         self._outer.addLayout(head)
         self._rows = QVBoxLayout()
         self._rows.setContentsMargins(0, 4, 0, 0)
@@ -713,20 +785,60 @@ class _PagedBox(QFrame):
 class MoversColumn(_PagedBox):
     """Top Gainers / Losers / Sellers rows, with card-art thumbnails.
 
-    Clicking a row emits ``activated`` with the card's ``item_id`` — the main
-    window uses it to open that card in Inventory.
+    Clicking a row emits ``activated`` with the card's ``item_id`` — the main window
+    uses it to open that card in Inventory. **Only rows that have one**: a global
+    mover may describe a card no lot has ever held, and those emit nothing.
+
+    Gainers and losers also carry a **scope toggle**: `owned` ranks held resale cards
+    (the ledger), `global` ranks the whole catalog by price movement. The toggle emits
+    ``scope_changed``; the view reloads, because global runs off a worker thread.
     """
 
     activated = Signal(int)  # item_id
+    scope_changed = Signal(str)  # "owned" | "global"
 
-    def __init__(self, title: str, dot_color: str, images: _ImageLoader) -> None:
+    def __init__(
+        self,
+        title: str,
+        dot_color: str,
+        images: _ImageLoader,
+        *,
+        scoped: bool = False,
+    ) -> None:
         super().__init__(title, dot_color)
         self._images = images
         self._mode = "gain"  # gain | loss | seller
         self._label = ""  # window label (sellers empty-state)
+        self._scope = "owned"
+        self._loading = False
+        self._scope_box: QComboBox | None = None
+        if scoped:
+            self._scope_box = QComboBox()
+            self._scope_box.addItems(["Owned", "Global"])
+            self._scope_box.setToolTip(
+                "Owned ranks the resale cards you hold. Global ranks every card with "
+                "recorded price history, whether you hold it or not."
+            )
+            self._scope_box.currentIndexChanged.connect(self._scope_picked)
+            self._head.addWidget(self._scope_box)
+
+    def scope(self) -> str:
+        return self._scope
+
+    def _scope_picked(self, index: int) -> None:
+        self._scope = "global" if index else "owned"
+        self.scope_changed.emit(self._scope)
 
     def _render_item(self, item, first: bool) -> None:
         self._row(*self._format(item, self._mode), first=first, item_id=item.item_id)
+
+    def _empty_scope_text(self) -> str | None:
+        """Why a *global* list can be empty for a reason worth naming."""
+        if self._loading:
+            return "Ranking the catalog…"
+        if self._scope != "global":
+            return None
+        return "No catalog price history yet — run the price sweep from Operations."
 
     def _row(
         self,
@@ -741,10 +853,14 @@ class MoversColumn(_PagedBox):
         item_id: int | None = None,
     ) -> None:
         t = theme.active()
-        row = _ClickableRow("mvrow", first)
-        row.setToolTip(f"Show {name} in Inventory")
+        row = _ClickableRow("mvrow", first, clickable=item_id is not None)
         if item_id is not None:
+            row.setToolTip(f"Show {name} in Inventory")
             row.clicked.connect(lambda i=item_id: self.activated.emit(i))
+        else:
+            # The old tooltip promised Inventory unconditionally, which a card you do
+            # not hold cannot honour.
+            row.setToolTip(f"{name} — not in your inventory")
         h = QHBoxLayout(row)
         h.setContentsMargins(2, 7, 2, 7)
         h.setSpacing(11)
@@ -780,7 +896,20 @@ class MoversColumn(_PagedBox):
 
     def set_movers(self, rows: list[MoverRow], gain: bool) -> None:
         self._mode = "gain" if gain else "loss"
+        self._loading = False
         self.set_items(rows)
+
+    def set_ranking(self, gain: bool) -> None:
+        """Clear to a "working on it" state while the catalog is ranked.
+
+        Without this the column keeps the rows it already had, so switching to global
+        displayed the **owned** list — complete with "paid $X", which only an owned row
+        has — for as long as the worker took. Stale data under a changed heading is
+        worse than an empty box.
+        """
+        self._mode = "gain" if gain else "loss"
+        self._loading = True
+        self.set_items([])
 
     def set_sellers(self, rows: list[SellerRow], window_label: str) -> None:
         self._mode = "seller"
@@ -802,8 +931,14 @@ class MoversColumn(_PagedBox):
                 f"{money(item.revenue_cents)} · {item.sales} sale{plural}",
                 None,
             )
-        if mode == "loss":
+        held = getattr(item, "owned_qty", 0)
+        if held:
+            # The marker is what makes a global row answer "should I care?" in place.
+            sub = f"{sub} · you hold {held}"
+        if mode == "loss" and item.item_id is not None and not item.card_id:
             # Show what was paid, so a market drop can be read against cost basis.
+            # Only for owned rows: a global row has no basis, and printing "paid $0"
+            # would read as a fact rather than an absence.
             paid = f"paid {money(item.cost_cents)}"
             sub = f"{sub} · {paid}" if sub != "—" else paid
         pct = f" ({item.change_pct:+.0f}%)" if item.change_pct is not None else ""
@@ -821,6 +956,9 @@ class MoversColumn(_PagedBox):
     def _empty_text(self) -> str:
         if self._mode == "seller":
             return f"No sales in {self._label.lower()}."
+        scoped = self._empty_scope_text()
+        if scoped:
+            return scoped
         if self._mode == "gain":
             return "No gainers in this range."
         return "No losers here."
@@ -960,9 +1098,15 @@ class DashboardView(QWidget):
 
         # highlights strip: movers + upcoming shows
         t = theme.active()
-        self._gainers = MoversColumn("Top Gainers", t.pos, self._images)
-        self._losers = MoversColumn("Top Losers", t.neg, self._images)
+        self._gainers = MoversColumn("Top Gainers", t.pos, self._images, scoped=True)
+        self._losers = MoversColumn("Top Losers", t.neg, self._images, scoped=True)
         self._sellers = MoversColumn("Top Sellers", t.warn, self._images)
+        # Global ranking runs on a worker; `_parked` is where a retiring one waits for
+        # its own `finished`, per `retire()`. Never assign over a running worker.
+        self._movers_worker: QThread | None = None
+        self._parked: list[QThread] = []
+        for col in (self._gainers, self._losers):
+            col.scope_changed.connect(self._scope_changed)
         self._shows_box = UpcomingShowsBox()
         for col in (self._gainers, self._losers, self._sellers):
             col.activated.connect(self.item_activated)
@@ -1025,6 +1169,49 @@ class DashboardView(QWidget):
             return
         for box in (self._gainers, self._losers, self._sellers, self._shows_box):
             box.fit_to_height(avail)
+
+    def _scope_changed(self, _scope: str) -> None:
+        """A toggle moved: reload, because global has to go through the worker."""
+        self.refresh()
+
+    def _start_global_movers(self, cutoff: str | None) -> None:
+        """Kick the catalog ranking, retiring any in-flight one first.
+
+        `retire` rather than assignment: interruption only raises a flag, so
+        overwriting `self._movers_worker` would drop the last reference to a live
+        thread and Qt aborts the process for it (`WORKER-RETIRE-NOT-REPLACE`, and the
+        0xC0000409 startup crash of 2026-08-07). Toggling scope while the range
+        selector is being clicked is exactly how two land at once.
+        """
+        for column, gain in ((self._gainers, True), (self._losers, False)):
+            if column.scope() == "global":
+                column.set_ranking(gain)
+        retire(self._movers_worker, self._parked)
+        worker = _GlobalMoversWorker(config.db_path(), cutoff)
+        worker.done.connect(self._global_movers_ready)
+        self._movers_worker = worker
+        worker.start()
+
+    def _global_movers_ready(self, payload) -> None:
+        since, gainers, losers = payload
+        if gainers is None:
+            # The service failed; say so rather than showing an empty list that reads
+            # as "nothing moved".
+            self._note.setText("Could not read the catalog price history.")
+            return
+        if self._gainers.scope() == "global":
+            self._gainers.set_movers(gainers, gain=True)
+        if self._losers.scope() == "global":
+            self._losers.set_movers(losers, gain=False)
+
+    def park_workers(self) -> None:
+        """Stop the ranking thread. Called on teardown; see ticket 007 — a running
+        QThread that is garbage-collected aborts the process, and `deleteLater` needs
+        an event loop that is no longer running by then."""
+        retire(self._movers_worker, self._parked)
+        for worker in (self._movers_worker, *self._parked):
+            if worker is not None and worker.isRunning():
+                worker.wait(2000)
 
     def _selected_intent(self) -> Intent | None:
         text = self._intent.currentText()
@@ -1120,9 +1307,14 @@ class DashboardView(QWidget):
         # highlights: price-movement movers + sellers + upcoming shows (windowed).
         # Fetch the full lists (limit=None) so the columns can expand on demand.
         # One combined call so the movers query isn't recomputed twice per refresh.
-        gainers, losers = rpt.price_movers(intent, limit=None, since=cutoff)
-        self._gainers.set_movers(gainers, gain=True)
-        self._losers.set_movers(losers, gain=False)
+        if self._gainers.scope() == "global" or self._losers.scope() == "global":
+            self._start_global_movers(cutoff)
+        if self._gainers.scope() == "owned" or self._losers.scope() == "owned":
+            gainers, losers = rpt.price_movers(intent, limit=None, since=cutoff)
+            if self._gainers.scope() == "owned":
+                self._gainers.set_movers(gainers, gain=True)
+            if self._losers.scope() == "owned":
+                self._losers.set_movers(losers, gain=False)
         self._sellers.set_sellers(rpt.top_sellers(window_days=days, limit=None), label)
         self._shows_box.set_shows(self._shows_service.upcoming(limit=None))
 

@@ -3,12 +3,17 @@
   "version": 1,
   "captured_at": "2026-08-07",
   "captured_at_commit": "7633c05",
-
   "app": {
     "name": "TCGinventory",
     "one_liner": "Local, single-user PySide6 desktop app for a personal AND business trading-card inventory (Pokemon-focused): purchases, sales, trades on a single-card or lot basis, with inferred cost basis and profit/loss.",
     "shape": "Offline SQLite desktop app. One main window, a left nav list, eleven stacked destinations over one shared sqlite3 connection. No server, no auth, no multi-user.",
-    "stack": ["Python 3.10+ (dev on 3.12.10 Windows / 3.10.10 macOS)", "PySide6 (Qt 6) + QtCharts", "SQLite (WAL, FK on)", "httpx, numpy, Pillow, onnxruntime", "PyInstaller (onedir)"],
+    "stack": [
+      "Python 3.10+ (dev on 3.12.10 Windows / 3.10.10 macOS)",
+      "PySide6 (Qt 6) + QtCharts",
+      "SQLite (WAL, FK on)",
+      "httpx, numpy, Pillow, onnxruntime",
+      "PyInstaller (onedir)"
+    ],
     "entrypoints": {
       "module": "python -m tcginventory",
       "gui_script": "tcginventory.app:main",
@@ -16,13 +21,56 @@
     },
     "status": "V1 feature-complete (M0-M6). Live post-V1 work: pricing/catalog, card shows + calendar, eBay auction planner, market signals, and the recognition/vision engine (spec 06)."
   },
-
   "architecture": {
     "layers": [
-      {"name": "domain", "path": "src/tcginventory/domain/", "role": "enums + frozen dataclasses. No SQL, no Qt.", "files": ["src/tcginventory/domain/enums.py", "src/tcginventory/domain/models.py"]},
-      {"name": "data", "path": "src/tcginventory/data/", "role": "sqlite connections, forward-only migrations, repositories, backup, seed. No Qt.", "files": ["src/tcginventory/data/db.py", "src/tcginventory/data/migrator.py", "src/tcginventory/data/migrations/", "src/tcginventory/data/repositories.py", "src/tcginventory/data/vision.py", "src/tcginventory/data/auctions.py", "src/tcginventory/data/pricehistory.py", "src/tcginventory/data/backup.py", "src/tcginventory/data/seed.py", "src/tcginventory/data/setnames.py"]},
-      {"name": "services", "path": "src/tcginventory/services/", "role": "all business logic and money math. Qt-free and headless-testable.", "files": ["see windows[*].services — each is a real path under src/tcginventory/"]},
-      {"name": "ui", "path": "src/tcginventory/ui/", "role": "PySide6 only. Never issues SQL, never does money math.", "files": ["src/tcginventory/ui/main_window.py", "src/tcginventory/ui/theme.py", "src/tcginventory/ui/icons.py", "src/tcginventory/ui/charts.py", "src/tcginventory/ui/formatting.py", "src/tcginventory/ui/views/", "src/tcginventory/ui/models/"]}
+      {
+        "name": "domain",
+        "path": "src/tcginventory/domain/",
+        "role": "enums + frozen dataclasses. No SQL, no Qt.",
+        "files": [
+          "src/tcginventory/domain/enums.py",
+          "src/tcginventory/domain/models.py"
+        ]
+      },
+      {
+        "name": "data",
+        "path": "src/tcginventory/data/",
+        "role": "sqlite connections, forward-only migrations, repositories, backup, seed. No Qt.",
+        "files": [
+          "src/tcginventory/data/db.py",
+          "src/tcginventory/data/migrator.py",
+          "src/tcginventory/data/migrations/",
+          "src/tcginventory/data/repositories.py",
+          "src/tcginventory/data/vision.py",
+          "src/tcginventory/data/auctions.py",
+          "src/tcginventory/data/pricehistory.py",
+          "src/tcginventory/data/backup.py",
+          "src/tcginventory/data/seed.py",
+          "src/tcginventory/data/setnames.py"
+        ]
+      },
+      {
+        "name": "services",
+        "path": "src/tcginventory/services/",
+        "role": "all business logic and money math. Qt-free and headless-testable.",
+        "files": [
+          "see windows[*].services — each is a real path under src/tcginventory/"
+        ]
+      },
+      {
+        "name": "ui",
+        "path": "src/tcginventory/ui/",
+        "role": "PySide6 only. Never issues SQL, never does money math.",
+        "files": [
+          "src/tcginventory/ui/main_window.py",
+          "src/tcginventory/ui/theme.py",
+          "src/tcginventory/ui/icons.py",
+          "src/tcginventory/ui/charts.py",
+          "src/tcginventory/ui/formatting.py",
+          "src/tcginventory/ui/views/",
+          "src/tcginventory/ui/models/"
+        ]
+      }
     ],
     "non_negotiable_rules": [
       "Domain + service layers are Qt-free and unit-testable headless. tests/test_headless.py enforces it.",
@@ -37,7 +85,6 @@
     ],
     "invariants_doc": "specs/02-data-model.md#invariants-must-always-hold"
   },
-
   "commands": {
     "shell_note": "Windows dev box. PowerShell has no && — chain with `;` or `; if ($?) { ... }`. The Bash tool is also available with POSIX syntax.",
     "run_app_windows": ".\\.venv\\Scripts\\python.exe -m tcginventory",
@@ -55,52 +102,131 @@
     "build_exe": "pyinstaller --clean --noconfirm packaging/tcginventory.spec  (output: dist/TCGinventory/)",
     "ruff_config": "line-length 88, target py310, rules E/F/I/UP/B"
   },
-
   "databases": {
     "_note": "Four separate SQLite files. Only inventory.db is the ledger; the other three are derived/ephemeral and are NOT migrated by data/migrator.py.",
     "inventory.db": {
       "module": "src/tcginventory/data/db.py",
       "migrations": "src/tcginventory/data/migrations/ (0001..0020, forward-only)",
       "repositories": "src/tcginventory/data/repositories.py",
-      "tables": ["item", "lot", "lot_consumption", "transaction", "transaction_line", "audit_log", "price_snapshot", "collection_value_snapshot", "card_catalog", "card_show", "card_show_status", "calendar_entry", "operation_run", "schema_version"]
+      "tables": [
+        "item",
+        "lot",
+        "lot_consumption",
+        "transaction",
+        "transaction_line",
+        "audit_log",
+        "price_snapshot",
+        "collection_value_snapshot",
+        "card_catalog",
+        "card_show",
+        "card_show_status",
+        "calendar_entry",
+        "operation_run",
+        "schema_version"
+      ]
     },
     "vision.db": {
       "module": "src/tcginventory/data/vision.py",
-      "tables": ["capture", "image", "region", "card_embedding", "region_embedding", "model_run", "model_epoch"],
+      "tables": [
+        "capture",
+        "image",
+        "region",
+        "card_embedding",
+        "region_embedding",
+        "model_run",
+        "model_epoch"
+      ],
       "note": "Recognition corpus + model run history. Schema is created in-module, not by the migrator."
     },
     "auctions.db": {
       "module": "src/tcginventory/data/auctions.py",
-      "tables": ["auction", "auction_card"],
+      "tables": [
+        "auction",
+        "auction_card"
+      ],
       "note": "Ephemeral eBay watchlist. Deliberately not the ledger; nothing prunes it."
     },
     "pricehistory.db": {
       "module": "src/tcginventory/data/pricehistory.py",
-      "tables": ["catalog_price_snapshot", "catalog_price_latest", "set_state"],
+      "tables": [
+        "catalog_price_snapshot",
+        "catalog_price_latest",
+        "set_state"
+      ],
       "note": "Catalog-wide daily price history (whole catalog, not just holdings)."
     }
   },
-
   "shared_ui": {
     "theme": {
       "file": "src/tcginventory/ui/theme.py",
       "name": "Ember Duo",
       "rule": "Never hardcode a colour in a view. Read tokens via theme.active(); DARK is default, LIGHT follows the OS. Tokens: bg, surface, surface2, line, line2, zebra, ink, ink2, ink3, accent (orange), accent2 (brick red), accent_soft, accent_ink, accent_on, pos, neg, neg_soft, info, warn, series."
     },
-    "icons": {"file": "src/tcginventory/ui/icons.py", "rule": "Lucide SVGs tinted at call time: icons.icon(name, color, size). Assets in ui/assets/icons/."},
-    "formatting": {"file": "src/tcginventory/ui/formatting.py", "rule": "money(cents) and percent() — the only place cents become strings."},
-    "charts": {"file": "src/tcginventory/ui/charts.py", "classes": ["RangedChartView", "HoverChartView"]},
-    "card_entry": {"file": "src/tcginventory/ui/views/_card_entry.py", "rule": "CardEntryMixin + PriceLookupWorker + MatchDelegate are THE standard for any inline card row (catalog autocomplete, art preview, auto-pricing, printing picker). Transaction and Auctions both use it — do not fork it."},
-    "background_jobs": {"file": "src/tcginventory/ui/views/_worker.py", "rule": "TaskWorker(db_path, task) runs `task(conn) -> sentence` off the UI thread with its own connection. Any 'call a service and report a sentence' job uses it instead of a new QThread subclass."},
-    "card_preview": {"files": ["src/tcginventory/ui/card_preview.py", "src/tcginventory/ui/card_gallery.py", "src/tcginventory/ui/thumbcache.py"], "rule": "Hover shows the hovered card; on leave fall back to the selected card, else the last hovered. Platform-wide convention."},
-    "table_delegates": ["src/tcginventory/ui/views/_combo_delegate.py", "src/tcginventory/ui/views/_intent_delegate.py", "src/tcginventory/ui/views/_link_delegate.py", "src/tcginventory/ui/views/_review_delegate.py", "src/tcginventory/ui/views/_inventory_delegates.py"],
-    "dialogs": ["src/tcginventory/ui/views/_card_dialogs.py", "src/tcginventory/ui/views/_autofill_dialog.py", "src/tcginventory/ui/views/item_editor.py", "src/tcginventory/ui/views/item_detail.py"],
-    "qt_models": ["src/tcginventory/ui/models/inventory_model.py", "src/tcginventory/ui/models/history_model.py", "src/tcginventory/ui/models/recognition_history_model.py"]
+    "icons": {
+      "file": "src/tcginventory/ui/icons.py",
+      "rule": "Lucide SVGs tinted at call time: icons.icon(name, color, size). Assets in ui/assets/icons/."
+    },
+    "formatting": {
+      "file": "src/tcginventory/ui/formatting.py",
+      "rule": "money(cents) and percent() — the only place cents become strings."
+    },
+    "charts": {
+      "file": "src/tcginventory/ui/charts.py",
+      "classes": [
+        "RangedChartView",
+        "HoverChartView"
+      ]
+    },
+    "card_entry": {
+      "file": "src/tcginventory/ui/views/_card_entry.py",
+      "rule": "CardEntryMixin + PriceLookupWorker + MatchDelegate are THE standard for any inline card row (catalog autocomplete, art preview, auto-pricing, printing picker). Transaction and Auctions both use it — do not fork it."
+    },
+    "background_jobs": {
+      "file": "src/tcginventory/ui/views/_worker.py",
+      "rule": "TaskWorker(db_path, task) runs `task(conn) -> sentence` off the UI thread with its own connection. Any 'call a service and report a sentence' job uses it instead of a new QThread subclass."
+    },
+    "card_preview": {
+      "files": [
+        "src/tcginventory/ui/card_preview.py",
+        "src/tcginventory/ui/card_gallery.py",
+        "src/tcginventory/ui/thumbcache.py"
+      ],
+      "rule": "Hover shows the hovered card; on leave fall back to the selected card, else the last hovered. Platform-wide convention."
+    },
+    "table_delegates": [
+      "src/tcginventory/ui/views/_combo_delegate.py",
+      "src/tcginventory/ui/views/_intent_delegate.py",
+      "src/tcginventory/ui/views/_link_delegate.py",
+      "src/tcginventory/ui/views/_review_delegate.py",
+      "src/tcginventory/ui/views/_inventory_delegates.py"
+    ],
+    "dialogs": [
+      "src/tcginventory/ui/views/_card_dialogs.py",
+      "src/tcginventory/ui/views/_autofill_dialog.py",
+      "src/tcginventory/ui/views/item_editor.py",
+      "src/tcginventory/ui/views/item_detail.py"
+    ],
+    "qt_models": [
+      "src/tcginventory/ui/models/inventory_model.py",
+      "src/tcginventory/ui/models/history_model.py",
+      "src/tcginventory/ui/models/recognition_history_model.py"
+    ]
   },
-
   "main_window": {
     "file": "src/tcginventory/ui/main_window.py",
-    "nav_order": ["Dashboard", "Transaction", "Inventory", "History", "Calendar", "Price Lookup", "eBay Auctions", "Recognition", "Market", "Models", "Operations"],
+    "nav_order": [
+      "Dashboard",
+      "Transaction",
+      "Inventory",
+      "History",
+      "Calendar",
+      "Price Lookup",
+      "eBay Auctions",
+      "Recognition",
+      "Market",
+      "Models",
+      "Operations"
+    ],
     "contract": [
       "A view is constructed with the shared sqlite3 connection and added to a QStackedWidget in NAV_ITEMS order. Nav index == stack index — derive indexes with NAV_ITEMS.index(...), never a literal.",
       "Every view SHOULD expose refresh(); _warm_views() calls it once at startup behind the splash, and _on_nav_changed() calls it again only when _data_version has moved.",
@@ -110,42 +236,132 @@
     ],
     "file_menu": "Deliberately thin: Operations (Ctrl+Shift+O) + Exit. Every maintenance verb lives on the Operations screen, never in a menu."
   },
-
   "windows": {
     "dashboard": {
       "nav_label": "Dashboard",
-      "aliases": ["dash", "home", "overview", "portfolio"],
+      "aliases": [
+        "dash",
+        "home",
+        "overview",
+        "portfolio"
+      ],
       "class": "DashboardView",
       "file": "src/tcginventory/ui/views/dashboard.py",
       "purpose": "Stylized portfolio overview: a hero Collection Value metric with sparkline, a KPI cluster (cost / market / unrealized / realized), a signature collection-value-over-net-cash chart, and a Highlights strip (Top Gainers/Losers by market-price movement, Top Sellers by units, Upcoming Shows) with card art.",
-      "services": ["services/reporting.py", "services/cardshows.py", "services/cardimages.py"],
+      "services": [
+        "services/reporting.py",
+        "services/cardshows.py",
+        "services/cardimages.py",
+        "src/tcginventory/services/globalmovers.py"
+      ],
       "repositories": [],
-      "tables": ["lot", "lot_consumption", "transaction", "transaction_line", "price_snapshot", "collection_value_snapshot", "card_show"],
-      "supporting_files": ["ui/charts.py", "ui/formatting.py", "ui/icons.py", "ui/theme.py"],
-      "tests": ["tests/test_ui_dashboard.py", "tests/test_ui_dashboard_links.py", "tests/test_ui_movers_expand.py", "tests/test_reporting.py", "tests/test_reporting_movers.py", "tests/test_charts.py", "tests/test_ui_views.py"],
-      "signals_out": ["item_activated(item_id) -> selects that card in Inventory", "show_date_activated(iso) -> opens that day in Calendar"],
+      "tables": [
+        "lot",
+        "lot_consumption",
+        "transaction",
+        "transaction_line",
+        "price_snapshot",
+        "collection_value_snapshot",
+        "card_show"
+      ],
+      "supporting_files": [
+        "ui/charts.py",
+        "ui/formatting.py",
+        "ui/icons.py",
+        "ui/theme.py"
+      ],
+      "tests": [
+        "tests/test_ui_dashboard.py",
+        "tests/test_ui_dashboard_links.py",
+        "tests/test_ui_movers_expand.py",
+        "tests/test_reporting.py",
+        "tests/test_reporting_movers.py",
+        "tests/test_charts.py",
+        "tests/test_ui_views.py",
+        "tests/test_global_movers.py",
+        "tests/test_ui_dashboard_movers_scope.py",
+        "tests/test_pricehistory_movers.py"
+      ],
+      "signals_out": [
+        "item_activated(item_id) -> selects that card in Inventory",
+        "show_date_activated(iso) -> opens that day in Calendar"
+      ],
       "gotchas": [
         "The chart's date-range selector is a SHARED time filter: it windows the flow boxes (Realized, Net Cash), the movers, the sellers and every sparkline. Position boxes stay a current snapshot and must NOT follow it.",
         "Collection value comes from collection_value_snapshot and must reconcile with the hero tile (ADR 2026-07-27).",
         "Movers rank by market-price movement, not by P/L.",
-        "Read-only screen: it never posts or mutates."
+        "Read-only screen: it never posts or mutates.",
+        "Top Gainers/Losers carry an owned/global scope toggle. Owned reads the ledger inline; global ranks the whole catalog from pricehistory.db on a QThread with its own connections (~900ms), so it must never be called on the UI thread and the column is cleared to a ranking state first -- otherwise the owned rows show under a Global heading. Global rows for cards you do not hold have item_id None and are deliberately inert: no navigation, no hand cursor, no Inventory tooltip.",
+        "Global movers are fetched with a bounded limit (_GLOBAL_LIMIT). The owned path uses limit=None because 759 rows are free; the catalog ranking returns ~18,500 and hydrates a catalog name per row, so unbounded it never arrives."
       ],
-      "specs": ["specs/03-features.md (F-VW-6/7/8)", "specs/04-ui-ux.md"]
+      "specs": [
+        "specs/03-features.md (F-VW-6/7/8)",
+        "specs/04-ui-ux.md"
+      ]
     },
-
     "transaction": {
       "nav_label": "Transaction",
-      "aliases": ["txn", "tx", "post", "purchase", "sale", "trade", "write"],
+      "aliases": [
+        "txn",
+        "tx",
+        "post",
+        "purchase",
+        "sale",
+        "trade",
+        "write"
+      ],
       "class": "TransactionView",
       "file": "src/tcginventory/ui/views/transaction.py",
       "purpose": "The one write UI. A 'You vs Them' face-off: cards you give + cash you pay on the left, their cards + their cash on the right. Live inferred type badge (purchase/sale/trade), live totals and estimated margin, oversell-blocked submit. Also runs in edit mode (atomic void + re-post).",
-      "services": ["services/transactions.py", "services/allocation.py", "services/inventory.py", "services/reporting.py", "services/review.py", "services/inference.py", "services/tcgplayer.py", "services/ebay.py", "services/cardimages.py"],
-      "repositories": ["ItemRepository", "LotRepository", "CardCatalogRepository (autocomplete)"],
-      "tables": ["item", "lot", "lot_consumption", "transaction", "transaction_line", "audit_log", "card_catalog"],
-      "supporting_files": ["ui/views/_card_entry.py", "ui/views/_card_dialogs.py", "ui/views/_autofill_dialog.py", "ui/card_preview.py", "ui/completer_popup.py", "ui/clipboard_images.py"],
-      "tests": ["tests/test_ui_transaction.py", "tests/test_transactions.py", "tests/test_allocation.py", "tests/test_autofill.py", "tests/test_recognition_export.py", "tests/test_delete_entry.py"],
-      "signals_out": ["posted() -> MainWindow invalidates every read view"],
-      "entry_points_in": ["MainWindow._start_edit (from History)", "add_incoming / set_deal_context (from eBay Auctions)", "import_recognized (from Recognition and Recognition History)"],
+      "services": [
+        "services/transactions.py",
+        "services/allocation.py",
+        "services/inventory.py",
+        "services/reporting.py",
+        "services/review.py",
+        "services/inference.py",
+        "services/tcgplayer.py",
+        "services/ebay.py",
+        "services/cardimages.py"
+      ],
+      "repositories": [
+        "ItemRepository",
+        "LotRepository",
+        "CardCatalogRepository (autocomplete)"
+      ],
+      "tables": [
+        "item",
+        "lot",
+        "lot_consumption",
+        "transaction",
+        "transaction_line",
+        "audit_log",
+        "card_catalog"
+      ],
+      "supporting_files": [
+        "ui/views/_card_entry.py",
+        "ui/views/_card_dialogs.py",
+        "ui/views/_autofill_dialog.py",
+        "ui/card_preview.py",
+        "ui/completer_popup.py",
+        "ui/clipboard_images.py"
+      ],
+      "tests": [
+        "tests/test_ui_transaction.py",
+        "tests/test_transactions.py",
+        "tests/test_allocation.py",
+        "tests/test_autofill.py",
+        "tests/test_recognition_export.py",
+        "tests/test_delete_entry.py"
+      ],
+      "signals_out": [
+        "posted() -> MainWindow invalidates every read view"
+      ],
+      "entry_points_in": [
+        "MainWindow._start_edit (from History)",
+        "add_incoming / set_deal_context (from eBay Auctions)",
+        "import_recognized (from Recognition and Recognition History)"
+      ],
       "gotchas": [
         "This is the highest-risk screen in the app — it is the only path that creates cost basis. Any change here must keep the money invariants in specs/02-data-model.md.",
         "Type is inferred from which sides carry cards. Never let the user pick it.",
@@ -155,23 +371,71 @@
         "Preview totals come from TransactionService.preview() — do not recompute money in the view.",
         "Ctrl+S submits."
       ],
-      "specs": ["specs/02-data-model.md", "specs/03-features.md (F-TX-*, F-PU/SA/TR-*)", "specs/04-ui-ux.md"]
+      "specs": [
+        "specs/02-data-model.md",
+        "specs/03-features.md (F-TX-*, F-PU/SA/TR-*)",
+        "specs/04-ui-ux.md"
+      ]
     },
-
     "inventory": {
       "nav_label": "Inventory",
-      "aliases": ["holdings", "grid", "stock", "collection"],
+      "aliases": [
+        "holdings",
+        "grid",
+        "stock",
+        "collection"
+      ],
       "class": "InventoryView",
       "file": "src/tcginventory/ui/views/inventory.py",
       "purpose": "Sortable, filterable grid of holdings — one row per lot with cost, market, unrealized P/L, intent, SKU, review flag and a price sparkline; inline editing of intent/review, item edit and the sanctioned mistaken-entry delete.",
-      "services": ["services/inventory.py", "services/transactions.py", "services/trends.py", "services/review.py", "services/cardimages.py"],
-      "repositories": ["ItemRepository", "LotRepository", "PriceSnapshotRepository"],
-      "tables": ["item", "lot", "lot_consumption", "price_snapshot"],
-      "other_dbs": ["pricehistory.db (per-row price sparkline)"],
-      "supporting_files": ["ui/models/inventory_model.py", "ui/views/_inventory_delegates.py", "ui/views/_intent_delegate.py", "ui/views/_combo_delegate.py", "ui/views/_link_delegate.py", "ui/views/_review_delegate.py", "ui/views/item_detail.py", "ui/views/item_editor.py"],
-      "tests": ["tests/test_ui_views.py", "tests/test_ui_item_editing.py", "tests/test_ui_inventory_links.py", "tests/test_inventory.py", "tests/test_review.py", "tests/test_review_protection.py", "tests/test_missing_lots.py", "tests/test_lot_sku_split.py", "tests/test_delete_entry.py"],
-      "signals_out": ["changed() -> ledger mutated (intent edit, item edit, entry delete)"],
-      "entry_points_in": ["select_item(item_id) from the Dashboard highlights"],
+      "services": [
+        "services/inventory.py",
+        "services/transactions.py",
+        "services/trends.py",
+        "services/review.py",
+        "services/cardimages.py"
+      ],
+      "repositories": [
+        "ItemRepository",
+        "LotRepository",
+        "PriceSnapshotRepository"
+      ],
+      "tables": [
+        "item",
+        "lot",
+        "lot_consumption",
+        "price_snapshot"
+      ],
+      "other_dbs": [
+        "pricehistory.db (per-row price sparkline)"
+      ],
+      "supporting_files": [
+        "ui/models/inventory_model.py",
+        "ui/views/_inventory_delegates.py",
+        "ui/views/_intent_delegate.py",
+        "ui/views/_combo_delegate.py",
+        "ui/views/_link_delegate.py",
+        "ui/views/_review_delegate.py",
+        "ui/views/item_detail.py",
+        "ui/views/item_editor.py"
+      ],
+      "tests": [
+        "tests/test_ui_views.py",
+        "tests/test_ui_item_editing.py",
+        "tests/test_ui_inventory_links.py",
+        "tests/test_inventory.py",
+        "tests/test_review.py",
+        "tests/test_review_protection.py",
+        "tests/test_missing_lots.py",
+        "tests/test_lot_sku_split.py",
+        "tests/test_delete_entry.py"
+      ],
+      "signals_out": [
+        "changed() -> ledger mutated (intent edit, item edit, entry delete)"
+      ],
+      "entry_points_in": [
+        "select_item(item_id) from the Dashboard highlights"
+      ],
       "gotchas": [
         "Rows come from InventoryService.inventory_rows() — the view does no aggregation.",
         "Ripping lots value at $0 and show as a loss equal to cost basis. Do not 'fix' this.",
@@ -180,62 +444,147 @@
         "Missing/stolen items are a reversible $0 impairment, not a transaction (ADR 2026-07-27).",
         "Sorting/filtering runs through a QSortFilterProxyModel; add columns in ui/models/inventory_model.py, not by hand in the view."
       ],
-      "specs": ["specs/03-features.md (F-VW-1/5/9, F-SE-1/2)", "specs/04-ui-ux.md"]
+      "specs": [
+        "specs/03-features.md (F-VW-1/5/9, F-SE-1/2)",
+        "specs/04-ui-ux.md"
+      ]
     },
-
     "history": {
       "nav_label": "History",
-      "aliases": ["log", "ledger", "transactions log", "audit"],
+      "aliases": [
+        "log",
+        "ledger",
+        "transactions log",
+        "audit"
+      ],
       "class": "HistoryView",
       "file": "src/tcginventory/ui/views/history.py",
       "purpose": "Full transaction log with drill-down: type/status pills, sign-tinted mono money, per-card detail table, search by card or counterparty, Void/Edit on the selected row. Also hosts Recognition History — stored captures, re-exportable to Transaction or Auctions.",
-      "services": ["services/transactions.py", "services/reporting.py", "services/corpus.py", "services/regioncrops.py", "services/cardimages.py"],
-      "repositories": ["TransactionRepository", "AuditRepository", "VisionRepository"],
-      "tables": ["transaction", "transaction_line", "audit_log", "item", "lot_consumption"],
-      "other_dbs": ["vision.db (capture, image, region — the Recognition History tab)"],
-      "supporting_files": ["ui/models/history_model.py", "ui/models/recognition_history_model.py", "ui/thumbcache.py"],
-      "tests": ["tests/test_ui_views.py", "tests/test_ui_transaction.py", "tests/test_recognition_export.py", "tests/test_transactions.py"],
-      "signals_out": ["changed()", "edit_requested(transaction_id)", "new_transaction_requested()", "export_to_transaction(cards)", "export_to_auction(cards)"],
+      "services": [
+        "services/transactions.py",
+        "services/reporting.py",
+        "services/corpus.py",
+        "services/regioncrops.py",
+        "services/cardimages.py"
+      ],
+      "repositories": [
+        "TransactionRepository",
+        "AuditRepository",
+        "VisionRepository"
+      ],
+      "tables": [
+        "transaction",
+        "transaction_line",
+        "audit_log",
+        "item",
+        "lot_consumption"
+      ],
+      "other_dbs": [
+        "vision.db (capture, image, region — the Recognition History tab)"
+      ],
+      "supporting_files": [
+        "ui/models/history_model.py",
+        "ui/models/recognition_history_model.py",
+        "ui/thumbcache.py"
+      ],
+      "tests": [
+        "tests/test_ui_views.py",
+        "tests/test_ui_transaction.py",
+        "tests/test_recognition_export.py",
+        "tests/test_transactions.py"
+      ],
+      "signals_out": [
+        "changed()",
+        "edit_requested(transaction_id)",
+        "new_transaction_requested()",
+        "export_to_transaction(cards)",
+        "export_to_auction(cards)"
+      ],
       "gotchas": [
         "Void and Edit are the only mutations. Edit hands off to TransactionView via edit_requested — it never posts here.",
         "Voided rows stay visible with a status pill; nothing is ever removed from the log.",
         "Thumbnails use session-scoped pixmap + card-id caches (ADR 2026-08-04) — do not reload art per paint."
       ],
-      "specs": ["specs/03-features.md (F-VW-3, F-DA-*)", "specs/04-ui-ux.md"]
+      "specs": [
+        "specs/03-features.md (F-VW-3, F-DA-*)",
+        "specs/04-ui-ux.md"
+      ]
     },
-
     "calendar": {
       "nav_label": "Calendar",
-      "aliases": ["shows", "card shows", "month", "agenda"],
+      "aliases": [
+        "shows",
+        "card shows",
+        "month",
+        "agenda"
+      ],
       "class": "CalendarView",
       "file": "src/tcginventory/ui/views/calendar.py",
       "purpose": "Themed month grid + agenda combining scraped card shows (attending / walking / pending / denied) with user-created personal entries (vacations, obligations, travel). Overlaps between a show you're attending/walking and a personal entry are flagged as conflicts in the day cell, the agenda and a banner.",
-      "services": ["services/calendar.py", "services/cardshows.py"],
-      "repositories": ["CardShowRepository"],
-      "tables": ["card_show", "card_show_status", "calendar_entry"],
-      "supporting_files": ["ui/views/shows.py (the older shows list)"],
-      "tests": ["tests/test_calendar.py", "tests/test_cardshows.py", "tests/test_ui_dashboard_links.py"],
-      "entry_points_in": ["show_date(iso) from the Dashboard's Upcoming Shows"],
+      "services": [
+        "services/calendar.py",
+        "services/cardshows.py"
+      ],
+      "repositories": [
+        "CardShowRepository"
+      ],
+      "tables": [
+        "card_show",
+        "card_show_status",
+        "calendar_entry"
+      ],
+      "supporting_files": [
+        "ui/views/shows.py (the older shows list)"
+      ],
+      "tests": [
+        "tests/test_calendar.py",
+        "tests/test_cardshows.py",
+        "tests/test_ui_dashboard_links.py"
+      ],
+      "entry_points_in": [
+        "show_date(iso) from the Dashboard's Upcoming Shows"
+      ],
       "gotchas": [
         "Shows are scraped from tcdb.com on demand via the Operations screen — the calendar reads what was scraped, it does not fetch on its own.",
         "Attendance status is per-show and user-set (ADR 2026-07-13); the scrape must never clobber it.",
         "Conflict detection lives in services/calendar.find_conflicts, not in the view."
       ],
-      "specs": ["specs/05-roadmap.md"]
+      "specs": [
+        "specs/05-roadmap.md"
+      ]
     },
-
     "price_lookup": {
       "nav_label": "Price Lookup",
-      "aliases": ["lookup", "price", "price history", "market chart", "search"],
+      "aliases": [
+        "lookup",
+        "price",
+        "price history",
+        "market chart",
+        "search"
+      ],
       "class": "PriceLookupView",
       "file": "src/tcginventory/ui/views/market.py",
       "purpose": "Chart the price history of any card in the catalog and overlay several. Two shuttle lists (search results / tagged cards), a hover-driven art display that becomes a gallery when nothing is hovered, and persistent overlaid graph lines per tagged card.",
       "services": [],
-      "repositories": ["CardCatalogRepository"],
-      "tables": ["card_catalog"],
-      "other_dbs": ["pricehistory.db (catalog_price_snapshot / catalog_price_latest) — the actual series"],
-      "supporting_files": ["ui/card_gallery.py", "ui/charts.py", "ui/card_preview.py"],
-      "tests": ["tests/test_ui_market.py", "tests/test_catalog.py", "tests/test_marketprices.py"],
+      "repositories": [
+        "CardCatalogRepository"
+      ],
+      "tables": [
+        "card_catalog"
+      ],
+      "other_dbs": [
+        "pricehistory.db (catalog_price_snapshot / catalog_price_latest) — the actual series"
+      ],
+      "supporting_files": [
+        "ui/card_gallery.py",
+        "ui/charts.py",
+        "ui/card_preview.py"
+      ],
+      "tests": [
+        "tests/test_ui_market.py",
+        "tests/test_catalog.py",
+        "tests/test_marketprices.py"
+      ],
       "gotchas": [
         "This screen is about the whole CATALOG, not your holdings — do not filter to owned cards.",
         "Tagged cards keep their line colour; an untagged preview line is dropped on click-off.",
@@ -246,21 +595,51 @@
         "docs/decisions.md § ### 2026-07-16 — Catalog-wide price history (market outlook)"
       ]
     },
-
     "auctions": {
       "nav_label": "eBay Auctions",
-      "aliases": ["ebay", "auction", "bidding", "max bid", "watchlist"],
+      "aliases": [
+        "ebay",
+        "auction",
+        "bidding",
+        "max bid",
+        "watchlist"
+      ],
       "class": "AuctionsView",
       "file": "src/tcginventory/ui/views/auctions.py",
       "purpose": "Max-bid planner for auctions you're watching. Watchlist rows show title, listing link, total card value and a max-bid breakdown at 70/80/90/100% of value net of shipping + tax; the editor below takes a title, URL, catalog-autofilled cards (auto-priced from pricehistory.db), flat shipping and a tax rate, with a live breakdown as you type.",
-      "services": ["services/auctions.py (the bid math)", "services/ebay.py", "services/tcgplayer.py", "services/cardimages.py", "services/inference.py"],
-      "repositories": ["CardCatalogRepository", "data/auctions.py (open_auctions and friends)"],
+      "services": [
+        "services/auctions.py (the bid math)",
+        "services/ebay.py",
+        "services/tcgplayer.py",
+        "services/cardimages.py",
+        "services/inference.py"
+      ],
+      "repositories": [
+        "CardCatalogRepository",
+        "data/auctions.py (open_auctions and friends)"
+      ],
       "tables": [],
-      "other_dbs": ["auctions.db (auction, auction_card) — the watchlist", "pricehistory.db (auto-pricing)"],
-      "supporting_files": ["ui/views/_card_entry.py", "ui/views/_autofill_dialog.py", "ui/card_gallery.py"],
-      "tests": ["tests/test_auctions.py", "tests/test_autofill.py", "tests/test_ebay.py", "tests/test_recognition_export.py"],
-      "signals_out": ["export_to_transaction((title, incoming_cards)) -> prefills a purchase in Transaction"],
-      "entry_points_in": ["import_recognized(cards) from Recognition (Listing mode)"],
+      "other_dbs": [
+        "auctions.db (auction, auction_card) — the watchlist",
+        "pricehistory.db (auto-pricing)"
+      ],
+      "supporting_files": [
+        "ui/views/_card_entry.py",
+        "ui/views/_autofill_dialog.py",
+        "ui/card_gallery.py"
+      ],
+      "tests": [
+        "tests/test_auctions.py",
+        "tests/test_autofill.py",
+        "tests/test_ebay.py",
+        "tests/test_recognition_export.py"
+      ],
+      "signals_out": [
+        "export_to_transaction((title, incoming_cards)) -> prefills a purchase in Transaction"
+      ],
+      "entry_points_in": [
+        "import_recognized(cards) from Recognition (Listing mode)"
+      ],
       "gotchas": [
         "auctions.db is EPHEMERAL and is not the ledger. Nothing prunes it; the user deletes rows. Never post to the ledger from here — export to Transaction instead.",
         "In tests / in-memory mode the auctions DB must also be :memory: so the real auctions.db is untouched (see MainWindow builders).",
@@ -272,20 +651,67 @@
         "docs/decisions.md § ### 2026-07-16 — Auction editor: multi-card display reuses Price Lookup's gallery"
       ]
     },
-
     "recognition": {
       "nav_label": "Recognition",
-      "aliases": ["vision", "scan", "camera", "photos", "labeling", "corpus", "identify"],
+      "aliases": [
+        "vision",
+        "scan",
+        "camera",
+        "photos",
+        "labeling",
+        "corpus",
+        "identify"
+      ],
       "class": "RecognitionView",
       "file": "src/tcginventory/ui/views/recognition.py",
       "purpose": "The human-in-the-loop training surface. Load scene photos of cards on a blank background, draw numbered boxes, label each via the catalog, and save regions (geometry + identity + side + condition) into vision.db. Transaction mode splits the scene into 'I Give' / 'They Give' with an adjustable divider; Listing mode is one lot. Detector box proposals and identity suggestions toggle in here.",
-      "services": ["services/vision.py", "services/recognizer.py", "services/detector.py", "services/inference.py", "services/catalog_index.py", "services/condition.py", "services/corpus.py", "services/exemplars.py", "services/regioncrops.py", "services/identity_projection.py", "services/identity_patches.py"],
-      "repositories": ["VisionRepository", "CardCatalogRepository"],
-      "tables": ["card_catalog"],
-      "other_dbs": ["vision.db (capture, image, region, card_embedding, region_embedding)"],
-      "supporting_files": ["ui/card_preview.py", "ui/clipboard_images.py", "ui/completer_popup.py", "src/tcginventory/models/*.onnx"],
-      "tests": ["tests/test_ui_recognition.py", "tests/test_vision.py", "tests/test_recognizer.py", "tests/test_recognition_language.py", "tests/test_recognition_export.py", "tests/test_condition_sync.py", "tests/test_identity.py", "tests/test_identity_projection.py", "tests/test_detector.py", "tests/test_inference.py", "tests/test_corpus.py", "tests/test_exemplars.py"],
-      "signals_out": ["export_to_transaction(cards)", "export_to_auction(cards)"],
+      "services": [
+        "services/vision.py",
+        "services/recognizer.py",
+        "services/detector.py",
+        "services/inference.py",
+        "services/catalog_index.py",
+        "services/condition.py",
+        "services/corpus.py",
+        "services/exemplars.py",
+        "services/regioncrops.py",
+        "services/identity_projection.py",
+        "services/identity_patches.py"
+      ],
+      "repositories": [
+        "VisionRepository",
+        "CardCatalogRepository"
+      ],
+      "tables": [
+        "card_catalog"
+      ],
+      "other_dbs": [
+        "vision.db (capture, image, region, card_embedding, region_embedding)"
+      ],
+      "supporting_files": [
+        "ui/card_preview.py",
+        "ui/clipboard_images.py",
+        "ui/completer_popup.py",
+        "src/tcginventory/models/*.onnx"
+      ],
+      "tests": [
+        "tests/test_ui_recognition.py",
+        "tests/test_vision.py",
+        "tests/test_recognizer.py",
+        "tests/test_recognition_language.py",
+        "tests/test_recognition_export.py",
+        "tests/test_condition_sync.py",
+        "tests/test_identity.py",
+        "tests/test_identity_projection.py",
+        "tests/test_detector.py",
+        "tests/test_inference.py",
+        "tests/test_corpus.py",
+        "tests/test_exemplars.py"
+      ],
+      "signals_out": [
+        "export_to_transaction(cards)",
+        "export_to_auction(cards)"
+      ],
       "gotchas": [
         "Model-agnostic by design: this screen COLLECTS training data. Training itself lives on the Models screen.",
         "A card is a physical object photographed front and back and has ONE condition; faces join on (pair_group, pair index, box number). pair_group is allocated per SESSION, not per photo pair (ADR 2026-08-05).",
@@ -294,41 +720,98 @@
         "Identity suggestions are scoped per card by language.",
         "torch / ultralytics are deliberately NOT bundled — the app only ever runs models, never trains in-process here."
       ],
-      "specs": ["specs/06-recognition.md"]
+      "specs": [
+        "specs/06-recognition.md"
+      ]
     },
-
     "market": {
       "nav_label": "Market",
-      "aliases": ["market signals", "signals", "liquidity", "volatility", "analytics"],
+      "aliases": [
+        "market signals",
+        "signals",
+        "liquidity",
+        "volatility",
+        "analytics"
+      ],
       "class": "MarketView",
       "file": "src/tcginventory/ui/views/market_signal.py",
       "purpose": "Read-only analytics table of each resale card's monetary significance: liquidity (sell-through, days-to-sell), markup (realized + unrealized) and price volatility. Liquidity/markup are all-time; volatility is over the selected window. Sortable, defaults to most-liquid first.",
-      "services": ["services/market_signal.py", "services/trends.py"],
+      "services": [
+        "services/market_signal.py",
+        "services/trends.py"
+      ],
       "repositories": [],
-      "tables": ["lot", "lot_consumption", "transaction_line", "price_snapshot"],
-      "supporting_files": ["ui/formatting.py"],
-      "tests": ["tests/test_market_signal.py", "tests/test_trends.py"],
+      "tables": [
+        "lot",
+        "lot_consumption",
+        "transaction_line",
+        "price_snapshot"
+      ],
+      "supporting_files": [
+        "ui/formatting.py"
+      ],
+      "tests": [
+        "tests/test_market_signal.py",
+        "tests/test_trends.py"
+      ],
       "gotchas": [
         "Strictly read-only and strictly presentational — every number comes from MarketSignalService.",
         "Only resale-intent cards are in scope. Personal and ripping lots are excluded by design.",
         "Note the name collision: this screen is src/tcginventory/ui/views/market_signal.py; src/tcginventory/ui/views/market.py is the Price Lookup screen."
       ],
-      "specs": ["specs/06-recognition.md (M-Market)"]
+      "specs": [
+        "specs/06-recognition.md (M-Market)"
+      ]
     },
-
     "models": {
       "nav_label": "Models",
-      "aliases": ["training", "ml", "detector", "grader", "identification", "metrics"],
+      "aliases": [
+        "training",
+        "ml",
+        "detector",
+        "grader",
+        "identification",
+        "metrics"
+      ],
       "class": "ModelsView",
       "file": "src/tcginventory/ui/views/models.py",
       "purpose": "The recognition subsystem on one screen: each model (detector, identification, condition grader, catalog index) gets room to report what it serves, what it scored, its loss curve, its run history and what it is waiting for. Deliberately NOT a tile grid.",
-      "services": ["services/modelsummary.py", "services/modeljobs.py", "services/training.py", "services/trainingenv.py", "services/condition_train.py", "services/condition_dataset.py", "services/condition_features.py", "services/detector_dataset.py", "services/catalog_index.py", "services/identity_eval.py", "services/operations.py"],
-      "repositories": ["ModelRunRepository (data/vision.py)"],
+      "services": [
+        "services/modelsummary.py",
+        "services/modeljobs.py",
+        "services/training.py",
+        "services/trainingenv.py",
+        "services/condition_train.py",
+        "services/condition_dataset.py",
+        "services/condition_features.py",
+        "services/detector_dataset.py",
+        "services/catalog_index.py",
+        "services/identity_eval.py",
+        "services/operations.py"
+      ],
+      "repositories": [
+        "ModelRunRepository (data/vision.py)"
+      ],
       "tables": [],
-      "other_dbs": ["vision.db (model_run, model_epoch, region, card_embedding)"],
-      "supporting_files": ["ui/charts.py (HoverChartView)", "ui/views/_worker.py", "training/yolo_train_worker.py"],
-      "tests": ["tests/test_models_view.py", "tests/test_training.py", "tests/test_trainingenv_size.py", "tests/test_condition_model.py", "tests/test_catalog_index.py", "tests/test_identity.py"],
-      "signals_out": ["changed() -> a finished job can widen what Recognition proposes"],
+      "other_dbs": [
+        "vision.db (model_run, model_epoch, region, card_embedding)"
+      ],
+      "supporting_files": [
+        "ui/charts.py (HoverChartView)",
+        "ui/views/_worker.py",
+        "training/yolo_train_worker.py"
+      ],
+      "tests": [
+        "tests/test_models_view.py",
+        "tests/test_training.py",
+        "tests/test_trainingenv_size.py",
+        "tests/test_condition_model.py",
+        "tests/test_catalog_index.py",
+        "tests/test_identity.py"
+      ],
+      "signals_out": [
+        "changed() -> a finished job can widen what Recognition proposes"
+      ],
       "gotchas": [
         "The screen RENDERS and nothing more: every figure comes from services/modelsummary.py and every job from services/modeljobs.py. No SQL and no 'stale'/'blocked' judgement in the UI.",
         "Training runs in a SEPARATE interpreter that has ultralytics + torch; the app never imports them (services/trainingenv.py provisions it).",
@@ -342,19 +825,55 @@
         "docs/decisions.md § ## 2026-08-06 — Models becomes its own destination; the loss curve becomes real"
       ]
     },
-
     "operations": {
       "nav_label": "Operations",
-      "aliases": ["ops", "maintenance", "import", "export", "backup", "jobs", "file menu"],
+      "aliases": [
+        "ops",
+        "maintenance",
+        "import",
+        "export",
+        "backup",
+        "jobs",
+        "file menu"
+      ],
       "class": "OperationsView",
       "file": "src/tcginventory/ui/views/operations.py",
       "purpose": "The maintenance hub. A tile per job with a plain description, its own status and inline progress; an Activity list of what actually happened (backed by operation_run); and a fact strip describing the install. Covers imports/exports, backups, price + catalog updates, the market sweep, card-show scraping, integrity check / VACUUM / corpus re-index, and the daily-update toggle.",
-      "services": ["services/operations.py (the Qt-free registry)", "services/importexport.py", "services/pricing.py", "services/marketprices.py", "services/catalog.py", "services/cardshows.py", "services/catalog_index.py"],
-      "repositories": ["data/backup.py", "data/db.py (open_database)", "data/pricehistory.py"],
-      "tables": ["operation_run", "price_snapshot", "card_catalog", "card_show"],
-      "supporting_files": ["ui/views/_worker.py (TaskWorker)", "src/tcginventory/scheduling.py"],
-      "tests": ["tests/test_ui_operations.py", "tests/test_operations.py", "tests/test_importexport.py", "tests/test_backup.py", "tests/test_pricing.py", "tests/test_scheduling.py"],
-      "signals_out": ["changed() -> an import or price refresh changes every read screen"],
+      "services": [
+        "services/operations.py (the Qt-free registry)",
+        "services/importexport.py",
+        "services/pricing.py",
+        "services/marketprices.py",
+        "services/catalog.py",
+        "services/cardshows.py",
+        "services/catalog_index.py"
+      ],
+      "repositories": [
+        "data/backup.py",
+        "data/db.py (open_database)",
+        "data/pricehistory.py"
+      ],
+      "tables": [
+        "operation_run",
+        "price_snapshot",
+        "card_catalog",
+        "card_show"
+      ],
+      "supporting_files": [
+        "ui/views/_worker.py (TaskWorker)",
+        "src/tcginventory/scheduling.py"
+      ],
+      "tests": [
+        "tests/test_ui_operations.py",
+        "tests/test_operations.py",
+        "tests/test_importexport.py",
+        "tests/test_backup.py",
+        "tests/test_pricing.py",
+        "tests/test_scheduling.py"
+      ],
+      "signals_out": [
+        "changed() -> an import or price refresh changes every read screen"
+      ],
       "gotchas": [
         "ADDING AN OPERATION = one registry entry in services/operations.py + one runner in OperationsView._runner. The generic TaskWorker covers 'call a service, report a sentence'. Do not add a new QThread subclass or a File-menu item.",
         "The registry is Qt-free — descriptions, groups and status live there, not in the view.",
@@ -369,7 +888,6 @@
       ]
     }
   },
-
   "docs": {
     "specs/README.md": "Reading order + ratification sign-off for the planning baseline.",
     "specs/00-overview.md": "Vision, users, scope, non-goals.",
@@ -385,7 +903,6 @@
     "docs/cost-basis-examples.md": "Worked cost-basis examples.",
     "CLAUDE.md": "Session context: status per milestone, non-negotiable rules, dev environment."
   },
-
   "workflow": {
     "branch": "Branch + merge request, since 2026-08-07. Never commit directly to main. One work item has one number and two phases: `/sdd-ticket open <slug>` files a GitHub issue `X#` (the specification, no branch needed), and `start X` converts that same object into pull request `X!` from your branch. Tickets live only on GitHub -- the body is the ticket, there is no local file -- and `close X` rewrites it as the final record before the merge.",
     "isolation": "One session, one worktree, one branch. Take your own worktree with EnterWorktree BEFORE editing if you intend to commit — a checkout has exactly one HEAD, so two sessions sharing one tree put each other's commits on the wrong branch. Enforced by .claude/hooks/branch_lease.py as a PreToolUse hook; see `## Working in parallel sessions` in CLAUDE.md.",
