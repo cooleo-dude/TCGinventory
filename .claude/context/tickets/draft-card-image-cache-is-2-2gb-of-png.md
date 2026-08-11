@@ -1,10 +1,10 @@
-# 005 — The card image cache is 2.2 GB of PNG
+# The card image cache is 2.2 GB of PNG
 
 ```
 status:   deferred
 kind:     optimization
 source:   /optimization-sweep grounded pass, 2026-08-07
-issue:    #13
+mr:       none
 axis:     storage
 found:    2026-08-07
 saving:   ~1.2 GB (2,212 MB -> ~1,021 MB as WebP q85)
@@ -78,3 +78,7 @@ the extension assumption is spread wider than the writer.
 - Sampling was enough to size this to within a few percent and cost seconds; do
   not convert everything to find out whether it is worth converting.
 - The saving is disk only. It is not a latency win, and should not be sold as one.
+
+## Filed before the numbering change
+
+This was issue #13 under the old scheme, where a ticket carried three unrelated numbers (ours, the issue's, the PR's). It now carries one — the merge request's — so `X#` and `X!` are the same work. The old issue is closed and points here; nothing about the finding below changed.
