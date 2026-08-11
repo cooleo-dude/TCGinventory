@@ -1,10 +1,10 @@
-# 004 — Recognition prewarm holds 112 MB at startup for everyone
+# Recognition prewarm holds 112 MB at startup for everyone
 
 ```
 status:   deferred
 kind:     optimization
 source:   /optimization-sweep grounded pass, 2026-08-07
-issue:    #12
+mr:       none
 axis:     memory
 found:    2026-08-07
 saving:   ~103 MB resident for anyone who never opens Recognition
@@ -67,3 +67,7 @@ that is the thing prewarm is buying.
   before/after.
 - Do not pair this with the vision-import deferral without re-measuring both;
   that combination is the one that already failed.
+
+## Filed before the numbering change
+
+This was issue #12 under the old scheme, where a ticket carried three unrelated numbers (ours, the issue's, the PR's). It now carries one — the merge request's — so `X#` and `X!` are the same work. The old issue is closed and points here; nothing about the finding below changed.
