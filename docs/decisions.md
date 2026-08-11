@@ -4,6 +4,47 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-10 — The ticket lives on GitHub, and a pull request is an issue (46#)
+
+- **Decision:** there is no local ticket storage. `.claude/context/tickets/` is
+  deleted. A ticket is a GitHub **issue** — `X#`, the specification — and `start X`
+  **converts that same issue into pull request `X`**, which is `X!`. One object, one
+  number, two phases, and one copy of the text: the body.
+- **Why this is the mechanism and not a convention.** `POST /repos/{o}/{r}/pulls`
+  accepts an `issue` parameter in place of `title`/`body`, and converts the issue in
+  place, keeping its number, body and comments. It is absent from the current REST
+  documentation, so it was **verified before anything was built on it**: issue 46
+  became pull request 46 on this repo, `gh issue list` stopped showing it, `gh pr
+  view 46` started. The reason it works is the reason issues and PRs share a
+  counter — **a pull request *is* an issue** with a head and base attached.
+- **This replaces yesterday's answer, which was worse.** `41#` allocated the number
+  by pushing a branch and opening a draft MR. That forced filing to happen after
+  `EnterWorktree`, and would have needed an **empty commit** for the MR to have
+  something to open against. Filing as an issue restores the rule `/task-planning`
+  is emphatic about: the ticket exists before any code does.
+- **One copy cannot disagree with itself.** The file-backed design put the number in
+  three places — filename, heading sigil, `mr:` field — and needed a checker to keep
+  them agreeing, because a disagreement meant `push` retitled one MR from a file
+  describing another. That whole hazard class is gone, and `mr:` leaves the front
+  block with it. What `check` validates instead is the **sigil against the actual
+  phase**: a pull request must not still call itself a specification, which is
+  reachable because `start` converts and retitles in two steps.
+- **`review_gate.ticket_mr()` is deleted, one day after being added.** It read `mr:`
+  out of the ticket file so a bare `ticket.py close` could still be bound to an MR.
+  No file, no read — and it may not call `gh` instead, because it runs in a
+  `PreToolUse` hook with a 20s budget (`HOOK-FAILS-OPEN`). So `close` takes its
+  number again, which is the only form the hook can classify from argv alone.
+- **Costs accepted, on the user's explicit call:** nothing works offline, `check`
+  included; and ticket *prose* loses its edit history, since GitHub keeps no diffs
+  of an issue body. An append-only log to preserve that history was offered and
+  declined — the merged body is a permanent record, and the edit history of a brief
+  has never been read.
+- **Trade to remember:** the `issue` parameter is undocumented. If GitHub removes
+  it, `start` breaks and the fallback is `41#`'s shape — open a normal PR and accept
+  that its number differs from the issue's, or file no issue at all.
+
+---
+
 ### 2026-08-10 — One work item, one number: the merge request is the ticket (41#)
 
 - **Decision:** `X` is the **GitHub merge-request number**, and it is the only

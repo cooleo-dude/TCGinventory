@@ -1,7 +1,7 @@
 ---
 name: sdd-ticket
-description: File, sync and close TCGinventory tickets as merge requests. Use when a sweep or a plan produces work that will not be done immediately, when asked to open an issue or ticket, to list what is outstanding, or to close one that has landed. Also use when the user types /sdd-ticket.
-argument-hint: <list | check | open <what> | push | close> — defaults to list
+description: File, sync and close TCGinventory tickets, which live on GitHub as issues that become pull requests. Use when a sweep or a plan produces work that will not be done immediately, when asked to open an issue or ticket, to list what is outstanding, or to close one that has landed. Also use when the user types /sdd-ticket.
+argument-hint: <list | open <what> | show N | push N <file> | start N | check N | close N> — defaults to list
 allowed-tools: [Read, Grep, Glob, Bash, PowerShell, Edit, Write]
 ---
 
@@ -14,50 +14,48 @@ Request: **$ARGUMENTS** — if empty, run `list` and report what is outstanding.
 
 ```bash
 PY=.venv/Scripts/python.exe; T=.claude/skills/sdd-ticket/scripts/ticket.py
-$PY $T open my-slug   # branch commit + push + draft MR; its number is X
-$PY $T list           # every open ticket, read from GitHub
-$PY $T check          # non-zero if the ticket on this branch is malformed
-$PY $T push           # rewrite the MR title and body from the file
-$PY $T close          # record the outcome, remove the file, then merge
+$PY $T open my-slug     # file the specification as an issue; its number is X
+$PY $T list             # the queue: X# not started, X! in flight
+$PY $T show 46          # print the title and body
+$PY $T push 46 t.md     # replace the body from a file you wrote
+$PY $T start 46         # convert issue 46 into pull request 46
+$PY $T check 46         # non-zero if it is malformed
+$PY $T close 46         # record the outcome, then merge
 ```
 
-## Numbering: one work item, one number
+## Numbering: one work item, one number, two phases
 
-**`X` is the GitHub merge-request number.** `X#` names the specification and `X!`
-names the change that satisfies it — `41#` and `41!` are the same work, and you
-never need a lookup table to get from one to the other.
+**`X` is a GitHub number, and the sigil says which phase the work is in.** `X#` is
+the specification; `X!` is the change that satisfies it. `46#` and `46!` are not two
+things kept in agreement — they are **the same object**, and `start` moves it from
+one phase to the other without the number changing.
 
-They cannot drift, because they are the same object. That is the point of the
-scheme and the reason it is shaped this way rather than as a naming convention:
+That is possible because of how GitHub is actually built:
 
-> GitHub allocates issues and pull requests from **one per-repo counter**. Measured
-> on this repo, issues took 2/7/10/12/13/14/16/17/22/31/32/36 while PRs took
-> 1/3/4/5/6/8/9/11/15/18…, one interleaved sequence with no overlap. A work item
-> that files both an issue *and* a PR can therefore never have them agree.
+> **A pull request is an issue** with a head and a base attached. That is why issues
+> and pull requests share one per-repo counter — measured here, issues took
+> 2/7/10/12/13/14/16/17/22/31/32/36 while PRs took 1/3/4/5/6/8/9/11/15/18…, one
+> interleaved sequence. `POST /pulls` accepts an `issue` parameter in place of
+> `title`/`body` and **converts that issue into a pull request, keeping its number**.
+> Undocumented in the current REST reference, but live: verified when `46#` became
+> `46!`.
 
-So the issue is retired. A ticket is a **branch with a draft MR** carrying the
-ticket file, and `deferred` work is simply a draft MR left open — a better backlog
-than an issue, because it carries the branch and the plan with it.
-
-Three places hold the number and `check` makes them agree: the filename
-(`041-my-slug.md`), the heading sigil (`# 41# — Title`) and the `mr:` field. A
-disagreement means `push` would retitle one MR from a file describing another.
-
-**The number arrives after the branch exists**, because GitHub mints it. So the
-branch is named for the slug, not the number — you find the branch from the MR.
+So numbering needs no discipline at all. There is one number because there is one
+object, and one copy of the text because it is that object's body.
 
 ## The one rule
 
-**The file on the branch is the truth while the MR is open. The MR body is a
-mirror.** Edit the file, then `push`.
+**The body on GitHub is the ticket. There is no local copy.**
 
-`.claude/context/tickets/NNN-*.md` is versioned with the code, readable offline,
-and actionable by an agent with no network and no auth. The MR body exists so the
-work is visible from a phone. When they disagree, the file wins.
+`show` prints it, `push` replaces it from a file you wrote — keep that file in the
+session scratchpad, never in the repo. `close` rewrites it one last time so it
+records what happened rather than what was planned, and after the merge it is the
+permanent record.
 
-Then `close` inverts it exactly once: it rewrites the body from the file and
-removes the file, so the **MR body is the durable record** from that moment on.
-Never hand-edit an MR body before then — `push` overwrites it.
+This replaced a `.claude/context/tickets/` directory, and the reason is worth
+keeping: a file meant the number lived in three places (filename, heading sigil,
+`mr:` field) with a checker to keep them agreeing. **One copy cannot disagree with
+itself.** The cost is that nothing here works offline — accepted deliberately.
 
 ## Where tickets come from
 
@@ -71,34 +69,49 @@ their own format.
 | `/dead-code-sweep` | *Flagged for review* items — a symbol whose only reference could be dynamic, a handler whose failure mode was not pinned down |
 | `/task-planning` | **always** — every approved brief, before any code is written |
 
-Read `.claude/context/tickets/README.md` for the bar each must clear. The short
-version: a found improvement needs a measurement, no regression, no accuracy
-cost, no product decision, and a clean constraint checklist. Planned work from
-`/task-planning` files unconditionally — the ticket is what the branch, the MR
-and the commit point back at.
+### What earns a ticket
 
-**Anything that does not qualify goes to the user in the calling skill's report,
-not into this directory.** Minimal-impact wins, alternatives worth weighing and
-`none` results are for judgement. If the user declines one, it belongs in
+For a **found improvement** (either sweep), all five:
+
+1. **Measured better** on at least one axis, against real data, before and after.
+2. **No measured regression** elsewhere.
+3. **No correctness or accuracy cost** — or one measured to be zero. "Probably
+   fine" is not a measurement.
+4. **Not a product decision.** A tradeoff the user must weigh is a question for
+   them, not a ticket.
+5. **Passes the constraint checklist** — packaging, offline, layer, platform,
+   maintenance.
+
+For **planned work** (`/task-planning`) there is no bar: an approved brief is always
+filed, before any code is written, whether or not it is being worked on now. The
+ticket is what the branch, the MR and the commit point back at.
+
+**Anything that does not qualify goes to the user in the calling skill's report, and
+no further.** Minimal-impact wins, alternatives worth weighing and `none` results
+are for judgement. If the user declines one, it belongs in
 `.claude/skills/optimization-sweep/references/declined.md`.
+
+**Declined is not the same as worthless.** A finding the user has said "not now" to,
+but which is real and measured, stays filed as `deferred` so it remains visible and
+re-openable — an unstarted `X#` in the queue. A finding that measurement *killed* is
+not a ticket at all: it is a permanent result and lives only in `declined.md`.
 
 ## Filing one
 
-1. **Take a worktree first** (`EnterWorktree`). `open` commits and pushes, so it
-   needs a branch that is yours.
-2. `ticket.py open <kebab-title>`. It writes `draft-<slug>.md`, commits it, pushes
-   the branch, opens the draft MR, then renames the file to the number GitHub
-   handed back and retitles the MR `X! Title`.
-3. Fill in `.claude/context/tickets/NNN-<slug>.md` — the front block (`status kind
-   source mr axis found saving risk`), then the finding and its evidence, an **area
-   of impact** table of real `file:line`, the chosen approach **and the rejected
-   alternatives with reasons**, a numbered plan, and how to verify.
-4. `ticket.py check` must pass.
-5. `ticket.py push` mirrors it to the MR body.
+**No branch, no commit, no worktree.** Filing is `open`, and it happens before any
+code exists — that is the whole reason the specification is an issue.
 
-`open` needs network and refuses on `main`, on a non-kebab slug, and on a branch
-that already has a ticket — one ticket per MR, or `push` and `close` cannot tell
-which one you mean.
+1. `ticket.py open <kebab-title>` → files issue `X#` with the skeleton body.
+2. `ticket.py show X > <scratchpad>/t.md`, then write it: the front block (`status
+   kind source axis found saving risk`), the finding and its evidence, an **area of
+   impact** table of real `file:line`, the chosen approach **and the rejected
+   alternatives with reasons**, a numbered plan, and how to verify.
+3. `ticket.py push X <scratchpad>/t.md`.
+4. `ticket.py check X` must pass.
+
+Then, when the work actually starts: take a worktree, commit, push, and
+`ticket.py start X` — the issue becomes pull request `X`, same number, and the title
+picks up the `!`.
 
 **Write for someone who was not in the conversation.** The measurement you did
 not record is a measurement the next agent has to redo. The alternative you
@@ -226,26 +239,20 @@ panel that did nothing.
 **measured after** — a ticket that says what actually happened is the reason the
 code looks the way it does.
 
-`ticket.py close` then sets `status: done`, rewrites the MR body with that final
-text, and **removes the ticket file** in a commit on the branch. Then you merge.
+`ticket.py close X` sets `status: done` and rewrites the body, so it records the
+outcome instead of the plan. Then you merge.
 
-**The order is the whole design, and `close` runs *before* the merge.** Rewriting
-the body first means the MR carries the finished write-up rather than the brief;
-removing the file in the same branch means the merge leaves `main` with no ticket
-files to sweep up afterwards. Run it after the merge and both guarantees are gone —
-the file is already on `main` and deleting it needs its own PR, which is the
-overhead this replaced. `close` refuses in that state and says so.
+**`close` runs *before* the merge**, and refuses afterwards. Once merged, the body is
+a plan nobody goes back to correct and there is no local copy to rewrite it from — so
+the last moment it can be made true is the moment before it lands.
 
-Nothing is lost by the delete: the merged MR carries the full final body, and the
-file is in `git log`. The number is never reused, because GitHub never reissues
-one.
+The number is never reused, because GitHub never reissues one.
 
-For a ticket that is abandoned rather than finished, set `status: dropped`, say
-why, mirror it into `declined.md` so no future sweep re-derives it, then `close` —
-it keeps the `dropped` wording — and close the MR without merging.
-
-Never delete a ticket file by hand: that strands an open MR describing finished
-work, and `check` cannot flag what is no longer there.
+For a ticket that is abandoned rather than finished, set `status: dropped`, say why,
+mirror it into `declined.md` so no future sweep re-derives it, then `close X` — it
+keeps the `dropped` wording — and close the MR without merging. A specification that
+was never started needs no `close` at all: it refuses, and says to drop the issue
+instead, because nothing landed.
 
 ## Notes that will bite you
 
@@ -255,10 +262,14 @@ work, and `check` cannot flag what is no longer there.
 - `gh auth login` is interactive and this harness redirects stdin — it cannot be
   run from a tool call. The user runs it in a real terminal.
 - The repo is **private**, so a token needs the `repo` scope for MRs.
-- **`open`, `list`, `push` and `close` need network.** Only `check` is offline.
-  That is the trade for a number GitHub owns; the old local counter needed
-  `O_EXCL` marker files to stop two sessions minting `007` twice, and none of that
-  exists any more.
-- **`main` carries no ticket files**, so `list` reads open MRs from GitHub. The
-  local directory would only ever show the branch you are standing on, which is
-  not a queue.
+- **Everything needs network**, `check` included. There is no offline mode and no
+  local mirror to fall back on — that is the trade for one copy of the text. The old
+  local counter also needed `O_EXCL` marker files to stop two sessions minting `007`
+  twice; GitHub cannot issue a number twice, so none of that exists any more.
+- **`start` needs a pushed branch with real commits.** GitHub cannot open a pull
+  request against a branch identical to its base. An earlier design worked around
+  that with an empty commit; filing as an issue means the number already exists, so
+  `start` can simply refuse until there is something to review.
+- **`list` shows both phases.** `X#` rows are specified-but-unstarted (including
+  everything `deferred`); `X!` rows are in flight, draft or ready. A row marked
+  `(no sigil)` predates the convention — it is still real work.

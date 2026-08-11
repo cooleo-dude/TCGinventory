@@ -1,140 +1,64 @@
-"""Ticket tool for TCGinventory — the merge request *is* the ticket.
+"""Ticket tool for TCGinventory — the ticket lives on GitHub, and nowhere else.
 
-    ticket.py open <kebab-title>   branch commit, push, draft MR; X is its number
-    ticket.py list                 every open ticket, read from GitHub
-    ticket.py check                non-zero if the ticket on this branch is malformed
-    ticket.py push                 rewrite the MR title and body from the file
-    ticket.py close                record the outcome and remove the file, then merge
+    ticket.py open <kebab-title>   file the specification as an issue; its number is X
+    ticket.py list                 the queue: X# not started, X! in flight
+    ticket.py show <X>             print the title and body
+    ticket.py push <X> <file>      replace the body from a file you wrote
+    ticket.py start <X>            convert issue X into pull request X
+    ticket.py check <X>            non-zero if the ticket is malformed
+    ticket.py close <X>            record the outcome, then merge
 
-**One work item, one number.** ``X`` is the GitHub pull-request number: ``X#``
-names the specification and ``X!`` names the change that satisfies it. They are
-the same object, so they cannot drift apart.
+**One work item, one number, one copy of the text.** ``X`` is a GitHub number:
+``X#`` names the specification and ``X!`` names the change that satisfies it. The
+sigil says which phase it is in; the number never changes, because it is the same
+object throughout.
 
-That is not a convention this script maintains, it is the only arrangement
-arithmetic allows. GitHub allocates issues and pull requests from a single
-per-repo counter, so a work item that files **both** an issue and a PR can never
-have them agree — measured on this repo, issues took 2/7/10/12/13/14/16/17/22/
-31/32/36 while PRs took 1/3/4/5/6/8/9/11/15/18…, one interleaved sequence with no
-overlap. Retiring the issue is what lets the two numbers become one.
+That is possible because **a pull request on GitHub *is* an issue** with a head and
+a base attached — which is also why issues and pull requests share one per-repo
+counter. So ``start`` does not create a second object and copy anything across: it
+converts the issue in place, keeping its number, its body and its comments.
+``POST /pulls`` takes an ``issue`` parameter for exactly this, in place of
+``title``/``body``. The parameter is absent from the current REST documentation but
+live; verified on this repo when issue 46 became pull request 46.
 
-Consequences worth knowing before you use it:
+Two consequences worth knowing:
 
-* **GitHub allocates, so nothing needs locking.** The old ``claim`` existed
-  because ticket numbers were minted locally and two sessions could both read
-  ``007``; it defended that with ``taken_numbers()`` over every ref plus
-  ``O_EXCL`` marker files in the git common dir. A number issued by GitHub cannot
-  collide, so all of it is gone.
-* **``open`` needs network and writes to the branch.** It commits the ticket file
-  and pushes, because ``gh pr create`` has nothing to open an MR against
-  otherwise. It stages by explicit pathspec — never ``git add -A`` — so it is safe
-  in a shared tree.
-* **The ticket file lives on its branch and must not reach ``main``.** ``close``
-  removes it in a final commit *before* the merge, so the merge leaves nothing to
-  clean up. The durable record is the MR body, which ``close`` rewrites from the
-  file a moment before deleting it.
+* **Filing needs no branch, no commit and no worktree.** ``open`` files an issue, so
+  a specification can exist before any code does. ``start`` is the step that needs a
+  pushed branch with real commits on it.
+* **There is no local copy of anything.** The body is the ticket. ``show`` prints it,
+  ``push`` replaces it from a file you wrote — put that file in the session
+  scratchpad, not in the repo. An earlier design kept the text in
+  ``.claude/context/tickets/``, which meant three copies of the number (filename,
+  heading, ``mr:`` field) and a checker to keep them agreeing. One copy cannot
+  disagree with itself.
 
-Needs ``gh`` authenticated for everything except ``check``. ``gh`` installs into
-the *machine* PATH, so a shell opened before the install will not see it — this
-resolves the absolute path as a fallback.
+Everything here needs ``gh`` authenticated; there is no offline mode, by design.
+``gh`` installs into the *machine* PATH, so a shell opened before the install will
+not see it — this resolves the absolute path as a fallback.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[4]
-TICKETS = REPO / ".claude" / "context" / "tickets"
 GH_FALLBACK = Path(r"C:\Program Files\GitHub CLI\gh.exe")
 
 STATUSES = ("open", "in-progress", "deferred", "done", "dropped")
 KINDS = ("optimization", "dead-code", "feature", "fix")
-REQUIRED = ("status", "kind", "source", "mr", "axis", "found", "saving", "risk")
+REQUIRED = ("status", "kind", "source", "axis", "found", "saving", "risk")
 
-# A numbered ticket, and the transient state between writing the file and hearing
-# back which number GitHub gave it. Four digits and beyond are allowed: the number
-# is GitHub's counter now, and it will pass 999 eventually.
-_NAME = re.compile(r"^(\d{3,})-(.+)\.md$")
-_DRAFT = re.compile(r"^draft-(.+)\.md$")
 _FIELD = re.compile(r"^(\w+):\s*(.*?)\s*$", re.MULTILINE)
-# "# 41# — The merge request is the ticket". An en/em dash or a plain hyphen is
-# accepted on read; `open` always writes the em dash.
-_HEADING = re.compile(r"^#\s+(\d+)#\s+[—–-]\s+(.+?)\s*$")
-_MR_TITLE = re.compile(r"^(\d+)!\s+(.+?)\s*$")
-
-
-class Ticket:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        match = _NAME.match(path.name)
-        self.number = int(match.group(1)) if match else None
-        self.slug = match.group(2) if match else _DRAFT.match(path.name).group(1)
-        text = path.read_text(encoding="utf-8")
-        self.text = text
-        first = text.splitlines()[0] if text.strip() else ""
-        head = _HEADING.match(first)
-        # The sigil in the heading is what `check` compares against the filename
-        # and the `mr:` field, so keep them separable rather than parsed away.
-        self.heading_number = int(head.group(1)) if head else None
-        self.title = head.group(2) if head else first.lstrip("# ").strip()
-        block = text.split("```")[1] if "```" in text else ""
-        self.fields = {k: v for k, v in _FIELD.findall(block)}
-
-    @property
-    def status(self) -> str:
-        return self.fields.get("status", "?")
-
-    @property
-    def mr(self) -> int | None:
-        raw = self.fields.get("mr", "none").lstrip("#")
-        return int(raw) if raw.isdigit() else None
-
-    def mr_title(self) -> str:
-        return f"{self.number}! {self.title}"
-
-    def body(self) -> str:
-        """The MR body: the front block as prose, then everything after it."""
-        parts = self.text.split("```", 2)
-        rest = parts[2] if len(parts) > 2 else self.text
-        rel = self.path.relative_to(REPO).as_posix()
-        meta = "\n".join(
-            f"- **{k}**: {self.fields[k]}" for k in REQUIRED if k in self.fields
-        )
-        return (
-            f"{meta}\n\n---\n{rest.strip()}\n\n---\n"
-            f"Generated from `{rel}` on this branch, which is the source of truth "
-            f"while the MR is open. Edit the file, then `/sdd-ticket push`. "
-            f"`close` rewrites this body and removes the file, so what you are "
-            f"reading is the durable record once the MR is merged.\n"
-        )
-
-    def set_field(self, key: str, value: str) -> None:
-        pattern = re.compile(rf"^({key}:\s*).*$", re.MULTILINE)
-        self.text = pattern.sub(rf"\g<1>{value}", self.text, count=1)
-        self.path.write_text(self.text, encoding="utf-8")
-        self.fields[key] = value
-
-    def set_heading(self, number: int) -> None:
-        lines = self.text.splitlines()
-        lines[0] = f"# {number}# — {self.title}"
-        self.text = "\n".join(lines) + "\n"
-        self.path.write_text(self.text, encoding="utf-8")
-        self.heading_number = number
-
-
-def load() -> list[Ticket]:
-    """Every ticket file in this checkout — normally exactly one, yours."""
-    if not TICKETS.is_dir():
-        return []
-    found = [
-        Ticket(p)
-        for p in sorted(TICKETS.glob("*.md"))
-        if _NAME.match(p.name) or _DRAFT.match(p.name)
-    ]
-    return sorted(found, key=lambda t: (t.number is None, t.number or 0))
+# "46# Retire the local ticket directory" while it is a specification, "46! …" once
+# it is the change. The sigil is not decoration: `check` uses it to catch a pull
+# request still advertising itself as an unstarted ticket.
+_TITLE = re.compile(r"^(\d+)([#!])\s+(.+?)\s*$")
 
 
 def gh(*args: str, check: bool = True) -> str:
@@ -162,26 +86,74 @@ def git(*args: str) -> str:
     return done.stdout if done.returncode == 0 else ""
 
 
-def git_checked(*args: str) -> str:
-    done = subprocess.run(
-        ["git", *args], cwd=REPO, capture_output=True, text=True, check=False
-    )
-    if done.returncode != 0:
-        raise SystemExit(f"git {' '.join(args)}\n{done.stderr.strip()}")
-    return done.stdout.strip()
+_SLUG: list[str] = []
 
 
-def branch() -> str:
-    return git("rev-parse", "--abbrev-ref", "HEAD").strip()
+def repo_slug() -> str:
+    """`owner/name`, asked once. Every command here makes at least one API call."""
+    if not _SLUG:
+        _SLUG.append(
+            gh("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
+        )
+    return _SLUG[0]
 
 
-SKELETON = """# {title}
+class Ticket:
+    """A ticket as GitHub holds it. Read through the *issues* endpoint deliberately.
 
-```
+    `repos/{slug}/issues/{n}` answers for pull requests too — a pull request is an
+    issue — so one call covers both phases and the caller never has to decide which
+    endpoint applies. `pull_request` present means it has been started;
+    `pull_request.merged_at` means it has landed.
+    """
+
+    def __init__(self, number: int, payload: dict) -> None:
+        self.number = number
+        self.raw = payload
+        self.title_full = str(payload.get("title") or "")
+        match = _TITLE.match(self.title_full)
+        self.title_number = int(match.group(1)) if match else None
+        self.sigil = match.group(2) if match else None
+        self.title = match.group(3) if match else self.title_full
+        self.body = str(payload.get("body") or "")
+        block = self.body.split("```")[1] if "```" in self.body else ""
+        self.fields = {k: v for k, v in _FIELD.findall(block)}
+
+    @classmethod
+    def fetch(cls, number: int) -> Ticket:
+        raw = gh("api", f"repos/{repo_slug()}/issues/{number}")
+        try:
+            return cls(number, json.loads(raw))
+        except (json.JSONDecodeError, ValueError):
+            raise SystemExit(f"could not read ticket {number} from GitHub") from None
+
+    @property
+    def status(self) -> str:
+        return self.fields.get("status", "?")
+
+    @property
+    def started(self) -> bool:
+        return bool(self.raw.get("pull_request"))
+
+    @property
+    def merged(self) -> bool:
+        return bool((self.raw.get("pull_request") or {}).get("merged_at"))
+
+    @property
+    def state(self) -> str:
+        return str(self.raw.get("state") or "?").upper()
+
+    def phase_sigil(self) -> str:
+        return "!" if self.started else "#"
+
+    def titled(self) -> str:
+        return f"{self.number}{self.phase_sigil()} {self.title}"
+
+
+SKELETON = """```
 status:   in-progress
 kind:     feature
 source:   /task-planning {today}
-mr:       none
 axis:     correctness
 found:    {today}
 saving:   -
@@ -216,73 +188,64 @@ TODO — the finding and its evidence.
 """
 
 
-def cmd_open(args) -> int:
-    """Write the ticket, push it, and let GitHub name it.
+def _patch(number: int, **fields: str) -> None:
+    args = ["api", "-X", "PATCH", f"repos/{repo_slug()}/issues/{number}"]
+    for key, value in fields.items():
+        args += ["-f", f"{key}={value}"]
+    gh(*args)
 
-    The number cannot be known before the MR exists, so this is ordered: file,
-    commit, push, create, *then* rename to the number that came back. The window
-    where the file is called `draft-<slug>.md` is why `_DRAFT` exists.
+
+def cmd_open(args) -> int:
+    """File the specification. No branch, no commit, no worktree.
+
+    The number arrives with the issue, so the title carries its sigil immediately:
+    `X#`, a specification. `start` changes that to `X!` when the same object becomes
+    the change.
     """
     slug = args.slug.strip().strip("-")
-    if not slug:
-        raise SystemExit("give a kebab-case title, e.g. `open isolate-sessions`")
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
-        raise SystemExit(f"slug {slug!r} must be kebab-case: [a-z0-9-]")
-
-    here = branch()
-    if here in ("main", "master"):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug or ""):
         raise SystemExit(
-            f"on {here} — a ticket is a branch with an MR. Take a worktree first "
-            f"(EnterWorktree), then run this again."
-        )
-    existing = load()
-    if existing:
-        raise SystemExit(
-            f"{existing[0].path.name} is already on this branch — one ticket per "
-            f"MR. Finish or `close` it before opening another."
+            f"slug {args.slug!r} must be kebab-case: [a-z0-9-], e.g. isolate-sessions"
         )
 
     today = datetime.now().strftime("%Y-%m-%d")
     title = slug.replace("-", " ").capitalize()
-    draft = TICKETS / f"draft-{slug}.md"
-    draft.write_text(SKELETON.format(title=title, today=today), encoding="utf-8")
-
-    rel = draft.relative_to(REPO).as_posix()
-    git_checked("add", "--", rel)
-    git_checked("commit", "-m", f"Tickets: file the brief for {slug}", "--", rel)
-    git_checked("push", "-u", "origin", here)
-
-    url = gh("pr", "create", "--draft", "--title", slug, "--body-file", str(draft))
+    url = gh(
+        "issue", "create", "--title", title, "--body", SKELETON.format(today=today)
+    )
     number = int(url.rstrip("/").rsplit("/", 1)[-1])
-
-    final = TICKETS / f"{number:03d}-{slug}.md"
-    git_checked("mv", rel, final.relative_to(REPO).as_posix())
-    ticket = Ticket(final)
-    ticket.set_heading(number)
-    ticket.set_field("mr", str(number))
-    gh("pr", "edit", str(number), "--title", ticket.mr_title())
-
-    # `git mv` has already staged both sides of the rename, and `git add` on the
-    # old path fails outright ("pathspec did not match any files") now that it is
-    # gone from the working tree. Commit the pair by pathspec instead — never
-    # `git add -A`, which is denied while a tree is shared.
-    paths = [rel, final.relative_to(REPO).as_posix()]
-    git_checked("commit", "-m", f"Tickets: number the brief {number}#", "--", *paths)
-    git_checked("push")
-
-    print(f"  opened {number}#  {final.relative_to(REPO).as_posix()}")
-    print(f"  draft MR {number}!  {url}")
-    print("  fill it in, then `ticket.py push` to mirror it")
+    _patch(number, title=f"{number}# {title}")
+    print(f"  opened {number}#  {url}")
+    print(f"  fill it in:  ticket.py show {number} > <scratch>/t.md")
+    print(f"               ticket.py push {number} <scratch>/t.md")
     return 0
 
 
 def cmd_list(args) -> int:
-    """The queue is GitHub's open MRs — `main` carries no ticket files.
+    """The queue, in two phases: `X#` specified but not started, `X!` in flight.
 
-    Reading the local directory would only ever show the ticket on the branch you
-    are standing on, which is not a queue.
+    Both halves come from GitHub because there is nowhere else they could come from.
+    The two `gh` subcommands are used for their filtering, not because the objects
+    differ — the issues endpoint would return the pull requests as well.
     """
-    raw = gh(
+    rows: list[tuple[int, str, str, str]] = []
+    specs = gh(
+        "issue",
+        "list",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,title",
+        "-q",
+        '.[] | "\\(.number)\\t\\(.title)"',
+    )
+    for line in specs.splitlines():
+        number, _, title = line.partition("\t")
+        if number.strip():
+            rows.append((int(number), "#", "spec", title))
+    flight = gh(
         "pr",
         "list",
         "--state",
@@ -294,179 +257,220 @@ def cmd_list(args) -> int:
         "-q",
         '.[] | "\\(.number)\\t\\(.isDraft)\\t\\(.headRefName)\\t\\(.title)"',
     )
-    rows = [line.split("\t", 3) for line in raw.splitlines() if line.strip()]
+    for line in flight.splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) == 4:
+            number, is_draft, head, title = parts
+            phase = "draft" if is_draft == "true" else "ready"
+            rows.append((int(number), "!", phase, f"{title}   [{head}]"))
     if not rows:
         print("  no open tickets")
         return 0
-    for number, is_draft, head, title in sorted(rows, key=lambda r: int(r[0])):
-        sigil = _MR_TITLE.match(title)
-        state = "draft" if is_draft == "true" else "ready"
-        name = sigil.group(2) if sigil else f"{title}   (no sigil)"
-        print(f"  {int(number):>4}!  {state:<6} {head:<28}  {name}")
+    for number, sigil, phase, title in sorted(rows):
+        shown = _TITLE.match(title)
+        name = title if not shown else f"{shown.group(3)}{title[shown.end() :]}"
+        if not shown:
+            name = f"{title}   (no sigil)"
+        print(f"  {number:>4}{sigil}  {phase:<6} {name}")
+    return 0
+
+
+def cmd_show(args) -> int:
+    t = Ticket.fetch(args.number)
+    print(f"# {t.titled()}\n")
+    print(t.body)
+    return 0
+
+
+def cmd_push(args) -> int:
+    """Replace the body from a file you wrote, and re-derive the title's sigil.
+
+    There is no merge of local and remote: the file is a working copy the author has
+    just produced, and the body becomes whatever it says. `show` is how you get the
+    current text to start from.
+    """
+    path = Path(args.file)
+    if not path.is_file():
+        raise SystemExit(f"{path}: no such file")
+    t = Ticket.fetch(args.number)
+    body = path.read_text(encoding="utf-8")
+    # A `show` round-trip prepends the title as a heading; strip it back off, or the
+    # body accumulates one copy of the title per edit.
+    lines = body.splitlines()
+    if lines and _TITLE.match(lines[0].lstrip("# ").strip()):
+        body = "\n".join(lines[1:]).lstrip("\n")
+    _patch(t.number, title=t.titled(), body=body)
+    print(f"  updated {t.number}{t.phase_sigil()}  ({len(body)} bytes)")
+    return 0
+
+
+def cmd_start(args) -> int:
+    """Convert the issue into a pull request — the same object, so the same number.
+
+    `POST /pulls` with an `issue` parameter is what makes `X#` and `X!` one
+    identifier rather than two numbers kept in step by hand. It needs a pushed branch
+    with at least one commit `main` does not have; GitHub has nothing to open a pull
+    request against otherwise.
+    """
+    t = Ticket.fetch(args.number)
+    if t.started:
+        raise SystemExit(
+            f"{t.number}! is already a pull request — `start` converts an issue, and "
+            f"this one has been converted"
+        )
+    branch = git("rev-parse", "--abbrev-ref", "HEAD").strip()
+    if branch in ("main", "master", ""):
+        raise SystemExit(
+            f"on {branch or 'no branch'} — `start` opens a pull request from the "
+            f"branch you are on, so take a worktree and commit your work first"
+        )
+    ahead = git("rev-list", "--count", f"origin/main..{branch}").strip()
+    if ahead in ("", "0"):
+        raise SystemExit(
+            f"{branch} has no commits origin/main does not, so GitHub has nothing to "
+            f"open a pull request against. Commit and push, then start."
+        )
+    gh(
+        "api",
+        "-X",
+        "POST",
+        f"repos/{repo_slug()}/pulls",
+        "-F",
+        f"issue={args.number}",
+        "-f",
+        f"head={branch}",
+        "-f",
+        "base=main",
+        "-F",
+        f"draft={'true' if args.draft else 'false'}",
+    )
+    _patch(args.number, title=f"{args.number}! {t.title}")
+    print(f"  {args.number}# became {args.number}!  from {branch}")
     return 0
 
 
 def cmd_check(args) -> int:
+    """Validate the ticket GitHub holds. There is nothing local to check.
+
+    Three things can be wrong, where the file-backed version had to police one number
+    appearing in three places: the title can lack its sigil, the sigil can contradict
+    the phase the object is actually in, and the front block can be incomplete.
+    """
+    t = Ticket.fetch(args.number)
     problems: list[str] = []
-    tickets = load()
-    for t in tickets:
-        where = t.path.name
-        for field in REQUIRED:
-            if field not in t.fields:
-                problems.append(f"{where}: missing '{field}:'")
-        if t.status not in STATUSES:
-            problems.append(f"{where}: status {t.status!r} not one of {STATUSES}")
-        kind = t.fields.get("kind")
-        if kind and kind not in KINDS:
-            problems.append(f"{where}: kind {kind!r} not one of {KINDS}")
+    where = str(t.number)
 
-        if t.number is None:
-            # Only legitimate between `open`'s push and its rename. Committed, it
-            # means an `open` died halfway and the MR is unnumbered.
+    if t.title_number is None:
+        problems.append(
+            f"{where}: title {t.title_full!r} carries no sigil — it should read "
+            f"'{t.number}{t.phase_sigil()} <Title>'"
+        )
+    else:
+        if t.title_number != t.number:
             problems.append(
-                f"{where}: still a draft — no number. `open` assigns one from the "
-                f"MR it creates; if that MR exists, rename the file to it."
+                f"{where}: title says {t.title_number} but this is ticket {t.number}"
             )
-        else:
-            # The three places the number appears must agree, or `push` retitles
-            # one MR from a file describing another.
-            if t.heading_number is None:
-                problems.append(
-                    f"{where}: heading must carry the sigil, '# {t.number}# — Title'"
-                )
-            elif t.heading_number != t.number:
-                problems.append(
-                    f"{where}: heading says {t.heading_number}# but the filename "
-                    f"says {t.number}"
-                )
-            if t.mr is None:
-                problems.append(
-                    f"{where}: 'mr:' is not a number — it is the MR that lands this"
-                )
-            elif t.mr != t.number:
-                problems.append(
-                    f"{where}: mr: {t.mr} disagrees with the filename ({t.number}) "
-                    f"— X# and X! are the same number"
-                )
+        if t.sigil != t.phase_sigil():
+            claimed, actually = (
+                ("#", "a pull request") if t.started else ("!", "still an issue")
+            )
+            problems.append(
+                f"{where}: titled with {claimed!r} but it is {actually} — "
+                f"{'start' if not t.started else 'push'} fixes the sigil"
+            )
 
-        # The file is removed by `close`, in the commit before the merge. Edited to
-        # a terminal status by hand, it would ride into `main` and the MR body
-        # would still describe the work as pending.
-        if t.status in ("done", "dropped"):
-            problems.append(
-                f"{where}: {t.status} but still on disk — `close` mirrors it to the "
-                f"MR and removes it, and must run before the merge"
-            )
+    for field in REQUIRED:
+        if field not in t.fields:
+            problems.append(f"{where}: body is missing '{field}:'")
+    if t.fields and t.status not in STATUSES:
+        problems.append(f"{where}: status {t.status!r} not one of {STATUSES}")
+    kind = t.fields.get("kind")
+    if kind and kind not in KINDS:
+        problems.append(f"{where}: kind {kind!r} not one of {KINDS}")
+    if t.status in ("done", "dropped") and t.state == "OPEN" and not t.merged:
+        problems.append(
+            f"{where}: {t.status} but still open — `close {t.number}` records the "
+            f"outcome, and then it is merged or closed"
+        )
 
     for problem in problems:
         print(f"  FAIL  {problem}")
     if problems:
         return 1
-    print(f"  ok — {len(tickets)} ticket(s) on this branch, well-formed")
-    return 0
-
-
-def _only_ticket() -> Ticket:
-    tickets = load()
-    if not tickets:
-        raise SystemExit(
-            "no ticket file on this branch — `open <slug>` files one, or switch to "
-            "the branch whose ticket you meant"
-        )
-    if len(tickets) > 1:
-        names = ", ".join(t.path.name for t in tickets)
-        raise SystemExit(f"more than one ticket on this branch: {names}")
-    return tickets[0]
-
-
-def cmd_push(args) -> int:
-    t = _only_ticket()
-    if t.number is None or t.mr is None:
-        raise SystemExit(f"{t.path.name}: no MR number yet — see `check`")
-    gh(
-        "pr",
-        "edit",
-        str(t.mr),
-        "--title",
-        t.mr_title(),
-        "--body",
-        t.body(),
-    )
-    print(f"  updated {t.mr}!  ({t.path.name})")
+    print(f"  ok — {t.number}{t.sigil} is well-formed")
     return 0
 
 
 def cmd_close(args) -> int:
-    """Record the outcome in the MR, then remove the file — before the merge.
+    """Record the outcome in the body, then merge.
 
-    Order and timing both matter. The body is rewritten first so the MR carries
-    the finished text rather than the brief; the file is then deleted in the same
-    branch, so merging leaves `main` with no ticket files to sweep up later. Run
-    after the merge and both guarantees are gone: the file is already on `main`,
-    and removing it needs a second PR — which is the overhead this replaced.
+    The body is the durable record, so this is the last chance to make it say what
+    happened rather than what was planned. It refuses once the thing is merged: the
+    record would then be a plan nobody goes back to correct, and no local copy
+    remains to rewrite it from.
     """
-    t = _only_ticket()
-    if t.number is None or t.mr is None:
-        raise SystemExit(f"{t.path.name}: no MR number yet — see `check`")
+    t = Ticket.fetch(args.number)
+    if not t.started:
+        raise SystemExit(
+            f"{t.number}# was never started, so nothing landed. Either `start "
+            f"{t.number}` and land it, or set `status: dropped` and close the issue."
+        )
+    if t.merged:
+        raise SystemExit(
+            f"{t.number}! is already merged, so this is too late — the body still "
+            f"describes the plan and no local copy remains to rewrite it from. Edit "
+            f"the body on GitHub by hand."
+        )
 
-    state = (
-        gh("pr", "view", str(t.mr), "--json", "state", "-q", ".state", check=False)
-        .strip()
-        .upper()
-    )
     dropped = t.status == "dropped"
-    if state == "MERGED":
-        raise SystemExit(
-            f"{t.mr}! is already merged, so {t.path.name} is on main and this is "
-            f"too late: the MR body still describes the brief, and deleting the "
-            f"file now needs its own PR. Record the outcome in the MR by hand, "
-            f"then remove the file in your next change."
-        )
-    if state == "CLOSED" and not dropped:
-        raise SystemExit(
-            f"{t.mr}! is closed without merging, but the ticket says "
-            f"{t.status!r}. If the work was abandoned set `status: dropped` and "
-            f"say why; otherwise reopen the MR."
-        )
-
-    # A ticket already edited to `dropped` is abandoned, not landed: keep that
-    # word, or the record says the work shipped when it never did.
-    t.set_field("status", "dropped" if dropped else "done")
-    gh("pr", "edit", str(t.mr), "--title", t.mr_title(), "--body", t.body())
-
-    rel = t.path.relative_to(REPO).as_posix()
-    # `-f` because `set_field` above rewrote `status:` in the working tree, and git
-    # refuses to remove a file with unstaged modifications. Discarding them is the
-    # intent: the edit existed only to reach the MR body, which is already pushed.
-    git_checked("rm", "--quiet", "-f", "--", rel)
-    verb = "Dropped" if dropped else "Landed"
-    git_checked(
-        "commit",
-        "-m",
-        f"Tickets: close {t.number}#, recorded in {t.mr}! ({verb.lower()})",
-        "--",
-        rel,
+    body = re.sub(
+        r"^status:(\s*).*$",
+        lambda m: f"status:{m.group(1)}{'dropped' if dropped else 'done'}",
+        t.body,
+        count=1,
+        flags=re.MULTILINE,
     )
-    git_checked("push")
-
-    print(f"  {verb} {t.number}# — MR body rewritten, {t.path.name} removed")
+    _patch(t.number, title=t.titled(), body=body)
+    verb = "Dropped" if dropped else "Landed"
+    print(f"  {verb} {t.number}! — body rewritten as the final record")
     if dropped:
-        print(f"  now:  gh pr close {t.mr} --comment 'Dropped — see the body'")
+        print(f"  now:  gh pr close {t.number} --comment 'Dropped — see the body'")
     else:
-        print(f"  now:  gh pr merge {t.mr} --squash --delete-branch")
+        print(f"  now:  gh pr merge {t.number} --squash --delete-branch")
     return 0
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
+
     opener = sub.add_parser("open")
     opener.add_argument("slug", help="kebab-case title, e.g. isolate-sessions")
     opener.set_defaults(func=cmd_open)
+
     sub.add_parser("list").set_defaults(func=cmd_list)
-    sub.add_parser("check").set_defaults(func=cmd_check)
-    sub.add_parser("push").set_defaults(func=cmd_push)
-    sub.add_parser("close").set_defaults(func=cmd_close)
+
+    shower = sub.add_parser("show")
+    shower.add_argument("number", type=int)
+    shower.set_defaults(func=cmd_show)
+
+    pusher = sub.add_parser("push")
+    pusher.add_argument("number", type=int)
+    pusher.add_argument("file", help="the body to upload; keep it in the scratchpad")
+    pusher.set_defaults(func=cmd_push)
+
+    starter = sub.add_parser("start")
+    starter.add_argument("number", type=int)
+    starter.add_argument("--draft", action="store_true")
+    starter.set_defaults(func=cmd_start)
+
+    checker = sub.add_parser("check")
+    checker.add_argument("number", type=int)
+    checker.set_defaults(func=cmd_check)
+
+    closer = sub.add_parser("close")
+    closer.add_argument("number", type=int)
+    closer.set_defaults(func=cmd_close)
 
     args = parser.parse_args()
     raise SystemExit(args.func(args))

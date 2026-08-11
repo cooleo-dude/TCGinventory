@@ -387,7 +387,7 @@
   },
 
   "workflow": {
-    "branch": "Branch + merge request, since 2026-08-07. Never commit directly to main. One work item has one number, GitHub's MR number: `X#` is the ticket and `X!` the merge request that lands it. `/sdd-ticket open <slug>` creates the branch commit and the draft MR together; the branch is named for the slug, because the number does not exist until the branch is pushed. The ticket file lives on that branch only and `close` removes it before the merge.",
+    "branch": "Branch + merge request, since 2026-08-07. Never commit directly to main. One work item has one number and two phases: `/sdd-ticket open <slug>` files a GitHub issue `X#` (the specification, no branch needed), and `start X` converts that same object into pull request `X!` from your branch. Tickets live only on GitHub -- the body is the ticket, there is no local file -- and `close X` rewrites it as the final record before the merge.",
     "isolation": "One session, one worktree, one branch. Take your own worktree with EnterWorktree BEFORE editing if you intend to commit — a checkout has exactly one HEAD, so two sessions sharing one tree put each other's commits on the wrong branch. Enforced by .claude/hooks/branch_lease.py as a PreToolUse hook; see `## Working in parallel sessions` in CLAUDE.md.",
     "review_gate": "A ticket cannot be closed and a PR cannot be merged without a green critic panel recorded for the current HEAD, by the session that ran it. .claude/hooks/review_gate.py enforces it.",
     "git_identity": "Cooleo <coleleo00@gmail.com>",
