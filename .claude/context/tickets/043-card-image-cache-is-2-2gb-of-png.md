@@ -1,10 +1,10 @@
-# The card image cache is 2.2 GB of PNG
+# 43# — The card image cache is 2.2 GB of PNG
 
 ```
 status:   deferred
 kind:     optimization
 source:   /optimization-sweep grounded pass, 2026-08-07
-mr:       none
+mr:       43
 axis:     storage
 found:    2026-08-07
 saving:   ~1.2 GB (2,212 MB -> ~1,021 MB as WebP q85)
