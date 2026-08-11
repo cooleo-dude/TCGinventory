@@ -56,9 +56,22 @@ class MoverRow:
     """One card in the Top Gainers / Top Losers list.
 
     Ranking is by **market-price movement** over the selected window — the change
-    in the card's recorded market price, NOT unrealized P/L against cost."""
+    in the card's recorded market price, NOT unrealized P/L against cost.
 
-    item_id: int
+    Serves **both** scopes the Dashboard offers. Owned rows come from the ledger and
+    always have an ``item_id``; global rows come from the catalog-wide price history
+    (``services/globalmovers.py``) and may describe a card no lot has ever held, so
+    ``item_id`` is ``None`` there and ``card_id`` identifies it instead. One row type
+    rather than two, because the only difference is which identifier is present —
+    ``MoversColumn._format`` would otherwise fork into two near-identical branches.
+
+    The fields a global row cannot know are the holdings ones: ``qty`` is 0 and
+    ``cost_cents`` stays 0 unless you happen to hold the card, in which case
+    ``owned_qty`` says how many. **``item_id is None`` is the test for "not
+    navigable"**, not ``owned_qty == 0``: a card you hold is reachable in Inventory,
+    one you do not is reachable nowhere."""
+
+    item_id: int | None
     name: str
     set_name: str | None
     card_number: str | None
@@ -67,6 +80,8 @@ class MoverRow:
     change_cents: int  # market-price change over the window (per unit)
     change_pct: float | None  # vs the window-start price (None when unknown)
     cost_cents: int = 0  # weighted-avg purchase price of the held units (per unit)
+    card_id: str | None = None  # catalog id — set on global rows, None on owned ones
+    owned_qty: int = 0  # units held; global rows use it for the ownership marker
 
 
 @dataclass

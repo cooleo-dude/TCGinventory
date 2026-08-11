@@ -917,6 +917,20 @@ class CardCatalogRepository:
         ).fetchone()
         return self._to_model(row) if row else None
 
+    def card_id_for(
+        self, name: str | None, set_name: str | None = None, number: str | None = None
+    ) -> str | None:
+        """The catalog id for a printed identity, artwork or not.
+
+        The ledger and the catalog share no foreign key — an ``item`` carries only a
+        printed identity — so anything that needs to cross between them resolves it
+        here. ``image_for`` applies exactly the right matching rules and has always
+        returned the id alongside the picture, which is why callers borrowed it; but it
+        required the card to *have* a picture, so the crossing silently failed for
+        imageless entries. Same matcher, without that condition."""
+        hit = self.image_for(name, set_name, number, require_image=False)
+        return hit[0] if hit else None
+
     def _insert_many(self, cards: list[CatalogCard], updated_at: str) -> None:
         self.conn.executemany(
             """
@@ -1028,8 +1042,16 @@ class CardCatalogRepository:
         name: str | None,
         set_name: str | None = None,
         number: str | None = None,
+        *,
+        require_image: bool = True,
     ) -> tuple[str, str] | None:
         """Best-effort ``(card_id, image_small)`` for a card by printed identity.
+
+        ``require_image=False`` runs the same matching without insisting the card have
+        artwork, which is how callers that want the **identity** rather than the image
+        use it — see ``CardCatalogRepository.card_id_for``. Every branch below filtered
+        on ``image_small IS NOT NULL``, so resolving a card id through this silently
+        failed for any imageless catalog entry.
 
         Used where we hold only the printed identity (inventory rows, given
         cards) rather than a catalog id. Matching rules:
@@ -1071,6 +1093,7 @@ class CardCatalogRepository:
             "FROM card_catalog"
         )
         pool: dict[str, sqlite3.Row] = {}
+        has_art = " AND image_small IS NOT NULL" if require_image else ""
 
         def gather(where: str, params: tuple) -> None:
             for row in self.conn.execute(f"{cols} WHERE {where}", params).fetchall():
@@ -1082,19 +1105,19 @@ class CardCatalogRepository:
         # scoring, so this stays correct while avoiding a full-table LIKE scan.
         if want_set:
             gather(
-                "set_name = ? COLLATE NOCASE AND image_small IS NOT NULL",
+                f"set_name = ? COLLATE NOCASE{has_art}",
                 (set_name.strip(),),
             )
         if name:
-            gather("name = ? COLLATE NOCASE AND image_small IS NOT NULL", (name,))
+            gather(f"name = ? COLLATE NOCASE{has_art}", (name,))
         if want_num:
             gather(
-                "(number = ? OR number = ?) AND image_small IS NOT NULL LIMIT 400",
+                f"(number = ? OR number = ?){has_art} LIMIT 400",
                 ((number or "").strip(), want_num),
             )
         if not pool and name:  # loose fallback when nothing else hit
             gather(
-                "name LIKE ? AND image_small IS NOT NULL LIMIT 50",
+                f"name LIKE ?{has_art} LIMIT 50",
                 (f"%{name.strip()}%",),
             )
         if not pool:
