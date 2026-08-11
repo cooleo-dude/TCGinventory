@@ -1,10 +1,10 @@
-# Worker threads are parked when replaced, but not when the app shuts down
+# 45# — Worker threads are parked when replaced, but not when the app shuts down
 
 ```
 status:   open
 kind:     fix
 source:   tcgi-risk-critic on PR #6, 2026-08-07
-mr:       none
+mr:       45
 axis:     correctness
 found:    2026-08-07
 saving:   -  (crash avoidance)
