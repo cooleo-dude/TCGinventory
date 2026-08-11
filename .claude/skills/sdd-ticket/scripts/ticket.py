@@ -61,6 +61,16 @@ _FIELD = re.compile(r"^(\w+):\s*(.*?)\s*$", re.MULTILINE)
 _TITLE = re.compile(r"^(\d+)([#!])\s+(.+?)\s*$")
 
 
+# GitHub speaks UTF-8 and ticket bodies are full of em dashes and curly quotes.
+# `text=True` alone decodes with the *locale* codec, which on Windows is cp1252 —
+# where byte 0x9d (the tail of a UTF-8 right curly quote) is simply undefined. The
+# decode then fails inside subprocess's reader thread, `stdout` comes back `None`,
+# and the caller dies on `None.strip()` *after* the API call has already succeeded.
+# That is the worst possible shape for a failure: the write landed, the reply was
+# unreadable, and the tool reported an error.
+_TEXT = {"capture_output": True, "encoding": "utf-8", "errors": "replace"}
+
+
 def gh(*args: str, check: bool = True) -> str:
     exe = "gh"
     try:
@@ -71,19 +81,15 @@ def gh(*args: str, check: bool = True) -> str:
                 "gh not found — install it, or open a fresh shell"
             ) from None
         exe = str(GH_FALLBACK)
-    done = subprocess.run(
-        [exe, *args], capture_output=True, text=True, cwd=REPO, check=False
-    )
+    done = subprocess.run([exe, *args], cwd=REPO, check=False, **_TEXT)
     if check and done.returncode != 0:
-        raise SystemExit(f"gh {' '.join(args)}\n{done.stderr.strip()}")
-    return done.stdout.strip()
+        raise SystemExit(f"gh {' '.join(args)}\n{(done.stderr or '').strip()}")
+    return (done.stdout or "").strip()
 
 
 def git(*args: str) -> str:
-    done = subprocess.run(
-        ["git", *args], cwd=REPO, capture_output=True, text=True, check=False
-    )
-    return done.stdout if done.returncode == 0 else ""
+    done = subprocess.run(["git", *args], cwd=REPO, check=False, **_TEXT)
+    return (done.stdout or "") if done.returncode == 0 else ""
 
 
 _SLUG: list[str] = []

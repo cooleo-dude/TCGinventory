@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -141,6 +142,48 @@ def hub(tool, monkeypatch):
 
 def _args(**kwargs):
     return type("A", (), kwargs)()
+
+
+# --- talking to gh at all ----------------------------------------------------
+
+
+def test_gh_decodes_utf8_rather_than_the_windows_locale(tool, monkeypatch):
+    """The bug this pins cost a `close` that had already succeeded.
+
+    `text=True` decodes with the *locale* codec. On Windows that is cp1252, where
+    0x9d — the tail of a UTF-8 right curly quote — is undefined, so a ticket body
+    containing one blew up in subprocess's reader thread. `stdout` came back `None`
+    and the caller died on `None.strip()` **after** the PATCH had landed: the write
+    went through, the reply was unreadable, and the tool reported failure.
+
+    Ticket bodies in this repo are full of em dashes and curly quotes, so this is
+    the ordinary case rather than an edge one.
+    """
+    seen: dict[str, object] = {}
+    body = "status: done — “quoted”, ~1 GB…"
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout=body, stderr="")
+
+    monkeypatch.setattr(tool.subprocess, "run", fake_run)
+
+    assert tool.gh("api", "repos/o/r/issues/46") == body
+    assert seen.get("encoding") == "utf-8", "left the decode to the locale codec"
+    assert seen.get("errors") == "replace", "an odd byte must not raise mid-read"
+
+
+def test_gh_survives_output_it_could_not_decode(tool, monkeypatch):
+    """`stdout` is `None` whenever the decode fails, so every read must tolerate it
+    instead of raising `AttributeError` on `None.strip()`."""
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=None, stderr=None)
+
+    monkeypatch.setattr(tool.subprocess, "run", fake_run)
+
+    assert tool.gh("api", "x") == ""
+    assert tool.git("rev-parse", "HEAD") == ""
 
 
 # --- open: the number arrives with the issue ---------------------------------
