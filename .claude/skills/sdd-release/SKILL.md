@@ -54,38 +54,33 @@ is how that half-finished `history.py` would have shipped.
 4. **`build`.** A few minutes, ~307 MB. `--zip` if you intend `--attach`.
 5. **`publish`.** Tags, pushes the tag, prepends to `CHANGELOG.md`, creates the
    GitHub release.
-6. **Close what shipped** — `/sdd-ticket close <N>` for every ticket this release
-   delivered, and record the measured result in each.
+6. **Close what shipped.** Tickets are closed on their own branch *before* the MR
+   merges, so by the time a release is cut there should be nothing outstanding —
+   `/sdd-ticket list` is the check. A ticket still open here means its MR never
+   landed, and it is not part of this release.
 
 ## The review gate
 
-**A ticket cannot be closed and a PR cannot be merged without a green critic
-panel.** This is enforced, not advised: `.claude/hooks/review_gate.py` runs as a
-`PreToolUse` hook and blocks `gh pr merge` and `ticket.py close` when there is no
-green verdict recorded for the current `HEAD`.
+**The critic panel is opt-in — never dispatch it unless the user asks.** A spawn
+costs ~26k tokens before it judges anything. A release with no panel on record
+proceeds normally.
 
-Dispatch the panel with the Agent tool, handing each critic the diff and nothing
-else — they judge the change, never your account of it:
+What `.claude/hooks/review_gate.py` enforces as a `PreToolUse` hook is the other
+half: **a panel that was run cannot be quietly ignored.** No verdict on record →
+the merge or close proceeds. A recorded `block` → it stops until the finding is
+fixed and committed, or cleared deliberately (`review_gate.py clear`).
 
-| when | dispatch |
-|---|---|
-| default | `tcgi-invariant-critic`, `tcgi-risk-critic`, `tcgi-test-critic` in parallel |
-| the diff touches `ui/` | add `tcgi-ui-critic` |
-| <=2 files, no migration, no money path, no `ui/` | `tcgi-mini-critic` alone |
+`/sdd-ticket` § The review gate is the authority on how to run one — which lanes
+the rule registry says a diff can even violate, the `≤150 changed lines`
+mini-critic tier, and `--inherit` for re-judging only what got dirty. Do not
+duplicate that guidance here; two copies of it drifted apart once already.
 
-Each ends in a verdict line. Record them:
+The one thing worth repeating: `--ref` is the **MR number**, and one verdict covers
+landing it — closing the ticket and merging the MR share a number now.
 
 ```bash
-python .claude/hooks/review_gate.py record --scope pr-merge --ref <n>     --verdict invariants=pass --verdict risk=pass --verdict test=pass
+python .claude/hooks/review_gate.py record --ref 41     --verdict invariants=pass --verdict risk=pass --verdict test=pass
 ```
-
-`revise` is a note to answer, not a failure. **`block` stops the gate** — fix the
-findings, commit, and re-run the panel. Verdicts are bound to a sha, so a new
-commit reopens the gate deliberately: the panel judged something that is no
-longer what would merge.
-
-They are bound to the **session** that recorded them too, so a panel another
-session ran will not open your gate. Run your own.
 
 Relay every finding to the user. A panel whose findings you summarise away is a
 panel that did nothing.

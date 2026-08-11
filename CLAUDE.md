@@ -142,7 +142,7 @@ clone.
 
 ```bash
 # what EnterWorktree does, if you need it by hand
-git worktree add -b ticket/007-thing ../tcgi-007 main
+git worktree add -b the-thing-you-are-doing ../tcgi-thing main
 ```
 
 - Run the venv from the **main clone** (`.venv/Scripts/python.exe`) with

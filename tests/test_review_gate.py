@@ -68,9 +68,7 @@ def _stdin(monkeypatch, command: str) -> None:
 
 
 def _args(**over):
-    base = dict(
-        scope="pr-merge", ref="6", verdict=[], findings=[], inherit=None, paths=[]
-    )
+    base = dict(ref="6", verdict=[], findings=[], inherit=None, paths=[])
     base.update(over)
     return SimpleNamespace(**base)
 
@@ -99,26 +97,26 @@ GREEN = ["invariants=pass", "risk=pass", "test=pass"]
     [
         # The ref is what binds a verdict to the thing being merged, so it has to
         # come out of the right argv position in every shape gh accepts.
-        ("gh pr merge 6 --squash", ("pr-merge", "6")),
-        ("gh pr merge --squash 6", ("pr-merge", "6")),
-        ("gh.exe pr merge 26 --squash --delete-branch", ("pr-merge", "26")),
-        ("gh pr merge", ("pr-merge", None)),
+        ("gh pr merge 6 --squash", ("land", "6")),
+        ("gh pr merge --squash 6", ("land", "6")),
+        ("gh.exe pr merge 26 --squash --delete-branch", ("land", "26")),
+        ("gh pr merge", ("land", None)),
         (
             "python .claude/skills/sdd-ticket/scripts/ticket.py close 3",
-            ("ticket-close", "3"),
+            ("land", "3"),
         ),
         (
             ".venv/Scripts/python.exe .claude/skills/sdd-ticket/scripts/ticket.py"
             " close 12",
-            ("ticket-close", "12"),
+            ("land", "12"),
         ),
         # A flag's *value* is not the ref. `--subject "close 9"` used to be the kind
         # of thing a substring search would read as a close of ticket 9.
-        ('gh pr merge --subject "close 9" 6', ("pr-merge", "6")),
+        ('gh pr merge --subject "close 9" 6', ("land", "6")),
         ("git status", None),
         ("gh pr view 6 --json state", None),
         # Chained commands: the merge is still found after a separator.
-        ("git add x && gh pr merge 6", ("pr-merge", "6")),
+        ("git add x && gh pr merge 6", ("land", "6")),
     ],
 )
 def test_guarded_reads_the_scope_and_ref_from_argv(gate, command, expected):
@@ -298,7 +296,7 @@ def test_inherit_refuses_to_cross_pull_requests(gate, reviews, monkeypatch):
     _record(gate, verdict=GREEN, ref="6")
     monkeypatch.setattr(gate, "head", lambda repo=None: "beef456")
 
-    with pytest.raises(SystemExit, match="only be carried forward within one PR"):
+    with pytest.raises(SystemExit, match="only be carried forward within one MR"):
         gate.cmd_record(_args(ref="9", verdict=["risk=pass"], inherit="cafe123"))
 
 
@@ -464,7 +462,7 @@ def _artifact(reviews: Path, **over) -> dict:
     """A verdict on disk, keyed the way `cmd_record` keys one."""
     payload = {
         "sha": "branchtip",
-        "scope": "pr-merge",
+        "scope": "land",
         "ref": "8",
         "binding": "pr-head",
         "head_branch": "ticket/008",
@@ -566,35 +564,80 @@ def test_record_falls_back_to_local_head_when_gh_cannot_answer(gate, reviews):
     assert record["sha"] == "cafe123"
 
 
-def test_a_ticket_close_still_binds_to_local_head(gate, reviews, monkeypatch):
-    """Closing a ticket is a statement about work that has already landed, so the
-    checkout is the right referent — `pr_head` must not even be consulted."""
-    monkeypatch.setattr(
-        gate,
-        "pr_head",
-        lambda repo, ref: pytest.fail("ticket-close must not resolve a PR head"),
-    )
-    record = _record(gate, scope="ticket-close", ref="3", verdict=GREEN)
-    assert record["binding"] == "local-head"
-    assert record["sha"] == "cafe123"
-
-
-def test_a_blocking_ticket_close_still_stops_at_its_own_commit(
+def test_a_ticket_close_binds_to_the_mr_head_like_everything_else(
     gate, reviews, monkeypatch
 ):
-    _artifact(
-        reviews,
-        scope="ticket-close",
-        ref="3",
-        binding="local-head",
-        head_branch=None,
-        sha="cafe123",
+    """The special case that expired.
+
+    `ticket-close` used to bind to local `HEAD`, on the reasoning that closing a
+    ticket described work which had already landed. `close` now runs on the ticket's
+    own branch in the commit *before* the merge, so the MR head is the right referent
+    for both steps — and there is one binding rule instead of a carve-out.
+    """
+    monkeypatch.setattr(
+        gate, "pr_head", lambda repo, ref: ("abc1234def5678", "mr-is-the-ticket")
     )
-    _stdin(monkeypatch, "python .claude/skills/sdd-ticket/scripts/ticket.py close 3")
-    assert gate.hook() == 2
-    monkeypatch.setattr(gate, "head", lambda repo=None: "movedon")
-    _stdin(monkeypatch, "python .claude/skills/sdd-ticket/scripts/ticket.py close 3")
-    assert gate.hook() == 0, "the work it judged is no longer what is checked out"
+    assert gate.cmd_record(_args(ref="41", verdict=GREEN)) == 0
+    record = json.loads((reviews / "abc1234.json").read_text(encoding="utf-8"))
+    assert record["binding"] == "pr-head"
+    assert record["sha"] == "abc1234", "still bound to the checkout"
+
+
+def test_one_verdict_admits_both_the_close_and_the_merge(gate, reviews, monkeypatch):
+    """The payoff of collapsing the referent. Landing a change is two commands, and
+    a panel recorded once for MR 41 has to answer for both — under the old split
+    scopes each needed its own recording, which is paying twice for one judgement."""
+    _artifact(reviews, ref="41", sha="branchtip")
+    monkeypatch.setattr(gate, "head", lambda repo=None: "mainsha")
+    monkeypatch.setattr(gate, "rev_parse", lambda repo, rev: "branchtip0000")
+    monkeypatch.setattr(gate, "ticket_mr", lambda repo: "41")
+
+    _stdin(monkeypatch, "gh pr merge 41 --squash")
+    assert gate.hook() == 2, "the merge ignored a block recorded for this MR"
+    _stdin(monkeypatch, "python .claude/skills/sdd-ticket/scripts/ticket.py close")
+    assert gate.hook() == 2, "the close ignored a block recorded for the same MR"
+
+
+def test_a_close_with_no_number_resolves_the_mr_from_the_ticket_file(
+    gate, monkeypatch, tmp_path
+):
+    """`close` takes no argument now, so the number has to come from the ticket on
+    the branch. Reading it wrong is worse than not reading it: the gate would look up
+    a verdict for something nobody asked about."""
+    tickets = tmp_path / ".claude" / "context" / "tickets"
+    tickets.mkdir(parents=True)
+    (tickets / "041-mr-is-the-ticket.md").write_text(
+        "# 41# — The merge request is the ticket\n\n```\nstatus:   in-progress\n"
+        "mr:       41\n```\n",
+        encoding="utf-8",
+    )
+
+    assert gate.ticket_mr(tmp_path) == "41"
+    assert gate.guarded("python x/ticket.py close", tmp_path) == ("land", "41")
+
+
+@pytest.mark.parametrize(
+    "body, why",
+    [
+        ("# 41# — x\n\n```\nmr:       none\n```\n", "an unnumbered draft"),
+        ("# 41# — x\n\n```\nstatus:   open\n```\n", "no mr field at all"),
+        ("", "an empty file"),
+    ],
+)
+def test_ticket_mr_returns_none_rather_than_guessing(gate, tmp_path, body, why):
+    """Every failure path has to fall back to the weaker lookups instead of inventing
+    a ref, and none of them may raise — this runs in a `PreToolUse` hook, where an
+    exception stops every shell call in the session."""
+    tickets = tmp_path / ".claude" / "context" / "tickets"
+    tickets.mkdir(parents=True)
+    (tickets / "041-thing.md").write_text(body, encoding="utf-8")
+
+    assert gate.ticket_mr(tmp_path) is None, why
+
+
+def test_ticket_mr_survives_a_missing_tickets_directory(gate, tmp_path):
+    """`main` carries no ticket files at all now, so this is the ordinary case."""
+    assert gate.ticket_mr(tmp_path) is None
 
 
 def test_show_names_the_binding(gate, reviews, capsys):
@@ -616,8 +659,8 @@ def test_show_reports_a_verdict_that_is_not_on_local_head(gate, reviews, capsys)
     capsys.readouterr()
     assert gate.cmd_show(SimpleNamespace()) == 0
     said = capsys.readouterr().out
-    assert "pr-merge 8" in said and "invariants   block" in said, said
-    assert "a merge of pr-merge 8 is BLOCKED on invariants" in said, said
+    assert "8!" in said and "invariants   block" in said, said
+    assert "a merge of 8! is BLOCKED on invariants" in said, said
     assert "nothing blocking" not in said, said
 
 

@@ -121,21 +121,29 @@ Do not edit anything yet. Let the user confirm or adjust the plan.
 
 **Once the brief is approved it becomes a ticket, before any code is written.**
 Not "if you are not doing it now" — always. The ticket is what the branch, the
-pull request and the commit all point back at, and it is the only artefact that
+merge request and the commit all point back at, and it is the only artefact that
 survives the conversation. A brief that exists solely in a transcript gets
 re-derived from scratch, dossier and all.
 
-`/sdd-ticket`, `kind: feature` or `fix`. The brief is already the right shape:
-the blast-radius table is the area of impact, the numbered steps are the plan,
-the open questions are what blocks it, and the rules section is why the approach
-is what it is. Then `push` it so the issue exists.
+`/sdd-ticket open <kebab-title>`, `kind: feature` or `fix`. That takes the
+worktree's branch, commits the ticket file, pushes, and opens a **draft merge
+request** whose number is the ticket's: `41#` is the specification and `41!` the
+change that satisfies it. Filing therefore happens *after* `EnterWorktree` and
+needs network — see `/sdd-ticket` § Numbering for why the number has to be
+GitHub's.
 
-Then work it, or leave it `open` for someone else — that decision no longer
+The brief is already the right shape: the blast-radius table is the area of
+impact, the numbered steps are the plan, the open questions are what blocks it,
+and the rules section is why the approach is what it is. Then `push` it so the MR
+body matches the file.
+
+Then work it, or leave the MR in draft for someone else — that decision no longer
 changes whether the ticket gets written.
 
 ## Step 6 — Working it
 
-**Take your own worktree before the first edit.** Call `EnterWorktree` — CLAUDE.md's
+**Take your own worktree before step 5, not after.** Filing the ticket commits and
+pushes, so the branch has to be yours already. Call `EnterWorktree` — CLAUDE.md's
 `## Working in parallel sessions` section authorises it. Several sessions work this
 repo at once and a checkout has exactly one `HEAD`, so a shared tree puts their
 commits on your branch and into your PR. `.claude/hooks/branch_lease.py` enforces
@@ -148,8 +156,9 @@ Then the steps in order, and close out per the dossier's **Definition of done**:
 an ADR in `docs/decisions.md` if the decision was significant, `CLAUDE.md` status
 if a milestone moved.
 
-Then a branch and a pull request — this repo moved off direct-to-`main` on
-2026-08-07 — with `Closes #<issue>` in the PR body. Then step 7.
+The branch and the merge request already exist — step 5 opened them — so finishing
+is `gh pr ready <X>` to take the MR out of draft. This repo moved off
+direct-to-`main` on 2026-08-07. Then step 7.
 
 ## Step 7 — Closing it out
 
@@ -161,18 +170,23 @@ that exe — PyInstaller writes `dist/` under the build root, so a build in
 
 In this order:
 
-1. **Merge the PR.** `gh pr merge <N> --squash --delete-branch` (the recent ones
+1. **Close the ticket** — `/sdd-ticket close`, recording the measured result rather
+   than the intent. This comes *first*, before the merge: it rewrites the MR body
+   with the finished write-up and removes the ticket file in a commit on the
+   branch, so the merge leaves `main` with no ticket file to sweep up. After the
+   merge it is too late and `close` refuses.
+2. **Merge the MR.** `gh pr merge <X> --squash --delete-branch` (the recent ones
    land squashed; older history has merge commits). `review_gate.py` guards this
    command, but only refuses when a panel **you** ran on this sha returned
    `block` — a ticket with no panel merges, because the critics are opt-in.
-2. **Bring the main clone up to date.** `git -C <main-clone> pull --ff-only`.
+3. **Bring the main clone up to date.** `git -C <main-clone> pull --ff-only`.
    Skipping this rebuilds the exe from the old `main` and everything below then
    passes against a build that lacks your change.
-3. **Stop the running exe.** `Stop-Process -Name TCGinventory -Force`, or
+4. **Stop the running exe.** `Stop-Process -Name TCGinventory -Force`, or
    `taskkill //F //IM TCGinventory.exe`. Killing it to rebuild is expected, and
    it is not optional: with it running, `--clean` dies with `PermissionError:
    [WinError 5]` on a locked DLL and leaves the *previous* build in `dist/`.
-4. **Rebuild**, from the main clone root:
+5. **Rebuild**, from the main clone root:
 
    ```powershell
    .\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm packaging\tcginventory.spec
@@ -180,12 +194,10 @@ In this order:
 
    Read **PyInstaller's own exit code** — not a trailing `echo`/`tail` in the
    same command line, which reports `0` over a failed build.
-5. **Confirm the exe's timestamp actually moved**, then boot it against a
+6. **Confirm the exe's timestamp actually moved**, then boot it against a
    throwaway `TCGINVENTORY_DATA_DIR` and check the process stays alive and
    `inventory.db` appears. Because a failed `--clean` leaves the old build in
    place, a boot check that skips the timestamp proves nothing (2026-08-05).
-6. **Close the ticket** — `/sdd-ticket close <N>` — recording the measured
-   result, not the intent.
 7. **Drop the worktree.** `ExitWorktree` with `action: "remove"`, or by hand:
    `git worktree remove --force <path>` and `branch_lease.py release`. A worktree
    left behind keeps a lease and denies the next session commands in this tree.

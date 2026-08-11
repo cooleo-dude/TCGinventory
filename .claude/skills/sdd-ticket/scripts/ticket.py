@@ -1,32 +1,46 @@
-"""Ticket tool for TCGinventory — local files are the truth, issues mirror them.
+"""Ticket tool for TCGinventory — the merge request *is* the ticket.
 
-    ticket.py list                    every ticket, its status and its issue
-    ticket.py next                    the number a new ticket should take
-    ticket.py claim <kebab-title>     reserve the next number by creating the file
-    ticket.py check                   non-zero if a ticket is malformed or out of sync
-    ticket.py push [N ...]            create/update the GitHub issue for a ticket
-    ticket.py close N                 close the issue and remove the ticket file
+    ticket.py open <kebab-title>   branch commit, push, draft MR; X is its number
+    ticket.py list                 every open ticket, read from GitHub
+    ticket.py check                non-zero if the ticket on this branch is malformed
+    ticket.py push                 rewrite the MR title and body from the file
+    ticket.py close                record the outcome and remove the file, then merge
 
-The local file under ``.claude/context/tickets/`` is canonical *while the work is
-outstanding*: it is versioned, it is readable offline, and an agent can act on it
-with no network and no auth. The GitHub issue is a mirror for visibility. When
-they disagree, the file wins.
+**One work item, one number.** ``X`` is the GitHub pull-request number: ``X#``
+names the specification and ``X!`` names the change that satisfies it. They are
+the same object, so they cannot drift apart.
 
-**The directory holds live work only.** ``close`` pushes the ticket's final text
-to its issue, closes the issue and then deletes the file, so a listing is the
-outstanding queue rather than a growing pile of finished ones. The record
-survives in the closed issue and in ``git log``; the number is never handed out
-again, because ``taken_numbers()`` reads every ref including deleted files.
+That is not a convention this script maintains, it is the only arrangement
+arithmetic allows. GitHub allocates issues and pull requests from a single
+per-repo counter, so a work item that files **both** an issue and a PR can never
+have them agree — measured on this repo, issues took 2/7/10/12/13/14/16/17/22/
+31/32/36 while PRs took 1/3/4/5/6/8/9/11/15/18…, one interleaved sequence with no
+overlap. Retiring the issue is what lets the two numbers become one.
 
-Needs ``gh`` authenticated for ``push``/``close``; everything else is offline.
-``gh`` installs into the *machine* PATH, so a shell opened before the install
-will not see it — this resolves the absolute path as a fallback.
+Consequences worth knowing before you use it:
+
+* **GitHub allocates, so nothing needs locking.** The old ``claim`` existed
+  because ticket numbers were minted locally and two sessions could both read
+  ``007``; it defended that with ``taken_numbers()`` over every ref plus
+  ``O_EXCL`` marker files in the git common dir. A number issued by GitHub cannot
+  collide, so all of it is gone.
+* **``open`` needs network and writes to the branch.** It commits the ticket file
+  and pushes, because ``gh pr create`` has nothing to open an MR against
+  otherwise. It stages by explicit pathspec — never ``git add -A`` — so it is safe
+  in a shared tree.
+* **The ticket file lives on its branch and must not reach ``main``.** ``close``
+  removes it in a final commit *before* the merge, so the merge leaves nothing to
+  clean up. The durable record is the MR body, which ``close`` rewrites from the
+  file a moment before deleting it.
+
+Needs ``gh`` authenticated for everything except ``check``. ``gh`` installs into
+the *machine* PATH, so a shell opened before the install will not see it — this
+resolves the absolute path as a fallback.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 from datetime import datetime
@@ -34,26 +48,38 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[4]
 TICKETS = REPO / ".claude" / "context" / "tickets"
-README = TICKETS / "README.md"
 GH_FALLBACK = Path(r"C:\Program Files\GitHub CLI\gh.exe")
 
 STATUSES = ("open", "in-progress", "deferred", "done", "dropped")
 KINDS = ("optimization", "dead-code", "feature", "fix")
-REQUIRED = ("status", "kind", "source", "issue", "axis", "found", "saving", "risk")
+REQUIRED = ("status", "kind", "source", "mr", "axis", "found", "saving", "risk")
 
-_NAME = re.compile(r"^(\d{3})-(.+)\.md$")
+# A numbered ticket, and the transient state between writing the file and hearing
+# back which number GitHub gave it. Four digits and beyond are allowed: the number
+# is GitHub's counter now, and it will pass 999 eventually.
+_NAME = re.compile(r"^(\d{3,})-(.+)\.md$")
+_DRAFT = re.compile(r"^draft-(.+)\.md$")
 _FIELD = re.compile(r"^(\w+):\s*(.*?)\s*$", re.MULTILINE)
+# "# 41# — The merge request is the ticket". An en/em dash or a plain hyphen is
+# accepted on read; `open` always writes the em dash.
+_HEADING = re.compile(r"^#\s+(\d+)#\s+[—–-]\s+(.+?)\s*$")
+_MR_TITLE = re.compile(r"^(\d+)!\s+(.+?)\s*$")
 
 
 class Ticket:
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.number = int(_NAME.match(path.name).group(1))
+        match = _NAME.match(path.name)
+        self.number = int(match.group(1)) if match else None
+        self.slug = match.group(2) if match else _DRAFT.match(path.name).group(1)
         text = path.read_text(encoding="utf-8")
         self.text = text
-        heading = text.splitlines()[0].lstrip("# ").strip()
-        # "001 — Store card embeddings as float16" -> the part after the number.
-        self.title = heading.split("—", 1)[-1].strip() if "—" in heading else heading
+        first = text.splitlines()[0] if text.strip() else ""
+        head = _HEADING.match(first)
+        # The sigil in the heading is what `check` compares against the filename
+        # and the `mr:` field, so keep them separable rather than parsed away.
+        self.heading_number = int(head.group(1)) if head else None
+        self.title = head.group(2) if head else first.lstrip("# ").strip()
         block = text.split("```")[1] if "```" in text else ""
         self.fields = {k: v for k, v in _FIELD.findall(block)}
 
@@ -62,12 +88,15 @@ class Ticket:
         return self.fields.get("status", "?")
 
     @property
-    def issue(self) -> int | None:
-        raw = self.fields.get("issue", "none")
-        return int(raw.lstrip("#")) if raw.lstrip("#").isdigit() else None
+    def mr(self) -> int | None:
+        raw = self.fields.get("mr", "none").lstrip("#")
+        return int(raw) if raw.isdigit() else None
+
+    def mr_title(self) -> str:
+        return f"{self.number}! {self.title}"
 
     def body(self) -> str:
-        """The issue body: everything after the front block, plus a pointer back."""
+        """The MR body: the front block as prose, then everything after it."""
         parts = self.text.split("```", 2)
         rest = parts[2] if len(parts) > 2 else self.text
         rel = self.path.relative_to(REPO).as_posix()
@@ -76,8 +105,10 @@ class Ticket:
         )
         return (
             f"{meta}\n\n---\n{rest.strip()}\n\n---\n"
-            f"Mirrored from `{rel}`, which is the source of truth. "
-            f"Edit the file, then `/sdd-ticket push {self.number}`.\n"
+            f"Generated from `{rel}` on this branch, which is the source of truth "
+            f"while the MR is open. Edit the file, then `/sdd-ticket push`. "
+            f"`close` rewrites this body and removes the file, so what you are "
+            f"reading is the durable record once the MR is merged.\n"
         )
 
     def set_field(self, key: str, value: str) -> None:
@@ -86,14 +117,24 @@ class Ticket:
         self.path.write_text(self.text, encoding="utf-8")
         self.fields[key] = value
 
+    def set_heading(self, number: int) -> None:
+        lines = self.text.splitlines()
+        lines[0] = f"# {number}# — {self.title}"
+        self.text = "\n".join(lines) + "\n"
+        self.path.write_text(self.text, encoding="utf-8")
+        self.heading_number = number
+
 
 def load() -> list[Ticket]:
+    """Every ticket file in this checkout — normally exactly one, yours."""
     if not TICKETS.is_dir():
         return []
-    return sorted(
-        (Ticket(p) for p in TICKETS.glob("*.md") if _NAME.match(p.name)),
-        key=lambda t: t.number,
-    )
+    found = [
+        Ticket(p)
+        for p in sorted(TICKETS.glob("*.md"))
+        if _NAME.match(p.name) or _DRAFT.match(p.name)
+    ]
+    return sorted(found, key=lambda t: (t.number is None, t.number or 0))
 
 
 def gh(*args: str, check: bool = True) -> str:
@@ -114,20 +155,6 @@ def gh(*args: str, check: bool = True) -> str:
     return done.stdout.strip()
 
 
-def cmd_list(args) -> int:
-    tickets = load()
-    if not tickets:
-        print("  no tickets")
-        return 0
-    for t in tickets:
-        issue = f"#{t.issue}" if t.issue else "—"
-        print(
-            f"  {t.number:03d}  {t.status:<12} {t.fields.get('kind', '?'):<13} "
-            f"{issue:<5}  {t.title}"
-        )
-    return 0
-
-
 def git(*args: str) -> str:
     done = subprocess.run(
         ["git", *args], cwd=REPO, capture_output=True, text=True, check=False
@@ -135,50 +162,26 @@ def git(*args: str) -> str:
     return done.stdout if done.returncode == 0 else ""
 
 
-def taken_numbers() -> set[int]:
-    """Every ticket number ever used, on **any** ref — not just this checkout.
-
-    Two sessions each asked the local directory for the next number, both got
-    `007`, and both filed an issue. The local tickets directory only knows about
-    tickets that have been merged into the branch you are standing on, so a ticket
-    filed an hour ago on someone else's branch is invisible to it.
-
-    `git log --all` covers every local and remote ref, including files since
-    deleted: a number that was ever used is never handed out again.
-    """
-    numbers = {t.number for t in load()}
-    listing = git(
-        "log",
-        "--all",
-        "--name-only",
-        "--pretty=format:",
-        "--",
-        TICKETS.relative_to(REPO).as_posix(),
+def git_checked(*args: str) -> str:
+    done = subprocess.run(
+        ["git", *args], cwd=REPO, capture_output=True, text=True, check=False
     )
-    for line in listing.splitlines():
-        match = _NAME.match(Path(line.strip()).name)
-        if match:
-            numbers.add(int(match.group(1)))
-    return numbers
+    if done.returncode != 0:
+        raise SystemExit(f"git {' '.join(args)}\n{done.stderr.strip()}")
+    return done.stdout.strip()
 
 
-def next_number() -> int:
-    taken = taken_numbers()
-    return (max(taken) + 1) if taken else 1
+def branch() -> str:
+    return git("rev-parse", "--abbrev-ref", "HEAD").strip()
 
 
-def cmd_next(args) -> int:
-    print(f"{next_number():03d}")
-    return 0
-
-
-SKELETON = """# {number:03d} — {title}
+SKELETON = """# {title}
 
 ```
-status:   open
+status:   in-progress
 kind:     feature
 source:   /task-planning {today}
-issue:    none
+mr:       none
 axis:     correctness
 found:    {today}
 saving:   -
@@ -213,79 +216,100 @@ TODO — the finding and its evidence.
 """
 
 
-def reservations_dir() -> Path:
-    """Where claimed numbers are recorded, shared by every worktree of the repo.
+def cmd_open(args) -> int:
+    """Write the ticket, push it, and let GitHub name it.
 
-    The git common directory, for the same reason the session registry lives there
-    (`.claude/hooks/_session.py`): each worktree has its own checkout of
-    `.claude/context/`, so a marker written there would be invisible to the other
-    session and prove nothing. This is also never committed — the *tickets* are the
-    durable record; these are just high-water marks.
-    """
-    done = subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    common = done.stdout.strip() if done.returncode == 0 else ""
-    root = Path(common) if common else REPO / ".git"
-    if not root.is_absolute():
-        root = REPO / root
-    return root / "tcgi-ticket-numbers"
-
-
-def cmd_claim(args) -> int:
-    """Reserve a *number*, so two sessions cannot both file `007`.
-
-    `next` is a read: between one session reading `007` and writing its file,
-    another session reads `007` too. The reservation has to key on the **number
-    alone** — keying it on the filename lets `007-foo.md` and `007-bar.md` both
-    succeed, which is the collision rather than a fix for it (caught by
-    `test_claim_steps_over_a_number_taken_between_read_and_write`).
-
-    Two layers: a glob rules out numbers already present in this checkout, and an
-    `O_EXCL` marker in the shared git dir closes the window between two concurrent
-    claims. Whoever loses gets `FileExistsError` and takes the next number.
+    The number cannot be known before the MR exists, so this is ordered: file,
+    commit, push, create, *then* rename to the number that came back. The window
+    where the file is called `draft-<slug>.md` is why `_DRAFT` exists.
     """
     slug = args.slug.strip().strip("-")
     if not slug:
-        raise SystemExit("give a kebab-case title, e.g. `claim isolate-sessions`")
+        raise SystemExit("give a kebab-case title, e.g. `open isolate-sessions`")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
+        raise SystemExit(f"slug {slug!r} must be kebab-case: [a-z0-9-]")
+
+    here = branch()
+    if here in ("main", "master"):
+        raise SystemExit(
+            f"on {here} — a ticket is a branch with an MR. Take a worktree first "
+            f"(EnterWorktree), then run this again."
+        )
+    existing = load()
+    if existing:
+        raise SystemExit(
+            f"{existing[0].path.name} is already on this branch — one ticket per "
+            f"MR. Finish or `close` it before opening another."
+        )
 
     today = datetime.now().strftime("%Y-%m-%d")
     title = slug.replace("-", " ").capitalize()
-    markers = reservations_dir()
-    markers.mkdir(parents=True, exist_ok=True)
+    draft = TICKETS / f"draft-{slug}.md"
+    draft.write_text(SKELETON.format(title=title, today=today), encoding="utf-8")
 
-    start = next_number()
-    for candidate in range(start, start + 50):
-        if any(TICKETS.glob(f"{candidate:03d}-*.md")):
-            continue  # taken in this checkout, whatever its title
-        try:
-            handle = os.open(
-                markers / f"{candidate:03d}", os.O_CREAT | os.O_EXCL | os.O_WRONLY
-            )
-        except FileExistsError:
-            continue  # another session got this number first
-        os.close(handle)
+    rel = draft.relative_to(REPO).as_posix()
+    git_checked("add", "--", rel)
+    git_checked("commit", "-m", f"Tickets: file the brief for {slug}", "--", rel)
+    git_checked("push", "-u", "origin", here)
 
-        path = TICKETS / f"{candidate:03d}-{slug}.md"
-        path.write_text(
-            SKELETON.format(number=candidate, title=title, today=today),
-            encoding="utf-8",
-        )
-        _reindex()
-        print(f"  claimed {candidate:03d}  {path.relative_to(REPO).as_posix()}")
-        print("  fill it in, then `ticket.py check` and `ticket.py push`")
+    url = gh("pr", "create", "--draft", "--title", slug, "--body-file", str(draft))
+    number = int(url.rstrip("/").rsplit("/", 1)[-1])
+
+    final = TICKETS / f"{number:03d}-{slug}.md"
+    git_checked("mv", rel, final.relative_to(REPO).as_posix())
+    ticket = Ticket(final)
+    ticket.set_heading(number)
+    ticket.set_field("mr", str(number))
+    gh("pr", "edit", str(number), "--title", ticket.mr_title())
+
+    # `git mv` has already staged both sides of the rename, and `git add` on the
+    # old path fails outright ("pathspec did not match any files") now that it is
+    # gone from the working tree. Commit the pair by pathspec instead — never
+    # `git add -A`, which is denied while a tree is shared.
+    paths = [rel, final.relative_to(REPO).as_posix()]
+    git_checked("commit", "-m", f"Tickets: number the brief {number}#", "--", *paths)
+    git_checked("push")
+
+    print(f"  opened {number}#  {final.relative_to(REPO).as_posix()}")
+    print(f"  draft MR {number}!  {url}")
+    print("  fill it in, then `ticket.py push` to mirror it")
+    return 0
+
+
+def cmd_list(args) -> int:
+    """The queue is GitHub's open MRs — `main` carries no ticket files.
+
+    Reading the local directory would only ever show the ticket on the branch you
+    are standing on, which is not a queue.
+    """
+    raw = gh(
+        "pr",
+        "list",
+        "--state",
+        "open",
+        "--limit",
+        "100",
+        "--json",
+        "number,title,isDraft,headRefName",
+        "-q",
+        '.[] | "\\(.number)\\t\\(.isDraft)\\t\\(.headRefName)\\t\\(.title)"',
+    )
+    rows = [line.split("\t", 3) for line in raw.splitlines() if line.strip()]
+    if not rows:
+        print("  no open tickets")
         return 0
-    raise SystemExit(f"could not claim a number near {start:03d}")
+    for number, is_draft, head, title in sorted(rows, key=lambda r: int(r[0])):
+        sigil = _MR_TITLE.match(title)
+        state = "draft" if is_draft == "true" else "ready"
+        name = sigil.group(2) if sigil else f"{title}   (no sigil)"
+        print(f"  {int(number):>4}!  {state:<6} {head:<28}  {name}")
+    return 0
 
 
 def cmd_check(args) -> int:
     problems: list[str] = []
-    seen: dict[int, Path] = {}
-    for t in load():
+    tickets = load()
+    for t in tickets:
         where = t.path.name
         for field in REQUIRED:
             if field not in t.fields:
@@ -295,206 +319,154 @@ def cmd_check(args) -> int:
         kind = t.fields.get("kind")
         if kind and kind not in KINDS:
             problems.append(f"{where}: kind {kind!r} not one of {KINDS}")
-        if t.number in seen:
-            problems.append(f"{where}: number reused from {seen[t.number].name}")
-        seen[t.number] = t.path
-        # The directory is the outstanding queue. A ticket edited to `done` or
-        # `dropped` by hand never went through `close`, so its issue is still open
-        # and still describes the work as pending.
+
+        if t.number is None:
+            # Only legitimate between `open`'s push and its rename. Committed, it
+            # means an `open` died halfway and the MR is unnumbered.
+            problems.append(
+                f"{where}: still a draft — no number. `open` assigns one from the "
+                f"MR it creates; if that MR exists, rename the file to it."
+            )
+        else:
+            # The three places the number appears must agree, or `push` retitles
+            # one MR from a file describing another.
+            if t.heading_number is None:
+                problems.append(
+                    f"{where}: heading must carry the sigil, '# {t.number}# — Title'"
+                )
+            elif t.heading_number != t.number:
+                problems.append(
+                    f"{where}: heading says {t.heading_number}# but the filename "
+                    f"says {t.number}"
+                )
+            if t.mr is None:
+                problems.append(
+                    f"{where}: 'mr:' is not a number — it is the MR that lands this"
+                )
+            elif t.mr != t.number:
+                problems.append(
+                    f"{where}: mr: {t.mr} disagrees with the filename ({t.number}) "
+                    f"— X# and X! are the same number"
+                )
+
+        # The file is removed by `close`, in the commit before the merge. Edited to
+        # a terminal status by hand, it would ride into `main` and the MR body
+        # would still describe the work as pending.
         if t.status in ("done", "dropped"):
             problems.append(
-                f"{where}: {t.status} but still on disk — "
-                f"`close {t.number}` to mirror it and remove the file"
+                f"{where}: {t.status} but still on disk — `close` mirrors it to the "
+                f"MR and removes it, and must run before the merge"
             )
-        elif t.status == "in-progress" and not t.issue:
-            problems.append(f"{where}: in-progress but never mirrored to an issue")
-        if README.is_file() and f"]({t.path.name})" not in README.read_text(
-            encoding="utf-8"
-        ):
-            problems.append(f"{where}: missing from the README index")
 
     for problem in problems:
         print(f"  FAIL  {problem}")
     if problems:
         return 1
-    print(f"  ok — {len(seen)} ticket(s), all well-formed and indexed")
+    print(f"  ok — {len(tickets)} ticket(s) on this branch, well-formed")
     return 0
 
 
-def _repo_slug() -> str:
-    return gh("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
+def _only_ticket() -> Ticket:
+    tickets = load()
+    if not tickets:
+        raise SystemExit(
+            "no ticket file on this branch — `open <slug>` files one, or switch to "
+            "the branch whose ticket you meant"
+        )
+    if len(tickets) > 1:
+        names = ", ".join(t.path.name for t in tickets)
+        raise SystemExit(f"more than one ticket on this branch: {names}")
+    return tickets[0]
 
 
 def cmd_push(args) -> int:
-    wanted = set(args.numbers or [])
-    slug = _repo_slug()
-    for t in load():
-        if wanted and t.number not in wanted:
-            continue
-        title = f"[{t.number:03d}] {t.title}"
-        labels = [t.fields.get("kind", "")] if t.fields.get("kind") else []
-        if t.issue:
-            gh(
-                "issue",
-                "edit",
-                str(t.issue),
-                "--repo",
-                slug,
-                "--title",
-                title,
-                "--body",
-                t.body(),
-            )
-            print(f"  updated #{t.issue}  ({t.path.name})")
-        else:
-            cmd = [
-                "issue",
-                "create",
-                "--repo",
-                slug,
-                "--title",
-                title,
-                "--body",
-                t.body(),
-            ]
-            for label in labels:
-                cmd += ["--label", label]
-            url = gh(*cmd, check=False)
-            if not url.startswith("http"):  # label may not exist yet
-                url = gh(
-                    "issue",
-                    "create",
-                    "--repo",
-                    slug,
-                    "--title",
-                    title,
-                    "--body",
-                    t.body(),
-                )
-            number = url.rstrip("/").rsplit("/", 1)[-1]
-            t.set_field("issue", f"#{number}")
-            print(f"  created #{number}  {url}")
-            _reindex()
+    t = _only_ticket()
+    if t.number is None or t.mr is None:
+        raise SystemExit(f"{t.path.name}: no MR number yet — see `check`")
+    gh(
+        "pr",
+        "edit",
+        str(t.mr),
+        "--title",
+        t.mr_title(),
+        "--body",
+        t.body(),
+    )
+    print(f"  updated {t.mr}!  ({t.path.name})")
     return 0
 
 
 def cmd_close(args) -> int:
-    """Mirror the finished ticket to its issue, close the issue, delete the file.
+    """Record the outcome in the MR, then remove the file — before the merge.
 
-    The order matters. Deleting first, or closing the issue without re-pushing the
-    body, would drop the outcome the ticket was edited to record — the commit, the
-    PR, the measured after — leaving a closed issue that still describes the work
-    as pending. The push is what makes the issue a faithful record before the file
-    that fed it goes away.
+    Order and timing both matter. The body is rewritten first so the MR carries
+    the finished text rather than the brief; the file is then deleted in the same
+    branch, so merging leaves `main` with no ticket files to sweep up later. Run
+    after the merge and both guarantees are gone: the file is already on `main`,
+    and removing it needs a second PR — which is the overhead this replaced.
     """
-    for t in load():
-        if t.number != args.number:
-            continue
-        if not t.issue:
-            raise SystemExit(
-                f"{t.path.name}: no mirrored issue, and closing deletes the file — "
-                f"the issue would be the only surviving copy. "
-                f"Run `push {t.number}` first."
-            )
-        # A ticket already edited to `dropped` is abandoned, not landed: keep that
-        # word, or the record says the work shipped when it never did.
-        dropped = t.status == "dropped"
-        t.set_field("status", "dropped" if dropped else "done")
-        slug = _repo_slug()
-        gh(
-            "issue",
-            "edit",
-            str(t.issue),
-            "--repo",
-            slug,
-            "--title",
-            f"[{t.number:03d}] {t.title}",
-            "--body",
-            t.body(),
-        )
-        tail = (
-            "The issue body above is the final record — the ticket file is removed "
-            "on close, and its history is in `git log`."
-        )
-        # `gh issue close` fails on an issue that is already closed, and that is a
-        # normal state to be in: the PR body said "closes #N", or a previous `close`
-        # died after this point. Failing here would strand the file forever.
-        state = gh(
-            "issue",
-            "view",
-            str(t.issue),
-            "--repo",
-            slug,
-            "--json",
-            "state",
-            "-q",
-            ".state",
-            check=False,
-        )
-        if state.strip().upper() == "CLOSED":
-            print(f"  #{t.issue} was already closed — updated its body")
-        else:
-            close_cmd = [
-                "issue",
-                "close",
-                str(t.issue),
-                "--repo",
-                slug,
-                "--comment",
-                (f"Dropped. {tail}" if dropped else f"Landed. {tail}"),
-            ]
-            if dropped:
-                close_cmd += ["--reason", "not planned"]
-            gh(*close_cmd)
-        name = t.path.name
-        t.path.unlink()
-        _reindex()
-        # Staging a path that no longer exists records the deletion; explicit
-        # pathspecs, because `git add -A` is denied while a tree is shared.
-        gone = t.path.relative_to(REPO).as_posix()
-        index = README.relative_to(REPO).as_posix()
-        print(f"  closed #{t.issue} and removed {name}")
-        print(f"  commit it:  git add {gone} {index}")
-        return 0
-    raise SystemExit(f"no ticket {args.number:03d}")
+    t = _only_ticket()
+    if t.number is None or t.mr is None:
+        raise SystemExit(f"{t.path.name}: no MR number yet — see `check`")
 
-
-def _reindex() -> None:
-    """Rewrite the README index table from the ticket files themselves."""
-    if not README.is_file():
-        return
-    rows = [
-        f"| [{t.number:03d}]({t.path.name}) | {t.title} "
-        f"| {t.fields.get('kind', '?')} | "
-        f"{('#' + str(t.issue)) if t.issue else '—'} | `{t.status}` |"
-        for t in load()
-    ]
-    text = README.read_text(encoding="utf-8")
-    head, _, _ = text.partition("| # | title |")
-    README.write_text(
-        head
-        + "| # | title | kind | issue | status |\n|---|---|---|---|---|\n"
-        + "\n".join(rows)
-        + "\n",
-        encoding="utf-8",
+    state = (
+        gh("pr", "view", str(t.mr), "--json", "state", "-q", ".state", check=False)
+        .strip()
+        .upper()
     )
+    dropped = t.status == "dropped"
+    if state == "MERGED":
+        raise SystemExit(
+            f"{t.mr}! is already merged, so {t.path.name} is on main and this is "
+            f"too late: the MR body still describes the brief, and deleting the "
+            f"file now needs its own PR. Record the outcome in the MR by hand, "
+            f"then remove the file in your next change."
+        )
+    if state == "CLOSED" and not dropped:
+        raise SystemExit(
+            f"{t.mr}! is closed without merging, but the ticket says "
+            f"{t.status!r}. If the work was abandoned set `status: dropped` and "
+            f"say why; otherwise reopen the MR."
+        )
+
+    # A ticket already edited to `dropped` is abandoned, not landed: keep that
+    # word, or the record says the work shipped when it never did.
+    t.set_field("status", "dropped" if dropped else "done")
+    gh("pr", "edit", str(t.mr), "--title", t.mr_title(), "--body", t.body())
+
+    rel = t.path.relative_to(REPO).as_posix()
+    # `-f` because `set_field` above rewrote `status:` in the working tree, and git
+    # refuses to remove a file with unstaged modifications. Discarding them is the
+    # intent: the edit existed only to reach the MR body, which is already pushed.
+    git_checked("rm", "--quiet", "-f", "--", rel)
+    verb = "Dropped" if dropped else "Landed"
+    git_checked(
+        "commit",
+        "-m",
+        f"Tickets: close {t.number}#, recorded in {t.mr}! ({verb.lower()})",
+        "--",
+        rel,
+    )
+    git_checked("push")
+
+    print(f"  {verb} {t.number}# — MR body rewritten, {t.path.name} removed")
+    if dropped:
+        print(f"  now:  gh pr close {t.mr} --comment 'Dropped — see the body'")
+    else:
+        print(f"  now:  gh pr merge {t.mr} --squash --delete-branch")
+    return 0
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
+    opener = sub.add_parser("open")
+    opener.add_argument("slug", help="kebab-case title, e.g. isolate-sessions")
+    opener.set_defaults(func=cmd_open)
     sub.add_parser("list").set_defaults(func=cmd_list)
-    sub.add_parser("next").set_defaults(func=cmd_next)
-    claimer = sub.add_parser("claim")
-    claimer.add_argument("slug", help="kebab-case title, e.g. isolate-sessions")
-    claimer.set_defaults(func=cmd_claim)
     sub.add_parser("check").set_defaults(func=cmd_check)
-    pusher = sub.add_parser("push")
-    pusher.add_argument("numbers", nargs="*", type=int)
-    pusher.set_defaults(func=cmd_push)
-    closer = sub.add_parser("close")
-    closer.add_argument("number", type=int)
-    closer.set_defaults(func=cmd_close)
+    sub.add_parser("push").set_defaults(func=cmd_push)
+    sub.add_parser("close").set_defaults(func=cmd_close)
 
     args = parser.parse_args()
     raise SystemExit(args.func(args))
