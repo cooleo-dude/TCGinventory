@@ -4,6 +4,73 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-11 — The Dashboard stops being a second Inventory screen (48#)
+
+- **Decision:** Top Gainers and Top Losers each carry an **owned / global** scope
+  toggle. Owned is unchanged — held resale cards from the ledger. Global ranks the
+  whole catalog (49,709 cards with recorded price history) by **percent** movement,
+  read from `pricehistory.db` on a worker thread, with the cards you happen to hold
+  marked in place.
+- **Why:** every panel on that screen was a projection of the ledger.
+  `ReportingService._price_movers` opens `FROM lot l JOIN item i`, so the highlights
+  strip could only ever describe the 759 cards already on the shelf. Global movers is
+  the first outward-looking thing on the Dashboard.
+- **Percent, not cents.** Absolute-cents ranking is right for 759 held cards and
+  useless across 49,709: a $400 card drifting 5% outranks a $2 card doubling, so the
+  panel becomes a list of expensive cards.
+- **Three guards, all found by measuring rather than by taste** — the ticket promised
+  measured floors and the measuring is what earned its keep:
+  1. **Baseline falls back to a card's earliest snapshot.** Catalog history reaches
+     back 26 days and the shortest range pill asks for 30, so "latest snapshot at or
+     before the cutoff" matched nothing and the panel was **empty at every range**.
+  2. **The floor applies to both endpoints.** Flooring only the current price put a
+     card that went 26c to $1283.67 at the top, at +493,619%.
+  3. **A card with a single ≥5x step between adjacent observations is dropped.** This
+     is the one that matters. Untouched, the ranking was entirely cards whose sweep
+     mapping changed mid-series — `ex7-36` reads 271.64, 294.97, then **6.34** and flat
+     ever after; `basep-17` reads 1.00, 0.99, then **111.30** and flat. They batch on
+     specific dates (52 cards on 2026-07-28, 52 more on 2026-08-04), so it is the
+     card-to-pricing-product mapping moving, not a market. **This also rules out
+     ranking by `trends.py`'s least-squares slope** — a step that persists has a
+     perfectly real slope. With floor $1 and step <5x: 18,558 candidates, extremes
+     +700%/−86% across many sets, where before it was +493,619% across two.
+  4. **The underlying relabels are a pipeline bug, not a panel bug.** 226 cards
+     currently have histories describing two products, and the sweep keeps producing
+     more. Guarded here; not fixed here.
+- **Its own service, not a `ReportingService` method.** `pricehistory.db` is derived
+  and `ReportingService` holds the ledger connection; reaching one from the other is
+  what `LEDGER-VS-DERIVED` exists to stop. `TrendService` already takes both
+  connections and `GlobalMoversService` follows it.
+- **Rank first, hydrate the slice.** Names live in `inventory.db` and prices in
+  `pricehistory.db`, so joining them would touch every candidate. Ranking first means
+  the catalog is asked about ~10 cards instead of ~18,000 — and the first cut got this
+  wrong in the *view*, which asked for `limit=None` by copying the owned path, hydrated
+  all 18,558 rows, and never arrived.
+- **Global rows for cards you do not hold are inert** (the user's call): no navigation,
+  no hand cursor, and no "Show … in Inventory" tooltip, which the old code promised
+  unconditionally. Price Lookup was considered as a destination and deferred — it is
+  not yet decided what that screen is for. `item_id is None` is the test for
+  navigability, not `owned_qty == 0`.
+- **Range pills are untouched**, also the user's call: 3M and up return the same list
+  as 1M until history accrues past 2026-07-16. The selector is shared by the whole
+  highlights strip, and special-casing one panel's pills would break that for a
+  condition time fixes by itself.
+- **Two things only the running app caught**, with a green suite and green offscreen
+  tests: the `limit=None` stall above, and that nothing cleared the column while the
+  worker ran — so switching to global displayed the **owned** list, "paid $X" and all,
+  under a Global heading. Both now have tests; the second became `set_ranking`.
+- **`image_for` was resolving identity through an image.** Every branch filtered on
+  `image_small IS NOT NULL`, so borrowing it for a card *id* — which `TrendService`
+  also does — silently failed for imageless entries. Added `require_image` and a named
+  `card_id_for`; same matcher, one flag, existing callers unchanged.
+- **Test-infrastructure note worth keeping:** these are the first tests to clear rows a
+  `_PagedBox` already had. `_clear` uses `deleteLater`, the suite spins no event loop,
+  and the column's wrapper died before conftest's module drain delivered the events —
+  an access violation far from its cause. The fix is a fixture that owns the widgets
+  and flushes `DeferredDelete` while their parents are still alive.
+
+---
+
 ### 2026-08-10 — The ticket lives on GitHub, and a pull request is an issue (46#)
 
 - **Decision:** there is no local ticket storage. `.claude/context/tickets/` is
