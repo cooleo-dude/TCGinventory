@@ -4,6 +4,53 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-08-10 — One work item, one number: the merge request is the ticket (41#)
+
+- **Decision:** `X` is the **GitHub merge-request number**, and it is the only
+  number a work item has. `X#` names the specification, `X!` the change that
+  satisfies it. GitHub issues are retired: a ticket is a branch with a draft MR
+  carrying the ticket file, and `deferred` work is a draft MR left open.
+- **Why it could not be done as a convention over the old numbers.** Three
+  sequences were in play — our ticket `NNN`, the mirrored issue `#N`, the PR `#N` —
+  and GitHub allocates issues and pull requests from **one per-repo counter**.
+  Measured here: issues took 2/7/10/12/13/14/16/17/22/31/32/36 while PRs took
+  1/3/4/5/6/8/9/11/15/18…, one interleaved sequence with no overlap. A work item
+  that files both can therefore *never* have them agree, whatever it is called.
+  Alignment required dropping to one GitHub object per item; keeping the issue and
+  renumbering tickets to match it (the rejected alternative) would have left `X!` a
+  decorative label whose number was not the MR's.
+- **The ticket file lives on its branch and never reaches `main`.** `close` runs
+  *before* the merge: it rewrites the MR body with the finished write-up, then
+  removes the file in the same branch. So the merge leaves nothing to sweep up, and
+  the `Tickets: close N` follow-up commits (#33, #38, #39 were all just that) stop
+  existing. Run after the merge, both guarantees are gone — the file is already on
+  `main` — so `close` refuses in that state, with a test pinning it.
+- **The number-reservation machinery is deleted, not ported.** `claim` existed
+  because ticket numbers were minted locally and two sessions could both read
+  `007`; it defended that with `taken_numbers()` over every ref plus `O_EXCL`
+  markers in the git common dir. GitHub cannot issue one number twice, so the race
+  it guarded no longer exists. `check` instead enforces that the three copies of the
+  number on disk — filename, heading sigil, `mr:` field — agree, because a
+  disagreement means `push` retitles one MR from a file describing another.
+- **The gate's two referents collapse to one.** `review_gate.py --ref` used to mean
+  a PR number under `--scope pr-merge` and our ticket number under
+  `--scope ticket-close`, while admission keyed on `(scope, ref)` — two numbering
+  schemes behind one flag, so landing one change needed two panels recorded.
+  `--scope` is gone; `gh pr merge 41` and `ticket.py close` are two steps of
+  landing `41!` and share a verdict. `close` no longer takes a number, so the hook
+  reads it from the ticket file on the branch — a local read, never `gh`, because a
+  `PreToolUse` call has a 20s budget.
+- **The `ticket-close` binding carve-out expired with it.** It bound to local
+  `HEAD` on the reasoning that closing a ticket described work that had already
+  landed. `close` now runs on the branch before the merge, so the MR head is right
+  for both, and one binding rule replaces a special case.
+- **Costs accepted:** filing needs network and a pushed branch (`open` refuses on
+  `main`); the branch is named for the slug, because the number does not exist until
+  the branch is pushed; and `list` reads open MRs from GitHub, since `main` carries
+  no ticket files for a local listing to find.
+
+---
+
 ### 2026-08-09 — The rule registry names the invariant that broke (ticket 002)
 
 - **Decision:** `INVARIANTS-DOC` is retired and replaced by **nine rules, one per

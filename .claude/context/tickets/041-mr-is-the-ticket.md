@@ -1,10 +1,10 @@
-# The merge request is the ticket
+# 41# — The merge request is the ticket
 
 ```
 status:   in-progress
 kind:     feature
 source:   /task-planning 2026-08-10
-mr:       none
+mr:       41
 axis:     maintainability
 found:    2026-08-10
 saving:   -
@@ -34,7 +34,7 @@ with ("Ticket numbers and issue numbers are **not** the same sequence").
 The desync has two concrete costs beyond the reading friction:
 
 1. **`review_gate.py` overloads one flag with two sequences.** `--ref` is a GitHub
-   PR number under `--scope pr-merge` (`classify`, line 233) but our ticket number
+   PR number under `--scope pr-merge` (`guarded`, line 233) but our ticket number
    under `--scope ticket-close` (line 239), while admission keys on `(scope, ref)`.
    Undocumented, and the kind of thing ticket 003 was filed about.
 2. **`claim` exists to work around a race that GitHub does not have.** Ticket
@@ -101,9 +101,11 @@ only to delete a file from `main`.
    `issue:` → `mr:` in `REQUIRED`; sigil in the skeleton, the MR title and the
    README index.
 2. `ticket.py check`: validate the sigil form and that `mr:` agrees with the
-   filename. `close`: refuse unless the MR is merged.
+   filename. `close` runs *before* the merge — it rewrites the MR body and removes
+   the file in the same branch — so it refuses once the MR is already merged,
+   where both guarantees are gone.
 3. `tests/test_ticket.py`: negative tests first — malformed sigil, `mr:`
-   disagreeing with the filename, `close` on an unmerged MR.
+   disagreeing with the filename, `close` on an already-merged MR.
 4. `review_gate.py`: collapse the two `--ref` referents; simplify the `--inherit`
    guard. Update `tests/test_review_gate.py`.
 5. Docs: `sdd-ticket/SKILL.md` (new *Numbering* section), `tickets/README.md`,
@@ -121,3 +123,40 @@ only to delete a file from `main`.
   here, which is why `app-map.json` `.workflow.branch` is safe to touch.
 - `ticket.py check` passes against the migrated tickets.
 - This ticket's own MR number is the first `X!`, so the flow is proven by use.
+
+## Result
+
+Landed as `41!`, which was itself filed through the new flow by hand before the
+script existed — the manual sequence (write, commit, push, `gh pr create --draft`,
+rename to the number that came back, retitle) is exactly what `ticket.py open`
+now automates.
+
+**Measured after:**
+
+- `ruff format` / `ruff check` clean; **945 tests pass** serially with
+  `QT_QPA_PLATFORM=offscreen`, exit 0. `rules.py check` green — 37 rules, every
+  seal resolves, because no rule anchors a section this touched.
+- `ticket.py` went from 505 to 448 lines while gaining two subcommands' worth of
+  behaviour: `taken_numbers`, `next_number`, `reservations_dir`, `cmd_claim`,
+  `cmd_next` and `_reindex` are gone, and the README index they maintained is
+  replaced by `list` reading open MRs.
+- Test coverage moved rather than shrank: `test_ticket_claim.py` (317 lines, over
+  half of it the number-reservation race) became `test_ticket.py` (19 tests), and
+  `test_review_gate.py` gained five, four of them negative.
+- **The negative tests were verified by reverting**, per
+  `CHECKER-NEEDS-NEGATIVE-TEST`: gutting the number-agreement block in `cmd_check`
+  turns exactly four tests red — `mr` disagreeing with the filename, the heading
+  sigil disagreeing, a heading with no sigil, and an `mr:` that is not a number —
+  and nothing else.
+
+**Two real bugs the tests caught before this shipped**, both in `close`/`open`'s
+git handling and neither reachable by reading:
+
+1. `open` called `git add` on the draft path after `git mv` had already staged the
+   rename, which fails outright (`pathspec did not match any files`) now that the
+   old path is gone from the working tree. The `mv` stages both sides; the `add`
+   was wrong, not merely redundant.
+2. `close` rewrote `status:` in the file and then ran `git rm`, which git refuses
+   on a file with unstaged modifications. `-f` is correct here and the reason is
+   worth keeping: the edit existed only to reach the MR body, which is already
+   pushed by that point.

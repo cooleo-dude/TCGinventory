@@ -11,16 +11,24 @@ silence.
 
 Two jobs in one file:
 
-* **hook mode** (no arguments, JSON on stdin): a `PreToolUse` hook. On a PR merge
-  or a ticket close it looks for a verdict **for that PR or ticket**; no verdict is
-  fine, a blocking verdict is not.
+* **hook mode** (no arguments, JSON on stdin): a `PreToolUse` hook. On a merge or a
+  ticket close it looks for a verdict **for that MR**; no verdict is fine, a
+  blocking verdict is not.
 * **`record`**: how the panel's verdicts get written, after the agents have run.
 
-    review_gate.py record --scope pr-merge --ref 4 \
+    review_gate.py record --ref 41 \
         --paths $(git diff --name-only origin/main...HEAD) \
         --verdict risk=pass --verdict test=pass
     review_gate.py show
     review_gate.py clear
+
+**`--ref` is the MR number, and it is the only number in play.** It used to mean
+two different sequences depending on `--scope`: a GitHub PR number for `pr-merge`
+and our own ticket number for `ticket-close`, while admission keyed on
+`(scope, ref)`. One work item therefore needed two panels recorded under two
+numbering schemes to land. Now that `X#` and `X!` are the same number — the MR's —
+closing the ticket and merging the MR are two steps of landing one reviewed change,
+and one recorded verdict admits both.
 
 A verdict is bound to **the commit that would actually merge** — resolved from the
 PR itself at record time, not read off the local checkout. Push another commit and
@@ -68,6 +76,11 @@ FALLBACK_REPO = Path(__file__).resolve().parents[2]
 # A verdict of `revise` is not a failure — it is a note the author answers.
 # Only `block` stops the gate. `n/a` is a lane the rule registry says this diff
 # cannot violate: recorded so the panel's coverage stays legible, never spawned.
+# One scope, because one work item now has one number: `X#` is the ticket and `X!`
+# the MR, so `gh pr merge 41` and `ticket.py close` are two steps of landing the
+# same reviewed change and share a verdict.
+SCOPE = "land"
+
 BLOCKING = {"block"}
 VALID = {"pass", "revise", "block", "n/a"}
 REQUIRED = {"invariants", "risk", "test"}
@@ -212,8 +225,37 @@ def _ref_after(rest: list[str], value_flags: set[str]) -> str | None:
     return None
 
 
-def guarded(command: str) -> tuple[str, str | None] | None:
+def ticket_mr(repo: Path) -> str | None:
+    """The MR number from the ticket file on this branch, or `None`.
+
+    `ticket.py close` takes no argument any more — it acts on the one ticket on the
+    branch — so the number has to be read rather than parsed off argv. A local file
+    read is affordable where `pr_head`'s network call is not: this runs inside a
+    `PreToolUse` hook with a 20s budget.
+
+    Every failure path returns `None`, which falls back to the weaker lookups in
+    `matching()`. A hook that raises stops every shell call in the session.
+    """
+    try:
+        tickets = repo / ".claude" / "context" / "tickets"
+        for path in sorted(tickets.glob("*.md")):
+            if path.name == "README.md":
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("mr:"):
+                    value = line.split(":", 1)[1].strip().lstrip("#")
+                    return value if value.isdigit() else None
+    except Exception:
+        return None
+    return None
+
+
+def guarded(command: str, repo: Path | None = None) -> tuple[str, str | None] | None:
     """`(scope, ref)` for a command this gate judges, else `None`.
+
+    There is one scope, `land`, because there is now one number. `gh pr merge 41`
+    and `ticket.py close` are two steps of landing MR 41, so a panel recorded for it
+    admits both rather than needing to be recorded twice.
 
     Classified from **argv positions**, never by searching the command text. The
     regex this replaced was `\\bgh\\b[^\\n]*\\bpr\\b[^\\n]*\\bmerge\\b`, which was
@@ -230,13 +272,19 @@ def guarded(command: str) -> tuple[str, str | None] | None:
         words = [t for t in argv[1:] if not t.startswith("-")]
         if name == "gh" and words[:2] == ["pr", "merge"]:
             after = argv[argv.index("merge") + 1 :]
-            return "pr-merge", _ref_after(after, GH_MERGE_VALUE_FLAGS)
-        # `ticket.py close N`, however it is invoked — python, a venv interpreter,
-        # or directly. The script path is an argv token, so prose cannot fake it.
+            return "land", _ref_after(after, GH_MERGE_VALUE_FLAGS)
+        # `ticket.py close`, however it is invoked — python, a venv interpreter, or
+        # directly. The script path is an argv token, so prose cannot fake it.
         if any(t.replace("\\", "/").endswith("ticket.py") for t in argv):
             if "close" in words:
                 after = argv[argv.index("close") + 1 :]
-                return "ticket-close", _ref_after(after, set())
+                # A bare number is still honoured if someone types one, but `close`
+                # no longer takes an argument, so normally the MR comes from the
+                # ticket file on the branch.
+                ref = _ref_after(after, set())
+                if ref is None and repo is not None:
+                    ref = ticket_mr(repo)
+                return "land", ref
     return None
 
 
@@ -353,12 +401,13 @@ def hook() -> int:
     if tool not in ("Bash", "PowerShell"):
         return 0
     command = str(event.get("tool_input", {}).get("command", ""))
-    what = guarded(command)
+    # The repo is resolved first because `guarded` may need it: `ticket.py close`
+    # carries no number, so the MR is read from the ticket file on that branch.
+    repo = repo_root(event.get("cwd"))
+    what = guarded(command, repo)
     if what is None:
         return 0
     scope, ref = what
-
-    repo = repo_root(event.get("cwd"))
     # No panel was run, and that is allowed. The critics are opt-in — they cost
     # ~26k tokens per spawn, so they run when someone asks for them, not on every
     # merge. What this hook still enforces is that a panel you *did* run cannot be
@@ -374,7 +423,7 @@ def hook() -> int:
         }
     )
     if blocked:
-        where = f"{scope} {ref}" if ref else scope
+        where = f"{ref}!" if ref else scope
         shas = ", ".join(sorted({str(r.get("sha", "?")) for r in live}))
         print(
             f"BLOCKED: critics were run on {where} ({shas}) and returned `block` "
@@ -459,7 +508,7 @@ def inherited(args, judged: dict[str, str], repo: Path | None = None) -> dict[st
     if str(prior.get("ref")) != str(args.ref):
         raise SystemExit(
             f"--inherit {args.inherit}: recorded for ref {prior.get('ref')!r}, not "
-            f"{args.ref!r} — a lane may only be carried forward within one PR"
+            f"{args.ref!r} — a lane may only be carried forward within one MR"
         )
     return {k: v for k, v in prior.get("verdicts", {}).items() if k not in judged}
 
@@ -507,33 +556,31 @@ def cmd_record(args) -> int:
             )
 
     # Bind to the commit that would actually merge, not to whatever this checkout
-    # is standing on. Those coincide only when the PR's branch happens to be
+    # is standing on. Those coincide only when the MR's branch happens to be
     # checked out; from `main` the verdict used to attest to the *base*, and a
     # recorded `block` was then invisible to the merge it was about.
     #
-    # `ticket-close` deliberately keeps binding to `HEAD`: closing a ticket is a
-    # statement about work that has already landed, so the checkout *is* the right
-    # referent. Left as a comment rather than an inconsistency someone later
-    # "fixes" into a bug.
+    # This used to be conditional: `ticket-close` bound to local `HEAD` instead, on
+    # the reasoning that closing a ticket described work that had already landed. It
+    # no longer does. `close` now runs on the ticket's own branch in the commit
+    # *before* the merge, so the MR's head is the right referent for both — and one
+    # binding rule beats a special case whose justification has expired.
     binding, head_branch = "local-head", None
-    if args.scope == "pr-merge":
-        resolved = pr_head(repo, args.ref)
-        if resolved:
-            oid, head_branch = resolved
-            binding = "pr-head"
-            # Abbreviated for the filename and the printed line; `same_commit`
-            # compares by prefix, so this never has to match git's chosen length.
-            sha = oid[:7]
-        else:
-            sha = head(repo)
-            print(
-                f"  note: `gh` could not resolve PR {args.ref} — binding this "
-                f"verdict to local HEAD only. It will speak for this commit and "
-                f"no other.",
-                file=sys.stderr,
-            )
+    resolved = pr_head(repo, args.ref)
+    if resolved:
+        oid, head_branch = resolved
+        binding = "pr-head"
+        # Abbreviated for the filename and the printed line; `same_commit` compares
+        # by prefix, so this never has to match git's chosen length.
+        sha = oid[:7]
     else:
         sha = head(repo)
+        print(
+            f"  note: `gh` could not resolve MR {args.ref} — binding this "
+            f"verdict to local HEAD only. It will speak for this commit and "
+            f"no other.",
+            file=sys.stderr,
+        )
     session = owning_session(repo)
     owners = lease_holders(repo)
     reviews_dir(repo).mkdir(parents=True, exist_ok=True)
@@ -541,7 +588,7 @@ def cmd_record(args) -> int:
         json.dumps(
             {
                 "sha": sha,
-                "scope": args.scope,
+                "scope": SCOPE,
                 "ref": args.ref,
                 # Which guarantee this artifact carries, named rather than implied:
                 # `pr-head` was resolved from the PR, `local-head` is the weaker
@@ -582,9 +629,9 @@ def cmd_record(args) -> int:
         )
     else:
         attribution = "unattributed (no lease)"
-    bound = "the PR head" if binding == "pr-head" else "local HEAD only"
+    bound = "the MR head" if binding == "pr-head" else "local HEAD only"
     print(
-        f"  recorded {sha}  {args.scope} {args.ref}  — {state}, {attribution}"
+        f"  recorded {sha}  {args.ref}!  — {state}, {attribution}"
         f"\n  bound to {bound} ({binding})"
     )
     return 1 if blocked else 0
@@ -620,7 +667,7 @@ def cmd_show(args) -> int:
             k for k, v in record.get("verdicts", {}).items() if v in BLOCKING
         )
         stale = superseded(repo, record)
-        where = f"{record.get('scope')} {record.get('ref')}"
+        where = f"{record.get('ref')}!"
         print(
             f"    {'HEAD ' if mine else '     '}{where} @{record.get('sha')} "
             f"[{binding}]{'  — superseded' if stale else ''}"
@@ -667,9 +714,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     recorder = sub.add_parser("record")
-    recorder.add_argument(
-        "--scope", required=True, choices=["pr-merge", "ticket-close"]
-    )
+    # No `--scope`: there is one number and one thing it refers to. The flag existed
+    # to say which sequence `--ref` was counted in, and that question is gone.
     recorder.add_argument("--ref", required=True)
     recorder.add_argument(
         "--verdict", action="append", default=[], metavar="lane=value"
