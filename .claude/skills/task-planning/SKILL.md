@@ -125,25 +125,23 @@ merge request and the commit all point back at, and it is the only artefact that
 survives the conversation. A brief that exists solely in a transcript gets
 re-derived from scratch, dossier and all.
 
-`/sdd-ticket open <kebab-title>`, `kind: feature` or `fix`. That takes the
-worktree's branch, commits the ticket file, pushes, and opens a **draft merge
-request** whose number is the ticket's: `41#` is the specification and `41!` the
-change that satisfies it. Filing therefore happens *after* `EnterWorktree` and
-needs network — see `/sdd-ticket` § Numbering for why the number has to be
-GitHub's.
+`/sdd-ticket open <kebab-title>`, `kind: feature` or `fix`. That files a GitHub
+**issue** — `X#`, the specification — and needs no branch, no commit and no
+worktree, which is what lets the ticket exist before any code does. Write the body
+with `show`/`push`; see `/sdd-ticket` § Numbering for why `X#` and `X!` are the same
+object.
 
 The brief is already the right shape: the blast-radius table is the area of
 impact, the numbered steps are the plan, the open questions are what blocks it,
-and the rules section is why the approach is what it is. Then `push` it so the MR
-body matches the file.
+and the rules section is why the approach is what it is.
 
-Then work it, or leave the MR in draft for someone else — that decision no longer
+Then work it, or leave `X#` in the queue for someone else — that decision no longer
 changes whether the ticket gets written.
 
 ## Step 6 — Working it
 
-**Take your own worktree before step 5, not after.** Filing the ticket commits and
-pushes, so the branch has to be yours already. Call `EnterWorktree` — CLAUDE.md's
+**Take your own worktree before the first edit.** Filing needs no branch, so this is
+the step that starts one. Call `EnterWorktree` — CLAUDE.md's
 `## Working in parallel sessions` section authorises it. Several sessions work this
 repo at once and a checkout has exactly one `HEAD`, so a shared tree puts their
 commits on your branch and into your PR. `.claude/hooks/branch_lease.py` enforces
@@ -156,8 +154,9 @@ Then the steps in order, and close out per the dossier's **Definition of done**:
 an ADR in `docs/decisions.md` if the decision was significant, `CLAUDE.md` status
 if a milestone moved.
 
-The branch and the merge request already exist — step 5 opened them — so finishing
-is `gh pr ready <X>` to take the MR out of draft. This repo moved off
+When there is something to review, `/sdd-ticket start <X>` converts the issue into
+pull request `X` from your branch — same number, and the title picks up the `!`. It
+needs the branch pushed with real commits on it. This repo moved off
 direct-to-`main` on 2026-08-07. Then step 7.
 
 ## Step 7 — Closing it out
@@ -170,11 +169,10 @@ that exe — PyInstaller writes `dist/` under the build root, so a build in
 
 In this order:
 
-1. **Close the ticket** — `/sdd-ticket close`, recording the measured result rather
-   than the intent. This comes *first*, before the merge: it rewrites the MR body
-   with the finished write-up and removes the ticket file in a commit on the
-   branch, so the merge leaves `main` with no ticket file to sweep up. After the
-   merge it is too late and `close` refuses.
+1. **Close the ticket** — `/sdd-ticket close <X>`, recording the measured result
+   rather than the intent. This comes *first*, before the merge: the body is the
+   permanent record, and once merged it is a plan nobody goes back to correct. After
+   the merge `close` refuses.
 2. **Merge the MR.** `gh pr merge <X> --squash --delete-branch` (the recent ones
    land squashed; older history has merge commits). `review_gate.py` guards this
    command, but only refuses when a panel **you** ran on this sha returned

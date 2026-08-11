@@ -225,37 +225,17 @@ def _ref_after(rest: list[str], value_flags: set[str]) -> str | None:
     return None
 
 
-def ticket_mr(repo: Path) -> str | None:
-    """The MR number from the ticket file on this branch, or `None`.
-
-    `ticket.py close` takes no argument any more — it acts on the one ticket on the
-    branch — so the number has to be read rather than parsed off argv. A local file
-    read is affordable where `pr_head`'s network call is not: this runs inside a
-    `PreToolUse` hook with a 20s budget.
-
-    Every failure path returns `None`, which falls back to the weaker lookups in
-    `matching()`. A hook that raises stops every shell call in the session.
-    """
-    try:
-        tickets = repo / ".claude" / "context" / "tickets"
-        for path in sorted(tickets.glob("*.md")):
-            if path.name == "README.md":
-                continue
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if line.startswith("mr:"):
-                    value = line.split(":", 1)[1].strip().lstrip("#")
-                    return value if value.isdigit() else None
-    except Exception:
-        return None
-    return None
-
-
-def guarded(command: str, repo: Path | None = None) -> tuple[str, str | None] | None:
+def guarded(command: str) -> tuple[str, str | None] | None:
     """`(scope, ref)` for a command this gate judges, else `None`.
 
     There is one scope, `land`, because there is now one number. `gh pr merge 41`
-    and `ticket.py close` are two steps of landing MR 41, so a panel recorded for it
-    admits both rather than needing to be recorded twice.
+    and `ticket.py close 41` are two steps of landing MR 41, so a panel recorded for
+    it admits both rather than needing to be recorded twice.
+
+    Both take the number in argv. A previous cut read it out of the ticket file on
+    the branch when `close` carried no argument; there is no ticket file any more —
+    the MR body is the ticket — so the argument came back, which is also the only
+    form this hook can classify without calling `gh` inside a 20s budget.
 
     Classified from **argv positions**, never by searching the command text. The
     regex this replaced was `\\bgh\\b[^\\n]*\\bpr\\b[^\\n]*\\bmerge\\b`, which was
@@ -278,13 +258,7 @@ def guarded(command: str, repo: Path | None = None) -> tuple[str, str | None] | 
         if any(t.replace("\\", "/").endswith("ticket.py") for t in argv):
             if "close" in words:
                 after = argv[argv.index("close") + 1 :]
-                # A bare number is still honoured if someone types one, but `close`
-                # no longer takes an argument, so normally the MR comes from the
-                # ticket file on the branch.
-                ref = _ref_after(after, set())
-                if ref is None and repo is not None:
-                    ref = ticket_mr(repo)
-                return "land", ref
+                return "land", _ref_after(after, set())
     return None
 
 
@@ -401,13 +375,12 @@ def hook() -> int:
     if tool not in ("Bash", "PowerShell"):
         return 0
     command = str(event.get("tool_input", {}).get("command", ""))
-    # The repo is resolved first because `guarded` may need it: `ticket.py close`
-    # carries no number, so the MR is read from the ticket file on that branch.
-    repo = repo_root(event.get("cwd"))
-    what = guarded(command, repo)
+    what = guarded(command)
     if what is None:
         return 0
     scope, ref = what
+
+    repo = repo_root(event.get("cwd"))
     # No panel was run, and that is allowed. The critics are opt-in — they cost
     # ~26k tokens per spawn, so they run when someone asks for them, not on every
     # merge. What this hook still enforces is that a panel you *did* run cannot be

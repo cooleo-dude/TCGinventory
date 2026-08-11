@@ -46,7 +46,7 @@ it measured small is as valuable as fixing one that measured large.
 | `specs/02-data-model.md` | The money and schema invariants. |
 | `references/baseline.md` (next to this file) | What was measured on 2026-08-07 and how. Read it before running anything — it will stop you rediscovering settled facts. |
 | `references/declined.md` (next to this file) | Every variant the user has turned down, and every one measurement rejected. Read it **before proposing anything**, in either pass. |
-| `.claude/context/tickets/` | Tickets already filed — by any skill, not just this one. Check before proposing: the work may be queued, or done. |
+| `ticket.py list` (see `/sdd-ticket`) | Tickets already filed — by any skill, not just this one. Check before proposing: the work may be queued, or in flight. Tickets live on GitHub; there is no local directory. |
 | `docs/decisions.md`, newest first | Several performance ADRs. Something that looks slow is often a decision. |
 
 Interpreter and tools (Windows is primary; both given):
@@ -643,9 +643,8 @@ finding qualifies only if it clears all five:
 4. Not a product decision. A tradeoff the user must weigh is a question, not a ticket.
 5. Passes the 7f constraint checklist.
 
-Write it as the next number in that directory, following
-`.claude/context/tickets/README.md`. `/sdd-ticket` assigns the number, writes
-the GitHub issue and regenerates the index — do not do those by hand. The
+File it with `/sdd-ticket open <slug>`, which creates the GitHub issue that *is*
+the ticket — there is no local file and no number for you to choose. The
 ticket must carry the measurement, the area of impact as a `file:line` table, the
 chosen approach **and the rejected alternatives with their reasons**, a numbered
 plan, and how to verify it. **Assume the agent who picks it up has none of this

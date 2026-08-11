@@ -1,20 +1,26 @@
-"""One work item, one number — and the checks that keep it that way.
+"""The ticket lives on GitHub, so these tests stand in for GitHub.
 
-`X` is the GitHub pull-request number: `X#` is the specification, `X!` the change
-that satisfies it. The number therefore appears in three places on disk — the
-filename, the heading sigil and the `mr:` field — and every one of these tests
-exists because a disagreement between them silently retitles or rewrites the wrong
-MR.
+`X#` is the specification and `X!` the change that satisfies it — the same object,
+because a pull request *is* an issue with a head and base attached. `start` converts
+one into the other in place, which is what keeps the number identical.
 
-The tests that used to live here covered `claim`'s number reservation: a local
-counter could hand `007` to two sessions, so it was defended with `taken_numbers()`
-over every ref and `O_EXCL` markers in the git common dir. GitHub allocates now and
-cannot issue one number twice, so both the machinery and its tests are gone.
+Everything here goes through `gh`, so `gh` is the seam: `_hub` is a fake GitHub that
+holds issues in a dict and answers the handful of calls the tool makes. No test may
+reach the network — the suite runs `-n auto` against a private repo and CI has no
+auth.
+
+The tests this replaced covered a local ticket file: that the filename, the heading
+sigil and the `mr:` field all agreed, because a disagreement meant `push` retitled
+one MR from a file describing another. There is one copy of the number now and it
+cannot disagree with itself, so those tests describe a hazard that no longer exists.
+What replaces them is the sigil/phase check — a pull request must not still call
+itself a specification.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -24,353 +30,413 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / ".claude/skills/sdd-ticket/scripts/ticket.py"
 
-
-def _git(tree: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=tree, check=True, capture_output=True)
+FRONT = (
+    "```\nstatus:   in-progress\nkind:     fix\nsource:   test\n"
+    "axis:     correctness\nfound:    2026-08-10\nsaving:   -\n"
+    "risk:     low — test\n```\n\n## The finding\n\nsomething\n"
+)
 
 
 @pytest.fixture
-def tool(tmp_path, monkeypatch):
-    """The real module, pointed at a throwaway repo.
-
-    `REPO`/`TICKETS` are module constants resolved from `__file__`, so a test has to
-    redirect them — the alternative is writing tickets into the repo while the suite
-    runs `-n auto`.
-    """
+def tool(monkeypatch):
     spec = importlib.util.spec_from_file_location("_ticket_tool", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     sys.modules["_ticket_tool"] = module
     spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "_SLUG", ["o/r"])
+    return module
 
-    tree = tmp_path / "repo"
-    tickets = tree / ".claude" / "context" / "tickets"
-    tickets.mkdir(parents=True)
-    _git(tree, "init", "-q", "-b", "main")
-    _git(tree, "config", "user.email", "t@example.com")
-    _git(tree, "config", "user.name", "Test")
-    (tree / "README.md").write_text("repo\n", encoding="utf-8")
-    _git(tree, "add", "README.md")
-    _git(tree, "commit", "-qm", "initial")
 
-    monkeypatch.setattr(module, "REPO", tree)
-    monkeypatch.setattr(module, "TICKETS", tickets)
-    return module, tree, tickets
+class Hub:
+    """A fake GitHub: issues in a dict, where a pull request is one that has a
+    `pull_request` key — which is what the real thing is, too."""
+
+    def __init__(self) -> None:
+        self.issues: dict[int, dict] = {}
+        self.next_number = 46
+        self.calls: list[tuple[str, ...]] = []
+
+    def add(self, number: int, title: str, body: str = FRONT, **over) -> dict:
+        payload = {"title": title, "body": body, "state": "OPEN"}
+        payload.update(over)
+        self.issues[number] = payload
+        return payload
+
+    def __call__(self, *args: str, check: bool = True) -> str:
+        self.calls.append(args)
+        if args[:2] == ("issue", "create"):
+            number = self.next_number
+            self.next_number += 1
+            title = args[args.index("--title") + 1]
+            body = args[args.index("--body") + 1]
+            self.add(number, title, body)
+            return f"https://github.com/o/r/issues/{number}"
+        if args[0] == "api":
+            return self._api(args)
+        if args[:2] == ("issue", "edit"):
+            number = int(args[2])
+            self.issues[number]["title"] = args[args.index("--title") + 1]
+            return ""
+        if args[:2] == ("issue", "list"):
+            return "\n".join(
+                f"{n}\t{i['title']}"
+                for n, i in sorted(self.issues.items())
+                if i["state"] == "OPEN" and "pull_request" not in i
+            )
+        if args[:2] == ("pr", "list"):
+            return "\n".join(
+                "\t".join(
+                    (
+                        str(n),
+                        str(i.get("draft", False)).lower(),
+                        i.get("head", "b"),
+                        i["title"],
+                    )
+                )
+                for n, i in sorted(self.issues.items())
+                if i["state"] == "OPEN" and "pull_request" in i
+            )
+        return ""
+
+    def _api(self, args: tuple[str, ...]) -> str:
+        path = (
+            args[-1]
+            if "-X" not in args
+            else next(a for a in args if a.startswith("repos/"))
+        )
+        fields = {}
+        for i, token in enumerate(args):
+            if token in ("-f", "-F") and i + 1 < len(args):
+                key, _, value = args[i + 1].partition("=")
+                fields[key] = value
+        if "-X" in args and args[args.index("-X") + 1] == "POST":
+            # Converting an issue into a pull request: the same object gains a head.
+            number = int(fields["issue"])
+            self.issues[number]["pull_request"] = {"merged_at": None}
+            self.issues[number]["head"] = fields.get("head", "b")
+            self.issues[number]["draft"] = fields.get("draft") == "true"
+            return json.dumps({"number": number})
+        if "-X" in args and args[args.index("-X") + 1] == "PATCH":
+            number = int(path.rsplit("/", 1)[-1])
+            self.issues[number].update(
+                {k: v for k, v in fields.items() if k in ("title", "body")}
+            )
+            return json.dumps(self.issues[number])
+        number = int(path.rsplit("/", 1)[-1])
+        if number not in self.issues:
+            raise SystemExit(f"gh api {path}\nNot Found")
+        return json.dumps(self.issues[number])
 
 
 @pytest.fixture
-def fakes(tool, monkeypatch):
-    """`tool`, plus a `gh` that records instead of calling and a `git` kept local.
-
-    Every `gh` call has to be intercepted: the tests must not touch the real repo's
-    pull requests, and CI has no auth. `git` is intercepted only for `push` — the
-    rest runs for real, because `cmd_open` depends on `git mv` actually moving the
-    file it then reads back.
-    """
-    module, tree, tickets = tool
-    calls: list[tuple[str, ...]] = []
-    remote = {"state": "OPEN", "number": 41, "list": ""}
-
-    def fake_gh(*args: str, check: bool = True) -> str:
-        calls.append(args)
-        if args[:2] == ("pr", "create"):
-            return f"https://github.com/o/r/pull/{remote['number']}"
-        if args[:2] == ("pr", "view"):
-            return remote["state"]
-        if args[:2] == ("pr", "list"):
-            return remote["list"]
-        return ""
-
-    real = module.git_checked
-
-    def fake_git(*args: str) -> str:
-        calls.append(("git", *args))
-        if args[0] == "push":
-            return ""
-        return real(*args)
-
-    monkeypatch.setattr(module, "gh", fake_gh)
-    monkeypatch.setattr(module, "git_checked", fake_git)
-    return module, tree, tickets, calls, remote
-
-
-def _file(
-    tickets: Path,
-    number: int,
-    slug: str,
-    *,
-    status: str = "in-progress",
-    mr: str | int | None = None,
-    heading: str | None = None,
-    name: str | None = None,
-) -> Path:
-    """A ticket on disk. Every parameter that can disagree with another is settable,
-    because the disagreements are what `check` exists to catch."""
-    mr = number if mr is None else mr
-    head = f"# {number}# — {slug}" if heading is None else heading
-    path = tickets / (name or f"{number:03d}-{slug}.md")
-    path.write_text(
-        f"{head}\n\n```\nstatus:   {status}\nkind:     fix\n"
-        f"source:   test\nmr:       {mr}\naxis:     correctness\n"
-        f"found:    2026-08-10\nsaving:   -\nrisk:     low — test\n```\n\n"
-        f"## The finding\n\nsomething\n",
-        encoding="utf-8",
+def hub(tool, monkeypatch):
+    fake = Hub()
+    monkeypatch.setattr(tool, "gh", fake)
+    monkeypatch.setattr(
+        tool,
+        "git",
+        lambda *a: "some-work\n" if a[0] == "rev-parse" else "3\n",
     )
-    return path
-
-
-def _tracked(tree: Path, path: Path) -> Path:
-    """Commit a ticket file. `close` removes it with `git rm`, which needs it tracked
-    — as it always is in real use, because `open` commits it."""
-    rel = path.relative_to(tree).as_posix()
-    _git(tree, "add", "--", rel)
-    _git(tree, "commit", "-qm", f"ticket {path.name}", "--", rel)
-    return path
+    return fake
 
 
 def _args(**kwargs):
     return type("A", (), kwargs)()
 
 
-# --- opening: GitHub names the ticket ----------------------------------------
+# --- talking to gh at all ----------------------------------------------------
 
 
-def test_open_names_the_ticket_after_the_mr_it_created(fakes):
-    """The whole point. The number is not ours to pick, so `open` files first and
-    renames to whatever came back."""
-    module, tree, tickets, calls, remote = fakes
-    _git(tree, "checkout", "-q", "-b", "some-work")
-    remote["number"] = 41
+def test_gh_decodes_utf8_rather_than_the_windows_locale(tool, monkeypatch):
+    """The bug this pins cost a `close` that had already succeeded.
 
-    assert module.cmd_open(_args(slug="mr-is-the-ticket")) == 0
+    `text=True` decodes with the *locale* codec. On Windows that is cp1252, where
+    0x9d — the tail of a UTF-8 right curly quote — is undefined, so a ticket body
+    containing one blew up in subprocess's reader thread. `stdout` came back `None`
+    and the caller died on `None.strip()` **after** the PATCH had landed: the write
+    went through, the reply was unreadable, and the tool reported failure.
 
-    assert not (tickets / "draft-mr-is-the-ticket.md").exists(), "draft left behind"
-    final = tickets / "041-mr-is-the-ticket.md"
-    assert final.is_file(), sorted(p.name for p in tickets.glob("*"))
-    body = final.read_text(encoding="utf-8")
-    assert body.startswith("# 41# — Mr is the ticket"), body.splitlines()[0]
-    assert "mr:       41" in body
-    # The MR is retitled with the sigil, so the queue reads the same as the file.
-    edit = next(c for c in calls if c[:2] == ("pr", "edit"))
-    assert edit[edit.index("--title") + 1] == "41! Mr is the ticket"
+    Ticket bodies in this repo are full of em dashes and curly quotes, so this is
+    the ordinary case rather than an edge one.
+    """
+    seen: dict[str, object] = {}
+    body = "status: done — “quoted”, ~1 GB…"
 
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout=body, stderr="")
 
-def test_open_writes_a_skeleton_that_passes_check(fakes):
-    """`open` handing over a file that fails `check` would make the first thing every
-    author does a repair."""
-    module, tree, _tickets, _calls, _remote = fakes
-    _git(tree, "checkout", "-q", "-b", "some-work")
+    monkeypatch.setattr(tool.subprocess, "run", fake_run)
 
-    module.cmd_open(_args(slug="well-formed"))
-
-    assert module.cmd_check(_args()) == 0
+    assert tool.gh("api", "repos/o/r/issues/46") == body
+    assert seen.get("encoding") == "utf-8", "left the decode to the locale codec"
+    assert seen.get("errors") == "replace", "an odd byte must not raise mid-read"
 
 
-def test_open_refuses_on_main(fakes):
-    """A ticket is a branch with an MR. On `main` there is nothing to open one
-    against, and the commit would land on the trunk."""
-    module, _tree, tickets, calls, _remote = fakes
+def test_gh_survives_output_it_could_not_decode(tool, monkeypatch):
+    """`stdout` is `None` whenever the decode fails, so every read must tolerate it
+    instead of raising `AttributeError` on `None.strip()`."""
 
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, stdout=None, stderr=None)
+
+    monkeypatch.setattr(tool.subprocess, "run", fake_run)
+
+    assert tool.gh("api", "x") == ""
+    assert tool.git("rev-parse", "HEAD") == ""
+
+
+# --- open: the number arrives with the issue ---------------------------------
+
+
+def test_open_files_an_issue_and_stamps_the_spec_sigil(tool, hub):
+    """No branch, no commit, no worktree — the whole reason to file as an issue is
+    that a specification can exist before any code does."""
+    assert tool.cmd_open(_args(slug="retire-local-ticket-files")) == 0
+
+    assert 46 in hub.issues
+    assert hub.issues[46]["title"] == "46# Retire local ticket files"
+    assert "status:   in-progress" in hub.issues[46]["body"]
+    # Nothing may touch git: filing predates the branch.
+    assert not [c for c in hub.calls if c[:2] == ("pr", "create")]
+
+
+def test_open_writes_a_skeleton_that_passes_check(tool, hub):
+    tool.cmd_open(_args(slug="well-formed"))
+    assert tool.cmd_check(_args(number=46)) == 0
+
+
+@pytest.mark.parametrize("bad", ["Not Kebab", "trailing_underscore", "  -  ", ""])
+def test_open_refuses_a_slug_that_is_not_kebab_case(tool, hub, bad):
+    """The slug becomes the title and the branch people name after it."""
     with pytest.raises(SystemExit):
-        module.cmd_open(_args(slug="on-the-trunk"))
-
-    assert list(tickets.glob("*.md")) == []
-    assert calls == []
+        tool.cmd_open(_args(slug=bad))
+    assert hub.issues == {}
 
 
-def test_open_refuses_a_second_ticket_on_one_branch(fakes):
-    """One ticket per MR, or `push` and `close` cannot tell which one they mean."""
-    module, tree, tickets, calls, _remote = fakes
-    _git(tree, "checkout", "-q", "-b", "some-work")
-    _file(tickets, 41, "already-here")
+# --- start: the issue becomes the pull request, keeping its number ------------
 
+
+def test_start_converts_the_issue_in_place(tool, hub):
+    """The mechanism the whole scheme rests on. `POST /pulls` with `issue=N` converts
+    rather than creates, so N is preserved — verified live when 46# became 46!."""
+    hub.add(46, "46# Retire the local ticket directory")
+
+    assert tool.cmd_start(_args(number=46, draft=False)) == 0
+
+    assert hub.issues[46]["pull_request"] is not None, "never became a pull request"
+    assert hub.issues[46]["title"] == "46! Retire the local ticket directory"
+    assert list(hub.issues) == [46], "created a second object instead of converting"
+    post = next(c for c in hub.calls if "-X" in c and c[c.index("-X") + 1] == "POST")
+    assert "issue=46" in post, "did not convert by issue number"
+
+
+def test_start_refuses_something_already_started(tool, hub):
+    hub.add(46, "46! x", pull_request={"merged_at": None})
     with pytest.raises(SystemExit):
-        module.cmd_open(_args(slug="second"))
-
-    assert not list(tickets.glob("*second*")), "filed a second ticket anyway"
-    assert calls == []
+        tool.cmd_start(_args(number=46, draft=False))
 
 
-def test_open_refuses_a_slug_that_is_not_kebab_case(fakes):
-    """The slug becomes a filename and part of the MR title; spaces and capitals in
-    it break the `_NAME` match that finds the ticket again."""
-    module, tree, _tickets, _calls, _remote = fakes
-    _git(tree, "checkout", "-q", "-b", "some-work")
-
-    for bad in ("Not Kebab", "trailing_underscore", "  -  "):
-        with pytest.raises(SystemExit):
-            module.cmd_open(_args(slug=bad))
+def test_start_refuses_on_main(tool, hub, monkeypatch):
+    """A pull request opens from the branch you are on, and `main` is not one."""
+    hub.add(46, "46# x")
+    monkeypatch.setattr(tool, "git", lambda *a: "main\n")
+    with pytest.raises(SystemExit):
+        tool.cmd_start(_args(number=46, draft=False))
+    assert "pull_request" not in hub.issues[46]
 
 
-# --- check: the three copies of the number must agree ------------------------
+def test_start_refuses_a_branch_with_nothing_on_it(tool, hub, monkeypatch):
+    """GitHub cannot open a pull request against a branch identical to its base. The
+    previous design solved this with an empty commit; filing as an issue means the
+    number already exists and this can simply refuse."""
+    hub.add(46, "46# x")
+    monkeypatch.setattr(
+        tool, "git", lambda *a: "some-work\n" if a[0] == "rev-parse" else "0\n"
+    )
+    with pytest.raises(SystemExit):
+        tool.cmd_start(_args(number=46, draft=False))
+    assert "pull_request" not in hub.issues[46]
 
 
-def test_check_passes_on_a_well_formed_ticket(fakes):
-    module, _tree, tickets, _calls, _remote = fakes
-    _file(tickets, 41, "consistent")
-
-    assert module.cmd_check(_args()) == 0
+# --- check: what can still be wrong with one copy of the number --------------
 
 
-def test_check_fails_when_mr_disagrees_with_the_filename(fakes):
-    """The failure this convention exists to make impossible: `push` would retitle
-    MR 7 from a file describing ticket 41."""
-    module, _tree, tickets, _calls, _remote = fakes
-    _file(tickets, 41, "crossed-wires", mr=7)
-
-    assert module.cmd_check(_args()) == 1
+def test_check_passes_on_a_well_formed_spec(tool, hub):
+    hub.add(46, "46# Something specified")
+    assert tool.cmd_check(_args(number=46)) == 0
 
 
-def test_check_fails_when_the_heading_sigil_disagrees(fakes):
-    module, _tree, tickets, _calls, _remote = fakes
-    _file(tickets, 41, "crossed-wires", heading="# 7# — crossed wires")
-
-    assert module.cmd_check(_args()) == 1
-
-
-def test_check_fails_when_the_heading_has_no_sigil(fakes):
-    """The sigil is the human-readable half of the convention. Without it the file
-    reads like the old scheme, where the heading number meant something else."""
-    module, _tree, tickets, _calls, _remote = fakes
-    _file(tickets, 41, "unsigiled", heading="# Unsigiled thing")
-
-    assert module.cmd_check(_args()) == 1
+def test_check_fails_when_the_title_has_no_sigil(tool, hub):
+    """The sigil is how a reader tells a specification from a change in flight."""
+    hub.add(46, "Retire the local ticket directory")
+    assert tool.cmd_check(_args(number=46)) == 1
 
 
-def test_check_fails_on_an_unnumbered_draft(fakes):
-    """`draft-*.md` is legitimate only between `open`'s push and its rename. On disk
-    afterwards it means `open` died halfway and the MR is unnumbered."""
-    module, _tree, tickets, _calls, _remote = fakes
-    _file(tickets, 41, "half-open", mr="none", name="draft-half-open.md")
-
-    assert module.cmd_check(_args()) == 1
+def test_check_fails_when_the_title_number_is_not_this_ticket(tool, hub):
+    hub.add(46, "7# Someone else's work")
+    assert tool.cmd_check(_args(number=46)) == 1
 
 
-def test_check_fails_on_a_mr_field_that_is_not_a_number(fakes):
-    module, _tree, tickets, _calls, _remote = fakes
-    _file(tickets, 41, "unmirrored", mr="none")
-
-    assert module.cmd_check(_args()) == 1
-
-
-def test_check_flags_a_resolved_ticket_still_on_disk(fakes):
-    """A status hand-edited to `done` skips `close` entirely, so the MR body still
-    describes the brief and the file rides into `main`."""
-    module, _tree, tickets, _calls, _remote = fakes
-    _file(tickets, 41, "hand-edited", status="done")
-
-    assert module.cmd_check(_args()) == 1
+def test_check_fails_when_a_pull_request_still_calls_itself_a_spec(tool, hub):
+    """The replacement for the old three-copies check. `start` retitles; if it died
+    between converting and retitling, the queue shows work as unstarted that is
+    already open for review."""
+    hub.add(46, "46# Still a spec, apparently", pull_request={"merged_at": None})
+    assert tool.cmd_check(_args(number=46)) == 1
 
 
-# --- closing: record, then remove, then merge --------------------------------
+def test_check_fails_when_an_issue_claims_to_be_a_pull_request(tool, hub):
+    hub.add(46, "46! Not really")
+    assert tool.cmd_check(_args(number=46)) == 1
 
 
-def test_close_rewrites_the_body_before_removing_the_file(fakes):
-    """Order is the whole safety argument. The file is the only copy of the write-up
-    the author just added; the MR body is stale until `close` pushes it. Removing
-    first leaves an MR describing the brief and no file to fix it from."""
-    module, tree, tickets, calls, _remote = fakes
-    path = _tracked(tree, _file(tickets, 41, "landed"))
-    path.write_text(
-        path.read_text(encoding="utf-8") + "\n## Result\n\nLanded in abc1234.\n",
-        encoding="utf-8",
+@pytest.mark.parametrize(
+    "field", ["status", "kind", "source", "axis", "found", "saving", "risk"]
+)
+def test_check_fails_on_a_missing_front_block_field(tool, hub, field):
+    """Each of these is something the next agent needs and cannot re-derive."""
+    body = "\n".join(
+        line for line in FRONT.splitlines() if not line.startswith(f"{field}:")
+    )
+    hub.add(46, "46# x", body=body)
+    assert tool.cmd_check(_args(number=46)) == 1
+
+
+@pytest.mark.parametrize(
+    "line, replacement",
+    [
+        ("status:   in-progress", "status:   nearly"),
+        ("kind:     fix", "kind:     vibes"),
+    ],
+)
+def test_check_fails_on_a_value_outside_the_vocabulary(tool, hub, line, replacement):
+    hub.add(46, "46# x", body=FRONT.replace(line, replacement))
+    assert tool.cmd_check(_args(number=46)) == 1
+
+
+def test_check_flags_a_resolved_ticket_that_is_still_open(tool, hub):
+    """A status hand-edited to `done` skips `close`, so the body still ends at the
+    plan and the queue still shows the work as live."""
+    hub.add(
+        46,
+        "46! x",
+        body=FRONT.replace("status:   in-progress", "status:   done"),
+        pull_request={"merged_at": None},
+    )
+    assert tool.cmd_check(_args(number=46)) == 1
+
+
+# --- show / push: the body is the only copy ----------------------------------
+
+
+def test_push_uploads_the_file_and_strips_a_show_heading(tool, hub, tmp_path):
+    """`show` prints the title as a heading so it reads as a document. Pushing that
+    back must not leave the heading in the body, or every edit adds another copy of
+    the title."""
+    hub.add(46, "46! Retire it", pull_request={"merged_at": None})
+    edited = tmp_path / "t.md"
+    edited.write_text(
+        f"# 46! Retire it\n\n{FRONT}\n## Result\n\nLanded.\n", encoding="utf-8"
     )
 
-    assert module.cmd_close(_args()) == 0
+    assert tool.cmd_push(_args(number=46, file=str(edited))) == 0
 
-    edit = next(c for c in calls if c[:2] == ("pr", "edit"))
-    body = edit[edit.index("--body") + 1]
-    assert "Landed in abc1234." in body, "pushed a body without the write-up"
-    assert "**status**: done" in body, "pushed a body that still says in-progress"
-    assert not path.exists(), "ticket file survived close"
-    # And the removal is committed, or the merge carries the file into `main`.
-    removed = [i for i, c in enumerate(calls) if c[:2] == ("git", "rm")]
-    assert removed, calls
-    assert calls.index(edit) < removed[0], "removed the file before recording it"
-    assert any(c[:2] == ("git", "commit") for c in calls), "removal never committed"
+    body = hub.issues[46]["body"]
+    assert body.startswith("```"), body[:40]
+    assert "## Result" in body and "Landed." in body
+    assert "46! Retire it" not in body, "left the show heading in the body"
+    assert hub.issues[46]["title"] == "46! Retire it"
 
 
-def test_close_refuses_once_the_mr_is_merged(fakes):
-    """The one-way door. After the merge the file is already on `main` and removing
-    it needs its own PR — which is the overhead this scheme removed."""
-    module, _tree, tickets, calls, remote = fakes
-    path = _file(tickets, 41, "too-late")
-    remote["state"] = "MERGED"
-
+def test_push_refuses_a_file_that_is_not_there(tool, hub, tmp_path):
+    hub.add(46, "46! x", pull_request={"merged_at": None})
     with pytest.raises(SystemExit):
-        module.cmd_close(_args())
-
-    assert path.is_file(), "removed the file after the merge had taken it to main"
-    assert not [c for c in calls if c[:2] == ("pr", "edit")], "rewrote a merged MR"
+        tool.cmd_push(_args(number=46, file=str(tmp_path / "nope.md")))
 
 
-def test_close_refuses_a_closed_mr_unless_the_ticket_says_dropped(fakes):
-    """An MR closed without merging means the work did not land. Recording `done`
-    against it would claim a change shipped that is not in `main`."""
-    module, _tree, tickets, _calls, remote = fakes
-    path = _file(tickets, 41, "abandoned-but-claimed", status="in-progress")
-    remote["state"] = "CLOSED"
+def test_show_prints_the_title_and_the_body(tool, hub, capsys):
+    hub.add(46, "46! Retire it", pull_request={"merged_at": None})
+    assert tool.cmd_show(_args(number=46)) == 0
+    out = capsys.readouterr().out
+    assert "46! Retire it" in out and "## The finding" in out
 
+
+def test_show_renders_the_sigil_of_the_real_phase(tool, hub, capsys):
+    """The stored title can be stale — `start` retitles as a second step, so it can be
+    interrupted. Everything that prints or writes a title derives the sigil from the
+    object instead of trusting the string, which is why `push` repairs it in passing.
+    """
+    hub.add(46, "46! Claims to be started")
+
+    assert tool.cmd_show(_args(number=46)) == 0
+
+    assert "46# Claims to be started" in capsys.readouterr().out
+
+
+# --- close: record the outcome, then merge -----------------------------------
+
+
+def test_close_writes_done_into_the_body(tool, hub):
+    hub.add(46, "46! Retire it", pull_request={"merged_at": None})
+    assert tool.cmd_close(_args(number=46)) == 0
+    assert "status:   done" in hub.issues[46]["body"]
+
+
+def test_close_keeps_dropped_from_becoming_done(tool, hub):
+    """Abandoned is not landed."""
+    hub.add(
+        46,
+        "46! x",
+        body=FRONT.replace("status:   in-progress", "status:   dropped"),
+        pull_request={"merged_at": None},
+    )
+    assert tool.cmd_close(_args(number=46)) == 0
+    assert "status:   dropped" in hub.issues[46]["body"]
+
+
+def test_close_refuses_something_never_started(tool, hub):
+    """A specification that was never converted describes work that never landed."""
+    hub.add(46, "46# x")
     with pytest.raises(SystemExit):
-        module.cmd_close(_args())
-
-    assert path.is_file()
-
-
-def test_close_keeps_dropped_from_becoming_done(fakes):
-    """Abandoned is not landed. Flipping the word records work as shipped that never
-    was."""
-    module, tree, tickets, calls, remote = fakes
-    _tracked(tree, _file(tickets, 41, "abandoned", status="dropped"))
-    remote["state"] = "CLOSED"
-
-    assert module.cmd_close(_args()) == 0
-
-    edit = next(c for c in calls if c[:2] == ("pr", "edit"))
-    assert "**status**: dropped" in edit[edit.index("--body") + 1]
+        tool.cmd_close(_args(number=46))
+    assert "status:   in-progress" in hub.issues[46]["body"]
 
 
-def test_close_refuses_when_there_is_no_ticket_on_the_branch(fakes):
-    module, _tree, _tickets, calls, _remote = fakes
-
+def test_close_refuses_once_it_is_merged(tool, hub):
+    """The one-way door, and the reason `close` runs before the merge: afterwards the
+    body is a plan nobody goes back to correct, and there is no local copy to rewrite
+    it from."""
+    hub.add(46, "46! x", pull_request={"merged_at": "2026-08-11T01:59:27Z"})
     with pytest.raises(SystemExit):
-        module.cmd_close(_args())
-
-    assert calls == []
-
-
-# --- listing: the queue is GitHub, not the directory -------------------------
+        tool.cmd_close(_args(number=46))
+    assert "status:   in-progress" in hub.issues[46]["body"], "rewrote a merged record"
 
 
-def test_list_reads_open_mrs_and_shows_the_sigil(fakes, capsys):
-    """`main` carries no ticket files, so the local directory can only ever show the
-    branch you are standing on — which is not a queue."""
-    module, _tree, _tickets, _calls, remote = fakes
-    remote["list"] = (
-        "41\ttrue\tmr-is-the-ticket\t41! The merge request is the ticket\n"
-        "12\tfalse\tprewarm\t12! Recognition prewarm holds 112 MB\n"
+# --- list: the queue is GitHub, in two phases --------------------------------
+
+
+def test_list_separates_specifications_from_work_in_flight(tool, hub, capsys):
+    hub.add(46, "46# Not started yet")
+    hub.add(
+        42, "42! In flight", pull_request={"merged_at": None}, draft=True, head="wip"
     )
 
-    assert module.cmd_list(_args()) == 0
+    assert tool.cmd_list(_args()) == 0
 
     out = capsys.readouterr().out
-    assert "41!" in out and "The merge request is the ticket" in out
-    assert "draft" in out and "ready" in out, "never distinguished draft from ready"
-    assert "mr-is-the-ticket" in out, "never named the branch"
-    # Sorted by number, so the queue reads in filing order rather than gh's.
-    assert out.index("12!") < out.index("41!")
-    # The sigil is stripped from the displayed title — printing "41!  41! ..." twice
-    # is what the first cut did.
-    assert "41! The merge request" not in out
+    assert "46#" in out and "spec" in out
+    assert "42!" in out and "draft" in out and "wip" in out
+    assert out.index("42!") < out.index("46#"), "not ordered by number"
+    assert "46# Not started" not in out, "printed the sigil twice"
 
 
-def test_list_keeps_an_mr_whose_title_lost_its_sigil(fakes, capsys):
-    """A PR opened by hand has no sigil. It still belongs in the listing — silently
-    dropping it would hide real open work behind a convention it predates."""
-    module, _tree, _tickets, _calls, remote = fakes
-    remote["list"] = "9\tfalse\tsome-branch\tOpened by hand\n"
+def test_list_keeps_a_title_that_lost_its_sigil(tool, hub, capsys):
+    """Legacy issues and hand-opened pull requests have no sigil. Dropping them would
+    hide real open work behind a convention it predates."""
+    hub.add(22, "[009] Rewrite the README")
 
-    assert module.cmd_list(_args()) == 0
+    assert tool.cmd_list(_args()) == 0
 
     out = capsys.readouterr().out
-    assert "Opened by hand" in out, "dropped an open MR for lacking a sigil"
-    assert "no sigil" in out, "listed it as if it were a well-formed ticket"
+    assert "Rewrite the README" in out and "no sigil" in out
