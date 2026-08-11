@@ -1,10 +1,10 @@
-# 006 — Two measured optimizations that are real and too small to ship
+# Two measured optimizations that are real and too small to ship
 
 ```
 status:   deferred
 kind:     optimization
 source:   /optimization-sweep research pass, 2026-08-07
-issue:    #14
+mr:       none
 axis:     latency
 found:    2026-08-07
 saving:   ~2.5 ms total, in real use
@@ -79,3 +79,7 @@ deferral, and it is in `declined.md` too.
 - The point of filing them is the same as the point of `declined.md`: the
   expensive part of a sweep is rediscovering what a previous sweep already
   measured.
+
+## Filed before the numbering change
+
+This was issue #14 under the old scheme, where a ticket carried three unrelated numbers (ours, the issue's, the PR's). It now carries one — the merge request's — so `X#` and `X!` are the same work. The old issue is closed and points here; nothing about the finding below changed.
