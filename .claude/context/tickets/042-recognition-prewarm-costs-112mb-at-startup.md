@@ -1,10 +1,10 @@
-# Recognition prewarm holds 112 MB at startup for everyone
+# 42# — Recognition prewarm holds 112 MB at startup for everyone
 
 ```
 status:   deferred
 kind:     optimization
 source:   /optimization-sweep grounded pass, 2026-08-07
-mr:       none
+mr:       42
 axis:     memory
 found:    2026-08-07
 saving:   ~103 MB resident for anyone who never opens Recognition
