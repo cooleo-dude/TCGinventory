@@ -53,6 +53,11 @@ from PySide6.QtWidgets import (
 from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.ui import icons, theme
 from tcginventory.ui.completer_popup import show_fitted
+from tcginventory.ui.views._card_entry import (
+    CATALOG_MIN_CHARS,
+    catalog_labels,
+    search_debouncer,
+)
 
 _CARD_ID_ROLE = Qt.UserRole + 1
 _PASTE_PREFIX = "tcgi-paste-"  # spooled clipboard image (see ui/clipboard_images)
@@ -194,21 +199,21 @@ class _Row:
         self._completer.setCaseSensitivity(Qt.CaseInsensitive)
         self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
         self.name.setCompleter(self._completer)
+        self._search_timer = search_debouncer(self.name, self._run_catalog_search)
         self.name.textEdited.connect(self._on_name_edited)
         self._completer.activated[QModelIndex].connect(self._pick_match)
 
     def _on_name_edited(self, text: str) -> None:
-        if len(text.strip()) < 2:
+        if len(text.strip()) < CATALOG_MIN_CHARS:
             return
-        repo = CardCatalogRepository(self._conn)
-        matches = repo.search(text, limit=20)
-        self._matches = {c.card_id: c for c in matches}
+        self._search_timer.start()
+
+    def _run_catalog_search(self) -> None:
+        matches = catalog_labels(self._conn, self.name.text(), limit=20)
+        self._matches = {c.card_id: c for c, _ in matches}
         self._model.clear()
-        for card in matches:
-            item = QStandardItem(
-                f"{card.name}  ·  {card.set_name or '?'}  "
-                f"#{repo.display_number(card) or '?'}"
-            )
+        for card, label in matches:
+            item = QStandardItem(label)
             item.setData(card.card_id, _CARD_ID_ROLE)
             self._model.appendRow(item)
         if matches:

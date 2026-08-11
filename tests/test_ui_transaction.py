@@ -13,6 +13,7 @@ import pytest
 pytest.importorskip("PySide6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from conftest import type_catalog_search  # noqa: E402
 from tcginventory.data.repositories import (  # noqa: E402
     ItemRepository,
     LotRepository,
@@ -389,7 +390,7 @@ def test_receive_row_autofills_set_and_number_from_catalog(app, conn):
     view._auto_detect_cb.setChecked(True)
     row = view._add_receive_row()
     # Typing a name (+set) searches the catalog; picking a match fills fields.
-    row._on_name_edited("Kilowattrel Journey Together")
+    type_catalog_search(row.name, "Kilowattrel Journey Together", row)
     (card,) = row._matches.values()
     row.apply_catalog_card(card)
     assert row.name.text() == "Iono's Kilowattrel"

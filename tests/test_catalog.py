@@ -464,3 +464,175 @@ def test_classic_collection_art_joins_on_the_printed_numerator(conn):
     update_catalog(conn, fetch_json=_classic_collection_fetch)
     (card,) = CardCatalogRepository(conn).find_by_name("Dark Gyarados")
     assert card.image_small == "https://images.pokemontcg.io/cel25c/8_A.png"
+
+
+# ---------------------------------------------------------------------------
+# The FTS5 search index (migration 0020). search() answers from a trigram index
+# instead of a full scan, but the SQL predicate is still the authority: the index
+# only prunes the rows it runs against. These tests pin that equivalence, because
+# a prune narrower than the predicate silently loses real results.
+
+
+def _like_only_search(conn, query, limit=25):
+    """The pre-0020 implementation, kept as the parity oracle.
+
+    Deliberately a copy rather than a call: the point is to compare the new path
+    against the semantics that shipped, so this must not move when search() does.
+    """
+    clauses, params = [], []
+    for tok in query.strip().split():
+        like = f"%{tok}%"
+        parts = ["name LIKE ?", "set_name LIKE ?", "set_code LIKE ?"]
+        tok_params = [like, like, like]
+        if "/" in tok and any(ch.isdigit() for ch in tok):
+            head = tok.split("/", 1)[0].strip()
+            for form in dict.fromkeys([tok, head, head.lstrip("0") or head]):
+                parts.append("number = ? COLLATE NOCASE")
+                tok_params.append(form)
+        elif any(ch.isalpha() for ch in tok):
+            parts.append("number LIKE ? COLLATE NOCASE")
+            tok_params.append(f"{tok}%")
+        elif tok.isdigit():
+            for form in dict.fromkeys([tok, tok.lstrip("0") or tok]):
+                parts.append("number = ? COLLATE NOCASE")
+                tok_params.append(form)
+        clauses.append("(" + " OR ".join(parts) + ")")
+        params += tok_params
+    rows = conn.execute(
+        "SELECT card_id FROM card_catalog WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY name, set_name, number LIMIT ?",
+        (*params, limit),
+    ).fetchall()
+    return [r["card_id"] for r in rows]
+
+
+def test_search_matches_the_like_scan_it_replaced(conn):
+    update_catalog(conn, fetch_json=_fake_fetch)
+    repo = CardCatalogRepository(conn)
+
+    # Every token form search()'s docstring promises, plus the ones the trigram
+    # index cannot serve and must fall through to the scan for.
+    for query in (
+        "Pikachu Celebrations",
+        "Pikachu Celebrations 5",
+        "Pikachu 5 Celebrations",
+        "Pikachu 1/99",
+        "Kilowattrel",
+        "Iono",
+        "pik",  # below the trigram floor in one token, still exact
+        "ex 5",  # no token long enough to prune on at all
+        "zzz nothing here",
+        'quote"inside',  # the phrase terminator: must be escaped, not fatal
+    ):
+        assert [c.card_id for c in repo.search(query)] == _like_only_search(
+            conn, query
+        ), query
+
+
+def test_search_finds_a_bare_number_given_in_full(conn):
+    """The case that makes the index a *prune* and not a translation.
+
+    "SV103/SV122" appears nowhere in a row numbered plain "SV103", so matching
+    the whole token against the index finds nothing. Pruning on the head keeps
+    the row, which the predicate then confirms.
+    """
+    from tcginventory.domain.models import CatalogCard
+
+    CardCatalogRepository(conn).replace_all(
+        [
+            CatalogCard(
+                card_id="w",
+                name="Wooloo",
+                set_id="s1",
+                set_name="Shining Fates Shiny Vault",
+                number="SV103",
+            )
+        ],
+        "t",
+    )
+    (hit,) = CardCatalogRepository(conn).search("Wooloo Shiny Vault SV103/SV122")
+    assert hit.card_id == "w"
+
+
+def test_search_index_is_rebuilt_when_the_catalog_is_replaced(conn):
+    """A stale index is worse than no index: it answers with rows that are gone.
+
+    replace_for_language must leave the other language's rows searchable and the
+    replaced language's old rows unfindable.
+    """
+    from tcginventory.domain.models import CatalogCard
+
+    repo = CardCatalogRepository(conn)
+    repo.replace_all(
+        [
+            CatalogCard(
+                card_id="en1", name="Snorlax", set_id="s1", number="1", language="EN"
+            ),
+            CatalogCard(
+                card_id="jp1", name="Kabigon", set_id="s2", number="2", language="JP"
+            ),
+        ],
+        "t",
+    )
+    assert [c.card_id for c in repo.search("Snorlax")] == ["en1"]
+
+    repo.replace_for_language(
+        [
+            CatalogCard(
+                card_id="en2", name="Munchlax", set_id="s1", number="3", language="EN"
+            )
+        ],
+        "EN",
+        "t2",
+    )
+    assert repo.search("Snorlax") == []  # the replaced row is gone from the index
+    assert [c.card_id for c in repo.search("Munchlax")] == ["en2"]
+    assert [c.card_id for c in repo.search("Kabigon")] == ["jp1"]  # untouched
+
+    counts = conn.execute(
+        "SELECT (SELECT count(*) FROM card_catalog) AS rows, "
+        "(SELECT count(*) FROM card_catalog_fts) AS indexed"
+    ).fetchone()
+    assert counts["rows"] == counts["indexed"]
+
+
+def test_display_numbers_batches_without_changing_the_answer(conn):
+    """The batched form is what the popups call, so it must agree with the single
+    lookup row for row — including the subset denominator it exists to derive."""
+    from tcginventory.domain.models import CatalogCard
+
+    cards = [
+        CatalogCard(
+            card_id=f"rc{n}",
+            name=f"Radiant {n}",
+            set_id="s1",
+            set_name="Legendary Treasures",
+            number=f"RC{n}",
+            printed_total=113,
+        )
+        for n in range(1, 4)
+    ] + [
+        CatalogCard(
+            card_id="plain",
+            name="Radiant Plain",
+            set_id="s1",
+            set_name="Legendary Treasures",
+            number="12",
+            printed_total=113,
+        )
+    ]
+    repo = CardCatalogRepository(conn)
+    repo.replace_all(cards, "t")
+
+    stored = repo.search("Radiant")
+    batched = repo.display_numbers(stored)
+    assert batched == {c.card_id: repo.display_number(c) for c in stored}
+    # The subset's own size (3), not the parent set's printed_total (113).
+    assert batched["rc1"] == "RC1/RC3"
+    assert batched["plain"] == "12/113"
+
+    # search_labelled is the pairing the autocomplete rows consume.
+    assert [(c.card_id, n) for c, n in repo.search_labelled("Radiant")] == [
+        (c.card_id, batched[c.card_id]) for c in stored
+    ]

@@ -10,6 +10,7 @@ pytest.importorskip("PySide6")
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from conftest import type_catalog_search  # noqa: E402
 from tcginventory.data.repositories import CardCatalogRepository  # noqa: E402
 from tcginventory.domain.models import CatalogCard  # noqa: E402
 
@@ -66,7 +67,7 @@ def test_click_updates_graph(app, conn):
     _seed(conn)
     view = PriceLookupView(conn)
     view._history = _FakeHistory({"sv9-1": [("2026-06-01", 500), ("2026-07-01", 750)]})
-    view._search.setText("Pikachu")
+    type_catalog_search(view._search, "Pikachu", view)
     assert view._results.count() == 1
     view._on_click(view._results.item(0))  # clicking updates the graph
     assert "current market" in view._current.text().lower()
@@ -86,12 +87,12 @@ def test_shuttle_tag_and_untag(app, conn):
         }
     )
 
-    view._search.setText("Pikachu")
+    type_catalog_search(view._search, "Pikachu", view)
     view._tag("sv9-1")  # move Pikachu → tagged
     assert view._tagged_list.count() == 1
     assert view._results.count() == 0  # removed from the search list
 
-    view._search.setText("Charizard")
+    type_catalog_search(view._search, "Charizard", view)
     assert view._results.count() == 1  # a non-tagged card is listable
     view._tag("cel-5")
     assert view._tagged_list.count() == 2
@@ -116,9 +117,9 @@ def test_click_off_drops_untagged_preview_line(app, conn):
         }
     )
     # Tag one card, preview another → two lines.
-    view._search.setText("Charizard")
+    type_catalog_search(view._search, "Charizard", view)
     view._tag("cel-5")
-    view._search.setText("Pikachu")
+    type_catalog_search(view._search, "Pikachu", view)
     view._on_click(view._results.item(0))
     assert _line_count(view) == 2
 

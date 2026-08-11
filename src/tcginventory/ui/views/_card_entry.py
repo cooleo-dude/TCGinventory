@@ -19,7 +19,7 @@ A host row must:
 
 from __future__ import annotations
 
-from PySide6.QtCore import QModelIndex, Qt, QThread, Signal
+from PySide6.QtCore import QModelIndex, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QComboBox,
@@ -30,6 +30,48 @@ from PySide6.QtWidgets import (
 from tcginventory.data.repositories import CardCatalogRepository
 from tcginventory.ui.card_preview import install_hover_preview
 from tcginventory.ui.completer_popup import show_fitted
+
+# Below this, the catalog's trigram index cannot answer a substring search at all
+# (a trigram is three characters), so a shorter query would fall back to the full
+# scan this screen exists to avoid — and 53k cards narrowed by two letters is not
+# a useful list anyway. See migration 0020.
+CATALOG_MIN_CHARS = 3
+
+# Long enough to coalesce a burst of typing into one query, short enough to feel
+# immediate. The query itself is now sub-millisecond; what this saves is the
+# model rebuild and the popup's width re-measure, which are not.
+_DEBOUNCE_MS = 120
+
+
+def catalog_labels(conn, text: str, limit: int = 25) -> list[tuple[object, str]]:
+    """Catalog matches for ``text``, each with its popup label.
+
+    The one place the "name · set #number" label is built. Every autocomplete in
+    the app shows that string, and each used to assemble it from its own
+    ``display_number()`` call per row — which is what made a 25-row popup 25
+    extra queries (ticket 47).
+    """
+    if len(text.strip()) < CATALOG_MIN_CHARS:
+        return []
+    return [
+        (card, f"{card.name}  ·  {card.set_name or '?'}  #{number or '?'}")
+        for card, number in CardCatalogRepository(conn).search_labelled(
+            text, limit=limit
+        )
+    ]
+
+
+def search_debouncer(owner, slot) -> QTimer:
+    """A single-shot timer that turns a burst of keystrokes into one search.
+
+    Parented to ``owner`` so it dies with the widget rather than firing into a
+    deleted row.
+    """
+    timer = QTimer(owner)
+    timer.setSingleShot(True)
+    timer.setInterval(_DEBOUNCE_MS)
+    timer.timeout.connect(slot)
+    return timer
 
 
 class MatchDelegate(QStyledItemDelegate):
@@ -123,6 +165,7 @@ class CardEntryMixin:
         self._completer.setCaseSensitivity(Qt.CaseInsensitive)
         self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
         self.name.setCompleter(self._completer)
+        self._search_timer = search_debouncer(self.name, self._run_catalog_search)
         self.name.textEdited.connect(self._on_name_edited)
         self._completer.activated[QModelIndex].connect(self._pick_match)
         self.name.textChanged.connect(lambda *_: self._on_change())
@@ -138,22 +181,20 @@ class CardEntryMixin:
         install_hover_preview(popup, lambda: None, self._sink)  # clear on leave
 
     def _on_name_edited(self, text: str) -> None:
-        """Query the catalog as the user types (when Auto Detect is on) and show
-        the matches in the popup."""
-        if not self._is_auto() or len(text.strip()) < 2:
+        """Note the keystroke; the search itself runs once the typing pauses."""
+        if not self._is_auto() or len(text.strip()) < CATALOG_MIN_CHARS:
             return
-        repo = CardCatalogRepository(self._conn)
-        matches = repo.search(text, limit=25)
-        self._matches = {c.card_id: c for c in matches}
+        self._search_timer.start()
+
+    def _run_catalog_search(self) -> None:
+        """Query the catalog and show the matches in the popup."""
+        matches = catalog_labels(self._conn, self.name.text(), limit=25)
+        self._matches = {c.card_id: c for c, _ in matches}
         self._search_model.clear()
-        for card in matches:
+        for card, label in matches:
             # Completion text is the clean name (what QCompleter inserts into the
             # Name field); the popup shows the fuller label via MatchDelegate.
             item = QStandardItem(card.name)
-            label = (
-                f"{card.name}  ·  {card.set_name or '?'}  "
-                f"#{repo.display_number(card) or '?'}"
-            )
             item.setData(card.card_id, self._CARD_ID_ROLE)
             item.setData(label, self._LABEL_ROLE)
             self._search_model.appendRow(item)
