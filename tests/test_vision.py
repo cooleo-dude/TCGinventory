@@ -6,6 +6,7 @@ import os
 
 import pytest
 
+from conftest import type_catalog_search
 from tcginventory.data.vision import CardLabel, VisionRepository, open_vision
 
 # ---------------------------------------------------------------------------
@@ -384,7 +385,7 @@ def test_name_pick_keeps_identity_through_focus_out(app):
     conn = _catalog_conn()  # has cel-4 "Charizard" · Celebrations #4
     box = _Box(number=1, rect=QRectF(0, 0, 1, 1))
     field = _NameField(conn, box)
-    field._on_edited("Charizard")  # populate completer matches
+    type_catalog_search(field, "Charizard")  # populate completer matches
     field._pick(field._model.index(0, 0))  # pick the top match
     assert box.card.card_id == "cel-4" and box.card.set_name == "Celebrations"
 
@@ -396,7 +397,7 @@ def test_name_pick_keeps_identity_through_focus_out(app):
     # A genuinely typed name (no pick) still records as free text.
     box2 = _Box(number=2, rect=QRectF(0, 0, 1, 1))
     f2 = _NameField(conn, box2)
-    f2._on_edited("Custom Promo")
+    type_catalog_search(f2, "Custom Promo")
     f2.setText("Custom Promo")
     f2._on_free_text()
     assert box2.card.card_id is None and box2.card.name == "Custom Promo"

@@ -123,6 +123,29 @@ def inv(conn):
     return InventoryService(conn)
 
 
+def type_catalog_search(field, text: str, owner=None) -> None:
+    """Type ``text`` into a catalog search box and run the search it triggers.
+
+    Two things this does that ``setText`` cannot. It emits ``textEdited``, which
+    is what the search boxes listen to — a programmatic ``setText`` deliberately
+    no longer starts a query (ticket 47), so a test using it would assert on a
+    search that never ran. And it fires the 120 ms debounce immediately rather
+    than waiting on the clock, because a suite that sleeps for its own timers is
+    a suite that goes flaky under load (TESTS-HEADLESS).
+
+    ``owner`` holds the timer when that is not the field itself — the Price
+    Lookup view owns its search box's.
+    """
+    from PySide6.QtTest import QTest
+
+    field.clear()
+    QTest.keyClicks(field, text)
+    timer = (owner if owner is not None else field)._search_timer
+    if timer.isActive():
+        timer.stop()
+        timer.timeout.emit()
+
+
 def make_item(name: str, **overrides) -> Item:
     """A minimal single-card item for building transactions."""
     base = dict(name=name, category=Category.SINGLE)

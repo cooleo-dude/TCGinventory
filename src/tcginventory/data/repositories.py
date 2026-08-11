@@ -13,6 +13,7 @@ booleans are stored as 0/1.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 
 from tcginventory.data.db import now_iso
 from tcginventory.domain.enums import (
@@ -896,20 +897,71 @@ class CardCatalogRepository:
         (numerator + parent total)."""
         if not card.number:
             return None
+        prefix = self._subset_prefix(card)
+        if not prefix:  # purely numeric → parent total is correct
+            return card.full_number
+        return self._subset_number(card, prefix, self._subset_total(card, prefix))
+
+    @staticmethod
+    def _subset_prefix(card: CatalogCard) -> str:
+        """The non-numeric head of a collector number ("RC" of "RC19"); "" when
+        the number is purely numeric, and the parent total is then correct."""
         prefix = ""
-        for ch in card.number:
+        for ch in card.number or "":
             if ch.isdigit():
                 break
             prefix += ch
-        if not prefix:  # purely numeric → parent total is correct
-            return card.full_number
+        return prefix
+
+    @staticmethod
+    def _subset_number(card: CatalogCard, prefix: str, total: int) -> str | None:
+        return f"{card.number}/{prefix}{total}" if total else card.number
+
+    def _subset_total(self, card: CatalogCard, prefix: str) -> int:
         row = self.conn.execute(
             "SELECT COUNT(DISTINCT number) AS n FROM card_catalog "
             "WHERE set_id = ? AND language = ? AND number LIKE ?",
             (card.set_id, card.language, f"{prefix}%"),
         ).fetchone()
-        total = row["n"] if row else 0
-        return f"{card.number}/{prefix}{total}" if total else card.number
+        return row["n"] if row else 0
+
+    def display_numbers(self, cards: Sequence[CatalogCard]) -> dict[str, str | None]:
+        """:meth:`display_number` for a whole result set, by ``card_id``.
+
+        Called per row this was the second half of the autocomplete lag: one
+        ``COUNT(DISTINCT number)`` for each of 25–50 matches, 0–20 ms a popup.
+        The count only depends on ``(set_id, language, prefix)``, and a popup
+        holds a handful of those at most, so ask once per distinct group — with
+        0020's ``(set_id, language, number)`` index turning each one from a scan
+        into a range seek.
+        """
+        totals: dict[tuple[str, str, str], int] = {}
+        out: dict[str, str | None] = {}
+        for card in cards:
+            if not card.number:
+                out[card.card_id] = None
+                continue
+            prefix = self._subset_prefix(card)
+            if not prefix:
+                out[card.card_id] = card.full_number
+                continue
+            key = (card.set_id, card.language, prefix)
+            if key not in totals:
+                totals[key] = self._subset_total(card, prefix)
+            out[card.card_id] = self._subset_number(card, prefix, totals[key])
+        return out
+
+    def search_labelled(
+        self, query: str, limit: int = 25
+    ) -> list[tuple[CatalogCard, str | None]]:
+        """:meth:`search` paired with each card's display number.
+
+        The autocomplete popups all want the same "name · set #number" label, and
+        building it a row at a time is what made :meth:`display_number` an N+1.
+        """
+        cards = self.search(query, limit=limit)
+        numbers = self.display_numbers(cards)
+        return [(c, numbers[c.card_id]) for c in cards]
 
     def get(self, card_id: str) -> CatalogCard | None:
         row = self.conn.execute(
@@ -942,6 +994,21 @@ class CardCatalogRepository:
                 )
                 for c in cards
             ],
+        )
+        self._rebuild_fts()
+
+    def _rebuild_fts(self) -> None:
+        """Re-derive the search index from card_catalog.
+
+        ``card_catalog_fts`` is an FTS5 *external-content* table (migration 0020):
+        it holds the index but reads the columns back from ``card_catalog``, so
+        SQLite does not maintain it on writes. Every write goes through
+        :meth:`_insert_many`, so rebuilding here covers ``replace_all`` and
+        ``replace_for_language`` both — one rebuild per catalog refresh (~250 ms
+        for 53k rows) rather than a trigger firing 53k times.
+        """
+        self.conn.execute(
+            "INSERT INTO card_catalog_fts(card_catalog_fts) VALUES ('rebuild')"
         )
 
     def replace_all(self, cards: list[CatalogCard], updated_at: str) -> None:
@@ -1015,13 +1082,61 @@ class CardCatalogRepository:
             clauses.append("(" + " OR ".join(parts) + ")")
             params += tok_params
 
+        # The predicate above stays the authority on what matches. The FTS index
+        # only *prunes* the rows it is evaluated against — see _fts_prune.
+        prune = self._fts_prune(query)
+        # A rowid subquery rather than a join, so the predicate needs no table
+        # qualifying: card_catalog and its index share four column names, and
+        # every unqualified one would be ambiguous.
+        narrow = (
+            "rowid IN (SELECT rowid FROM card_catalog_fts "
+            "WHERE card_catalog_fts MATCH ?) AND "
+            if prune
+            else ""
+        )
+
         rows = self.conn.execute(
-            "SELECT * FROM card_catalog WHERE "
+            f"SELECT * FROM card_catalog WHERE {narrow}"
             + " AND ".join(clauses)
             + " ORDER BY name, set_name, number LIMIT ?",
-            (*params, limit),
+            ((prune,) if prune else ()) + (*params, limit),
         ).fetchall()
         return [self._to_model(r) for r in rows]
+
+    # Trigram indexes every 3-character window, so a shorter needle matches
+    # nothing at all — silently, with no error. Anything below this length has to
+    # be left to the SQL predicate.
+    _TRIGRAM_MIN = 3
+
+    @staticmethod
+    def _fts_core(token: str) -> str | None:
+        """The substring of ``token`` safe to prune on, or None.
+
+        Safe means: **every row the SQL predicate could match for this token also
+        contains this substring.** Prune on anything narrower and real results
+        disappear.
+
+        A collector number given in full is the case that bites. For
+        ``SV103/SV122`` the predicate also accepts the row numbered plain
+        ``SV103``, which does not contain the full string — so the head is the
+        most that can be pruned on. (Verified against the catalog: the full form
+        matches 0 rows, the head matches the Wooloo the search is for.)
+        """
+        core = token.split("/", 1)[0].strip() if "/" in token else token
+        return core if len(core) >= CardCatalogRepository._TRIGRAM_MIN else None
+
+    def _fts_prune(self, query: str) -> str:
+        """An FTS5 MATCH expression narrowing the candidate rows, or ``""``.
+
+        Empty when no token is long enough to be indexed (e.g. ``"ex 5"``), in
+        which case the search falls back to the scan it has always done — correct,
+        just not fast, and rare now the callers require three characters.
+        """
+        cores = [c for c in map(self._fts_core, query.split()) if c]
+        # A quoted phrase is a run of adjacent trigrams, which is how trigram FTS
+        # expresses "contains". Double quotes are the one character that could end
+        # the phrase early; FTS5 escapes them by doubling.
+        return " AND ".join(f'"{c.replace(chr(34), chr(34) * 2)}"' for c in cores)
 
     def image_for(
         self,

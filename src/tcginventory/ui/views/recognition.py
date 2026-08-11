@@ -67,6 +67,11 @@ from tcginventory.ui import icons, theme
 from tcginventory.ui.card_preview import CardImagePane
 from tcginventory.ui.clipboard_images import clipboard_image_paths
 from tcginventory.ui.completer_popup import show_fitted
+from tcginventory.ui.views._card_entry import (
+    CATALOG_MIN_CHARS,
+    catalog_labels,
+    search_debouncer,
+)
 
 _IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif)"
 _MODES = ["Transaction (I Give / They Give)", "Listing (one lot)"]
@@ -494,6 +499,7 @@ class _NameField(QLineEdit):
         self._completer.setCaseSensitivity(Qt.CaseInsensitive)
         self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
         self.setCompleter(self._completer)
+        self._search_timer = search_debouncer(self, self._run_catalog_search)
         self.textEdited.connect(self._on_edited)
         self._completer.activated[QModelIndex].connect(self._pick)
         # Preview each candidate's art as you arrow through the dropdown…
@@ -525,24 +531,23 @@ class _NameField(QLineEdit):
 
     def _on_edited(self, text: str) -> None:
         self._picked = False  # the user is typing — subsequent text is free text
-        if len(text.strip()) < 2:
+        if len(text.strip()) < CATALOG_MIN_CHARS:
             return
-        repo = CardCatalogRepository(self._conn)
-        matches = repo.search(text, limit=20)
-        self._matches = {c.card_id: c for c in matches}
+        self._search_timer.start()
+
+    def _run_catalog_search(self) -> None:
+        matches = catalog_labels(self._conn, self.text(), limit=20)
+        self._matches = {c.card_id: c for c, _ in matches}
         self._model.clear()
-        for card in matches:
-            item = QStandardItem(
-                f"{card.name}  ·  {card.set_name or '?'}  "
-                f"#{repo.display_number(card) or '?'}"
-            )
+        for card, label in matches:
+            item = QStandardItem(label)
             item.setData(card.card_id, self._CARD_ID_ROLE)
             self._model.appendRow(item)
         if matches:
             show_fitted(self._completer, self)
             # Preview the top hit immediately; hovering the dropdown refines it.
             if self._on_preview is not None:
-                self._on_preview(matches[0].card_id)
+                self._on_preview(matches[0][0].card_id)
 
     def _pick(self, index: QModelIndex) -> None:
         card = self._matches.get(index.data(self._CARD_ID_ROLE))

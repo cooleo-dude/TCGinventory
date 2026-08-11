@@ -34,6 +34,11 @@ from tcginventory.ui import theme
 from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.charts import RangedChartView
 from tcginventory.ui.formatting import money
+from tcginventory.ui.views._card_entry import (
+    CATALOG_MIN_CHARS,
+    catalog_labels,
+    search_debouncer,
+)
 
 _CARD_ID_ROLE = Qt.UserRole + 1
 _DAY_MS = 86_400_000
@@ -136,7 +141,10 @@ class PriceLookupView(QWidget):
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search a card — name, set, and/or number…")
-        self._search.textChanged.connect(self._on_search)
+        # textEdited, not textChanged: only a person typing should spend a query,
+        # and refresh() re-setting this field is not that.
+        self._search_timer = search_debouncer(self._search, self._run_search)
+        self._search.textEdited.connect(self._on_search)
         self._results = QListWidget()
         _configure_list(self._results)
         self._results.setItemDelegate(
@@ -260,17 +268,22 @@ class PriceLookupView(QWidget):
 
     def _on_search(self, text: str) -> None:
         self._results.clear()
-        if len(text.strip()) < 2:
+        if len(text.strip()) < CATALOG_MIN_CHARS:
             return
-        for card in self._catalog.search(text, limit=50):
+        self._search_timer.start()
+
+    def _run_search(self) -> None:
+        self._results.clear()
+        for card, label in catalog_labels(self._conn, self._search.text(), limit=50):
             if card.card_id in self._tagged:
                 continue
             self._cards[card.card_id] = card
-            self._results.addItem(self._make_item(card))
+            self._results.addItem(self._make_item(card, label))
 
-    def _make_item(self, card) -> QListWidgetItem:
-        number = self._catalog.display_number(card) or card.full_number
-        label = f"{card.name}  ·  {card.set_name or '?'}  #{number or '?'}"
+    def _make_item(self, card, label: str | None = None) -> QListWidgetItem:
+        if label is None:
+            number = self._catalog.display_number(card) or card.full_number
+            label = f"{card.name}  ·  {card.set_name or '?'}  #{number or '?'}"
         item = QListWidgetItem(label)
         item.setData(_CARD_ID_ROLE, card.card_id)
         return item

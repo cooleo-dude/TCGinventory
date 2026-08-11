@@ -2576,3 +2576,62 @@ and top-5 agreement with the pre-conversion answers.
   affects a handful of cards catalog-wide. It gets its price and product link
   from this fix regardless, and `cardimages.art_for` covers its art from the
   TCGplayer product photo once a ledger item exists.
+
+### 2026-08-11 — Catalog search is a trigram index that prunes, not a rewrite (ticket 47)
+
+Autocomplete cost **14–35 ms of blocked UI repaint per keystroke**, at four call
+sites, because `CardCatalogRepository.search()` matches every token with
+`LIKE '%tok%'`. A leading wildcard cannot use an index, so 0013's indexes never
+applied and each character scanned all 53,289 rows and sorted them
+(`SCAN card_catalog` + `USE TEMP B-TREE FOR ORDER BY`) — the same 14 ms whether
+it matched twenty-five rows or none. `display_number()` added an N+1 on top: one
+`COUNT(DISTINCT number)` per match, 25–50 a popup, another 0–20 ms.
+
+Migration 0020 adds an FTS5 **trigram** virtual table. Trigram is the specific
+thing that makes a *substring* search indexable — ordinary FTS5 tokenizes on word
+boundaries and could not serve `%tok%` at all. Measured after, on the real
+catalog: **0.32–0.62 ms**, 30–70×.
+
+- **The index prunes; the SQL predicate still decides.** `search()` keeps its
+  original `WHERE` verbatim and merely restricts which rows it runs against, via
+  `rowid IN (SELECT rowid FROM card_catalog_fts WHERE … MATCH ?)`. This was not
+  caution — a direct translation is *wrong*, twice over. A collector number given
+  in full prunes to nothing: `SV103/SV122` appears nowhere in the row numbered
+  plain `SV103`, which the predicate accepts and the index cannot find, so only
+  the head is safe to prune on. And a token under three characters matches
+  **nothing at all, silently** — no error, zero rows — so `Pikachu Celebrations 5`
+  would have lost every result. Both are pinned by tests; parity was verified on
+  115 queries against the real 53k rows, including 100 names sampled from the
+  catalog itself.
+- **A rowid subquery, not a join.** `card_catalog` and its index share four
+  column names, so a join would leave every unqualified column in the predicate
+  ambiguous. The subquery needs no aliasing and leaves the predicate untouched.
+- **External content (`content='card_catalog'`)**, so 53k rows are not stored
+  twice — the index reads columns back from the table. The cost is that SQLite
+  does not maintain it: the repository rebuilds inside `_insert_many`, which is
+  every write. Explicit beats triggers here because a catalog refresh replaces
+  all 53k rows at once and triggers would tax that row by row. The risk it takes
+  on — a future writer bypassing the repo desyncs the index silently — is held by
+  a `count(fts) == count(catalog)` assertion.
+- **The minimum query length rises from 2 to 3.** A trigram is three characters,
+  so a 2-char query would fall back to the very scan being removed — and it is
+  the *first* query typed, the worst spike. Twenty-five arbitrary rows out of
+  53k is not a useful list to pay 14 ms for. Considered and rejected: keeping a
+  LIKE fallback for 2-char input, which preserves felt behaviour but keeps the
+  worst spike to serve the least useful result.
+- **Rejected: moving `search()` to a background worker.** The intuitive
+  `UI-THREAD-BLOCKING` answer, and the wrong one — it buys a per-keystroke thread
+  lifecycle (`WORKER-RETIRE-NOT-REPLACE`, and a worker needs its own connection)
+  to hide 14 ms that can be deleted instead. Making the query fast removes the
+  hazard class rather than managing it.
+- **A 120 ms debounce as well**, because the query is no longer what costs: the
+  model rebuild and the popup's width re-measure are. `market.py` also moved from
+  `textChanged` to `textEdited` — a programmatic `setText` from `refresh()` was
+  spending a full scan.
+- **Three of the four call sites had forked `_on_name_edited`** (`CARD-ENTRY-
+  STANDARD` says not to), which is how one slow query became four. The shared
+  label-building and debounce now live in `_card_entry.py` and the forks call
+  them; fully unwinding the forks onto `CardEntryMixin` remains open.
+- **Tests were mutation-checked**, not just written: breaking the head-pruning,
+  the trigram floor, the index rebuild, and the display-number batching each turns
+  the suite red.

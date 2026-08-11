@@ -328,7 +328,7 @@
       "source": {
         "file": "tests/conftest.py",
         "anchor": null,
-        "excerpt_sha256": "0b8049da891f552f"
+        "excerpt_sha256": "bce086f601bdee08"
       },
       "scope": [
         "src/tcginventory/ui/**/*.py",
@@ -404,7 +404,7 @@
       "source": {
         "file": ".claude/context/app-map.json",
         "anchor": "databases",
-        "excerpt_sha256": "870e4ebfd046f154"
+        "excerpt_sha256": "7abaddd60e6acab1"
       },
       "scope": [
         "src/tcginventory/data/**/*.py",
