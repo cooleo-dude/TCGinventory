@@ -590,54 +590,26 @@ def test_one_verdict_admits_both_the_close_and_the_merge(gate, reviews, monkeypa
     _artifact(reviews, ref="41", sha="branchtip")
     monkeypatch.setattr(gate, "head", lambda repo=None: "mainsha")
     monkeypatch.setattr(gate, "rev_parse", lambda repo, rev: "branchtip0000")
-    monkeypatch.setattr(gate, "ticket_mr", lambda repo: "41")
 
     _stdin(monkeypatch, "gh pr merge 41 --squash")
     assert gate.hook() == 2, "the merge ignored a block recorded for this MR"
-    _stdin(monkeypatch, "python .claude/skills/sdd-ticket/scripts/ticket.py close")
+    _stdin(monkeypatch, "python .claude/skills/sdd-ticket/scripts/ticket.py close 41")
     assert gate.hook() == 2, "the close ignored a block recorded for the same MR"
 
 
-def test_a_close_with_no_number_resolves_the_mr_from_the_ticket_file(
-    gate, monkeypatch, tmp_path
-):
-    """`close` takes no argument now, so the number has to come from the ticket on
-    the branch. Reading it wrong is worse than not reading it: the gate would look up
-    a verdict for something nobody asked about."""
-    tickets = tmp_path / ".claude" / "context" / "tickets"
-    tickets.mkdir(parents=True)
-    (tickets / "041-mr-is-the-ticket.md").write_text(
-        "# 41# — The merge request is the ticket\n\n```\nstatus:   in-progress\n"
-        "mr:       41\n```\n",
-        encoding="utf-8",
-    )
-
-    assert gate.ticket_mr(tmp_path) == "41"
-    assert gate.guarded("python x/ticket.py close", tmp_path) == ("land", "41")
+def test_the_gate_needs_nothing_on_disk_to_classify_a_close(gate, tmp_path):
+    """There is no ticket file anywhere any more — the MR body is the ticket — so the
+    number has to come from argv, and the hook must never reach for a file or `gh` to
+    find it. A `PreToolUse` call has a 20s budget, and an exception here stops every
+    shell call in the session (`HOOK-FAILS-OPEN`)."""
+    assert not (tmp_path / ".claude").exists()
+    assert gate.guarded("python x/ticket.py close 41") == ("land", "41")
 
 
-@pytest.mark.parametrize(
-    "body, why",
-    [
-        ("# 41# — x\n\n```\nmr:       none\n```\n", "an unnumbered draft"),
-        ("# 41# — x\n\n```\nstatus:   open\n```\n", "no mr field at all"),
-        ("", "an empty file"),
-    ],
-)
-def test_ticket_mr_returns_none_rather_than_guessing(gate, tmp_path, body, why):
-    """Every failure path has to fall back to the weaker lookups instead of inventing
-    a ref, and none of them may raise — this runs in a `PreToolUse` hook, where an
-    exception stops every shell call in the session."""
-    tickets = tmp_path / ".claude" / "context" / "tickets"
-    tickets.mkdir(parents=True)
-    (tickets / "041-thing.md").write_text(body, encoding="utf-8")
-
-    assert gate.ticket_mr(tmp_path) is None, why
-
-
-def test_ticket_mr_survives_a_missing_tickets_directory(gate, tmp_path):
-    """`main` carries no ticket files at all now, so this is the ordinary case."""
-    assert gate.ticket_mr(tmp_path) is None
+def test_a_close_with_no_number_binds_to_nothing_specific(gate):
+    """It must not guess. With no ref the lookup falls back to this branch and this
+    commit — weaker, but never a verdict for an MR nobody named."""
+    assert gate.guarded("python x/ticket.py close") == ("land", None)
 
 
 def test_show_names_the_binding(gate, reviews, capsys):
