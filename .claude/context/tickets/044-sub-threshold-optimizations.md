@@ -1,10 +1,10 @@
-# Two measured optimizations that are real and too small to ship
+# 44# — Two measured optimizations that are real and too small to ship
 
 ```
 status:   deferred
 kind:     optimization
 source:   /optimization-sweep research pass, 2026-08-07
-mr:       none
+mr:       44
 axis:     latency
 found:    2026-08-07
 saving:   ~2.5 ms total, in real use
