@@ -143,7 +143,7 @@
       "repositories": ["ItemRepository", "LotRepository", "CardCatalogRepository (autocomplete)"],
       "tables": ["item", "lot", "lot_consumption", "transaction", "transaction_line", "audit_log", "card_catalog"],
       "supporting_files": ["ui/views/_card_entry.py", "ui/views/_card_dialogs.py", "ui/views/_autofill_dialog.py", "ui/card_preview.py", "ui/completer_popup.py", "ui/clipboard_images.py"],
-      "tests": ["tests/test_ui_transaction.py", "tests/test_transactions.py", "tests/test_allocation.py", "tests/test_autofill.py", "tests/test_recognition_export.py", "tests/test_delete_entry.py"],
+      "tests": ["tests/test_ui_transaction.py", "tests/test_transactions.py", "tests/test_allocation.py", "tests/test_autofill.py", "tests/test_recognition_export.py", "tests/test_delete_entry.py", "tests/test_formatting.py"],
       "signals_out": ["posted() -> MainWindow invalidates every read view"],
       "entry_points_in": ["MainWindow._start_edit (from History)", "add_incoming / set_deal_context (from eBay Auctions)", "import_recognized (from Recognition and Recognition History)"],
       "gotchas": [

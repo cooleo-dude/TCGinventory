@@ -92,7 +92,6 @@ from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inference import write_back as inference_write_back
 from tcginventory.services.inventory import InventoryService
 from tcginventory.services.reporting import ReportingService
-from tcginventory.services.review import without_review_note
 from tcginventory.services.transactions import (
     IncomingCard,
     OutgoingCard,
@@ -107,7 +106,7 @@ from tcginventory.ui.card_preview import (
 )
 from tcginventory.ui.clipboard_images import clipboard_image_paths
 from tcginventory.ui.completer_popup import show_fitted
-from tcginventory.ui.formatting import money, percent
+from tcginventory.ui.formatting import item_label, money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
 from tcginventory.ui.views._card_entry import (
     CardEntryMixin,
@@ -349,6 +348,7 @@ class _GiveRow:
     ) -> None:
         self._conn = conn
         self._sellable = sellable  # [(Item, available)]
+        self._siblings = [item for item, _avail in sellable]
         self._by_id = {item.id: (item, avail) for item, avail in sellable}
         self._sink = sink
         self._on_change = on_change
@@ -380,13 +380,15 @@ class _GiveRow:
     def widgets(self) -> list[QWidget]:
         return [self.name, self.qty]
 
-    @staticmethod
-    def _label(item: Item) -> str:
-        """Card name (+set), then its Notes — with the auto "Manual price…"
-        review marker stripped out. No notes → just the name."""
-        name = item.name + (f" ({item.set_name})" if item.set_name else "")
-        note = without_review_note(item.notes)
-        return f"{name} — {note}" if note else name
+    def _label(self, item: Item) -> str:
+        """Name, set and number, plus whatever tells this card apart from the
+        other sellable rows sharing that much — see ``formatting.item_label``.
+
+        Disambiguated against ``self._sellable``, which is fixed for the row's
+        lifetime: ``_on_text_changed`` re-derives this string to decide the
+        selection still stands, so it has to be stable for a given card.
+        """
+        return item_label(item, self._siblings)
 
     def _fill(self, needle: str) -> None:
         self._model.clear()
