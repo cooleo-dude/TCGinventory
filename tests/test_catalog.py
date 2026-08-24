@@ -157,9 +157,11 @@ def test_catalog_autocomplete_queries(conn):
     assert "Iono's Kilowattrel" in repo.distinct_names("Iono")
 
     # Picking a name yields every printing (for set/number auto-fill choices).
+    # The number is TCGdex's localId verbatim — i.e. the number printed on the
+    # card. SV-era sets pad it ("001"); Celebrations does not ("5").
     pikachus = repo.find_by_name("Pikachu")
     assert {(c.set_name, c.number) for c in pikachus} == {
-        ("Journey Together", "1"),
+        ("Journey Together", "001"),
         ("Celebrations", "5"),
     }
     (kilo,) = repo.find_by_name("Iono's Kilowattrel")
@@ -177,9 +179,11 @@ def test_search_enriches_with_set_and_number(conn):
     (hit,) = repo.search("Pikachu Celebrations")
     assert (hit.set_name, hit.number) == ("Celebrations", "5")
 
-    # name + number (XX/YY form) narrows by collector number.
-    (hit,) = repo.search("Pikachu 1/99")
-    assert (hit.set_name, hit.number) == ("Journey Together", "1")
+    # name + number (XX/YY form) narrows by collector number — and finds the row
+    # whichever padding convention the query and the row each use.
+    for query in ("Pikachu 1/99", "Pikachu 001/099", "Pikachu 001"):
+        (hit,) = repo.search(query)
+        assert (hit.set_name, hit.number) == ("Journey Together", "001"), query
 
     # name only returns every printing.
     assert len(repo.search("Pikachu")) == 2
@@ -458,6 +462,26 @@ def test_classic_collection_stores_the_printed_collector_number(conn):
     assert repo.display_number(card) == "8/82"
 
 
+def test_catalog_keeps_the_padding_each_set_actually_prints(conn):
+    """Padding is a property of the set, so it is neither added nor removed.
+
+    TCGdex's localId already carries each era's convention — "001" for SV-era
+    sets like 151, "5" for Celebrations. Normalising either way is wrong for
+    half the catalog: stripping made a card printed "006/165" render as "6/165"
+    (ticket 49), and padding would make Base Set "4/102" read "004/102".
+    """
+    update_catalog(conn, fetch_json=_fake_fetch)
+    repo = CardCatalogRepository(conn)
+
+    (padded,) = [c for c in repo.find_by_name("Pikachu") if c.set_id == "sv9"]
+    (unpadded,) = [c for c in repo.find_by_name("Pikachu") if c.set_id == "cel25"]
+    assert padded.number == "001"
+    assert unpadded.number == "5"
+    # …and it survives into what the row displays, which is the reported symptom.
+    assert padded.full_number == "001/159"
+    assert repo.display_number(padded) == "001/159"
+
+
 def test_classic_collection_art_joins_on_the_printed_numerator(conn):
     # The dump denominates differently ("8" vs the stored "8/82"), so the image
     # fallback has to join on the numerator or the whole set stays art-less.
@@ -473,11 +497,24 @@ def test_classic_collection_art_joins_on_the_printed_numerator(conn):
 # a prune narrower than the predicate silently loses real results.
 
 
+def _forms(text):
+    """The number forms this oracle expects — spelled out rather than imported,
+    so a bug in the real ``number_forms`` cannot be mirrored into the oracle."""
+    bare = text.lstrip("0") or text
+    out = [text, bare]
+    if bare.isdigit():
+        out.append(bare.zfill(3))
+    return list(dict.fromkeys(out))
+
+
 def _like_only_search(conn, query, limit=25):
     """The pre-0020 implementation, kept as the parity oracle.
 
-    Deliberately a copy rather than a call: the point is to compare the new path
-    against the semantics that shipped, so this must not move when search() does.
+    Deliberately a copy rather than a call: the point is to compare the indexed
+    path against the predicate semantics, so this must not move when search()'s
+    *implementation* does. It moves only when the predicate's *meaning* changes
+    by intent — once so far, in ticket 49, when a number query became able to
+    match a row stored in the other padding convention.
     """
     clauses, params = [], []
     for tok in query.strip().split():
@@ -486,14 +523,14 @@ def _like_only_search(conn, query, limit=25):
         tok_params = [like, like, like]
         if "/" in tok and any(ch.isdigit() for ch in tok):
             head = tok.split("/", 1)[0].strip()
-            for form in dict.fromkeys([tok, head, head.lstrip("0") or head]):
+            for form in dict.fromkeys([tok, *_forms(head)]):
                 parts.append("number = ? COLLATE NOCASE")
                 tok_params.append(form)
         elif any(ch.isalpha() for ch in tok):
             parts.append("number LIKE ? COLLATE NOCASE")
             tok_params.append(f"{tok}%")
         elif tok.isdigit():
-            for form in dict.fromkeys([tok, tok.lstrip("0") or tok]):
+            for form in _forms(tok):
                 parts.append("number = ? COLLATE NOCASE")
                 tok_params.append(form)
         clauses.append("(" + " OR ".join(parts) + ")")
@@ -522,12 +559,36 @@ def test_search_matches_the_like_scan_it_replaced(conn):
         "Iono",
         "pik",  # below the trigram floor in one token, still exact
         "ex 5",  # no token long enough to prune on at all
+        "Pikachu 005",  # zero-padded, long enough to prune, stored unpadded
+        "Pikachu 005/025",  # …and the same padding inside a full number
+        "005",
         "zzz nothing here",
         'quote"inside',  # the phrase terminator: must be escaped, not fatal
     ):
         assert [c.card_id for c in repo.search(query)] == _like_only_search(
             conn, query
         ), query
+
+
+def test_search_finds_a_zero_padded_number_stored_unpadded(conn):
+    """The prune must not out-narrow the predicate on zero padding.
+
+    The catalog holds both conventions — English rows store the stripped "5",
+    Japanese rows the printed "005/025" — so the predicate accepts "5" for a
+    token of "005". A prune requiring the literal "005" deletes that row before
+    the predicate ever sees it, which is how a card printed "006/165" became
+    unfindable by its own number (ticket 49).
+    """
+    update_catalog(conn, fetch_json=_fake_fetch)
+    repo = CardCatalogRepository(conn)
+
+    (hit,) = repo.search("Pikachu 005")  # Celebrations #5
+    assert (hit.card_id, hit.number) == ("cel25-5", "5")
+    assert [c.card_id for c in repo.search("Pikachu 005/025")] == ["cel25-5"]
+
+    # The other tokens still carry the index — only the padded one abstains.
+    assert repo._fts_prune("Pikachu 005") == '"Pikachu"'
+    assert repo._fts_prune("005") == ""
 
 
 def test_search_finds_a_bare_number_given_in_full(conn):

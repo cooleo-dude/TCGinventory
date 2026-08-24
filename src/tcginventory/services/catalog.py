@@ -81,13 +81,21 @@ class CatalogUpdateSummary:
 
 
 def _tcgdex_number(local_id: str | None) -> str | None:
-    """TCGdex ``localId`` → our collector-number convention. Numeric ids are
-    zero-padded there ("001"); strip that to match the historical "1" form.
-    Lettered ids ("SV074", "TG01") are kept as-is."""
+    """TCGdex ``localId`` → the collector number **printed on the card**.
+
+    Kept verbatim, because ``localId`` already carries each era's own
+    convention: Base Set, Celebrations and Sword & Shield give "1, 2, 3, 4"
+    while 151 and every SV-era set give "001, 002, 003, 004" — which is exactly
+    how those cards are printed, and how tcgcsv names the products
+    ("...-charizard-ex-006-165").
+
+    This used to strip the padding to a uniform "1", which was only ever right
+    for the eras that do not pad: it made a card printed "006/165" render and
+    save as "6/165", and unfindable by its own number. Matching is normalised on
+    both sides instead — see :func:`repositories.number_forms`. (Ticket 49.)
+    """
     text = (local_id or "").strip()
-    if not text:
-        return None
-    return str(int(text)) if text.isdigit() else text
+    return text or None
 
 
 # TCGdex indexes the Celebrations Classic Collection with a synthetic
