@@ -243,6 +243,96 @@ def test_ui_give_row_caps_quantity_to_on_hand(app, conn):
     assert view._submit.isEnabled() is True
 
 
+def _buy(conn, item: Item, mv=1000):
+    """Purchase one of ``item`` so it becomes sellable give-side stock."""
+    from tcginventory.services.transactions import (
+        TransactionRequest,
+        TransactionService,
+    )
+
+    TransactionService(conn).post(
+        TransactionRequest(
+            occurred_at="2026-08-24",
+            cash_out_cents=mv,
+            incoming=[IncomingCard(item, 1, mv, Intent.RESALE)],
+        )
+    )
+
+
+def test_give_row_tells_two_conditions_of_one_card_apart(app, conn):
+    """Two Haunters differing only in wear must not read alike in the picker.
+
+    Both used to render "Haunter (Fossil)", so a user could not see — and a test
+    could not assert — which lot a row was about to draw down.
+    """
+    from tcginventory.domain.enums import Condition
+    from tcginventory.ui.views.transaction import TransactionView
+
+    for condition in (Condition.MP, Condition.LP):
+        _buy(
+            conn,
+            Item(
+                name="Haunter",
+                category=Category.SINGLE,
+                set_name="Fossil",
+                card_number="6/62",
+                condition=condition,
+            ),
+        )
+
+    view = TransactionView(conn)
+    row = view._add_give_row()
+    row._fill("")
+    labels = [row._model.item(i).text() for i in range(row._model.rowCount())]
+
+    assert sorted(labels) == [
+        "Haunter (Fossil · 6/62 · LP)",
+        "Haunter (Fossil · 6/62 · MP)",
+    ]
+    view.deleteLater()
+
+
+def test_give_row_picks_the_second_of_two_identical_looking_cards(app, conn):
+    """Picking row 2 must select row 2's item — and keep it selected.
+
+    ``_on_text_changed`` re-derives the label to decide the selection still
+    stands, so an unstable label would silently clear the pick right after it
+    was made.
+    """
+    from tcginventory.domain.enums import Condition
+    from tcginventory.ui.views.transaction import TransactionView
+
+    for condition in (Condition.MP, Condition.LP):
+        _buy(
+            conn,
+            Item(
+                name="Haunter",
+                category=Category.SINGLE,
+                set_name="Fossil",
+                card_number="6/62",
+                condition=condition,
+            ),
+        )
+
+    view = TransactionView(conn)
+    row = view._add_give_row()
+    row._fill("")
+    wanted = next(
+        i
+        for i in range(row._model.rowCount())
+        if row._model.item(i).text().endswith("· LP)")
+    )
+    entry = row._model.item(wanted)
+
+    row._set_chosen(entry.data(row._ITEM_ID_ROLE))
+
+    card = row.to_card()
+    assert card is not None, "the label write-back cleared the selection"
+    chosen = ItemRepository(conn).get(card.item_id)
+    assert chosen.condition is Condition.LP
+    view.deleteLater()
+
+
 def test_ui_trade_and_rip_lifecycle(app, conn):
     from tcginventory.ui.views.transaction import TransactionView
 
@@ -338,9 +428,13 @@ def test_ui_give_dialog_sku_lookup(app, conn):
     dialog = OutgoingCardDialog(sellable, conn)
     dialog._sku.setText(lot_sku)
     dialog._lookup_sku()
-    # The combo now points at the looked-up card.
+    # The combo now points at the looked-up card. Assert the *item*, not the
+    # label: the label carries set/number (and any disambiguator) by design, so
+    # matching it exactly would pin this test to formatting it does not own.
     card, name = dialog.result_card()
-    assert name == "Snorlax"
+    assert ItemRepository(conn).get(card.item_id).name == "Snorlax"
+    assert name.startswith("Snorlax")
+    assert "on hand" not in name  # the count is still split off
     dialog.deleteLater()
 
 
