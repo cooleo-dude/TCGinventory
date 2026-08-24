@@ -42,6 +42,27 @@ from tcginventory.domain.models import (
     TransactionLine,
 )
 
+# The only zero-padding width in use for collector numbers: TCGdex's localId and
+# tcgcsv's product numbers both pad to three ("006/165"), never further.
+_PAD_WIDTH = 3
+
+
+def number_forms(text: str) -> list[str]:
+    """Every stored form a collector number could take for ``text``.
+
+    Padding is a property of the *set*, not of the catalog: a card printed
+    "006/165" is stored "006" for an SV-era set and "6" for a Base Set one,
+    because that is what each carries in print. So a query given in either
+    convention has to be able to match a row held in either, and matching has to
+    normalise on both sides rather than on the query alone.
+    """
+    bare = text.lstrip("0") or text
+    forms = [text, bare]
+    if bare.isdigit():
+        forms.append(bare.zfill(_PAD_WIDTH))
+    return list(dict.fromkeys(forms))
+
+
 # Columns that together define an item's identity for auto match-or-create
 # (specs/02-data-model.md — Core concepts / F-IT-1).
 _ITEM_IDENTITY_COLUMNS = (
@@ -1063,9 +1084,9 @@ class CardCatalogRepository:
             tok_params = [like, like, like]
             if "/" in tok and any(ch.isdigit() for ch in tok):
                 # A full collector number, in any of its forms: full
-                # ("SV103/SV122"), head ("SV103"), or leading-zeros stripped.
+                # ("SV103/SV122"), head ("SV103"), or padded/stripped.
                 head = tok.split("/", 1)[0].strip()
-                for form in dict.fromkeys([tok, head, head.lstrip("0") or head]):
+                for form in dict.fromkeys([tok, *number_forms(head)]):
                     parts.append("number = ? COLLATE NOCASE")
                     tok_params.append(form)
             elif any(ch.isalpha() for ch in tok):
@@ -1076,7 +1097,7 @@ class CardCatalogRepository:
                 tok_params.append(f"{tok}%")
             elif tok.isdigit():
                 # A bare number matches exactly (not a prefix, so "1" ≠ "10").
-                for form in dict.fromkeys([tok, tok.lstrip("0") or tok]):
+                for form in number_forms(tok):
                     parts.append("number = ? COLLATE NOCASE")
                     tok_params.append(form)
             clauses.append("(" + " OR ".join(parts) + ")")
@@ -1121,8 +1142,17 @@ class CardCatalogRepository:
         ``SV103``, which does not contain the full string — so the head is the
         most that can be pruned on. (Verified against the catalog: the full form
         matches 0 rows, the head matches the Wooloo the search is for.)
+
+        **Zero padding** is the same trap one level down. The catalog holds both
+        conventions — English rows store the stripped "6", Japanese rows the
+        printed "006/165" — so for "006" the predicate accepts a row numbered
+        "6", which contains no "006" to prune on. Nothing about such a token is
+        safe, so it prunes on nothing and the other tokens carry the index (a
+        "Charizard 006" search still seeks on "Charizard").
         """
         core = token.split("/", 1)[0].strip() if "/" in token else token
+        if core.isdigit() and core != (core.lstrip("0") or core):
+            return None
         return core if len(core) >= CardCatalogRepository._TRIGRAM_MIN else None
 
     def _fts_prune(self, query: str) -> str:
@@ -1203,9 +1233,16 @@ class CardCatalogRepository:
         if name:
             gather("name = ? COLLATE NOCASE AND image_small IS NOT NULL", (name,))
         if want_num:
+            # Both padding conventions, since scoring's num_ok normalises the row
+            # side but this gather is what decides whether the row is seen at all.
+            forms = list(
+                dict.fromkeys([(number or "").strip(), *number_forms(want_num)])
+            )
             gather(
-                "(number = ? OR number = ?) AND image_small IS NOT NULL LIMIT 400",
-                ((number or "").strip(), want_num),
+                "number IN ({}) AND image_small IS NOT NULL LIMIT 400".format(
+                    ",".join("?" * len(forms))
+                ),
+                tuple(forms),
             )
         if not pool and name:  # loose fallback when nothing else hit
             gather(

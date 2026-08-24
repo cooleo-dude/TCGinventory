@@ -2635,3 +2635,61 @@ catalog: **0.32–0.62 ms**, 30–70×.
 - **Tests were mutation-checked**, not just written: breaking the head-pruning,
   the trigram floor, the index rebuild, and the display-number batching each turns
   the suite red.
+
+## 2026-08-24 — The collector number is the one printed on the card
+
+Reported as "set 151 items don't render properly and won't autofill", plus a
+Charizard promo that could not be found by its number. Two defects, compounding.
+(Ticket 49.)
+
+- **The trigram prune was narrower than the predicate it prunes for.** `search()`
+  accepts both forms of a padded number — for `076` it emits
+  `number = '076' OR number = '76'` — but `_fts_prune` then required the literal
+  `"076"` in the index. English rows stored `74`, so the prune deleted the answer
+  before the predicate ran. `_fts_core`'s own docstring states the rule this
+  broke ("every row the SQL predicate could match for this token also contains
+  this substring"); zero padding was simply never considered when 0020 landed.
+  A padded numeric token now prunes on nothing and the other tokens carry the
+  index, so `Charizard 006` is still a seek on `"Charizard"` — measured at
+  0.53 ms/search over 53k rows, unchanged from ticket 47's gain.
+- **Padding is a property of the set, not of the catalog.** `_tcgdex_number`
+  normalised TCGdex's `localId` to a uniform `"1"`, which is right for exactly
+  the eras that do not pad. Verified against the live API: Base Set, Celebrations
+  and Sword & Shield really do give `1, 2, 3, 4`, while 151 and every SV-era set
+  give `001, 002, 003, 004` — which is what those cards print and how tcgcsv
+  names the products (`...-charizard-ex-006-165`). So the padding was destroyed
+  only where it was real: 4,447 rows across 49 sets, Brilliant Stars onward. The
+  strip is gone; `localId` is now kept verbatim.
+- **This reverses a decision from 2026-08-03**, when the catalog moved to TCGdex
+  and the strip was added "to match the historical `1` form". That preserved
+  continuity with the pokemontcg.io dump rather than with the cards, and the
+  cards are what the user is holding while they type.
+- **Matching normalises on both sides instead.** The catalog now legitimately
+  holds both conventions, so `repositories.number_forms` generates
+  `{as-typed, stripped, padded-to-3}` and the predicate accepts any of them.
+  Normalising the *query* alone was rejected: Japanese rows have always stored
+  the printed `006/165`, so stripping the query breaks the JP half exactly as the
+  prune broke the EN half. Three is the only width in use — TCGdex and tcgcsv
+  both pad to three, never further.
+- **Migration 0021 re-keys `item.card_number`, and nothing else.** `card_number`
+  is in `_ITEM_IDENTITY_COLUMNS`, so leaving owned items behind would fork every
+  affected card in two — the `6/165` bought last month and the `006/165` bought
+  next month would stop being the same item. It reads the padding from `card_id`
+  (whose suffix is `localId` verbatim) rather than from `card_catalog.number`,
+  because at the moment it runs that column is still the stripped form it exists
+  to undo — so it is correct whether or not the English catalog has been
+  re-pulled yet. Measured on the real ledger: **60 of 978 items updated, zero
+  identity collisions, and `lot`, `lot_consumption`, `transaction`,
+  `transaction_line` and `audit_log` byte-identical before and after.**
+- **Rejected: padding to three digits wherever the head is shorter.** It would
+  corrupt Base Set `4/102` into `004/102` while fixing 151. 266 of 978 items have
+  a one- or two-digit head and most of them are already correct. The migration
+  joins the catalog so the padding comes from the set the card is actually in,
+  and skips ambiguous set names rather than guessing.
+- **Rejected: merging items that collide after padding.** None do, and moving
+  lots between items is the money path — it belongs behind a service with an
+  audit trail, not inside a `.sql` file.
+- **The parity oracle in `tests/test_catalog.py` moved, deliberately and for the
+  first time.** It exists to pin prune ≡ predicate, so it tracks a change in the
+  predicate's *meaning* while still refusing to track its implementation. Both
+  new search tests were checked to go red on revert.

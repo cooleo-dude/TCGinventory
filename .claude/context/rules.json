@@ -404,7 +404,7 @@
       "source": {
         "file": ".claude/context/app-map.json",
         "anchor": "databases",
-        "excerpt_sha256": "7abaddd60e6acab1"
+        "excerpt_sha256": "d05ff223a1bf90f0"
       },
       "scope": [
         "src/tcginventory/data/**/*.py",
