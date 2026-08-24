@@ -23,7 +23,7 @@ from tcginventory.domain.enums import (
 )
 from tcginventory.domain.models import Item
 from tcginventory.services.transactions import IncomingCard, OutgoingCard
-from tcginventory.ui.formatting import item_label
+from tcginventory.ui.formatting import item_labels
 
 
 def _money_spin() -> QDoubleSpinBox:
@@ -55,12 +55,11 @@ class OutgoingCardDialog(QDialog):
         self._sku_status.setFrame(False)
 
         self._item = QComboBox()
-        siblings = [item for item, _avail in sellable]
-        for item, available in sellable:
-            # Same label as the inline give row: two items that differ only by
-            # condition or grade must not read alike here either.
-            label = f"{item_label(item, siblings)} — {available} on hand"
-            self._item.addItem(label, item.id)
+        # Same labels as the inline give row — batched, since deriving them one
+        # at a time rescans every sibling per item.
+        labels = item_labels([item for item, _avail in sellable])
+        for (item, available), label in zip(sellable, labels, strict=True):
+            self._item.addItem(f"{label} — {available} on hand", item.id)
         self._item.currentIndexChanged.connect(self._sync_max)
 
         self._qty = QSpinBox()

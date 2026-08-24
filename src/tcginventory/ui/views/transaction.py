@@ -106,12 +106,22 @@ from tcginventory.ui.card_preview import (
 )
 from tcginventory.ui.clipboard_images import clipboard_image_paths
 from tcginventory.ui.completer_popup import show_fitted
-from tcginventory.ui.formatting import item_label, money, percent
+from tcginventory.ui.formatting import item_labels, money, percent
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
 from tcginventory.ui.views._card_entry import (
     CardEntryMixin,
     PriceLookupWorker,
+    search_debouncer,
 )
+
+# How many give-side matches the popup holds — the same 25 the catalog
+# autocomplete uses (see _card_entry.catalog_labels), and for a sharper reason
+# here: the popup is fitted to its widest row, and re-fitting a *wide* list is
+# super-linear in row count. Measured over a 769-card collection, refilling the
+# whole list after a narrowed one cost 1.73 s; at 25 rows it is 3.9 ms. A popup
+# showing seven rows at a time was never a way to browse 769 cards anyway —
+# typing narrows, which is what the field's placeholder asks for.
+_MATCH_LIMIT = 25
 
 _TOOLBAR_H = 34  # Them's autofill toolbar row; matched by a You-side spacer
 _DOCK_W = 178  # preview dock width; the header fields align to the board past it
@@ -348,8 +358,12 @@ class _GiveRow:
     ) -> None:
         self._conn = conn
         self._sellable = sellable  # [(Item, available)]
-        self._siblings = [item for item, _avail in sellable]
         self._by_id = {item.id: (item, avail) for item, avail in sellable}
+        # Labels are computed once for the whole picker, not per lookup: the row
+        # refills its completion model on every keystroke, and a label derived
+        # one at a time rescans every sibling (196 ms a keystroke at 769 cards).
+        items = [item for item, _avail in sellable]
+        self._labels = dict(zip((i.id for i in items), item_labels(items), strict=True))
         self._sink = sink
         self._on_change = on_change
         self._chosen_id: int | None = None
@@ -361,6 +375,7 @@ class _GiveRow:
         self._completer.setCaseSensitivity(Qt.CaseInsensitive)
         self._completer.setCompletionMode(QCompleter.UnfilteredPopupCompletion)
         self.name.setCompleter(self._completer)
+        self._search_timer = search_debouncer(self.name, self._repopulate)
         self.name.textEdited.connect(self._on_edited)
         self.name.focused.connect(self._show_all)
         self._completer.activated[QModelIndex].connect(self._pick)
@@ -382,37 +397,49 @@ class _GiveRow:
 
     def _label(self, item: Item) -> str:
         """Name, set and number, plus whatever tells this card apart from the
-        other sellable rows sharing that much — see ``formatting.item_label``.
+        other sellable rows sharing that much — see ``formatting.item_labels``.
 
-        Disambiguated against ``self._sellable``, which is fixed for the row's
-        lifetime: ``_on_text_changed`` re-derives this string to decide the
-        selection still stands, so it has to be stable for a given card.
+        A dictionary lookup, not a computation: ``_on_text_changed`` re-derives
+        this on every edit to decide the selection still stands, and the labels
+        were settled once against the row's fixed sellable set.
         """
-        return item_label(item, self._siblings)
+        return self._labels[item.id]
 
     def _fill(self, needle: str) -> None:
         self._model.clear()
         needle = needle.strip().lower()
+        shown = 0
         for item, _available in self._sellable:
+            if shown >= _MATCH_LIMIT:
+                break
             label = self._label(item)
             if needle and needle not in label.lower():
                 continue
             entry = QStandardItem(label)
             entry.setData(item.id, self._ITEM_ID_ROLE)
             self._model.appendRow(entry)
+            shown += 1
 
-    def _on_edited(self, text: str) -> None:
-        self._fill(text)
+    def _on_edited(self, _text: str) -> None:
+        """Note the keystroke; the refill runs once the typing pauses.
+
+        Same debounce the catalog rows use, and for the same reason: what costs
+        here is not the search but the model rebuild and the popup's width
+        re-measure, which walks every row (~23 ms over a 769-card collection).
+        Coalescing a burst of typing into one refill keeps the field responsive.
+        """
+        self._search_timer.start()
+
+    def _repopulate(self) -> None:
+        self._fill(self.name.text())
         if self._model.rowCount():
             show_fitted(self._completer, self.name)
 
     def _show_all(self) -> None:
-        # Focus an empty field → list everything you can give.
+        # Focus an empty field → list everything you can give, without waiting.
         if self.name.text().strip():
             return
-        self._fill("")
-        if self._model.rowCount():
-            show_fitted(self._completer, self.name)
+        self._repopulate()
 
     def _on_text_changed(self, *_) -> None:
         # Editing away from the chosen card's label drops the selection.

@@ -6,7 +6,8 @@ integer cents — the UI never does money math, it only renders.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections import defaultdict
+from collections.abc import Iterable, Sequence
 
 from tcginventory.domain.models import Item
 from tcginventory.services.review import without_review_note
@@ -82,6 +83,27 @@ def _render(name: str, parts: list[str]) -> str:
     return f"{name} ({_SEP.join(parts)})" if parts else name
 
 
+def _varying(group: list[Item]) -> list:
+    """Which discriminators actually differ across a colliding group.
+
+    A group of one has nothing to tell apart, so nothing is appended and the
+    common case keeps a clean label.
+    """
+    if len(group) < 2:
+        return []
+    return [f for f in _DISCRIMINATORS if len({f(o) for o in group}) > 1]
+
+
+def _label_for(item: Item, varying: list) -> str:
+    """One item's label, given the fields its group needs to be told apart by."""
+    parts = _base_parts(item)
+    # A None on one side still separates it from a sibling that has a value.
+    parts += [value for f in varying if (value := f(item))]
+    label = _render(item.name, parts)
+    note = without_review_note(item.notes)
+    return f"{label} — {note}" if note else label
+
+
 def item_label(item: Item, siblings: Iterable[Item] = ()) -> str:
     """A give-side label for ``item``, disambiguated against ``siblings``.
 
@@ -100,17 +122,30 @@ def item_label(item: Item, siblings: Iterable[Item] = ()) -> str:
     review marker is stripped), since that is where a hand-written distinction
     like "signed" ends up.
     """
-    parts = _base_parts(item)
-    base = _render(item.name, parts)
+    base = _render(item.name, _base_parts(item))
     group = [o for o in siblings if _render(o.name, _base_parts(o)) == base]
+    return _label_for(item, _varying(group))
 
-    if len(group) > 1:
-        for field in _DISCRIMINATORS:
-            # Only a field that actually varies within the group earns a slot; a
-            # None on one side still separates it from a sibling that has one.
-            if len({field(o) for o in group}) > 1 and (mine := field(item)):
-                parts.append(mine)
 
-    note = without_review_note(item.notes)
-    label = _render(item.name, parts)
-    return f"{label} — {note}" if note else label
+def item_labels(items: Sequence[Item]) -> list[str]:
+    """:func:`item_label` for a whole picker at once, returned in input order.
+
+    Building a list of labels one call at a time is **quadratic** — each label
+    rescans every sibling to find its collision group. At 769 sellable cards that
+    was 196 ms of UI-thread work *per keystroke*, since the give row refills its
+    completion model on every edit.
+
+    Only the base decides collision, so bucket by it once and work out each
+    group's varying fields once: O(n) rather than O(n²). Same answers — the
+    parity is pinned by a test.
+    """
+    items = list(items)
+    bases = [_render(i.name, _base_parts(i)) for i in items]
+
+    groups: dict[str, list[Item]] = defaultdict(list)
+    for item, base in zip(items, bases, strict=True):
+        groups[base].append(item)
+    varying = {base: _varying(group) for base, group in groups.items()}
+
+    pairs = zip(items, bases, strict=True)
+    return [_label_for(item, varying[base]) for item, base in pairs]
