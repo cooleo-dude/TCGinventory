@@ -15,7 +15,7 @@ from tcginventory.domain.enums import (
     Language,
 )
 from tcginventory.domain.models import Item
-from tcginventory.ui.formatting import item_label, money, percent
+from tcginventory.ui.formatting import item_label, item_labels, money, percent
 
 
 def _card(name="Haunter", **kwargs) -> Item:
@@ -105,6 +105,42 @@ def test_label_keeps_the_user_note_without_the_review_marker():
 
     assert label == "Haunter (Fossil · 6/62) — Signed by artist"
     assert "Manual price" not in label
+
+
+def test_batched_labels_match_the_one_at_a_time_answers():
+    """``item_labels`` is an optimisation, so it must not be a behaviour change."""
+    cards = [
+        _card(condition=Condition.NM),
+        _card(condition=Condition.LP),
+        _card("Pikachu", set_name="Celebrations", card_number="5"),
+        _card(
+            "Pikachu", set_name="Celebrations", card_number="5", language=Language.JP
+        ),
+        Item(name="Bulk Lot", category=Category.SEALED),
+    ]
+    assert item_labels(cards) == [item_label(c, cards) for c in cards]
+
+
+def test_batched_labels_do_not_rescan_per_item():
+    """The regression guard for the lag this replaced.
+
+    Deriving labels one at a time is quadratic — each rescans every sibling — so
+    a 2,000-card picker cost seconds of UI-thread work on every keystroke.
+
+    Measured on the dev box: batched 0.002s, one-at-a-time 1.09s. The bound sits
+    between them with room either way — ~100x slack over the linear pass so a
+    slow machine cannot trip it, and ~4x under the quadratic one so a regression
+    cannot slip beneath it.
+    """
+    import time
+
+    cards = [_card(card_number=f"{n}/300", condition=Condition.NM) for n in range(2000)]
+    start = time.perf_counter()
+    labels = item_labels(cards)
+    elapsed = time.perf_counter() - start
+
+    assert len(labels) == 2000
+    assert elapsed < 0.25, f"{elapsed:.2f}s — batching looks to have regressed"
 
 
 def test_every_distinct_item_gets_a_distinct_label():

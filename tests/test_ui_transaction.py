@@ -292,6 +292,40 @@ def test_give_row_tells_two_conditions_of_one_card_apart(app, conn):
     view.deleteLater()
 
 
+def test_give_row_caps_how_many_matches_the_popup_holds(app, conn):
+    """The popup is fitted to its widest row, and re-fitting a wide list is
+    super-linear in row count: over a 769-card collection an uncapped refill
+    cost 1.73 s of UI-thread work, against 3.9 ms at this limit."""
+    from tcginventory.services.transactions import (
+        TransactionRequest,
+        TransactionService,
+    )
+    from tcginventory.ui.views.transaction import _MATCH_LIMIT, TransactionView
+
+    count = _MATCH_LIMIT + 5
+    TransactionService(conn).post(
+        TransactionRequest(
+            occurred_at="2026-08-24",
+            cash_out_cents=100 * count,
+            incoming=[
+                IncomingCard(
+                    Item(name=f"Card {n:03d}", category=Category.SINGLE),
+                    1,
+                    100,
+                    Intent.RESALE,
+                )
+                for n in range(count)
+            ],
+        )
+    )
+
+    view = TransactionView(conn)
+    row = view._add_give_row()
+    row._fill("")
+    assert row._model.rowCount() == _MATCH_LIMIT
+    view.deleteLater()
+
+
 def test_give_row_picks_the_second_of_two_identical_looking_cards(app, conn):
     """Picking row 2 must select row 2's item — and keep it selected.
 
