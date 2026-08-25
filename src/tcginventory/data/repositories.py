@@ -70,6 +70,7 @@ _ITEM_IDENTITY_COLUMNS = (
     "set_name",
     "set_code",
     "card_number",
+    "variant",
     "language",
     "condition",
     "holo_pattern",
@@ -98,6 +99,7 @@ class ItemRepository:
             set_name=row["set_name"],
             set_code=row["set_code"],
             card_number=row["card_number"],
+            variant=row["variant"],
             language=Language(row["language"]),
             category=Category(row["category"]),
             condition=_opt_enum(Condition, row["condition"]),
@@ -125,12 +127,13 @@ class ItemRepository:
         cur = self.conn.execute(
             """
             INSERT INTO item (
-                name, game, set_name, set_code, card_number, language, category,
+                name, game, set_name, set_code, card_number, variant,
+                language, category,
                 condition, holo_pattern, edition, is_graded, grading_company,
                 grade, cert_number, location, tcgplayer_url, ebay_url,
                 market_value_cents, market_value_asof, review, notes,
                 created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 item.name,
@@ -138,6 +141,7 @@ class ItemRepository:
                 item.set_name,
                 item.set_code,
                 item.card_number,
+                item.variant,
                 item.language.value,
                 item.category.value,
                 item.condition.value if item.condition else None,
@@ -187,6 +191,7 @@ class ItemRepository:
             item.set_name,
             item.set_code,
             item.card_number,
+            item.variant,
             item.language.value,
             item.condition.value if item.condition else None,
             item.holo_pattern.value if item.holo_pattern else None,
@@ -208,7 +213,8 @@ class ItemRepository:
             """
             UPDATE item SET
                 name = ?, game = ?, set_name = ?, set_code = ?, card_number = ?,
-                language = ?, category = ?, condition = ?, holo_pattern = ?,
+                variant = ?, language = ?, category = ?, condition = ?,
+                holo_pattern = ?,
                 edition = ?, is_graded = ?,
                 grading_company = ?, grade = ?, cert_number = ?,
                 location = ?, tcgplayer_url = ?, ebay_url = ?,
@@ -222,6 +228,7 @@ class ItemRepository:
                 item.set_name,
                 item.set_code,
                 item.card_number,
+                item.variant,
                 item.language.value,
                 item.category.value,
                 item.condition.value if item.condition else None,

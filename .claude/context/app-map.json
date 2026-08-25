@@ -60,7 +60,7 @@
     "_note": "Four separate SQLite files. Only inventory.db is the ledger; the other three are derived/ephemeral and are NOT migrated by data/migrator.py.",
     "inventory.db": {
       "module": "src/tcginventory/data/db.py",
-      "migrations": "src/tcginventory/data/migrations/ (0001..0021, forward-only)",
+      "migrations": "src/tcginventory/data/migrations/ (0001..0022, forward-only)",
       "repositories": "src/tcginventory/data/repositories.py",
       "tables": ["item", "lot", "lot_consumption", "transaction", "transaction_line", "audit_log", "price_snapshot", "collection_value_snapshot", "card_catalog", "card_show", "card_show_status", "calendar_entry", "operation_run", "schema_version"]
     },
@@ -169,7 +169,7 @@
       "tables": ["item", "lot", "lot_consumption", "price_snapshot"],
       "other_dbs": ["pricehistory.db (per-row price sparkline)"],
       "supporting_files": ["ui/models/inventory_model.py", "ui/views/_inventory_delegates.py", "ui/views/_intent_delegate.py", "ui/views/_combo_delegate.py", "ui/views/_link_delegate.py", "ui/views/_review_delegate.py", "ui/views/item_detail.py", "ui/views/item_editor.py"],
-      "tests": ["tests/test_ui_views.py", "tests/test_ui_item_editing.py", "tests/test_ui_inventory_links.py", "tests/test_inventory.py", "tests/test_review.py", "tests/test_review_protection.py", "tests/test_missing_lots.py", "tests/test_lot_sku_split.py", "tests/test_delete_entry.py"],
+      "tests": ["tests/test_ui_views.py", "tests/test_ui_item_editing.py", "tests/test_ui_inventory_links.py", "tests/test_inventory.py", "tests/test_review.py", "tests/test_review_protection.py", "tests/test_missing_lots.py", "tests/test_lot_sku_split.py", "tests/test_delete_entry.py", "tests/test_item_variant.py"],
       "signals_out": ["changed() -> ledger mutated (intent edit, item edit, entry delete)"],
       "entry_points_in": ["select_item(item_id) from the Dashboard highlights"],
       "gotchas": [

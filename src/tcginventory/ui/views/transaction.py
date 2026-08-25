@@ -559,6 +559,12 @@ class _ReceiveRow(CardEntryMixin):
         self.intent = _combo(Intent, capitalize=True)
         _select(self.intent, Intent.RESALE.value)
         self.review = _review_chip()
+        self.variant = QLineEdit()
+        self.variant.setPlaceholderText("Base print")
+        self.variant.setToolTip(
+            "Which printing this is — filled by the Printing picker, editable "
+            "for variants TCGplayer doesn't list. A variant is its own item."
+        )
         self.tcgplayer = QLineEdit()
         self.ebay = QLineEdit()
         self.notes = QLineEdit()
@@ -569,8 +575,16 @@ class _ReceiveRow(CardEntryMixin):
         self._toggle_graded(False)
 
     def _apply_variant(self, variant) -> None:
+        """Apply a chosen printing — price, link, and *which printing it is*.
+
+        The label is what makes a stamped print a different item from the base
+        one (migration 0022). Dropping it here is what merged the two Mew ex
+        205/165 printings into a single item and let the metal card's price
+        overwrite the base card's.
+        """
         self.market.setValue(variant.price_cents / 100)
         self.tcgplayer.setText(variant.tcgplayer_url)
+        self.variant.setText("" if variant.is_base else variant.label)
 
     def widgets(self) -> list[QWidget]:
         return [
@@ -637,6 +651,7 @@ class _ReceiveRow(CardEntryMixin):
         self.qty.setValue(card.quantity)
         _select(self.intent, card.intent.value)
         self.review.setChecked(getattr(card, "review", False))
+        self.variant.setText(item.variant or "")
         self.tcgplayer.setText(item.tcgplayer_url or "")
         self.ebay.setText(item.ebay_url or "")
         self.notes.setText(item.notes or "")
@@ -651,6 +666,7 @@ class _ReceiveRow(CardEntryMixin):
             category=Category(self.category.currentData()),
             set_name=self.set.text().strip() or None,
             card_number=self.number.text().strip() or None,
+            variant=self.variant.text().strip() or None,
             language=Language(self.language.currentData()),
             condition=None if graded else Condition(self.condition.currentData()),
             holo_pattern=HoloPattern(self.holo.currentData()),
@@ -784,6 +800,9 @@ class _ReceiveRow(CardEntryMixin):
         pc.addWidget(plab)
         pc.addWidget(self.printing)
         g.addWidget(self._printing_cell, 4, 0, 1, 2)
+        # Beside the picker that fills it: the picker names the printing,
+        # this is what actually gets stored as the item's identity.
+        cell("Variant", self.variant, 4, 2, 2)
         self._printing_cell.setVisible(False)
         self._adv.setVisible(False)
         v.addWidget(self._adv)

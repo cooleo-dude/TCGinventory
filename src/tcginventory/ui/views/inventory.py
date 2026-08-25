@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
@@ -827,7 +828,7 @@ class InventoryView(QWidget):
             QDesktopServices.openUrl(QUrl(url))
 
     def _show_row_menu(self, pos) -> None:
-        """Right-click menu on an inventory row: mark/unmark as stolen."""
+        """Right-click menu on an inventory row: stolen flag, separate a copy."""
         index = self._table.indexAt(pos)
         if not index.isValid():
             return
@@ -838,7 +839,40 @@ class InventoryView(QWidget):
         else:
             act = menu.addAction("Mark as stolen / missing")
         act.triggered.connect(lambda: self._toggle_missing(row))
+        separate = menu.addAction("Separate this copy…")
+        separate.setToolTip(
+            "This copy is a different printing from the others under this card"
+        )
+        separate.setEnabled(row.sold_status == "unsold" and not row.missing)
+        separate.triggered.connect(lambda: self._separate_copy(row))
         menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _separate_copy(self, row: InventoryRow) -> None:
+        """Move this lot onto its own item — "this one is the metal card".
+
+        The grid is one row per lot over a shared item, so an item-level field
+        (Notes, Variant, market value) is common to every copy. When two copies
+        are actually different printings, the fix is a different item, not a
+        different note (ticket 52).
+        """
+        variant, ok = QInputDialog.getText(
+            self,
+            "Separate this copy",
+            f"Which printing is this copy of {row.item.name}?\n"
+            "It becomes its own item, keeping its cost basis and history.",
+            text=row.item.variant or "",
+        )
+        if not ok:
+            return
+        try:
+            TransactionService(self._conn).split_lot_to_new_item(
+                row.lot_id, variant=variant.strip() or None
+            )
+        except ServiceError as exc:
+            QMessageBox.warning(self, "Cannot separate this copy", str(exc))
+            return
+        self.refresh()
+        self.changed.emit()
 
     def _toggle_missing(self, row: InventoryRow) -> None:
         """Flag/unflag the row's lot as stolen — a reversible $0 write-down."""

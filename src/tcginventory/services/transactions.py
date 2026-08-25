@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 
 from tcginventory.data.db import now_iso
 from tcginventory.data.repositories import (
@@ -204,6 +204,89 @@ class TransactionService:
             self._write_audit(transaction_id, AuditAction.VOID, before=before)
             self.conn.commit()
             return voided
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def split_lot_to_new_item(self, lot_id: int, **edits) -> Item:
+        """Move one lot onto its own item — "this copy is a different card".
+
+        Two printings of one collector number (a base Mew ex 205/165 and the
+        "151 Metal Card" one) used to match on every identity column, so they
+        merged into a single item carrying both copies' lots. Migration 0022
+        gives ``variant`` an identity column so *new* acquisitions separate, but
+        nothing in the data says which of the already-merged lots is which —
+        only the owner knows. This is how they say so.
+
+        The lot keeps its basis, quantity, intent and acquisition date: nothing
+        about the money moves, only which item the copy hangs from. The
+        acquiring transaction line moves with it, or History and per-item
+        realized P/L would disagree with the lot. The SKU is regenerated because
+        its prefix encodes the identity the copy just left.
+
+        Restricted to a **fully unsold** lot. A partially sold one has out-lines
+        and ``lot_consumption`` rows referencing the old item, and re-pointing
+        those is the money path — it belongs behind its own design, not here.
+
+        ``edits`` are attributes to set on the new item (typically
+        ``variant="151 Metal Card"``). Recorded in ``audit_log``; the lot and the
+        line move inside one transaction or not at all.
+        """
+        lot = self.lots.get(lot_id)
+        if lot is None:
+            raise TransactionStateError(f"no lot {lot_id}")
+        if lot.remaining_qty != lot.quantity or self.consumptions.list_for_lot(lot.id):
+            raise TransactionStateError(
+                f"lot {lot_id} has sold units; only a fully unsold copy can be "
+                "separated (its disposals reference the item it is leaving)"
+            )
+        source = self.items.get(lot.item_id)
+        if source is None:
+            raise TransactionStateError(f"lot {lot_id} has no item")
+        unknown = set(edits) - {f.name for f in fields(Item)}
+        if unknown:
+            raise TransactionStateError(f"not item fields: {sorted(unknown)}")
+
+        before = json.dumps({"lot_id": lot.id, "item_id": source.id, "sku": lot.sku})
+        try:
+            target = replace(source, id=None, created_at=None, updated_at=None, **edits)
+            # Re-use an item that already carries this exact identity rather
+            # than minting a duplicate — separating a second metal copy must
+            # land it beside the first, not create a third item.
+            existing = self.items.find_by_identity(target)
+            target = existing if existing is not None else self.items.add(target)
+
+            line_id = lot.acquired_txn_line_id
+            if line_id is not None:
+                line = self.lines.get(line_id)
+                # Only when the line is this lot's alone. A line split across
+                # several lots (a non-divisible purchase, see migration 0016)
+                # still describes the copies left behind.
+                if (
+                    line is not None
+                    and len(self.lots.list_for_acquired_line(line_id)) == 1
+                ):
+                    line.item_id = target.id
+                    self.lines.update(line)
+
+            lot.item_id = target.id
+            lot.sku = generate_sku(self.conn, target)
+            self.lots.update(lot)
+
+            self.audit.add(
+                AuditLogEntry(
+                    entity="lot",
+                    entity_id=lot.id,
+                    action=AuditAction.EDIT,
+                    before_json=before,
+                    after_json=json.dumps(
+                        {"lot_id": lot.id, "item_id": target.id, "sku": lot.sku}
+                    ),
+                    note=f"copy separated onto its own item ({target.id})",
+                )
+            )
+            self.conn.commit()
+            return target
         except Exception:
             self.conn.rollback()
             raise

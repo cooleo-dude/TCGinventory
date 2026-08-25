@@ -44,7 +44,13 @@ def make_base(item: Item) -> str:
     else:
         cond_grade = "NA"
     lang = item.language.value
-    return f"{name}-{set_seg}-{number}-{cond_grade}-{lang}"
+    base = f"{name}-{set_seg}-{number}-{cond_grade}-{lang}"
+    # A variant is a different item, so its copies need a different SKU run.
+    # Appended rather than woven in, so every SKU already issued against a
+    # base-print item is byte-identical after this (migration 0022 leaves
+    # variant NULL on all 1,071 existing items).
+    variant = _seg(item.variant, 4) if item.variant else ""
+    return f"{base}-{variant}" if variant else base
 
 
 def generate_sku(conn: sqlite3.Connection, item: Item) -> str:

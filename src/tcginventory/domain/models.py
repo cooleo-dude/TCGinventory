@@ -35,6 +35,11 @@ class Item:
     set_name: str | None = None
     set_code: str | None = None
     card_number: str | None = None  # "60/107", "GG09/GG12"
+    # Which printing of that number this is — tcgcsv's product label
+    # ("151 Metal Card", "Pokemon Center Exclusive"); None for the base
+    # print. Part of identity: a variant is a different asset at a
+    # different price, not a note about the same one.
+    variant: str | None = None
     language: Language = Language.EN
     condition: Condition | None = None  # NULL when graded
     holo_pattern: HoloPattern | None = None

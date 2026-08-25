@@ -74,8 +74,14 @@ def _base_parts(item: Item) -> list[str]:
     The number is unconditional because it is the single most common way two
     give-side rows differ (22 of 33 colliding groups on the author's ledger), and
     without it a row gives no indication which printing is being pulled.
+
+    The variant rides with it for the same reason: a "151 Metal Card" is a
+    different asset from the base print at a different price (ticket 52), so
+    which one is being given away must never be left to a tie-break.
     """
-    return [p for p in (item.set_name, item.card_number, _grade(item)) if p]
+    return [
+        p for p in (item.set_name, item.card_number, item.variant, _grade(item)) if p
+    ]
 
 
 def _render(name: str, parts: list[str]) -> str:

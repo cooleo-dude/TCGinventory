@@ -27,7 +27,8 @@ _HOLO_LABEL = {"H": "Holo", "RH": "Reverse Holo"}
 
 
 def subline_for(row: InventoryRow) -> str:
-    """The Card cell's secondary line: set · number · lang · holo · edition · notes.
+    """The Card cell's secondary line: set · number · variant · lang · holo ·
+    edition · notes.
 
     Only the parts that exist show — no holo (``NH``) / no edition (``N/A``) are
     omitted, and the "Manual price change detected" review marker is stripped from
@@ -38,6 +39,8 @@ def subline_for(row: InventoryRow) -> str:
         parts.append(item.set_name)
     if item.card_number:
         parts.append(item.card_number)
+    if item.variant:
+        parts.append(item.variant)
     if item.language and item.language.value != "EN":
         parts.append(item.language.value)
     if item.holo_pattern and item.holo_pattern.value != "NH":
@@ -174,6 +177,16 @@ _COLUMNS: list[_Column] = [
         lambda r: r.item.card_number or "",
         field="card_number",
         editor="text",
+    ),
+    # Display-only, deliberately. A grid row is a *lot*, but variant is an
+    # identity column on the shared item — editing it inline would silently
+    # re-identify every other lot of the same card, which is the exact surprise
+    # ticket 52 exists to end. Change it for one copy with the row's "Separate
+    # this copy" action, or for the whole item in the item editor.
+    _Column(
+        "Variant",
+        lambda r: r.item.variant or "",
+        lambda r: (r.item.variant or "").lower(),
     ),
     _Column(
         "Lang",

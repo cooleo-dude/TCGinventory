@@ -63,6 +63,12 @@ class ItemEditorDialog(QDialog):
         self._set_code = QLineEdit(item.set_code or "" if item else "")
         self._set_name = QLineEdit(item.set_name or "" if item else "")
         self._card_number = QLineEdit(item.card_number or "" if item else "")
+        self._variant = QLineEdit(item.variant or "" if item else "")
+        self._variant.setPlaceholderText("Base print")
+        self._variant.setToolTip(
+            'Which printing this is ("151 Metal Card"). Part of the card\'s '
+            "identity, so changing it makes this a different item."
+        )
 
         self._language = QComboBox()
         for lang in Language:
@@ -130,6 +136,7 @@ class ItemEditorDialog(QDialog):
         form.addRow("Set code:", self._set_code)
         form.addRow("Set:", self._set_name)
         form.addRow("Card #:", self._card_number)
+        form.addRow("Variant:", self._variant)
         form.addRow("Language:", self._language)
         form.addRow("", self._graded)
         form.addRow("Condition:", self._condition)
@@ -187,6 +194,7 @@ class ItemEditorDialog(QDialog):
         item.set_code = self._set_code.text().strip() or None
         item.set_name = self._set_name.text().strip() or None
         item.card_number = self._card_number.text().strip() or None
+        item.variant = self._variant.text().strip() or None
         item.language = Language(self._language.currentData())
         item.is_graded = graded
         item.condition = None if graded else Condition(self._condition.currentData())
