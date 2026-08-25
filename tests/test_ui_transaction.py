@@ -614,3 +614,53 @@ def test_receive_row_printing_picker(app, conn):
     assert row.tcgplayer.text() == "u-excl"
     assert round(row.market.value() * 100) == 9413
     view.deleteLater()
+
+
+def test_receive_row_graded_toggle_gates_the_slab_fields(app, conn):
+    """The graded switch is what enables grading company / grade / cert #, and
+    disables Condition (a slab is identified by its grade, not its condition)."""
+    from tcginventory.ui.views.transaction import TransactionView
+
+    view = TransactionView(conn)
+    row = view._add_receive_row()
+
+    assert row.condition.isEnabled()
+    assert not row.company.isEnabled()
+    assert not row.grade.isEnabled()
+    assert not row.cert.isEnabled()
+
+    row.graded.setChecked(True)
+    assert not row.condition.isEnabled()
+    assert row.company.isEnabled()
+    assert row.grade.isEnabled()
+    assert row.cert.isEnabled()
+
+    row.graded.setChecked(False)
+    assert row.condition.isEnabled()
+    assert not row.company.isEnabled()
+    assert not row.grade.isEnabled()
+    assert not row.cert.isEnabled()
+    view.deleteLater()
+
+
+def test_receive_row_graded_switch_is_captioned_and_reacts_to_its_state(app, conn):
+    """Ticket 53: the switch was the only control in the advanced grid added
+    without a caption, and carried no styling, so it vanished into the
+    expander's ground and graded cards looked unenterable. It now has a caption
+    like its three siblings, and repaints when armed."""
+    from tcginventory.ui.views.transaction import TransactionView
+
+    view = TransactionView(conn)
+    row = view._add_receive_row()
+
+    assert row._graded_cap is not None  # not added raw any more
+    assert row._graded_cap.text() == "GRADED"
+    assert row.graded.objectName() == "gradedBox"
+
+    off = row.graded.styleSheet()
+    off_cap = row._graded_cap.styleSheet()
+    assert off  # unstyled was the defect
+    row.graded.setChecked(True)
+    assert row.graded.styleSheet() != off
+    assert row._graded_cap.styleSheet() != off_cap
+    view.deleteLater()
