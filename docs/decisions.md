@@ -2693,3 +2693,59 @@ Charizard promo that could not be found by its number. Two defects, compounding.
   first time.** It exists to pin prune ≡ predicate, so it tracks a change in the
   predicate's *meaning* while still refusing to track its implementation. Both
   new search tests were checked to go red on revert.
+
+## 2026-08-25 — Which printing a card is, is part of what card it is
+
+Reported as items being grouped in Inventory that should not be: a regular
+Mew ex 205/165 and a "151 Metal Card" Mew ex 205/165 shared one item, so editing
+item-level Notes on one grid row changed all three copies. (Ticket 52.)
+
+- **The app already offered the choice and discarded the answer.** tcgcsv lists
+  both products for that number — the base at $32.35 and `(151 Metal Card)` at
+  $25.57 — and `CardEntryMixin`'s Printing dropdown surfaces exactly that.
+  `_apply_variant` applied `variant.price_cents` and `variant.tcgplayer_url` and
+  dropped `variant.label`, because `Item` had no column to keep it in. With no
+  such column the two printings agreed on all eleven identity columns and
+  `find_by_identity` merged them.
+- **The quiet damage was to price, not display.** `_match_or_create_item`
+  refreshes `market_value_cents` on the item it matches, so acquiring a metal
+  copy overwrote the base card's market value with the metal one's. Two assets,
+  one price. That is why `variant` had to join `_ITEM_IDENTITY_COLUMNS` rather
+  than being a display field.
+- **`notes` stays out of identity, deliberately.** It is the obvious one-line
+  fix and the wrong one: items would fragment on a typo or a trailing space, and
+  `with_review_note` appends "Manual price changed detected." automatically — so
+  marking a card for review would silently split it from its own other copies.
+  The reporter reached for Notes because it was the only free-text field, which
+  is the signal that a field was missing, not that Notes should mean more.
+- **Nullable, un-backfilled, and free text.** Every existing row reads NULL, so
+  the 1,071 existing items go on matching each other and every SKU already
+  issued is byte-identical (`sku.make_base` only appends a segment when variant
+  is set). Nothing in the data says which of the three Mew ex lots were metal —
+  a migration that guessed would be worse than one that does nothing. Free text
+  rather than an enum because the set of printings is vendor-defined and open;
+  the picker fills it from tcgcsv's own label, and it stays editable for
+  variants TCGplayer does not list.
+- **Rejected: one item per acquisition.** It would destroy the point of lots —
+  FIFO needs several lots under one item, and 944 open lots would become 944
+  items, breaking every per-item aggregate in Dashboard, Inventory and
+  Reporting. Also rejected: overloading `holo_pattern`, a closed NH/H/RH enum
+  about foiling that the SKU and editor already key on.
+- **`split_lot_to_new_item` repairs what is already merged**, because only the
+  owner knows which copy is which. It moves one lot to its own item inside one
+  transaction with an `audit_log` row, keeping basis, quantity, intent and
+  acquisition date, and moves the acquiring `transaction_line` with it — the
+  line references the item, so leaving it behind would make History and
+  per-item realized P/L disagree with the lot. Separating a second copy reuses
+  the item the first one made rather than minting a third.
+- **The split refuses a partially sold lot.** Its out-lines and
+  `lot_consumption` rows reference the item being left, and re-pointing those is
+  the money path; it wants its own design and its own invariant proof. Same
+  restriction `delete_inventory_entry` already accepts.
+- **The Inventory grid shows Variant read-only.** Every other identity column
+  there (name, set, number, language, condition) is inline-editable and edits
+  the *shared* item, which is the pre-existing hazard this report ran into. A
+  row is a lot; changing one copy's printing is what the row's "Separate this
+  copy" action is for.
+- **Mutation-checked:** removing `variant` from the identity tuple turns seven
+  tests red, and removing the unsold-lot guard turns its negative test red.
