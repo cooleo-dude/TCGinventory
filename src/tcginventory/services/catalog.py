@@ -19,6 +19,7 @@ import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 from tcginventory.data.db import now_iso
 from tcginventory.data.repositories import CardCatalogRepository
@@ -77,6 +78,10 @@ def _results(data) -> list:
 class CatalogUpdateSummary:
     sets: int = 0
     cards: int = 0
+    # How many rows came out with an illustrator. Reported because the attribute
+    # sweep is best-effort: a pull that quietly resolved none of them still
+    # succeeds, and this is the number that says so.
+    artists: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -254,6 +259,117 @@ def _tcgdex_set_code(detail: dict) -> str | None:
     return serie.get("id") if isinstance(serie, dict) else None
 
 
+# ---------------------------------------------------------------------------
+# English attribute sweep — artist, rarity, supertype
+# ---------------------------------------------------------------------------
+
+# TCGdex's set payload (``/sets/{id}``) carries only a card *brief* — id,
+# localId, name, image — which is why the English pull left rarity and supertype
+# NULL, and had no artist to leave at all. Those three live on the per-card
+# endpoint: 23,444 requests for English, roughly eighty minutes.
+#
+# TCGdex also publishes an index per axis (``/illustrators``, ``/rarities``,
+# ``/categories``) and filters cards by it (``/cards?illustrator=…``). Inverting
+# those indexes costs one request per *value* rather than per card: 410 + 40 + 3
+# against 23,444, measured at 81s for the whole sweep and 96.6% / 99.5% / 99.5%
+# coverage of the English catalog.
+#
+# ``/variants`` exists but ``?variants=`` matches nothing, so foil treatment
+# (holo / reverse / first edition) is not reachable this way — it is per-card
+# only, and deliberately out of scope.
+_ATTRIBUTE_AXES: tuple[tuple[str, str, str], ...] = (
+    ("artist", "illustrators", "illustrator"),
+    ("rarity", "rarities", "rarity"),
+    ("supertype", "categories", "category"),
+)
+
+
+def _resolve_longest(claims: dict[str, set[str]]) -> dict[str, str]:
+    """Reduce ``{card_id: {every index value that claimed it}}`` to one value each.
+
+    The filters are **substring**-matched, not exact. ``?illustrator=Uta``
+    returns 493 cards, the first of them drawn by *Saya Tsuruta*; 2,935 of the
+    23,444 English cards are claimed by more than one illustrator name this way.
+    Keeping whichever arrived last attributes those cards by the order TCGdex
+    happened to list its illustrators in — wrong on 13% of the catalog, and
+    silently, which is why this is a named function with a test rather than a
+    ``dict`` assignment inside the loop.
+
+    A value ``N`` is returned for a card exactly when ``N`` is a substring of the
+    card's true value ``A``. ``A`` always claims itself, and every false positive
+    is therefore a *proper* substring of ``A`` — so the true value is always the
+    **longest** claimant. Checked against the per-card endpoint on 25
+    multi-claim cards: 25/25 correct, no counterexample.
+
+    Sorted before ``max`` so an equal-length tie takes the alphabetically first
+    claimant rather than whatever set iteration happened to yield, which is not
+    stable across runs. Two values of equal length cannot each be a substring of
+    the other, so a tie means neither is the true value anyway — determinism is
+    all that is available, and all that matters.
+    """
+    return {
+        card_id: max(sorted(names), key=len)
+        for card_id, names in claims.items()
+        if names
+    }
+
+
+def _attribute_plan(
+    fetch: Callable[[str], object],
+) -> tuple[list[tuple[str, str, str]], list[str]]:
+    """The sweep's work list: one ``(attribute, query param, value)`` per index
+    entry.
+
+    Fetched up front — three requests — so the caller can size a progress bar
+    across the sweep instead of watching it stall after the set phase. An axis
+    whose index will not load is dropped and reported; the others still run,
+    because a missing rarity costs less than a lost catalog.
+    """
+    plan: list[tuple[str, str, str]] = []
+    errors: list[str] = []
+    for attribute, index_path, param in _ATTRIBUTE_AXES:
+        try:
+            values = _as_list(fetch(f"{_TCGDEX}/{index_path}"))
+        except Exception as exc:
+            errors.append(f"{attribute} index: {exc}")
+            continue
+        plan.extend(
+            (attribute, param, value.strip())
+            for value in values
+            if isinstance(value, str) and value.strip()
+        )
+    return plan, errors
+
+
+def _sweep_attributes(
+    fetch: Callable[[str], object],
+    plan: list[tuple[str, str, str]],
+    on_step: Callable[[int], None] | None = None,
+) -> tuple[dict[str, dict[str, str]], list[str]]:
+    """Run the work list, returning ``{attribute: {card_id: value}}``.
+
+    One value that fails to fetch is recorded and skipped rather than abandoning
+    the sweep: this is best-effort enrichment layered onto a catalog that is
+    already complete without it, and a single dead illustrator query must not
+    cost the other 409.
+    """
+    claims: dict[str, dict[str, set[str]]] = {}
+    errors: list[str] = []
+    for done, (attribute, param, value) in enumerate(plan, start=1):
+        try:
+            cards = _as_list(fetch(f"{_TCGDEX}/cards?{param}={quote(value)}"))
+        except Exception as exc:
+            errors.append(f"{attribute}={value}: {exc}")
+            cards = []
+        axis = claims.setdefault(attribute, {})
+        for card in cards:
+            if isinstance(card, dict) and card.get("id"):
+                axis.setdefault(card["id"], set()).add(value)
+        if on_step is not None:
+            on_step(done)
+    return {attr: _resolve_longest(a) for attr, a in claims.items()}, errors
+
+
 def update_catalog(
     conn: sqlite3.Connection,
     fetch_json: Callable[[str], object] | None = None,
@@ -280,6 +396,13 @@ def update_catalog(
     total = len(valid)
     details = _fetch_map(fetch, [f"{_TCGDEX}/sets/{s['id']}" for s in valid])
 
+    # The attribute sweep is about half this pull's wall clock, so its work list
+    # is planned here and folded into one progress span with the set phase —
+    # otherwise the bar reaches 100% and then sits there for 80 seconds.
+    plan, plan_errors = _attribute_plan(fetch)
+    summary.errors.extend(plan_errors)
+    steps = total + len(plan)
+
     cards: list[CatalogCard] = []
     for done, s in enumerate(valid, start=1):
         set_id = s["id"]
@@ -287,7 +410,7 @@ def update_catalog(
         if not isinstance(detail, dict):
             summary.errors.append(f"{set_id}: {detail}")
             if on_progress is not None:
-                on_progress(done, total)
+                on_progress(done, steps)
             continue
         set_name = detail.get("name") or s.get("name")
         set_code = _tcgdex_set_code(detail)
@@ -305,6 +428,8 @@ def update_catalog(
                     set_name=set_name,
                     set_code=set_code,
                     number=_printed_number(set_id, c.get("localId")),
+                    # Both filled by the attribute sweep below — the set payload
+                    # is a card brief and carries neither.
                     rarity=None,
                     supertype=None,
                     image_small=_tcgdex_image(c.get("image")),
@@ -312,11 +437,35 @@ def update_catalog(
                 )
             )
         if on_progress is not None:
-            on_progress(done, total)
+            on_progress(done, steps)
 
     if not cards:
         summary.errors.append("no cards fetched — catalog left unchanged")
         return summary
+
+    # Enrich *before* the write, not after it: replace_for_language DELETEs the
+    # language's rows and re-inserts, so anything applied by a later UPDATE would
+    # be erased by the next pull. Populating the dataclasses here makes the
+    # columns correct by construction.
+    attributes, sweep_errors = _sweep_attributes(
+        fetch,
+        plan,
+        on_step=(
+            None
+            if on_progress is None
+            else lambda done: on_progress(total + done, steps)
+        ),
+    )
+    summary.errors.extend(sweep_errors)
+    by_artist = attributes.get("artist", {})
+    by_rarity = attributes.get("rarity", {})
+    by_supertype = attributes.get("supertype", {})
+    for card in cards:
+        card.artist = by_artist.get(card.card_id)
+        card.rarity = by_rarity.get(card.card_id)
+        card.supertype = by_supertype.get(card.card_id)
+    summary.artists = sum(1 for c in cards if c.artist)
+
     _fill_missing_images(cards, fetch)
     try:
         CardCatalogRepository(conn).replace_for_language(cards, "EN", now_iso())

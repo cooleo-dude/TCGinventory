@@ -138,6 +138,13 @@ def _fake_fetch(url: str):
     for set_id, detail in _SET_DETAIL.items():
         if url.endswith(f"/sets/{set_id}"):
             return detail
+    # The English pull also sweeps TCGdex's attribute indexes for artist, rarity
+    # and supertype (ticket 54). These tests are about the set/card half, so the
+    # indexes answer empty and the sweep is a no-op — but they must answer, or
+    # every one of them collects three "index unreachable" errors. The sweep has
+    # its own coverage in tests/test_catalog_artist.py.
+    if url.endswith(("/illustrators", "/rarities", "/categories")):
+        return []
     raise AssertionError(f"unexpected url: {url}")
 
 
