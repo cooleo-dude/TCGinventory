@@ -2749,3 +2749,99 @@ item-level Notes on one grid row changed all three copies. (Ticket 52.)
   copy" action is for.
 - **Mutation-checked:** removing `variant` from the identity tuple turns seven
   tests red, and removing the unsold-lot guard turns its negative test red.
+
+### 2026-08-26 — Catalog artist, and why the illustrator index needs longest-wins
+
+- **Why:** the planned **Collections** window derives template membership from
+  card attributes, and "every card illustrated by X" is the template most wanted.
+  An audit of the live catalog (53,289 rows) found the attribute layer thinner
+  than assumed, and split by language: EN had `printed_total` for 23,444/23,444
+  but **rarity for 0**; JP had rarity for 19,718/29,845 but **`printed_total` for
+  0**; `supertype` was populated for **none of the 53,289** — a dead column since
+  0008; and artist had no column at all. So the two obvious template axes were
+  mutually exclusive by language, and the wanted one did not exist.
+- **Cause of the EN gaps:** `update_catalog` reads each set's TCGdex
+  `/sets/{id}` detail, whose `cards` array is a *card brief* — `id`, `localId`,
+  `name`, `image`. It therefore hardcoded `rarity=None, supertype=None`, as the
+  ADR of 2026-07-14 records. Nothing was wrong; the data was simply never there.
+- **Decision: invert TCGdex's own indexes rather than fetch per card.**
+  `/illustrators` (410 names), `/rarities` (40) and `/categories` (3) list their
+  values, and `/cards?illustrator=…` lists the cards carrying one. That is **453
+  requests against 23,444** — measured at **81s versus roughly 80 minutes** — and
+  it fills all three columns in one pass: **artist 22,639/23,444 (96.6%), 386
+  distinct artists; rarity 23,324 (99.5%); supertype 23,324 (99.5%)**.
+- **The trap, and the rule that fixes it.** `?illustrator=` is
+  **substring**-matched, not exact: `?illustrator=Uta` returns 493 cards, the
+  first drawn by *Saya Tsuruta*. **2,935 of the 23,444 English cards (13%) are
+  claimed by more than one illustrator name**, so keeping whichever arrived last
+  attributes them by the order TCGdex happened to list its illustrators in —
+  wrong on an eighth of the catalog, and silently. A first dry run looked clean
+  only because the true names happened to sort after their false positives.
+
+  The filter returns name `N` for a card with true value `A` exactly when `N` is
+  a substring of `A`. `A` always claims itself, and every false positive is
+  therefore a *proper* substring of it — so **the true value is always the
+  longest claimant**. Verified against the per-card endpoint on 25 multi-claim
+  cards: **25/25 correct, 0 containment violations**. This is why
+  `_resolve_longest` is a named function with four tests rather than a `dict`
+  assignment inside the loop; reverting it to last-wins turns four red,
+  including the end-to-end pull.
+- **Enrichment happens inside the pull, before the write.**
+  `replace_for_language` deletes the language's rows and re-inserts, so a
+  post-hoc `UPDATE card_catalog SET artist = …` would be erased by the next
+  "Update card database". Populating the `CatalogCard` dataclasses before
+  `replace_for_language` makes the columns correct by construction and removes
+  the drift entirely. It also keeps one logical fact behind one trigger path,
+  which is what `services/operations.py` exists to enforce.
+- **Failure is isolated three ways**, because this is best-effort enrichment
+  layered on a catalog that is already correct without it: a dead *index* drops
+  only its own axis, a dead *query* drops only that one value, and a wholly dead
+  sweep still writes a complete catalog with `artist IS NULL`. `summary.artists`
+  reports how many resolved, so a pull that silently enriched nothing says so.
+- **English only.** JP rows come from tcgcsv, whose `card_id` is a TCGplayer
+  product id (`jp-694993`); TCGdex — the only source that knows the illustrator —
+  keys on `base1-1`. There is no join short of fuzzy name+set+number matching,
+  which needs its own accuracy budget. An artist template must say so rather than
+  appear empty for half the catalog.
+- **Rejected: per-card TCGdex fetch (23,444 requests).** The complete answer, and
+  the *only* route to `variants` (holo / reverse / first edition, which
+  `?variants=` does not filter on — it returns 0). But ~80 minutes for the last
+  3.4% of artist coverage. Revisit only if a holo template is actually wanted,
+  and price it then.
+- **Rejected: the pokemontcg.io GitHub dump for artist.** One request per set and
+  it carries rarity/supertype too, but artist coverage collapses at the leading
+  edge — **sv9: 0/190**, against 102/102 for base1 and 256/258 for sv1. Reverting
+  the EN source for a partly-populated column would trade the 2026-08-04 decision
+  for a worse one.
+- **Rejected: adding `artist` to `card_catalog_fts`.** 0020's table is
+  external-content and trigram-tokenized for substring autocomplete; Collections
+  filters artist by equality, which wants a b-tree. Adding it would mean dropping
+  and rebuilding the virtual table for no gain. `idx_card_catalog_artist
+  (artist, language)` serves the query instead.
+- **Consequence:** "Update card database (EN)" is about **80 seconds slower**.
+  `on_progress` now spans both phases over one total (sets + planned index
+  values), so the bar does not reach 100% and then sit through the sweep. Note
+  that `_CatalogUpdateWorker` does not currently pass `on_progress` at all, so the
+  tile is indeterminate either way — the contract is correct for when it does.
+- **Un-backfilled, deliberately.** Every existing row reads NULL until the next
+  EN pull, and `distinct_artists` excludes NULL rather than offering an "unknown
+  artist" bucket: a NULL means "not re-pulled yet" or "Japanese row", neither of
+  which is a collecting project.
+- **Four of TCGdex's 410 illustrator names are malformed upstream**, and the
+  sweep reproduces them faithfully rather than guessing:
+  `'"Big Mama" Tagawa'`, `'"Big Mama" Tagawa"'` (stray quote),
+  `'"Big Mama" Tagawa"Big Mama" Tagawa'` (doubled) and
+  `'Sumiyoshi Kizuki"Big Mama" Tagawa'` (two artists concatenated, no
+  separator). Confirmed **not** an artefact of the inversion: the per-card
+  endpoint returns exactly these strings — `pop2-9`'s illustrator really is the
+  doubled form, `ecard1-119`'s really is the concatenated pair. Longest-wins is
+  therefore behaving correctly; the source is wrong. It affects four cards, so
+  normalising was rejected as out of proportion and, for the concatenated pair,
+  as guesswork: splitting it needs a rule that knows `"Big Mama" Tagawa` is one
+  name. **Consequence for Collections:** leading quotes sort first, so an artist
+  picker over `distinct_artists` opens on these four. The picker should collapse
+  or demote them; the catalog should keep saying what the source said.
+- Ticket 54. Verified by a real pull into a throwaway DB: 218 sets, 23,546 cards,
+  **22,827 artists (96.9%), rarity and supertype 100%, zero errors, 174s**, and
+  `base1-4` / `sv09-001` / `swsh9-018` each matching independently-checked ground
+  truth.

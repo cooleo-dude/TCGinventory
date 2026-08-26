@@ -195,6 +195,10 @@ class CatalogCard:
     image_small: str | None = None
     printed_total: int | None = None
     language: str = "EN"  # "EN" (pokemontcg.io) or "JP" (TCGdex)
+    # Illustrator, English rows only (migration 0023). NULL until the catalog has
+    # been re-pulled, and permanently NULL for Japanese rows — tcgcsv does not
+    # carry it and its product ids do not join to TCGdex's.
+    artist: str | None = None
 
     @property
     def full_number(self) -> str | None:

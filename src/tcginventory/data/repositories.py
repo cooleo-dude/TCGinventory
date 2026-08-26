@@ -910,6 +910,7 @@ class CardCatalogRepository:
             image_small=row["image_small"],
             printed_total=row["printed_total"],
             language=row["language"],
+            artist=row["artist"],
         )
 
     def count(self) -> int:
@@ -1002,8 +1003,9 @@ class CardCatalogRepository:
             """
             INSERT OR REPLACE INTO card_catalog (
                 card_id, name, set_id, set_name, set_code, number, rarity,
-                supertype, image_small, printed_total, language, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                supertype, image_small, printed_total, language, artist,
+                updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             [
                 (
@@ -1018,6 +1020,7 @@ class CardCatalogRepository:
                     c.image_small,
                     c.printed_total,
                     c.language,
+                    c.artist,
                     updated_at,
                 )
                 for c in cards
@@ -1061,6 +1064,23 @@ class CardCatalogRepository:
             (prefix.replace("%", "") + "%", limit),
         ).fetchall()
         return [r["name"] for r in rows]
+
+    def distinct_artists(self, language: str = "EN") -> list[str]:
+        """Every illustrator in the catalog for one language, name-sorted.
+
+        The read surface behind an artist-based Collections template. NULLs are
+        excluded rather than reported as an "unknown artist" bucket: a NULL here
+        means the catalog has not been re-pulled since migration 0023, or the
+        card is a Japanese row that can never carry one — neither is a collecting
+        project, and offering it as one would be a lie about coverage.
+        """
+        rows = self.conn.execute(
+            "SELECT DISTINCT artist FROM card_catalog "
+            "WHERE language = ? AND artist IS NOT NULL AND artist <> '' "
+            "ORDER BY artist",
+            (language,),
+        ).fetchall()
+        return [r["artist"] for r in rows]
 
     def find_by_name(self, name: str) -> list[CatalogCard]:
         """All printings of an exact card name, newest-set first-ish."""
