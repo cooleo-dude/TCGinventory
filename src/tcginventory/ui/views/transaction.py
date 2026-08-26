@@ -572,6 +572,10 @@ class _ReceiveRow(CardEntryMixin):
         # with >1 tcgplayer product (base + stamped variants, e.g. Pokemon
         # Center Exclusive). Shown in the advanced grid via _printing_cell.
         self._init_printing_picker()
+        # Built in widget(), which runs after this — _toggle_graded is called
+        # below and again on every toggle, so it has to tolerate "not laid out
+        # yet" rather than assume the caption exists.
+        self._graded_cap: QLabel | None = None
         self._toggle_graded(False)
 
     def _apply_variant(self, variant) -> None:
@@ -621,6 +625,39 @@ class _ReceiveRow(CardEntryMixin):
         self.company.setEnabled(graded)
         self.grade.setEnabled(graded)
         self.cert.setEnabled(graded)
+        if self._graded_cap is not None:
+            self._style_graded(graded)
+
+    def _style_graded(self, on: bool) -> None:
+        """Paint the graded switch and its caption.
+
+        It reads as accent when armed because the three slab fields beside it
+        are disabled until it is: an unstyled default checkbox against the
+        expander's ``zebra`` ground was invisible, so the fields it gates looked
+        permanently dead and graded cards looked unenterable (ticket 53).
+        """
+        t = theme.active()
+        self._graded_cap.setStyleSheet(
+            f"color:{t.accent_ink if on else t.ink3};font-size:9px;"
+            f"font-weight:700;letter-spacing:.4px;"
+        )
+        self.graded.setStyleSheet(
+            f"QCheckBox#gradedBox{{color:{t.accent_ink if on else t.ink2};"
+            f"font-size:11px;font-weight:600;spacing:6px;padding:4px 7px;"
+            f"border:1px solid {t.accent if on else t.line2};border-radius:7px;"
+            f"background:{t.accent_soft if on else t.surface2};}}"
+            f"QCheckBox#gradedBox:hover{{border-color:{t.accent};"
+            f"color:{t.accent_ink};}}"
+            f"QCheckBox#gradedBox::indicator{{width:15px;height:15px;"
+            f"border-radius:4px;border:1.5px solid {t.line2};"
+            f"background:{t.surface};}}"
+            f"QCheckBox#gradedBox::indicator:hover{{border-color:{t.accent};}}"
+            # No image override: Fusion draws its own checkmark over the accent
+            # fill, and a checkmark reads as "on" where a filled square does not
+            # (see _autofill_dialog's afInclude, which learned this the hard way).
+            f"QCheckBox#gradedBox::indicator:checked{{background:{t.accent};"
+            f"border-color:{t.accent};}}"
+        )
 
     def apply_catalog_card(self, card) -> None:
         """Populate as many fields as possible from a chosen catalog card."""
@@ -783,8 +820,22 @@ class _ReceiveRow(CardEntryMixin):
         cell("Grading co.", self.company, 1, 0)
         cell("Grade", self.grade, 1, 1)
         cell("Cert #", self.cert, 1, 2)
+        # Captioned and styled like the three cells it gates — added raw, it
+        # was the only uncaptioned control in the grid and disappeared into the
+        # background (ticket 53).
         self.graded.setText("Graded slab")
-        g.addWidget(self.graded, 1, 3, Qt.AlignBottom)
+        self.graded.setObjectName("gradedBox")
+        self.graded.setCursor(Qt.PointingHandCursor)
+        self.graded.setToolTip(
+            "This card is a graded slab — enables grading company, grade and cert #"
+        )
+        self._graded_cap = QLabel("GRADED")
+        gbox = QVBoxLayout()
+        gbox.setSpacing(3)
+        gbox.addWidget(self._graded_cap)
+        gbox.addWidget(self.graded)
+        g.addLayout(gbox, 1, 3)
+        self._style_graded(self.graded.isChecked())
         cell("TCGplayer URL", self.tcgplayer, 2, 0, 2)
         cell("eBay URL", self.ebay, 2, 2, 2)
         cell("Notes", self.notes, 3, 0, 4)
