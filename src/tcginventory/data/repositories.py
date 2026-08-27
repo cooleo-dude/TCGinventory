@@ -1375,6 +1375,98 @@ class CardCatalogRepository:
         return (row["n"] or 0, row["at"]) if row else (0, None)
 
 
+class CardTreatmentRepository:
+    """Which foil printings each catalog card exists in (migration 0024).
+
+    One row per (card, treatment) — a card commonly has two, and 45.6% of
+    TCGplayer products carry more than one. Values are tcgcsv's own
+    ``subTypeName`` strings; :mod:`tcginventory.services.pricing` holds the map
+    back onto ``holo_pattern`` / ``edition``.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def replace_for_language(
+        self, rows: Sequence[tuple[str, str]], language: str
+    ) -> None:
+        """Swap in a language's treatments — ``(card_id, treatment)`` pairs.
+
+        Mirrors :meth:`CardCatalogRepository.replace_for_language` and is called
+        in the same transaction, because a catalog pull deletes and re-inserts
+        every card row: leaving treatments behind would point them at
+        ``card_id``s that no longer exist.
+        """
+        self.conn.execute(
+            "DELETE FROM card_catalog_treatment WHERE language = ?", (language,)
+        )
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO card_catalog_treatment "
+            "(card_id, language, treatment) VALUES (?,?,?)",
+            [(card_id, language, treatment) for card_id, treatment in rows],
+        )
+
+    def treatments_for(self, card_id: str) -> list[str]:
+        """Every printing this card comes in, name-sorted. Empty when the pull
+        could not resolve the card — which is not the same as "only one"."""
+        rows = self.conn.execute(
+            "SELECT treatment FROM card_catalog_treatment "
+            "WHERE card_id = ? ORDER BY treatment",
+            (card_id,),
+        ).fetchall()
+        return [r["treatment"] for r in rows]
+
+    def treatments_for_many(self, card_ids: Sequence[str]) -> dict[str, list[str]]:
+        """``{card_id: [treatment, …]}`` for a batch — one query per call rather
+        than one per card, which is what a Collections grid needs."""
+        out: dict[str, list[str]] = {}
+        ids = list(card_ids)
+        for start in range(0, len(ids), 500):  # stay under SQLite's parameter cap
+            chunk = ids[start : start + 500]
+            marks = ",".join("?" * len(chunk))
+            for row in self.conn.execute(
+                f"SELECT card_id, treatment FROM card_catalog_treatment "
+                f"WHERE card_id IN ({marks}) ORDER BY card_id, treatment",
+                chunk,
+            ):
+                out.setdefault(row["card_id"], []).append(row["treatment"])
+        return out
+
+    def card_ids_with(
+        self, treatment: str, language: str = "EN", set_id: str | None = None
+    ) -> list[str]:
+        """The card ids that come in ``treatment`` — the Collections template
+        query ("every reverse holo in Brilliant Stars")."""
+        if set_id is None:
+            rows = self.conn.execute(
+                "SELECT card_id FROM card_catalog_treatment "
+                "WHERE language = ? AND treatment = ? ORDER BY card_id",
+                (language, treatment),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT t.card_id FROM card_catalog_treatment t "
+                "JOIN card_catalog c ON c.card_id = t.card_id "
+                "WHERE t.language = ? AND t.treatment = ? AND c.set_id = ? "
+                "ORDER BY t.card_id",
+                (language, treatment, set_id),
+            ).fetchall()
+        return [r["card_id"] for r in rows]
+
+    def distinct_treatments(self, language: str = "EN") -> list[str]:
+        rows = self.conn.execute(
+            "SELECT DISTINCT treatment FROM card_catalog_treatment "
+            "WHERE language = ? ORDER BY treatment",
+            (language,),
+        ).fetchall()
+        return [r["treatment"] for r in rows]
+
+    def count(self) -> int:
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM card_catalog_treatment"
+        ).fetchone()[0]
+
+
 class OperationRunRepository:
     """The maintenance run log (operation_run) behind the Operations window.
 

@@ -544,8 +544,9 @@ class _ReceiveRow(CardEntryMixin):
         self.condition = _combo(Condition)
         # Auto-mark for review when a non-NM condition is chosen.
         self.condition.currentIndexChanged.connect(self._maybe_flag_review)
-        self.holo = _combo(HoloPattern)  # default NH
+        self.holo = _combo(HoloPattern)  # narrowed once a card's printings load
         self.edition = _combo(Edition)  # default N/A
+        self.init_treatments()
         self.company = _combo(GradingCompany)
         self.grade = QLineEdit()
         self.cert = QLineEdit()
@@ -589,6 +590,9 @@ class _ReceiveRow(CardEntryMixin):
         self.market.setValue(variant.price_cents / 100)
         self.tcgplayer.setText(variant.tcgplayer_url)
         self.variant.setText("" if variant.is_base else variant.label)
+        # A stamped printing may offer a different set of foils than the base
+        # one, so re-narrow whenever the printing changes.
+        self.offer_treatments()
 
     def widgets(self) -> list[QWidget]:
         return [
@@ -1548,6 +1552,10 @@ class TransactionView(QWidget):
         if base.tcgplayer_url and not row.tcgplayer.text().strip():
             row.tcgplayer.setText(base.tcgplayer_url)
         row.set_variants(variants)  # offer the picker when >1 printing
+        # Narrow Foil to the printings this product comes in, which also
+        # re-prices to the chosen one. After set_variants, so it reads the
+        # selected printing. (Ticket 57.)
+        row.offer_treatments()
         self._update_summary()
 
     # Test/programmatic API (used by the lifecycle tests).

@@ -2913,3 +2913,185 @@ auction is restorable from it.
   is the home for it, not an automatic sweep.
 - Ticket 58. Verified offscreen: 16 new pane tests plus 11 repository tests, the
   full suite green, and the two correlation guards proven red under mutation.
+### 2026-08-26 — Price the printing the card actually is, not the dearest one
+
+- **Bug:** `TcgcsvProvider._prices_for_group` collapsed a product's foil
+  treatments with `max()` — one line, commented "keep the highest market" — so
+  the app recorded the dearest printing as *the* price for the card. A plain
+  Normal copy was valued at its Reverse Holofoil. Worst in the catalog: a
+  Shadowless Base Set Charizard in Unlimited Holo ($2,146.38) recorded at the
+  1st Edition Holo's **$10,000.00**; Legendary Collection Charmander, Normal
+  $2.24, recorded at **$616.33** — 275x. 786 products carry a gap >= $50.
+- **The data was already being downloaded.** tcgcsv mirrors TCGplayer's own
+  model: one price row per product **per `subTypeName`**. Measured across all 218
+  English groups, zero fetch errors — exactly **seven** values (Normal 19,241 ·
+  Reverse Holofoil 13,602 · Holofoil 10,463 · Unlimited 761 · 1st Edition 760 ·
+  Unlimited Holofoil 179 · 1st Edition Holofoil 174) and **13,900 of 30,457
+  products (45.6%) carry more than one**. The collapse was throwing it away.
+- **Nothing new needed modelling.** `_ITEM_IDENTITY_COLUMNS` already contains
+  `holo_pattern` **and** `edition` (migration 0011), so a holo copy and a
+  non-holo copy have always been separate items with separate basis. All seven
+  treatments decompose exactly onto those two enums. The lookup simply had to use
+  what the item already said it was.
+- **Decision:** `_prices_for_group` keeps every treatment
+  (`{product_id: {subtype: cents}}`) and `select_treatment()` picks one, in four
+  recorded steps: **exact** (the item's printing is priced), **only** (the
+  product has one printing, which the item's claim cannot override), **cheapest**
+  (several exist, the item does not say), **fallback** (the item names one this
+  product lacks). `PriceQuote` carries `treatment` and `picked` so the choice is
+  inspectable rather than buried.
+- **Cheapest, not dearest, when unknown.** Overstating a portfolio inflates
+  unrealized gain and the Collection Value tile — the more damaging direction to
+  be wrong in — and Normal outnumbers the foils anyway.
+- **Rule 4 was wrong on the first attempt, and the real ledger caught it.** It
+  originally *refused* to price a card whose declared printing the product did
+  not carry, reasoning that a missing price beats a confident wrong one. Run
+  against a copy of the live database that **dropped 53 items whose product match
+  was perfectly good**: vintage cards exist only as `1st Edition`/`Unlimited`
+  with no plain `Normal`, and holo-only cards are routinely recorded `NH` because
+  `NH` is the default — the claim carries almost no information when 93% of items
+  make it. The card is still one of the printings offered, so the cheapest of
+  them is a real answer; refusing merely deleted a price the user had. Now it
+  falls back and marks the quote `fallback`, which is also the signal ticket 57
+  will use to decide what to ask about.
+- **Measured, old algorithm vs new, over identical fetched data** (a copy of the
+  real ledger, 1,101 un-graded items, 968 resolving to a priced product):
+  **968 priced before, 968 after — nothing lost** — and **108 of 968 prices
+  corrected, removing $5,476.18 of overstatement.** Picks: 96 exact, 818 only,
+  53 fallback, 1 cheapest. Largest single correction: Dark Slowbro 8/110 from
+  $329.99 to $44.77.
+- **The catalog-wide sweep is deliberately unchanged.** `market_prices()` still
+  collapses to the dearest, now via an explicit `_collapse_dearest()` naming this
+  ticket. That sweep prices *catalog cards*, which have no owner and therefore no
+  treatment to select by, and its output is a year of `pricehistory.db` series
+  behind the Inventory sparkline, `services/trends.py` and Market signals.
+  Changing it would silently redefine every existing series. Whether it should
+  prefer a base printing instead is a separate decision, deliberately left open.
+- **Card-entry autofill follows the same rule.** `price_for_card` and
+  `variants_for_card` run before an item exists, so they use the shared
+  `cheapest_treatment()` rather than the dearest — otherwise the bug survived at
+  the point of entry, where `market_value_cents` is first written.
+- **Rejected: a treatment column on `price_snapshot`.** Records the same wrong
+  number with better provenance; the bug is the selection, not the storage.
+- **Rejected: duplicating cards under a foil alias** (`Geodude 111/102 Holo` as
+  its own card), which was the original proposal. `holo_pattern` already makes
+  them separate items, so an alias would be a second mechanism for one fact, able
+  to disagree with the first — the hazard migration 0022's ADR documents. It also
+  cannot be backfilled and would not survive `replace_for_language`.
+- **No migration.** `price_snapshot` keeps one row per item; the item already
+  encodes its treatment. Ticket 56.
+
+### 2026-08-26 — Which foil printings a card comes in, as catalog reference data
+
+- **Why:** the Collections window needs "every reverse holo in this set" to be an
+  enumerable checklist, and nothing in the catalog said which treatments a card
+  exists in. `card_catalog` carried name/set/number/rarity/supertype/artist and
+  no foil.
+- **Not a column — a child table.** 45.6% of TCGplayer products carry more than
+  one treatment (measured: 13,900 of 30,457), so a single column could record
+  only one of them and would lose the question being asked. On the real catalog,
+  **68.3% of resolved cards have more than one**.
+- **Source: tcgcsv, in files the app already downloads.** Its price rows carry a
+  `subTypeName` per product. TCGdex knows the same thing as
+  `variants: {normal, holo, reverse, firstEdition, wPromo}`, but only on its
+  **per-card** endpoint — `?variants=` filters nothing — so that route is 23,546
+  requests. Reading it off the price files costs group resolution and a cached
+  fetch per set instead. Measured on the live catalog: **37 seconds**.
+- **Measured coverage: 22,274 of 23,444 English cards (95.0%)**, 37,528
+  (card, treatment) pairs, one set unresolved (`fut2020`, which has no tcgcsv
+  group). Vocabulary found matches the sweep of all 218 groups exactly: Reverse
+  Holofoil 14,243 · Normal 13,127 · Holofoil 8,327 · Unlimited 739 · 1st Edition
+  738 · Unlimited Holofoil 182 · 1st Edition Holofoil 172.
+- **Correctness signal worth recording: Base Set resolves to 0 reverse holos**,
+  15 holo and 86 normal. Reverse holos did not exist until Legendary Collection
+  in 2002, so a Base Set with reverse holos would have meant the join was wrong.
+  Journey Together, by contrast, gives 143 reverse holo / 63 holo / 127 normal.
+- **Stored as tcgcsv's raw string**, decomposed on read via
+  `services/pricing._TREATMENT`. The vendor vocabulary is the source of truth and
+  is open-ended in principle; a closed enum would be wrong within a release —
+  the same reasoning migration 0022 applied to `variant`.
+- **No foreign key, and rewritten in the same transaction as the cards.**
+  `CardCatalogRepository.replace_for_language` DELETEs and re-inserts a whole
+  language on every pull, so an FK would either block that or cascade the
+  treatments away mid-rebuild. Writing both inside one transaction is what keeps
+  them consistent; a test asserts zero orphaned rows after two consecutive pulls,
+  and the real sweep confirmed **0 orphans** over 37,528 rows.
+- **`language` is denormalised onto the table** so a pull can clear exactly its
+  own rows without joining back to a catalog that is mid-delete.
+- **Failure is isolated**, matching ticket 54's shape: a set that will not
+  resolve is recorded and skipped, a set whose fetch explodes costs only itself,
+  and a wholly dead sweep still writes a complete catalog with no treatments.
+  `CatalogUpdateSummary.treatments` reports how many cards were resolved, so a
+  pull that silently found none says so.
+- **`TcgcsvProvider.treatments_by_product()`** exposes the per-treatment data
+  ticket 56 started keeping — the sweep needs to know a card comes in Reverse
+  Holofoil without caring what it costs.
+- **Rejected: deriving treatments from the items the user owns.** It can only
+  describe what is already held, so it could never populate an unowned slot,
+  which is the entire point of a collection checklist.
+- **Rejected: JP coverage for now.** JP `card_id` is already a tcgcsv product id
+  so the join is cheaper there, but JP price files use different group ids and
+  the subtype vocabulary is unverified. English first, and a foil template must
+  say so rather than appearing empty for half the catalog.
+- Migration 0024, applied to a copy of the live ledger: schema 23 → 24, all
+  53,289 catalog rows preserved, `item`/`lot` untouched at 1,115/1,371, and the
+  new table empty until the next pull. Ticket 55.
+
+### 2026-08-26 — Card entry offers only the printings a card actually comes in
+
+- **Why:** ticket 56 made pricing respect an item's `holo_pattern`, which is
+  only worth as much as that column is accurate — and it is not. The real ledger
+  carries **1,040 NH / 20 H / 10 RH / 45 unset**, about **93% on the default**,
+  against a catalog where **45.6% of products have more than one printing**. That
+  distribution cannot be true; it is the shape of a field nobody was asked to
+  fill in, the same "the default is anti-correlated with truth" pattern already
+  found for the condition heuristic.
+- **There was no new widget to build.** Both card-entry screens already had
+  `self.holo = _combo(HoloPattern)` listing all three foils for every card and
+  defaulting to NON_HOLO. The fix is to make that combo *truthful*: offer only
+  the printings tcgcsv says the product comes in, and let the choice drive the
+  price.
+- **Treatments belong on `CardVariant`, not on the card.** Foil is a property of
+  the *product*: a stamped variant can offer a different set than the base print.
+  So `variants_for_card` now returns `treatments: dict[str, int]` — the printings
+  **and their individual prices** — and re-narrowing happens whenever the
+  Printing dropdown changes. This closes ticket 56's loop at the point of entry:
+  picking Reverse Holofoil applies the reverse holo's price, not the cheapest.
+- **This does not read `card_catalog_treatment` (ticket 55), deliberately.**
+  Entry resolves treatments live from the price file it is already fetching, so
+  the picker works with no catalog re-pull. Ticket 55's table answers a different
+  question — *which cards exist in a printing*, including ones the user does not
+  own — which a live per-card lookup cannot, because a checklist must enumerate
+  absences. Same vocabulary, two directions.
+- **It lives in `CardEntryMixin`, not in either row.** `CARD-ENTRY-STANDARD`
+  forbids forking the shared component, and Transaction and Auctions both build
+  the same combo. `apply_treatment_choice` prefers the host's own
+  `set_market_cents` where one exists, because Auctions tracks whether a price
+  was user-edited and writing its spin box directly would register our change as
+  a manual override — silently disabling future auto-pricing for that row.
+- **An unresolved product leaves the combo unconstrained.** An empty treatment
+  set means "could not tell", **not** "only one printing". Narrowing on a guess
+  would be worse than the default it replaces, so the full list comes back.
+- **`edition` is set alongside `holo_pattern`.** Both are identity columns;
+  recording only the foil would make a 1st-edition and an unlimited copy the same
+  item. `TREATMENT_IDENTITY` is derived from `_TREATMENT` rather than written
+  twice, and a test round-trips every entry so the two cannot drift.
+- **Bug caught by an existing test while building this:** filtering treatments to
+  named ones *before* choosing a price dropped any tcgcsv row with no
+  `subTypeName`, which cost the card its price entirely. A row without a
+  treatment label still prices the card; it just cannot say which printing it is.
+  Price selection now runs over all rows and only the *offer* is filtered.
+- **Rejected: making the treatment mandatory before submit.** The ticket proposed
+  blocking submission until an ambiguous row is resolved. Rejected on measurement:
+  narrowing already removes the wrong options, so the first entry in a narrowed
+  combo is a real printing rather than a default — a hard block would add friction
+  to every row while the remaining error case (two genuine printings, user picks
+  the first without looking) is not one a modal can fix.
+- **Split out, not dropped:** correcting the **existing** 1,040 defaults. Changing
+  `holo_pattern` on a saved item re-identifies it — it is in
+  `_ITEM_IDENTITY_COLUMNS`, so a correction can collide with another item and
+  must move lots the way `split_lot_to_new_item` does, with an audit row. That is
+  a money-path operation deserving its own ticket rather than a tail on a UI one.
+  Ticket 57 stops the bleeding; the backfill is filed separately.
+- Suite 1,071 passing. Reverting the narrowing turns **eight** tests red across
+  both hosts. Ticket 57.

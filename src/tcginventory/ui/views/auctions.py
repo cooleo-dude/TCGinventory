@@ -423,6 +423,7 @@ class _AuctionCardRow(CardEntryMixin):
         self.holo = _combo(HoloPattern)
         _select(self.holo, HoloPattern.NON_HOLO.value)
         self.holo.currentIndexChanged.connect(lambda *_: on_change())
+        self.init_treatments()  # narrow to the printings the card comes in
         self.market = _money_spin()
         self.market.valueChanged.connect(self._on_market_changed)
         self.qty = QSpinBox()
@@ -473,6 +474,8 @@ class _AuctionCardRow(CardEntryMixin):
     def _apply_variant(self, variant) -> None:
         self.set_market_cents(variant.price_cents)
         self.set_tcgplayer_url(variant.tcgplayer_url)
+        # A stamped printing may offer different foils than the base one.
+        self.offer_treatments()
 
     def _on_market_changed(self, *_args) -> None:
         # A user edit (not our own programmatic set) that differs from the last
@@ -2035,6 +2038,7 @@ class AuctionsView(QWidget):
         if not row.market_is_manual:
             row.set_market_cents(base.price_cents)
         row.set_variants(variants)  # offer the printing picker when >1 product
+        row.offer_treatments()  # then narrow Foil to what it comes in
         self._sync_printing_column()  # …and reveal its column when it appears
         self._update_breakdown()
 
