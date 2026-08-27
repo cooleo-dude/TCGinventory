@@ -235,3 +235,24 @@ class AuditLogEntry:
     after_json: str | None = None
     note: str | None = None
     id: int | None = None
+
+
+@dataclass
+class Collection:
+    """One collecting project in the Personal Collection window (migration 0025).
+
+    ``template`` names how membership is decided and ``selector`` is what that
+    template matches — a set id, an artist name, a rarity, a subset prefix — with
+    ``services/collections.py`` owning the interpretation. ``slot_mode`` decides
+    whether a slot is a collector number or an individual printing.
+    """
+
+    name: str
+    template: str  # set | subset | artist | rarity | supertype | custom
+    selector: str | None = None
+    slot_mode: str = "number"  # number | master
+    language: str = "EN"
+    notes: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    id: int | None = None

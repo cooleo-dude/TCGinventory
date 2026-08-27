@@ -35,6 +35,7 @@ from tcginventory.data.repositories import PriceSnapshotRepository
 from tcginventory.ui.assets import app_icon, scrafty_movie_path
 from tcginventory.ui.views.auctions import AuctionsView
 from tcginventory.ui.views.calendar import CalendarView
+from tcginventory.ui.views.collections import CollectionsView
 from tcginventory.ui.views.dashboard import DashboardView
 from tcginventory.ui.views.history import HistoryView
 from tcginventory.ui.views.inventory import InventoryView
@@ -49,6 +50,7 @@ NAV_ITEMS = [
     "Dashboard",
     "Transaction",
     "Inventory",
+    "Personal Collection",
     "History",
     "Calendar",
     "Price Lookup",
@@ -63,6 +65,7 @@ NAV_ICONS = {
     "Dashboard": "layout-dashboard",
     "Transaction": "arrow-left-right",
     "Inventory": "package",
+    "Personal Collection": "library",
     "History": "scroll-text",
     "Calendar": "calendar-days",
     "Price Lookup": "search",
@@ -137,6 +140,7 @@ class MainWindow(QMainWindow):
             ("Dashboard", lambda: DashboardView(conn)),
             ("Transaction", lambda: TransactionView(conn)),
             ("Inventory", lambda: InventoryView(conn)),
+            ("Personal Collection", lambda: CollectionsView(conn)),
             ("History", lambda: HistoryView(conn, auctions_conn=self._auctions_conn)),
             ("Calendar", lambda: CalendarView(conn)),
             ("Price Lookup", lambda: PriceLookupView(conn)),
@@ -161,6 +165,7 @@ class MainWindow(QMainWindow):
         self._dashboard = views["Dashboard"]
         self._transaction = views["Transaction"]
         self._inventory = views["Inventory"]
+        self._collections = views["Personal Collection"]
         self._history = views["History"]
         self._calendar = views["Calendar"]
         self._price_lookup = views["Price Lookup"]
@@ -183,6 +188,9 @@ class MainWindow(QMainWindow):
         self._transaction.posted.connect(self._on_ledger_changed)
         self._history.changed.connect(self._on_ledger_changed)
         self._inventory.changed.connect(self._on_ledger_changed)
+        # Bringing a card into a collection changes a lot's intent, which
+        # every intent-filtered screen reads.
+        self._collections.changed.connect(self._on_ledger_changed)
         # An import or a price refresh changes what every read screen shows.
         self._operations.changed.connect(self._on_ledger_changed)
         # A finished model job changes what Recognition can propose — a wider

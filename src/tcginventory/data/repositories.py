@@ -34,6 +34,7 @@ from tcginventory.domain.models import (
     CalendarEntry,
     CardShow,
     CatalogCard,
+    Collection,
     Item,
     Lot,
     LotConsumption,
@@ -1373,6 +1374,132 @@ class CardCatalogRepository:
             params = (language,)
         row = self.conn.execute(sql, params).fetchone()
         return (row["n"] or 0, row["at"]) if row else (0, None)
+
+
+class CollectionRepository:
+    """Collecting projects and, for custom ones, their hand-picked slots.
+
+    Template collections keep **no** membership rows: ownership is membership
+    (see migration 0025), so only ``custom`` uses ``collection_card``.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    @staticmethod
+    def _to_model(row: sqlite3.Row) -> Collection:
+        return Collection(
+            id=row["id"],
+            name=row["name"],
+            template=row["template"],
+            selector=row["selector"],
+            slot_mode=row["slot_mode"],
+            language=row["language"],
+            notes=row["notes"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def add(self, collection: Collection) -> Collection:
+        now = now_iso()
+        cur = self.conn.execute(
+            "INSERT INTO collection (name, template, selector, slot_mode, "
+            "language, notes, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                collection.name,
+                collection.template,
+                collection.selector,
+                collection.slot_mode,
+                collection.language,
+                collection.notes,
+                now,
+                now,
+            ),
+        )
+        collection.id = cur.lastrowid
+        collection.created_at = collection.updated_at = now
+        return collection
+
+    def update(self, collection: Collection) -> Collection:
+        if collection.id is None:
+            raise ValueError("cannot update a collection without an id")
+        collection.updated_at = now_iso()
+        self.conn.execute(
+            "UPDATE collection SET name = ?, template = ?, selector = ?, "
+            "slot_mode = ?, language = ?, notes = ?, updated_at = ? WHERE id = ?",
+            (
+                collection.name,
+                collection.template,
+                collection.selector,
+                collection.slot_mode,
+                collection.language,
+                collection.notes,
+                collection.updated_at,
+                collection.id,
+            ),
+        )
+        return collection
+
+    def delete(self, collection_id: int) -> None:
+        """Remove a collection and its picks.
+
+        A hard delete, and deliberately so: a collection is a *view* the user
+        arranged, not a ledger event. Nothing about money or holdings changes —
+        the cards stay in inventory with whatever intent they have, which is why
+        ``NO-HARD-DELETE`` does not reach here. ``collection_card`` goes with it
+        by ``ON DELETE CASCADE``, and the explicit delete covers a connection
+        opened without foreign keys on.
+        """
+        self.conn.execute(
+            "DELETE FROM collection_card WHERE collection_id = ?", (collection_id,)
+        )
+        self.conn.execute("DELETE FROM collection WHERE id = ?", (collection_id,))
+
+    def get(self, collection_id: int) -> Collection | None:
+        row = self.conn.execute(
+            "SELECT * FROM collection WHERE id = ?", (collection_id,)
+        ).fetchone()
+        return self._to_model(row) if row else None
+
+    def list_all(self) -> list[Collection]:
+        rows = self.conn.execute(
+            "SELECT * FROM collection ORDER BY template, name"
+        ).fetchall()
+        return [self._to_model(r) for r in rows]
+
+    # -- custom picks -------------------------------------------------------
+
+    def add_card(self, collection_id: int, card_id: str, treatment: str = "") -> None:
+        self.conn.execute(
+            "INSERT OR IGNORE INTO collection_card "
+            "(collection_id, card_id, treatment, added_at) VALUES (?,?,?,?)",
+            (collection_id, card_id, treatment, now_iso()),
+        )
+
+    def remove_card(
+        self, collection_id: int, card_id: str, treatment: str = ""
+    ) -> None:
+        """Drop a slot from a custom collection.
+
+        Intent on the owned lot is deliberately **not** reverted: removing a slot
+        is a membership change, and pushing a card back onto the resale side as a
+        side effect of tidying a checklist would be a bigger action than the
+        gesture implies. Change it in the Inventory grid if that is what you want.
+        """
+        self.conn.execute(
+            "DELETE FROM collection_card WHERE collection_id = ? AND card_id = ? "
+            "AND treatment = ?",
+            (collection_id, card_id, treatment),
+        )
+
+    def cards_for(self, collection_id: int) -> list[tuple[str, str]]:
+        """``[(card_id, treatment)]`` for a custom collection, in pick order."""
+        rows = self.conn.execute(
+            "SELECT card_id, treatment FROM collection_card "
+            "WHERE collection_id = ? ORDER BY added_at, card_id, treatment",
+            (collection_id,),
+        ).fetchall()
+        return [(r["card_id"], r["treatment"]) for r in rows]
 
 
 class CardTreatmentRepository:

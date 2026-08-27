@@ -3171,3 +3171,89 @@ meant clicking **Edit item…** inside it to open a second dialog,
 - Ticket 61. Verified: 1,109 tests green offscreen (11 new), ruff clean, both
   dialogs rendered before and the editor after, and the two guards that matter —
   the audit row and the notes line breaks — proven red under mutation.
+### 2026-08-27 — Personal Collection: ownership is membership
+
+- **Why:** Inventory is one row per *lot* and can only draw what is held. A
+  collecting project needs the opposite — a slot for every card in the set,
+  including the ones not owned — so membership comes from `card_catalog` and
+  ownership is painted on top. New twelfth nav destination.
+- **Named "Personal Collection", not "Collections".** The Dashboard's
+  **Collection Value** tile and `collection_value_snapshot` (migration 0015)
+  already use "collection" for the whole portfolio; that tile is untouched. The
+  `collection`/`grid` aliases also moved off Inventory in
+  `.claude/context/app-map.json` — they were what made `/task-planning` resolve
+  "collection grid" to Inventory and hand out the wrong screen's gotchas.
+- **Three states, and no membership table.** Settled with the user:
+
+      filled      owned, lot intent 'personal'
+      importable  owned as 'resale' — matches a slot, not brought in
+      missing     not owned
+
+  Intent **is** the membership signal, so a template collection stores no
+  membership rows at all. Only `custom` uses `collection_card`. A second source
+  of truth would need syncing on every import, sale and void; this one cannot
+  disagree with itself.
+- **Importing splits the lot.** Bringing a card in sets its lot to `personal`,
+  and a lot of quantity > 1 is **split** so the rest stay stock — "keep one of
+  these three for myself". `split_lot_to_new_item` could not do this: it moves a
+  whole lot onto a *different item* and keeps quantity and intent. New
+  `InventoryService.split_lot_for_intent`.
+- **Migration 0016 already established the shape** that makes the split safe: one
+  acquisition line legitimately carries several lots **sharing one SKU**, because
+  a purchase whose cost does not divide evenly splits into `(qty - r)` and `r`
+  lots. So the new lot keeps `unit_cost_cents`, `acquired_market_value_cents`,
+  the acquisition line, SKU and date. **No money is re-divided**, so unlike a
+  cost allocation there is no residual to place: `2 × unit + 1 × unit == 3 × unit`
+  exactly. Restricted to a fully unsold lot, as `split_lot_to_new_item` is —
+  a partially sold lot has `lot_consumption` rows pointing at the quantity it
+  would be leaving.
+- **Safe because intent is a filter, not a valuation input** — verified in
+  `services/reporting.py`, where `realized_*`, `cost_basis_cents` and
+  `collection_value_cents` all take intent as an *optional narrowing* and only
+  `ripping` changes a number. Tests assert the totals are byte-identical across
+  an import and that only the per-intent slices move.
+- **Closed an audit gap on the way.** `ui/views/inventory.py` changed lot intent
+  by calling `LotRepository.update()` straight from the view, writing **no**
+  `audit_log` row — while `set_lot_missing` audits for the same reason. Both the
+  grid edit and the collection import now go through
+  `InventoryService.set_lot_intent`, which audits.
+- **Removal does not revert intent.** Dropping a card from a custom collection is
+  a membership change; reverting would push it back onto the resale side as a
+  side effect of tidying a checklist. Deleting a collection is a hard delete and
+  `NO-HARD-DELETE` does not reach it: a collection is a *view the user arranged*,
+  not a ledger event, and no holding changes.
+- **`collection_card.treatment` is `NOT NULL DEFAULT ''`, not nullable.** SQLite
+  treats NULLs as **distinct** in a UNIQUE/PRIMARY KEY index, so a nullable
+  column would have let `(1, 'base1-4', NULL)` be inserted twice and the primary
+  key would not have stopped a duplicate slot.
+- **`selector` is one free-text column** rather than one per template kind, whose
+  meaning the registry owns. Five nullable columns with a
+  four-of-five-must-be-NULL rule is a constraint nothing could enforce.
+- **Two bugs the offscreen screenshot caught that no test did**, which is why the
+  render was worth doing:
+  1. **`blockSignals` does not stop `currentRowChanged`.** It is driven by the
+     list's *selection model*, so moving `currentRow` off its initial `-1`
+     emitted a change for row 0 even with the widget's own signals blocked — the
+     navigator highlighted the collection clicked while the page rendered the
+     first one. Replaced with an explicit `_syncing_nav` guard, and the nav row
+     is moved *before* the render so the last render always wins.
+  2. **Slots sorted lexicographically** — a 102-card set ran 1, 10, 100, 101,
+     102, 11, 12 …, useless as a checklist. `ORDER BY number` cannot fix it;
+     `collector_key()` sorts on (letter head, number, letter tail) so "TG01",
+     "006" and "195a" all order correctly.
+- **A third, caught by reading the render:** the fact strip showed
+  "Slots filled 0" beside "In collection $1,113.02", because value counted
+  *owned* slots including importable ones — a figure contradicting its own label.
+  `Progress.value_cents` is now filled-only, with `importable_value_cents`
+  reported separately.
+- **Honest gaps, surfaced in the UI rather than hidden.** `item` has no
+  `card_id`, so slots match holdings by printed identity and **124 owned cards
+  resolve to no slot** on the real ledger — the checklist says so. Master mode
+  needs `card_catalog_treatment`, which is empty until the catalog is re-pulled,
+  so every slot reads *unknown* and the total is described as a floor rather than
+  a count. Artist, rarity and card-type templates offer nothing until that pull
+  happens, and the creation dialog says which Operations job to run.
+- **Measured on a copy of the real ledger:** migration 24 → 25 with `item`,
+  `lot`, `card_catalog`, `transaction_line` and `audit_log` counts identical.
+  Base Set 102 slots / 9 importable, Journey Together 190 / 15, Trainer Gallery
+  120 / 31, at **3–8 ms** per collection. Suite 1,167 passing. Ticket 60.

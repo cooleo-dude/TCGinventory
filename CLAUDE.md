@@ -77,6 +77,21 @@ offline; no external price feeds in V1.
   "call a service, report a sentence"); a `models` group is reserved for
   metrics/triggers. Restore is M-Ops2 (see the ADR).
 
+- **Personal Collection (ticket 60): done** — a twelfth nav destination
+  (`ui/views/collections.py`) for collecting projects: a block grid over an
+  in-window navigator, each opening a checklist with one slot per collector
+  number, or per printing in *master set* mode. Six templates from a Qt-free
+  registry (`services/collections.py`): set, subset, artist, rarity, card type,
+  custom. **Ownership is membership** — a slot is *filled* when a matching lot's
+  intent is `personal`, *importable* when it is `resale`, *missing* when unowned
+  — so template collections store no membership rows. Bringing a card in changes
+  that lot's intent and **splits the lot** when quantity > 1
+  (`InventoryService.split_lot_for_intent`, audited), which also closed an audit
+  gap: the Inventory grid used to change intent with no `audit_log` row.
+  Migration 0025. Verified on Python 3.12.10 (ruff clean, 1,167 tests pass;
+  migration 24→25 on a copy of the real ledger leaves every ledger count
+  identical; Base Set renders 102 slots / 9 importable in 8 ms).
+
 ## Source of truth
 
 - **`specs/`** — what we're building and why. Read [`specs/02-data-model.md`](specs/02-data-model.md)

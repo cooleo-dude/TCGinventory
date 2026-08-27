@@ -1,0 +1,450 @@
+"""The Personal Collection window's templates and slot computation (ticket 60).
+
+A collection asks the opposite question to Inventory. Inventory is one row per
+*lot* and can only draw what is held; a collection has to draw what is **not**
+held, so membership comes from ``card_catalog`` and ownership is painted on top.
+
+Three states per slot, and ownership *is* membership for a template collection
+(migration 0025 explains why there are no membership rows):
+
+    filled      owned, and the lot's intent is ``personal``
+    importable  owned, but the lot is ``resale``/``ripping`` — matches a slot,
+                not yet brought in
+    missing     not owned
+
+Qt-free and issues its own SQL through the repositories only, so it is unit
+testable headless. No money math lives here: slot values come from the item's
+recorded market value, formatted by the UI.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass, field
+
+from tcginventory.data.repositories import (
+    CardCatalogRepository,
+    CardTreatmentRepository,
+    CollectionRepository,
+    number_forms,
+)
+from tcginventory.domain.enums import Intent
+from tcginventory.domain.models import Collection
+
+# ---------------------------------------------------------------------------
+# the template registry
+# ---------------------------------------------------------------------------
+
+# Described as data, mirroring services/operations.py: the view renders itself
+# from this, so adding a template is one entry and cannot drift out of line with
+# the others. `selector_kind` tells the UI what to ask for when creating one.
+TEMPLATE_SET = "set"
+TEMPLATE_SUBSET = "subset"
+TEMPLATE_ARTIST = "artist"
+TEMPLATE_RARITY = "rarity"
+TEMPLATE_SUPERTYPE = "supertype"
+TEMPLATE_CUSTOM = "custom"
+
+SLOT_BY_NUMBER = "number"
+SLOT_MASTER = "master"
+
+
+@dataclass(frozen=True)
+class Template:
+    """One way a collection can decide what belongs in it."""
+
+    id: str
+    label: str
+    blurb: str  # what it does, in the user's terms
+    icon: str  # bundled Lucide name (ui/assets/icons)
+    selector_kind: (
+        str  # what to prompt for: set | subset | artist | rarity | supertype | none
+    )
+    english_only: bool = False
+
+
+TEMPLATES: tuple[Template, ...] = (
+    Template(
+        TEMPLATE_SET,
+        "Set",
+        "Every card in one set, numbered as printed.",
+        "layers",
+        "set",
+        english_only=True,  # printed_total is EN-only (0 of 29,845 JP rows)
+    ),
+    Template(
+        TEMPLATE_SUBSET,
+        "Subset",
+        "A lettered run inside a set — Trainer Gallery, Radiant Collection.",
+        "image",
+        "subset",
+    ),
+    Template(
+        TEMPLATE_ARTIST,
+        "Artist",
+        "Every card one illustrator drew.",
+        "pencil",
+        "artist",
+        english_only=True,  # artist is EN-only; JP ids do not join to TCGdex
+    ),
+    Template(
+        TEMPLATE_RARITY,
+        "Rarity",
+        "Every card of one rarity — Illustration Rares, say.",
+        "sparkles",
+        "rarity",
+    ),
+    Template(
+        TEMPLATE_SUPERTYPE,
+        "Card type",
+        "Every Pokémon, Trainer or Energy card.",
+        "shapes",
+        "supertype",
+    ),
+    Template(
+        TEMPLATE_CUSTOM,
+        "Custom",
+        "Cards you pick by hand.",
+        "folder-open",
+        "none",
+    ),
+)
+
+TEMPLATES_BY_ID = {t.id: t for t in TEMPLATES}
+
+# Slot states
+FILLED = "filled"
+IMPORTABLE = "importable"
+MISSING = "missing"
+
+
+@dataclass
+class Slot:
+    """One position in a collection's checklist."""
+
+    card_id: str
+    name: str
+    number: str | None
+    set_name: str | None
+    image_url: str | None
+    treatment: str = ""  # the printing, in master mode; "" in by-number mode
+    state: str = MISSING
+    # Populated when owned. `lot_ids` is every matching lot, so the UI can offer
+    # an import without re-querying; `qty` is units on hand across them.
+    item_id: int | None = None
+    lot_ids: list[int] = field(default_factory=list)
+    qty: int = 0
+    market_value_cents: int | None = None
+    # True when master mode could not learn this card's printings, so the slot
+    # count for it is unknown rather than one. Never conflate the two.
+    treatments_unknown: bool = False
+
+    @property
+    def owned(self) -> bool:
+        return self.state in (FILLED, IMPORTABLE)
+
+
+@dataclass
+class Progress:
+    """A collection's headline numbers."""
+
+    total: int = 0
+    filled: int = 0
+    importable: int = 0
+    missing: int = 0
+    # Market value of the slots actually **in** the collection — filled only.
+    # Counting importable copies here made the grid read "Slots filled 0" beside
+    # "In collection $1,113.02", which is a figure contradicting its own label.
+    value_cents: int = 0
+    # Value of the owned-but-not-brought-in copies, kept separate for the same
+    # reason: it answers "what could I add", not "what is in here".
+    importable_value_cents: int = 0
+    unknown_treatments: int = 0
+
+    @property
+    def percent(self) -> float:
+        return (self.filled / self.total * 100) if self.total else 0.0
+
+
+def collector_key(number: str | None) -> tuple[str, int, str]:
+    """Natural sort key for a collector number.
+
+    ``ORDER BY number`` is lexicographic, which runs a 102-card set as
+    1, 10, 100, 101, 102, 11, 12 … — useless as a checklist. Collector numbers
+    are a letter head, a number, and sometimes a letter tail ("TG01", "006",
+    "195a"), so sort on those three parts.
+    """
+    text = (number or "").split("/", 1)[0].strip()
+    head = ""
+    i = 0
+    while i < len(text) and not text[i].isdigit():
+        head += text[i]
+        i += 1
+    digits = ""
+    while i < len(text) and text[i].isdigit():
+        digits += text[i]
+        i += 1
+    return (head.upper(), int(digits) if digits else 1 << 30, text[i:].lower())
+
+
+class CollectionService:
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+        self.collections = CollectionRepository(conn)
+        self.catalog = CardCatalogRepository(conn)
+        self.treatments = CardTreatmentRepository(conn)
+
+    # -- what the templates can offer --------------------------------------
+
+    def selector_options(self, template: str, language: str = "EN") -> list[str]:
+        """The values a template can be pointed at, for the creation dialog.
+
+        Empty means the catalog cannot support that template yet — an artist run
+        before the catalog has been re-pulled, for instance. The UI must say so
+        rather than offering an empty picker.
+        """
+        if template == TEMPLATE_SET:
+            rows = self.conn.execute(
+                "SELECT DISTINCT set_name FROM card_catalog WHERE language = ? "
+                "AND set_name IS NOT NULL AND printed_total IS NOT NULL "
+                "ORDER BY set_name",
+                (language,),
+            ).fetchall()
+            return [r["set_name"] for r in rows]
+        if template == TEMPLATE_ARTIST:
+            return self.catalog.distinct_artists(language)
+        if template == TEMPLATE_RARITY:
+            rows = self.conn.execute(
+                "SELECT DISTINCT rarity FROM card_catalog WHERE language = ? "
+                "AND rarity IS NOT NULL AND rarity <> '' AND rarity <> 'None' "
+                "ORDER BY rarity",
+                (language,),
+            ).fetchall()
+            return [r["rarity"] for r in rows]
+        if template == TEMPLATE_SUPERTYPE:
+            rows = self.conn.execute(
+                "SELECT DISTINCT supertype FROM card_catalog WHERE language = ? "
+                "AND supertype IS NOT NULL AND supertype <> '' ORDER BY supertype",
+                (language,),
+            ).fetchall()
+            return [r["supertype"] for r in rows]
+        if template == TEMPLATE_SUBSET:
+            # Lettered collector-number heads ("TG", "GG", "RC") — the runs that
+            # live inside a parent set. Derived rather than listed, so a new
+            # subset era needs no code change.
+            rows = self.conn.execute(
+                "SELECT DISTINCT number FROM card_catalog WHERE language = ? "
+                "AND number IS NOT NULL AND number GLOB '[A-Za-z]*'",
+                (language,),
+            ).fetchall()
+            prefixes = set()
+            for r in rows:
+                head = ""
+                for ch in r["number"]:
+                    if ch.isdigit():
+                        break
+                    head += ch
+                if head:
+                    prefixes.add(head.upper())
+            return sorted(prefixes)
+        return []
+
+    # -- slots --------------------------------------------------------------
+
+    def _catalog_rows(self, collection: Collection) -> list[sqlite3.Row]:
+        """The catalog cards a collection's template matches."""
+        lang = collection.language
+        sel = collection.selector
+        base = (
+            "SELECT card_id, name, number, set_name, set_id, image_small, artist "
+            "FROM card_catalog WHERE language = ? "
+        )
+        if collection.template == TEMPLATE_CUSTOM:
+            picks = self.collections.cards_for(collection.id)
+            if not picks:
+                return []
+            ids = [c for c, _t in picks]
+            out: list[sqlite3.Row] = []
+            for start in range(0, len(ids), 500):
+                chunk = ids[start : start + 500]
+                marks = ",".join("?" * len(chunk))
+                out.extend(
+                    self.conn.execute(
+                        base + f"AND card_id IN ({marks})", (lang, *chunk)
+                    ).fetchall()
+                )
+            return out
+        if sel is None:
+            return []
+        if collection.template == TEMPLATE_SET:
+            sql, params = base + "AND set_name = ? ORDER BY set_id, number", (lang, sel)
+        elif collection.template == TEMPLATE_ARTIST:
+            sql, params = base + "AND artist = ? ORDER BY set_name, number", (lang, sel)
+        elif collection.template == TEMPLATE_RARITY:
+            sql, params = base + "AND rarity = ? ORDER BY set_name, number", (lang, sel)
+        elif collection.template == TEMPLATE_SUPERTYPE:
+            sql, params = (
+                base + "AND supertype = ? ORDER BY set_name, number",
+                (lang, sel),
+            )
+        elif collection.template == TEMPLATE_SUBSET:
+            sql, params = (
+                base + "AND number LIKE ? ORDER BY set_name, number",
+                (lang, f"{sel}%"),
+            )
+        else:
+            return []
+        return self.conn.execute(sql, params).fetchall()
+
+    def _ownership(self, language: str) -> dict[tuple, list[sqlite3.Row]]:
+        """``(name, set_name, number-form) -> lot rows`` for what is held.
+
+        ``item`` has no ``card_id`` — identity is twelve NULL-safe columns — so a
+        catalog slot is matched to holdings by printed identity. About 88% of real
+        items resolve; the rest are reported by :meth:`unmatched_items` rather
+        than silently dropped.
+        """
+        rows = self.conn.execute(
+            "SELECT i.id AS item_id, i.name, i.set_name, i.card_number, "
+            "i.market_value_cents, i.holo_pattern, i.edition, "
+            "l.id AS lot_id, l.intent, l.remaining_qty "
+            "FROM item i JOIN lot l ON l.item_id = i.id "
+            "WHERE i.language = ? AND l.missing = 0 AND l.remaining_qty > 0",
+            (language,),
+        ).fetchall()
+        index: dict[tuple, list[sqlite3.Row]] = {}
+        for row in rows:
+            name = (row["name"] or "").strip().lower()
+            set_name = (row["set_name"] or "").strip().lower()
+            for form in number_forms((row["card_number"] or "").split("/", 1)[0]):
+                index.setdefault((name, set_name, form), []).append(row)
+        return index
+
+    def slots_for(self, collection: Collection) -> list[Slot]:
+        """Every position in a collection, with its ownership state."""
+        cards = self._catalog_rows(collection)
+        owned = self._ownership(collection.language)
+        master = collection.slot_mode == SLOT_MASTER
+        treatments = (
+            self.treatments.treatments_for_many([c["card_id"] for c in cards])
+            if master
+            else {}
+        )
+
+        slots: list[Slot] = []
+        # Collector order, not lexicographic. The catalog query cannot do this:
+        # SQL sorts "10" before "2" and a checklist has to read 1, 2, 3.
+        cards = sorted(
+            cards,
+            key=lambda c: (
+                (c["set_name"] or "") if collection.template != TEMPLATE_SET else "",
+                collector_key(c["number"]),
+            ),
+        )
+        for card in cards:
+            printings = treatments.get(card["card_id"], []) if master else [""]
+            unknown = master and not printings
+            if unknown:
+                # Master mode with no treatment data: one slot, flagged. Never
+                # silently one printing — that under-counts a master set and
+                # makes it read complete when it is not.
+                printings = [""]
+            for treatment in printings:
+                slot = Slot(
+                    card_id=card["card_id"],
+                    name=card["name"],
+                    number=card["number"],
+                    set_name=card["set_name"],
+                    image_url=card["image_small"],
+                    treatment=treatment,
+                    treatments_unknown=unknown,
+                )
+                self._apply_ownership(slot, owned, master)
+                slots.append(slot)
+        return slots
+
+    def _apply_ownership(
+        self, slot: Slot, owned: dict[tuple, list[sqlite3.Row]], master: bool
+    ) -> None:
+        """Paint a slot's state from what is held."""
+        from tcginventory.services.pricing import TREATMENT_IDENTITY
+
+        key = (
+            (slot.name or "").strip().lower(),
+            (slot.set_name or "").strip().lower(),
+            (slot.number or "").split("/", 1)[0].lstrip("0") or (slot.number or ""),
+        )
+        lots = owned.get(key)
+        if not lots and slot.number:
+            for form in number_forms((slot.number or "").split("/", 1)[0]):
+                lots = owned.get((key[0], key[1], form))
+                if lots:
+                    break
+        if not lots:
+            return
+
+        if master and slot.treatment:
+            # In master mode a slot is one printing, so only a copy that *is*
+            # that printing fills it. An item whose foil is unrecorded cannot be
+            # claimed for a specific printing.
+            want = TREATMENT_IDENTITY.get(slot.treatment)
+            if want is not None:
+                lots = [
+                    r
+                    for r in lots
+                    if r["holo_pattern"] == want[0]
+                    and (r["edition"] or None) == (want[1] or None)
+                ]
+            if not lots:
+                return
+
+        slot.item_id = lots[0]["item_id"]
+        slot.lot_ids = [r["lot_id"] for r in lots]
+        slot.qty = sum(r["remaining_qty"] for r in lots)
+        slot.market_value_cents = lots[0]["market_value_cents"]
+        slot.state = (
+            FILLED
+            if any(r["intent"] == Intent.PERSONAL.value for r in lots)
+            else IMPORTABLE
+        )
+
+    def progress_for(self, collection: Collection) -> Progress:
+        return summarise(self.slots_for(collection))
+
+    def unmatched_items(self, language: str = "EN") -> int:
+        """Owned items that resolve to no catalog card at all.
+
+        Reported so the window can say so. ``item`` carries no ``card_id``, so
+        this is a real limit of identity matching, not a bug to hide.
+        """
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM item i WHERE i.language = ? AND NOT EXISTS ("
+            "  SELECT 1 FROM card_catalog c WHERE c.language = i.language "
+            "  AND LOWER(TRIM(c.name)) = LOWER(TRIM(i.name)) "
+            "  AND LOWER(TRIM(COALESCE(c.set_name,''))) "
+            "      = LOWER(TRIM(COALESCE(i.set_name,'')))"
+            ")",
+            (language,),
+        ).fetchone()
+        return row["n"] if row else 0
+
+
+def summarise(slots: list[Slot]) -> Progress:
+    """Roll slots up into headline numbers. Pure, so it is trivially testable."""
+    p = Progress(total=len(slots))
+    for slot in slots:
+        if slot.state == FILLED:
+            p.filled += 1
+        elif slot.state == IMPORTABLE:
+            p.importable += 1
+        else:
+            p.missing += 1
+        if slot.treatments_unknown:
+            p.unknown_treatments += 1
+        if slot.market_value_cents:
+            worth = slot.market_value_cents * max(slot.qty, 1)
+            if slot.state == FILLED:
+                p.value_cents += worth
+            elif slot.state == IMPORTABLE:
+                p.importable_value_cents += worth
+    return p
