@@ -15,11 +15,13 @@ from dataclasses import dataclass
 from tcginventory.data.repositories import (
     AuditLogRepository,
     ItemRepository,
+    LotConsumptionRepository,
     LotRepository,
     PriceSnapshotRepository,
 )
 from tcginventory.domain.enums import AuditAction, Intent
-from tcginventory.domain.models import AuditLogEntry, Item
+from tcginventory.domain.models import AuditLogEntry, Item, Lot
+from tcginventory.services.exceptions import TransactionStateError
 
 
 @dataclass
@@ -77,6 +79,7 @@ class InventoryService:
         self.items = ItemRepository(conn)
         self.lots = LotRepository(conn)
         self.prices = PriceSnapshotRepository(conn)
+        self.consumptions = LotConsumptionRepository(conn)
         self.audit = AuditLogRepository(conn)
 
     def _sold_proceeds_by_lot(self) -> dict[int, tuple[int, int]]:
@@ -215,6 +218,129 @@ class InventoryService:
                 )
             )
         return rows
+
+    def set_lot_intent(
+        self, lot_id: int, intent: Intent, note: str | None = None
+    ) -> bool:
+        """Change one lot's intent, with an ``audit_log`` row. Caller commits.
+
+        Intent is **per lot** (spec 02) and is a *filter* dimension rather than a
+        valuation input — ``reporting`` takes it as an optional narrowing, and
+        only ``ripping`` changes a number (to $0). So this moves the lot between
+        slices of the Dashboard filter and the per-intent
+        ``collection_value_snapshot`` series, and changes no total.
+
+        It is audited for the same reason :meth:`set_lot_missing` is: it changes
+        what the lot *means* — personal holding versus resale stock is the
+        personal/business split this app exists to keep. The Inventory grid used
+        to make this change by calling ``LotRepository.update()`` straight from
+        the view, with no audit row at all; both that edit and the Personal
+        Collection import now come through here.
+
+        Returns True if the intent actually changed.
+        """
+        lot = self.lots.get(lot_id)
+        if lot is None or lot.intent is intent:
+            return False
+        before = {"intent": lot.intent.value}
+        lot.intent = intent
+        self.lots.update(lot)
+        self.audit.add(
+            AuditLogEntry(
+                entity="lot",
+                entity_id=lot_id,
+                action=AuditAction.EDIT,
+                before_json=json.dumps(before),
+                after_json=json.dumps({"intent": intent.value}),
+                note=note or f"intent -> {intent.value}",
+            )
+        )
+        return True
+
+    def split_lot_for_intent(
+        self, lot_id: int, quantity: int, intent: Intent, note: str | None = None
+    ) -> Lot | None:
+        """Move ``quantity`` units of a lot onto a new lot with a new intent.
+
+        "Keep one of these three for myself." The Personal Collection import
+        needs exactly this: a resale lot of 3 becomes 2 resale + 1 personal,
+        rather than flipping all three onto the personal side.
+
+        Note this is **not** :meth:`TransactionService.split_lot_to_new_item`,
+        which moves a whole lot onto a *different item* and keeps its quantity
+        and intent. Here the item is the same and the quantity divides.
+
+        Migration 0016 already established the shape: one acquisition line
+        legitimately carries several lots **sharing one SKU**, because a purchase
+        whose cost does not divide evenly splits into ``(qty - r)`` and ``r``
+        lots so the basis reconciles to the cent. The new lot therefore keeps the
+        source's ``unit_cost_cents``, ``acquired_market_value_cents``,
+        ``acquired_txn_line_id``, SKU and acquisition date — **no money is
+        re-divided**, so unlike a cost allocation there is no rounding residual
+        to place: ``2 x unit + 1 x unit == 3 x unit`` exactly.
+
+        Restricted to a **fully unsold** lot, exactly as ``split_lot_to_new_item``
+        is: a partially sold lot has ``lot_consumption`` rows pointing at it, and
+        re-pointing those is the money path and belongs behind its own design.
+
+        Returns the new lot, or ``None`` when no split was needed (the whole lot
+        moved, so its intent was simply changed). Caller commits.
+        """
+        lot = self.lots.get(lot_id)
+        if lot is None:
+            raise TransactionStateError(f"no lot {lot_id}")
+        if quantity < 1 or quantity > lot.quantity:
+            raise TransactionStateError(
+                f"cannot move {quantity} of lot {lot_id}'s {lot.quantity} units"
+            )
+        if lot.remaining_qty != lot.quantity or self.consumptions.list_for_lot(lot.id):
+            raise TransactionStateError(
+                f"lot {lot_id} has sold units; only a fully unsold lot can be "
+                "split (its disposals reference the quantity it is leaving)"
+            )
+        if quantity == lot.quantity:
+            self.set_lot_intent(lot_id, intent, note=note)
+            return None
+
+        before = {"quantity": lot.quantity, "intent": lot.intent.value}
+        remainder = lot.quantity - quantity
+        lot.quantity = remainder
+        lot.remaining_qty = remainder
+        self.lots.update(lot)
+        moved = self.lots.add(
+            Lot(
+                item_id=lot.item_id,
+                acquired_at=lot.acquired_at,
+                quantity=quantity,
+                remaining_qty=quantity,
+                unit_cost_cents=lot.unit_cost_cents,
+                acquired_market_value_cents=lot.acquired_market_value_cents,
+                intent=intent,
+                sku=lot.sku,  # same acquisition — 0016 permits the shared SKU
+                acquired_txn_line_id=lot.acquired_txn_line_id,
+                source=lot.source,
+                notes=lot.notes,
+            )
+        )
+        self.audit.add(
+            AuditLogEntry(
+                entity="lot",
+                entity_id=lot_id,
+                action=AuditAction.EDIT,
+                before_json=json.dumps(before),
+                after_json=json.dumps(
+                    {
+                        "quantity": remainder,
+                        "intent": lot.intent.value,
+                        "split_to_lot_id": moved.id,
+                        "split_quantity": quantity,
+                        "split_intent": intent.value,
+                    }
+                ),
+                note=note or f"split {quantity} unit(s) to {intent.value}",
+            )
+        )
+        return moved
 
     def set_lot_missing(
         self, lot_id: int, missing: bool, note: str | None = None

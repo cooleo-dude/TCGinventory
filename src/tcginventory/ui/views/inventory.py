@@ -984,18 +984,17 @@ class InventoryView(QWidget):
         self.changed.emit()
 
     def _set_lot_intent(self, lot_id: int, intent_str: str) -> None:
-        """Inline-edit handler: change a single lot's intent (per-lot, Spec 02)."""
-        lots = LotRepository(self._conn)
-        lot = lots.get(lot_id)
-        if lot is None:
-            return
-        new_intent = Intent(intent_str)
-        if lot.intent is new_intent:
-            return
-        lot.intent = new_intent
-        lots.update(lot)
-        self._conn.commit()
-        self.refresh()
+        """Inline-edit handler: change a single lot's intent (per-lot, Spec 02).
+
+        Goes through the service so the change is audited. This used to call
+        ``LotRepository.update()`` directly from the view, which wrote no
+        ``audit_log`` row at all — while ``set_lot_missing`` audits for the same
+        reason: intent is the personal/business split, so changing it changes
+        what the lot means. (Ticket 60.)
+        """
+        if self._service.set_lot_intent(lot_id, Intent(intent_str)):
+            self._conn.commit()
+            self.refresh()
 
     def _set_market_at_purchase(self, lot_id: int, per_unit_cents: int) -> None:
         """Inline-edit handler: correct a lot's market-value-at-purchase snapshot.
