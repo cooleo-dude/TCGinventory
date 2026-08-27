@@ -2845,3 +2845,71 @@ item-level Notes on one grid row changed all three copies. (Ticket 52.)
   **22,827 artists (96.9%), rarity and supertype 100%, zero errors, 174s**, and
   `base1-4` / `sv09-001` / `swsh9-018` each matching independently-checked ground
   truth.
+
+### 2026-08-27 — Auction History: a snapshot log, not a soft-delete flag (ticket 58)
+
+The History window gained a third page beside Transaction History and
+Recognition History: **Auction History**, the lifecycle log of the eBay
+watchlist — an auction deleted, archived, unarchived, or **won**. A deleted
+auction is restorable from it.
+
+- **The log lives in `auctions.db`, created in-module.** `auction_event` went
+  into `_SCHEMA` alongside `auction` and `auction_card`, not into
+  `data/migrations/`. Only `inventory.db` is migrated by `data/migrator.py`
+  (`LEDGER-VS-DERIVED`); `archived` and the thirteen `_parity_cols` both landed
+  the same way, through `_SCHEMA` + `_ensure_columns`, which every
+  `open_auctions()` re-runs idempotently.
+- **A delete stays a real `DELETE`; the payload is snapshotted first.** The
+  rejected alternative was a `deleted` flag symmetric with `archived`. It reads
+  cleaner and keeps ids stable, but it makes every existing read of `auction`
+  grow a `deleted = 0` filter — `list_all` already branches twice, plus the KPI
+  tile counts — and it means `auctions.db`, documented as ephemeral with
+  *"nothing prunes it"*, would never shrink. That is the opposite of what the
+  file is for. `AuctionRepository.delete` therefore serialises the auction and
+  all 24 card columns to JSON **inside the same transaction as the `DELETE`**,
+  since `ON DELETE CASCADE` takes `auction_card` with the parent and the payload
+  is unrecoverable one statement later.
+- **The cost of that choice is id stability, and it is paid explicitly.** SQLite
+  hands a freed rowid straight back out, so by the time an undo runs the deleted
+  auction's id may belong to someone else — `test_restore_does_not_collide_with_a_reused_id`
+  demonstrates exactly that sequence. `restore` therefore mints a **fresh** row
+  and records it on the event as `restored_id`, rather than pinning the old id
+  and colliding.
+- **The event row is kept and stamped, never removed.** `restored_at` /
+  `restored_id` mark it consumed. That matches History's standing rule that
+  nothing leaves the log (voided transactions stay visible with a pill), and it
+  doubles as the one-shot guard that stops a second restore minting a duplicate
+  watchlist entry.
+- **"Won" is export-then-post, never export alone.** Export was fire-and-forget:
+  `(title, cards)` with the auction id dropped on the floor, so "this auction was
+  won and its cards are in inventory" was not a fact the app held. The payload
+  now carries the id, `TransactionView` parks it in `_source_auction_id` as inert
+  context — it never reaches `build_request` or the posting algorithm, so
+  `UNIFIED-POSTING` still infers type purely from which sides carry cards — and
+  emits `posted_from_auction` **only** on a successful non-edit post. An
+  abandoned export records nothing; an edit (void + re-post of an existing
+  transaction) is not winning anything. `clear()` resets the tag, so it cannot
+  leak into the next transaction typed by hand. Both guards were verified by
+  mutation: removing either turns one event into two.
+- **`won` archives the auction and logs one row, not two.** Archiving is already
+  reversible in place with a visible *Unarchive* control, and a won auction is
+  done. One user action, one history row.
+- **`transaction_id` crosses databases and is a display pointer, not a foreign
+  key.** It points into `inventory.db` from `auctions.db`. The pane renders it
+  verbatim and never resolves it — the ledger may have voided that transaction
+  since, or been restored from a backup where the id means something else.
+  Restoring an auction re-creates a *watchlist entry only*: never a lot, never a
+  transaction.
+- **`HistoryView`'s `auctions_conn` is passed in, never opened.** MainWindow now
+  opens `auctions.db` once, above the `builders` tuple, and hands the same
+  connection to both readers — History is built before eBay Auctions, and two
+  connections would be two WAL writers on one file. The kwarg defaults to `None`
+  rather than lazily calling `open_auctions()`: five existing test files
+  construct a bare `HistoryView(conn)`, and a lazy default would have the suite
+  writing to the user's real watchlist. `None` means an empty pane and no
+  database opened.
+- **`auction_event` is not pruned**, inheriting the file's "nothing prunes it"
+  contract; the snapshots are small. If growth ever matters, an Operations tile
+  is the home for it, not an automatic sweep.
+- Ticket 58. Verified offscreen: 16 new pane tests plus 11 repository tests, the
+  full suite green, and the two correlation guards proven red under mutation.

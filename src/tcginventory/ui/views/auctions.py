@@ -74,8 +74,12 @@ from PySide6.QtWidgets import (
 
 from tcginventory import config
 from tcginventory.data.auctions import (
+    EVENT_ARCHIVED,
+    EVENT_UNARCHIVED,
+    EVENT_WON,
     Auction,
     AuctionCard,
+    AuctionEventRepository,
     AuctionRepository,
     open_auctions,
 )
@@ -980,8 +984,13 @@ def _mono_font(size: float, bold: bool = False) -> QFont:
 class AuctionsView(QWidget):
     """The eBay Auctions screen (watchlist + max-bid editor)."""
 
-    # Emitted with (title, [IncomingCard]) to prefill the Transaction window.
+    # Emitted with (title, [IncomingCard], auction_id | None) to prefill the
+    # Transaction window. The id rides along so that, *if* a transaction is
+    # actually posted from the prefill, it can be logged as this auction being
+    # won — an export the user abandons must record nothing.
     export_to_transaction = Signal(object)
+    # A watchlist entry was deleted or (un)archived: Auction History is stale.
+    changed = Signal()
 
     def __init__(
         self,
@@ -993,6 +1002,7 @@ class AuctionsView(QWidget):
         self._conn = conn  # main DB (catalog search)
         self._auctions = auctions_conn if auctions_conn is not None else open_auctions()
         self._repo = AuctionRepository(self._auctions)
+        self._events = AuctionEventRepository(self._auctions)
         # ``history`` supplied (incl. None) is honoured; omitted -> open default.
         self._history = _safe_open_history() if history is _UNSET else history
 
@@ -1421,14 +1431,17 @@ class AuctionsView(QWidget):
             self,
             "Delete auction",
             f"Delete “{name}”?",
-            f"This watchlist entry ({detail}) will be permanently removed. "
-            "This can't be undone.",
+            f"This watchlist entry ({detail}) leaves the watchlist. It is "
+            "recorded in History → Auction History, where it stays restorable.",
         ):
             return
+        # The repository snapshots the bundle before the cascade takes the cards,
+        # so this is the reversible half of the delete — see AuctionRepository.
         self._repo.delete(auction.id)
         if self._edit_id == auction.id:
             self._new()
         self.refresh()
+        self.changed.emit()
 
     # -- refresh values -----------------------------------------------------
 
@@ -2084,8 +2097,10 @@ class AuctionsView(QWidget):
             )
             return
         title = self._title.text().strip() or "eBay auction"
+        # ``_edit_id`` is None for an unsaved bundle — there is no watchlist
+        # entry to call won, so nothing will be logged if this one is posted.
         self.export_to_transaction.emit(
-            (title, [_auction_card_to_incoming(c) for c in cards])
+            (title, [_auction_card_to_incoming(c) for c in cards], self._edit_id)
         )
 
     def _export_auction(self, auction: Auction) -> None:
@@ -2097,12 +2112,39 @@ class AuctionsView(QWidget):
             return
         title = auction.title or "eBay auction"
         self.export_to_transaction.emit(
-            (title, [_auction_card_to_incoming(c) for c in auction.cards])
+            (
+                title,
+                [_auction_card_to_incoming(c) for c in auction.cards],
+                auction.id,
+            )
         )
 
     def _toggle_archived(self, auction: Auction) -> None:
-        self._repo.set_archived(auction.id, not auction.archived)
+        archiving = not auction.archived
+        self._repo.set_archived(auction.id, archiving)
+        self._events.record(EVENT_ARCHIVED if archiving else EVENT_UNARCHIVED, auction)
         self.refresh()
+        self.changed.emit()
+
+    def mark_won(self, auction_id: int, transaction_id: int) -> None:
+        """A transaction was posted from this auction's cards — it was won.
+
+        Called by MainWindow once the post actually succeeds, never at export
+        time. Archives the auction in the same breath: it is done, and archiving
+        is the reversible way to take it off the active watchlist. That is one
+        user action, so it logs one row — a ``won`` event, not an extra
+        ``archived`` one.
+        """
+        auction = self._repo.get(auction_id)
+        if auction is None:  # deleted between the export and the post
+            return
+        self._events.record(EVENT_WON, auction, transaction_id=transaction_id)
+        if not auction.archived:
+            self._repo.set_archived(auction_id, True)
+        if self._edit_id == auction_id:
+            self._new()
+        self.refresh()
+        self.changed.emit()
 
     def _load_auction(self, auction_id: int) -> None:
         auction = self._repo.get(auction_id)

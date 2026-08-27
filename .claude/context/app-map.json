@@ -71,8 +71,8 @@
     },
     "auctions.db": {
       "module": "src/tcginventory/data/auctions.py",
-      "tables": ["auction", "auction_card"],
-      "note": "Ephemeral eBay watchlist. Deliberately not the ledger; nothing prunes it."
+      "tables": ["auction", "auction_card", "auction_event"],
+      "note": "Ephemeral eBay watchlist plus its lifecycle log. Deliberately not the ledger; nothing prunes it. Schema is created in-module (_SCHEMA + _ensure_columns), not by the migrator — that is why auction_event needed no numbered migration. A deleted auction is snapshotted into auction_event as JSON, which is what makes the delete reversible."
     },
     "pricehistory.db": {
       "module": "src/tcginventory/data/pricehistory.py",
@@ -95,7 +95,7 @@
     "card_preview": {"files": ["src/tcginventory/ui/card_preview.py", "src/tcginventory/ui/card_gallery.py", "src/tcginventory/ui/thumbcache.py"], "rule": "Hover shows the hovered card; on leave fall back to the selected card, else the last hovered. Platform-wide convention."},
     "table_delegates": ["src/tcginventory/ui/views/_combo_delegate.py", "src/tcginventory/ui/views/_intent_delegate.py", "src/tcginventory/ui/views/_link_delegate.py", "src/tcginventory/ui/views/_review_delegate.py", "src/tcginventory/ui/views/_inventory_delegates.py"],
     "dialogs": ["src/tcginventory/ui/views/_card_dialogs.py", "src/tcginventory/ui/views/_autofill_dialog.py", "src/tcginventory/ui/views/item_editor.py", "src/tcginventory/ui/views/item_detail.py"],
-    "qt_models": ["src/tcginventory/ui/models/inventory_model.py", "src/tcginventory/ui/models/history_model.py", "src/tcginventory/ui/models/recognition_history_model.py"]
+    "qt_models": ["src/tcginventory/ui/models/inventory_model.py", "src/tcginventory/ui/models/history_model.py", "src/tcginventory/ui/models/recognition_history_model.py", "src/tcginventory/ui/models/auction_history_model.py"]
   },
 
   "main_window": {
@@ -144,7 +144,7 @@
       "tables": ["item", "lot", "lot_consumption", "transaction", "transaction_line", "audit_log", "card_catalog"],
       "supporting_files": ["ui/views/_card_entry.py", "ui/views/_card_dialogs.py", "ui/views/_autofill_dialog.py", "ui/card_preview.py", "ui/completer_popup.py", "ui/clipboard_images.py"],
       "tests": ["tests/test_ui_transaction.py", "tests/test_transactions.py", "tests/test_allocation.py", "tests/test_autofill.py", "tests/test_recognition_export.py", "tests/test_delete_entry.py", "tests/test_formatting.py"],
-      "signals_out": ["posted() -> MainWindow invalidates every read view"],
+      "signals_out": ["posted() -> MainWindow invalidates every read view", "posted_from_auction(auction_id, transaction_id) -> the post came from an auction prefill, so that auction was won. New posts only, never an edit."],
       "entry_points_in": ["MainWindow._start_edit (from History)", "add_incoming / set_deal_context (from eBay Auctions)", "import_recognized (from Recognition and Recognition History)"],
       "gotchas": [
         "This is the highest-risk screen in the app — it is the only path that creates cost basis. Any change here must keep the money invariants in specs/02-data-model.md.",
@@ -188,18 +188,19 @@
       "aliases": ["log", "ledger", "transactions log", "audit"],
       "class": "HistoryView",
       "file": "src/tcginventory/ui/views/history.py",
-      "purpose": "Full transaction log with drill-down: type/status pills, sign-tinted mono money, per-card detail table, search by card or counterparty, Void/Edit on the selected row. Also hosts Recognition History — stored captures, re-exportable to Transaction or Auctions.",
+      "purpose": "Full transaction log with drill-down: type/status pills, sign-tinted mono money, per-card detail table, search by card or counterparty, Void/Edit on the selected row. Three pages behind a mode toggle: Transaction History, Recognition History (stored captures, re-exportable to Transaction or Auctions) and Auction History (the eBay watchlist's lifecycle log, where a deleted auction is restorable).",
       "services": ["services/transactions.py", "services/reporting.py", "services/corpus.py", "services/regioncrops.py", "services/cardimages.py"],
-      "repositories": ["TransactionRepository", "AuditRepository", "VisionRepository"],
+      "repositories": ["TransactionRepository", "AuditRepository", "VisionRepository", "AuctionEventRepository"],
       "tables": ["transaction", "transaction_line", "audit_log", "item", "lot_consumption"],
-      "other_dbs": ["vision.db (capture, image, region — the Recognition History tab)"],
-      "supporting_files": ["ui/models/history_model.py", "ui/models/recognition_history_model.py", "ui/thumbcache.py"],
-      "tests": ["tests/test_ui_views.py", "tests/test_ui_transaction.py", "tests/test_recognition_export.py", "tests/test_transactions.py"],
+      "other_dbs": ["vision.db (capture, image, region — the Recognition History tab)", "auctions.db (auction_event, and auction on a restore — the Auction History tab)"],
+      "supporting_files": ["ui/models/history_model.py", "ui/models/recognition_history_model.py", "ui/models/auction_history_model.py", "ui/thumbcache.py"],
+      "tests": ["tests/test_ui_views.py", "tests/test_ui_transaction.py", "tests/test_recognition_export.py", "tests/test_transactions.py", "tests/test_auction_history.py"],
       "signals_out": ["changed()", "edit_requested(transaction_id)", "new_transaction_requested()", "export_to_transaction(cards)", "export_to_auction(cards)"],
       "gotchas": [
         "Void and Edit are the only mutations. Edit hands off to TransactionView via edit_requested — it never posts here.",
-        "Voided rows stay visible with a status pill; nothing is ever removed from the log.",
-        "Thumbnails use session-scoped pixmap + card-id caches (ADR 2026-08-04) — do not reload art per paint."
+        "Voided rows stay visible with a status pill; nothing is ever removed from the log — a restored auction event is stamped consumed, not deleted.",
+        "Thumbnails use session-scoped pixmap + card-id caches (ADR 2026-08-04) — do not reload art per paint.",
+        "auctions_conn is passed in, never opened here: MainWindow hands this view and AuctionsView the SAME connection, and a bare HistoryView(conn) shows an empty Auction History rather than touching the user's real auctions.db."
       ],
       "specs": ["specs/03-features.md (F-VW-3, F-DA-*)", "specs/04-ui-ux.md"]
     },
@@ -254,18 +255,20 @@
       "file": "src/tcginventory/ui/views/auctions.py",
       "purpose": "Max-bid planner for auctions you're watching. Watchlist rows show title, listing link, total card value and a max-bid breakdown at 70/80/90/100% of value net of shipping + tax; the editor below takes a title, URL, catalog-autofilled cards (auto-priced from pricehistory.db), flat shipping and a tax rate, with a live breakdown as you type.",
       "services": ["services/auctions.py (the bid math)", "services/ebay.py", "services/tcgplayer.py", "services/cardimages.py", "services/inference.py"],
-      "repositories": ["CardCatalogRepository", "data/auctions.py (open_auctions and friends)"],
+      "repositories": ["CardCatalogRepository", "AuctionEventRepository", "data/auctions.py (open_auctions and friends)"],
       "tables": [],
-      "other_dbs": ["auctions.db (auction, auction_card) — the watchlist", "pricehistory.db (auto-pricing)"],
+      "other_dbs": ["auctions.db (auction, auction_card, auction_event) — the watchlist and its lifecycle log", "pricehistory.db (auto-pricing)"],
       "supporting_files": ["ui/views/_card_entry.py", "ui/views/_autofill_dialog.py", "ui/card_gallery.py"],
-      "tests": ["tests/test_auctions.py", "tests/test_autofill.py", "tests/test_ebay.py", "tests/test_recognition_export.py"],
-      "signals_out": ["export_to_transaction((title, incoming_cards)) -> prefills a purchase in Transaction"],
-      "entry_points_in": ["import_recognized(cards) from Recognition (Listing mode)"],
+      "tests": ["tests/test_auctions.py", "tests/test_autofill.py", "tests/test_ebay.py", "tests/test_recognition_export.py", "tests/test_auction_history.py"],
+      "signals_out": ["export_to_transaction((title, incoming_cards, auction_id | None)) -> prefills a purchase in Transaction; the id rides along so a post can be logged as this auction being won", "changed() -> a delete / archive / won wrote an Auction History row"],
+      "entry_points_in": ["import_recognized(cards) from Recognition (Listing mode)", "mark_won(auction_id, transaction_id) from MainWindow, relaying TransactionView.posted_from_auction"],
       "gotchas": [
         "auctions.db is EPHEMERAL and is not the ledger. Nothing prunes it; the user deletes rows. Never post to the ledger from here — export to Transaction instead.",
-        "In tests / in-memory mode the auctions DB must also be :memory: so the real auctions.db is untouched (see MainWindow builders).",
+        "In tests / in-memory mode the auctions DB must also be :memory: so the real auctions.db is untouched (MainWindow opens it once, above the builders, and hands the same connection to History too).",
         "Autofill prefers a live price over cached history (ADR 2026-07-28).",
-        "Default sales-tax rate is 6%."
+        "Default sales-tax rate is 6%.",
+        "Delete / archive / won each append to auction_event and emit changed(). A delete is reversible from History → Auction History, so never describe it as permanent.",
+        "'Won' is export-then-post, never export alone: the auction id rides on export_to_transaction and is only logged once TransactionService.post() succeeds. mark_won also archives the auction — one user action, one history row."
       ],
       "specs": [
         "docs/decisions.md § ### 2026-07-16 — eBay auction max-bid planner (new screen, ephemeral store)",

@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import os
+from dataclasses import asdict
 
 import pytest
 
 from tcginventory.data.auctions import (
+    EVENT_ARCHIVED,
+    EVENT_DELETED,
+    EVENT_UNARCHIVED,
+    EVENT_WON,
     Auction,
     AuctionCard,
+    AuctionEventRepository,
     AuctionRepository,
     open_auctions,
 )
@@ -134,6 +140,214 @@ def test_repo_list_newest_first(auctions_conn):
     repo.save(second, now="2026-07-16T02:00:00+00:00")
     titles = [a.title for a in repo.list_all()]
     assert titles == ["second", "first"]
+
+
+# ---------------------------------------------------------------------------
+# the lifecycle log (auction_event) — Auction History's backing store
+# ---------------------------------------------------------------------------
+
+
+def _full_card() -> AuctionCard:
+    """One card with *every* column populated off its default.
+
+    Restore is compared against this with ``asdict``, so a column the snapshot
+    forgets to carry fails the test rather than silently coming back as a
+    default.
+    """
+    return AuctionCard(
+        name="Charizard",
+        card_id="base1-4",
+        set_name="Base Set",
+        set_code="base1",
+        number="4",
+        language="JP",
+        quantity=3,
+        market_value_cents=12_345,
+        image_url="https://img.example/z.png",
+        tcgplayer_url="https://tcgplayer.com/z",
+        category="sealed",
+        condition="LP",
+        holo_pattern="cosmos",
+        edition="1st",
+        is_graded=True,
+        grading_company="PSA",
+        grade="9",
+        cert_number="12345678",
+        ebay_url="https://ebay.com/sold?q=z",
+        notes="chipped corner",
+        intent="personal",
+        review=True,
+        market_is_manual=True,
+    )
+
+
+def _saved(repo: AuctionRepository, **kw) -> Auction:
+    a = Auction(**kw)
+    repo.save(a, now="2026-08-26T00:00:00+00:00")
+    return a
+
+
+def test_delete_records_a_restorable_event(auctions_conn):
+    repo = AuctionRepository(auctions_conn)
+    events = AuctionEventRepository(auctions_conn)
+    a = _saved(
+        repo,
+        title="Lot of 3",
+        cards=[
+            AuctionCard(name="A", market_value_cents=1_000, quantity=2),
+            AuctionCard(name="B", market_value_cents=500),
+        ],
+    )
+    repo.delete(a.id)
+
+    (event,) = events.list_all()
+    assert event.kind == EVENT_DELETED
+    assert event.auction_id == a.id
+    # Self-describing: the figures survive the auction they describe.
+    assert event.title == "Lot of 3"
+    assert event.card_count == 3  # quantities, not rows
+    assert event.value_cents == 2_500
+    assert event.restorable
+
+
+def test_restore_reconstitutes_every_card_field(auctions_conn):
+    repo = AuctionRepository(auctions_conn)
+    events = AuctionEventRepository(auctions_conn)
+    a = _saved(
+        repo,
+        title="Graded lot",
+        url="https://www.ebay.com/itm/9",
+        shipping_cents=1_250,
+        tax_rate_bps=725,
+        ends_at="2026-09-01T18:30:00",
+        notes="watch the shipping",
+        archived=True,
+        cards=[_full_card(), AuctionCard(name="filler")],
+    )
+    before = asdict(repo.get(a.id))
+    repo.delete(a.id)
+    assert repo.get(a.id) is None
+
+    (event,) = events.list_all()
+    restored = events.restore(event.id, now="2026-08-26T01:00:00+00:00")
+    after = asdict(repo.get(restored.id))
+
+    # A restore mints a fresh id, so ids and timestamps are expected to differ —
+    # everything else must come back byte-for-byte.
+    for blob in (before, after):
+        blob.pop("id"), blob.pop("created_at"), blob.pop("updated_at")
+        for card in blob["cards"]:
+            card.pop("id")
+    assert after == before
+
+
+def test_restore_stamps_the_event_and_keeps_it(auctions_conn):
+    repo = AuctionRepository(auctions_conn)
+    events = AuctionEventRepository(auctions_conn)
+    a = _saved(repo, title="x", cards=[AuctionCard(name="A")])
+    repo.delete(a.id)
+    (event,) = events.list_all()
+
+    restored = events.restore(event.id, now="2026-08-26T02:00:00+00:00")
+
+    # The row is kept — Auction History never loses one — but is no longer offered.
+    (stamped,) = events.list_all()
+    assert stamped.restored_at == "2026-08-26T02:00:00+00:00"
+    assert stamped.restored_id == restored.id
+    assert stamped.auction_id == a.id  # still points at the id it destroyed
+    assert not stamped.restorable
+    assert repo.get(restored.id) is not None
+
+
+def test_restore_does_not_collide_with_a_reused_id(auctions_conn):
+    """SQLite hands a freed rowid straight back out, so by the time an undo runs
+    the deleted auction's id may belong to someone else. Restore mints a fresh
+    row rather than pinning the old id — hence ``restored_id``."""
+    repo = AuctionRepository(auctions_conn)
+    events = AuctionEventRepository(auctions_conn)
+    doomed = _saved(repo, title="doomed", cards=[AuctionCard(name="A")])
+    repo.delete(doomed.id)
+
+    squatter = _saved(repo, title="squatter", cards=[AuctionCard(name="B")])
+    assert squatter.id == doomed.id  # the id really was handed back out
+
+    (event,) = events.list_all()
+    restored = events.restore(event.id)
+
+    assert restored.id != squatter.id
+    assert {a.title for a in repo.list_all(archived=None)} == {"doomed", "squatter"}
+
+
+def test_restore_is_one_shot(auctions_conn):
+    """The guard that stops an undo minting duplicate watchlist entries."""
+    repo = AuctionRepository(auctions_conn)
+    events = AuctionEventRepository(auctions_conn)
+    a = _saved(repo, title="x", cards=[AuctionCard(name="A")])
+    repo.delete(a.id)
+    (event,) = events.list_all()
+    events.restore(event.id)
+
+    with pytest.raises(ValueError, match="already restored"):
+        events.restore(event.id)
+    assert len(repo.list_all(archived=None)) == 1
+
+
+def test_restore_refuses_an_event_that_destroyed_nothing(auctions_conn):
+    repo = AuctionRepository(auctions_conn)
+    events = AuctionEventRepository(auctions_conn)
+    a = _saved(repo, title="x", cards=[AuctionCard(name="A")])
+    events.record(EVENT_ARCHIVED, a)
+    (event,) = events.list_all()
+
+    with pytest.raises(ValueError, match="only a deleted event"):
+        events.restore(event.id)
+
+
+def test_restore_refuses_an_unknown_event(auctions_conn):
+    with pytest.raises(ValueError, match="no such auction event"):
+        AuctionEventRepository(auctions_conn).restore(999)
+
+
+def test_record_refuses_a_delete_and_an_unknown_kind(auctions_conn):
+    """Deletes are logged by the repository that can still see the auction."""
+    events = AuctionEventRepository(auctions_conn)
+    a = Auction(title="x", cards=[AuctionCard(name="A")])
+    with pytest.raises(ValueError, match="AuctionRepository.delete"):
+        events.record(EVENT_DELETED, a)
+    with pytest.raises(ValueError, match="unknown auction event kind"):
+        events.record("mangled", a)
+
+
+def test_archive_and_won_events_log_newest_first(auctions_conn):
+    repo = AuctionRepository(auctions_conn)
+    events = AuctionEventRepository(auctions_conn)
+    a = _saved(repo, title="x", cards=[AuctionCard(name="A", market_value_cents=700)])
+
+    events.record(EVENT_ARCHIVED, a, now="2026-08-26T00:00:00+00:00")
+    events.record(EVENT_UNARCHIVED, a, now="2026-08-26T01:00:00+00:00")
+    events.record(EVENT_WON, a, transaction_id=42, now="2026-08-26T02:00:00+00:00")
+
+    kinds = [e.kind for e in events.list_all()]
+    assert kinds == [EVENT_WON, EVENT_UNARCHIVED, EVENT_ARCHIVED]
+    won = events.list_all()[0]
+    assert won.transaction_id == 42
+    assert won.value_cents == 700
+    assert won.snapshot is None  # only a delete destroys anything
+    assert not won.restorable
+
+
+def test_event_table_lands_on_a_pre_existing_db(tmp_path):
+    """auctions.db is not migrated by the migrator — the table has to appear
+    when an *older* file is reopened, exactly as `archived` did."""
+    path = tmp_path / "auctions.db"
+    conn = open_auctions(path)
+    conn.execute("DROP TABLE auction_event")
+    conn.commit()
+    conn.close()
+
+    conn = open_auctions(path)
+    assert conn.execute("SELECT COUNT(*) FROM auction_event").fetchone()[0] == 0
+    conn.close()
 
 
 # ---------------------------------------------------------------------------

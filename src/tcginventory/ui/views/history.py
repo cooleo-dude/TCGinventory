@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -57,6 +58,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from tcginventory.data.auctions import (
+    EVENT_ARCHIVED,
+    EVENT_DELETED,
+    EVENT_UNARCHIVED,
+    EVENT_WON,
+    AuctionEvent,
+    AuctionEventRepository,
+)
 from tcginventory.data.db import connect
 from tcginventory.data.repositories import (
     ItemRepository,
@@ -75,6 +84,10 @@ from tcginventory.services.transactions import TransactionService
 from tcginventory.ui import icons, theme, thumbcache
 from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.formatting import money, percent
+from tcginventory.ui.models.auction_history_model import (
+    AuctionEventRow,
+    AuctionHistoryModel,
+)
 from tcginventory.ui.models.history_model import (
     CARDS_COL,
     CARDS_ROLE,
@@ -1213,6 +1226,348 @@ class _RecHistoryPanel(QWidget):
         self._annotated.set_image(img["path"], regions)
 
 
+_AUC_KINDS = ["All", EVENT_DELETED, EVENT_ARCHIVED, EVENT_UNARCHIVED, EVENT_WON]
+_AUC_DETAIL_HEADERS = ["Card", "Set", "Qty", "Market"]
+
+
+def _event_color(value: str) -> str:
+    t = theme.active()
+    return {
+        EVENT_DELETED: t.neg,
+        EVENT_ARCHIVED: t.ink3,
+        EVENT_UNARCHIVED: t.info,
+        EVENT_WON: t.pos,
+    }.get(value, t.ink3)
+
+
+def _auc_state_color(value: str) -> str:
+    t = theme.active()
+    return {"restorable": t.accent_ink, "restored": t.info, "logged": t.ink3}.get(
+        value, t.ink3
+    )
+
+
+class _AucPillDelegate(_PillDelegate):
+    """Auction-log pills: Event (col 1) and State (col 5)."""
+
+    def _colors(self, col, text, index):
+        key = (text or "").lower()
+        fg = _event_color(key) if col == _TYPE_COL else _auc_state_color(key)
+        return fg, _alpha(fg, 0.15), None, fg
+
+
+class _AucFilterProxy(QSortFilterProxyModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self._kind = "All"
+        self._text = ""
+        self.setSortRole(Qt.UserRole)
+
+    def set_kind(self, value: str) -> None:
+        self._kind = value
+        self.invalidateFilter()
+
+    def set_text(self, text: str) -> None:
+        self._text = text.strip().lower()
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, parent: QModelIndex) -> bool:
+        model = self.sourceModel()
+        row = model.row_at(source_row)
+        if self._kind != "All" and row.event.kind != self._kind:
+            return False
+        if self._text:
+            haystack = f"{row.event.title} {row.result}".lower()
+            if self._text not in haystack:
+                return False
+        return True
+
+
+class _AucHistoryPanel(QWidget):
+    """Auction History — the lifecycle log of watched eBay auctions, in the same
+    format as the transaction log: one row per thing that happened (deleted,
+    archived, unarchived, won), with KPI tiles above and, below, what the
+    selected event was carrying.
+
+    A ``deleted`` row is restorable: the delete snapshotted the whole bundle
+    before ``ON DELETE CASCADE`` took the cards with it, so putting it back is a
+    re-insert rather than a re-type.
+    """
+
+    changed = Signal()  # a restore put an auction back on the watchlist
+
+    def __init__(self, auctions_conn: sqlite3.Connection | None = None) -> None:
+        super().__init__()
+        # None (the default) means "no watchlist database in this session" — the
+        # pane shows its empty state rather than opening auctions.db behind the
+        # caller's back, which is what keeps the bare HistoryView(conn) used
+        # across the suite from writing to the user's real file.
+        self._conn = auctions_conn
+        self._events = (
+            AuctionEventRepository(auctions_conn) if auctions_conn is not None else None
+        )
+
+        self._model = AuctionHistoryModel()
+        self._proxy = _AucFilterProxy()
+        self._proxy.setSourceModel(self._model)
+
+        self._subtitle = QLabel("")
+        self._subtitle.setStyleSheet(f"color:{theme.active().ink3}; font-size:12px;")
+
+        self._del_tile, self._stat_deleted = _kpi_tile("Deleted")
+        self._res_tile, self._stat_restorable = _kpi_tile("Restorable")
+        self._won_tile, self._stat_won = _kpi_tile("Won")
+        stats = QHBoxLayout()
+        stats.setSpacing(12)
+        for tile in (self._del_tile, self._res_tile, self._won_tile):
+            stats.addWidget(tile)
+        stats.addStretch(1)
+
+        self._kind = QComboBox()
+        self._kind.addItems(_AUC_KINDS)
+        self._kind.currentTextChanged.connect(self._on_kind_changed)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search auction titles…")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._on_search_changed)
+        self._restore_btn = QPushButton("Restore…")
+        self._restore_btn.setIcon(icons.icon("rotate-ccw", theme.active().ink2, 15))
+        self._restore_btn.setToolTip(
+            "Put the selected deleted auction back on the watchlist"
+        )
+        self._restore_btn.clicked.connect(self._restore_selected)
+        filter_bar = QHBoxLayout()
+        filter_bar.addWidget(QLabel("Event:"))
+        filter_bar.addWidget(self._kind)
+        filter_bar.addWidget(self._search, 1)
+        filter_bar.addWidget(self._restore_btn)
+
+        self._table = QTableView()
+        self._table.setModel(self._proxy)
+        self._table.setSortingEnabled(True)
+        self._table.sortByColumn(0, Qt.DescendingOrder)  # newest first
+        self._table.setItemDelegate(_AucPillDelegate(self._table))
+        self._table.horizontalHeader().setResizeContentsPrecision(25)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.selectionModel().selectionChanged.connect(self._show_detail)
+
+        self._empty, self._empty_body, empty_btn = _empty_state(
+            "gavel",
+            "No auction activity yet",
+            "Delete, archive, or win a watched auction in the eBay Auctions "
+            "window and it lands here — a deleted one stays restorable.",
+            "",
+        )
+        empty_btn.setVisible(False)  # no CTA on this state
+        self._no_match, self._no_match_body, clear_btn = _empty_state(
+            "search", "No matching events", "Nothing matches these filters.", "Clear"
+        )
+        clear_btn.clicked.connect(self._clear_filters)
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._table)  # 0
+        self._stack.addWidget(self._empty)  # 1
+        self._stack.addWidget(self._no_match)  # 2
+
+        # Below: what the selected event was carrying, so a restore is an
+        # informed click rather than a guess at which bundle this was.
+        self._detail_header = QLabel("Select an event to see the cards it covered.")
+        self._detail_header.setTextFormat(Qt.RichText)
+        self._detail_header.setStyleSheet("border:none; background:transparent;")
+        self._detail_band = QFrame()
+        band = QHBoxLayout(self._detail_band)
+        band.setContentsMargins(14, 9, 14, 9)
+        band.addWidget(self._detail_header)
+        band.addStretch(1)
+        self._detail_table = QTableWidget(0, len(_AUC_DETAIL_HEADERS))
+        self._detail_table.setHorizontalHeaderLabels(_AUC_DETAIL_HEADERS)
+        self._detail_table.verticalHeader().setVisible(False)
+        self._detail_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._detail_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._detail_table.setAlternatingRowColors(True)
+        # Card name takes the slack; Qty and Market are narrow numeric columns
+        # and look absurd stretched across the pane.
+        detail_header = self._detail_table.horizontalHeader()
+        detail_header.setStretchLastSection(False)
+        detail_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in range(1, len(_AUC_DETAIL_HEADERS)):
+            detail_header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+
+        detail_box = QWidget()
+        detail_layout = QVBoxLayout(detail_box)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(8)
+        detail_layout.addWidget(self._detail_band)
+        detail_layout.addWidget(self._detail_table, 1)
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(self._stack)
+        splitter.addWidget(detail_box)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 1)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        layout.addWidget(self._subtitle)
+        layout.addLayout(stats)
+        layout.addLayout(filter_bar)
+        layout.addWidget(splitter, 1)
+
+        self._update_state()
+
+    # -- data ---------------------------------------------------------------
+
+    def refresh(self) -> None:
+        rows = (
+            [AuctionEventRow(e) for e in self._events.list_all()]
+            if self._events is not None
+            else []
+        )
+        self._model.set_rows(rows)
+        self._table.resizeColumnsToContents()
+        self._update_stats(rows)
+        self._update_subtitle()
+        self._update_state()
+        self._clear_detail()
+
+    def _update_stats(self, rows: list[AuctionEventRow]) -> None:
+        t = theme.active()
+        deleted = sum(1 for r in rows if r.event.kind == EVENT_DELETED)
+        restorable = sum(1 for r in rows if r.event.restorable)
+        won = sum(1 for r in rows if r.event.kind == EVENT_WON)
+        _set_kpi(self._stat_deleted, str(deleted), t.neg if deleted else t.ink)
+        _set_kpi(
+            self._stat_restorable,
+            str(restorable),
+            t.accent_ink if restorable else t.ink,
+        )
+        _set_kpi(self._stat_won, str(won), t.pos if won else t.ink)
+
+    def _update_subtitle(self) -> None:
+        total = self._model.rowCount()
+        shown = self._proxy.rowCount()
+        if total and shown != total:
+            self._subtitle.setText(f"{shown} of {total} events")
+        else:
+            self._subtitle.setText(f"{total} event{'' if total == 1 else 's'}")
+
+    def _update_state(self) -> None:
+        if self._model.rowCount() == 0:
+            self._stack.setCurrentIndex(1)
+        elif self._proxy.rowCount() == 0:
+            self._stack.setCurrentIndex(2)
+        else:
+            self._stack.setCurrentIndex(0)
+        event = self._selected_event()
+        self._restore_btn.setEnabled(event is not None and event.restorable)
+
+    # -- filters ------------------------------------------------------------
+
+    def _on_kind_changed(self, value: str) -> None:
+        self._proxy.set_kind(value)
+        self._after_filter()
+
+    def _on_search_changed(self, text: str) -> None:
+        self._proxy.set_text(text)
+        self._after_filter()
+
+    def _after_filter(self) -> None:
+        self._update_subtitle()
+        self._update_state()
+
+    def _clear_filters(self) -> None:
+        self._kind.setCurrentIndex(0)
+        self._search.clear()
+
+    # -- selection / detail -------------------------------------------------
+
+    def _selected_event(self) -> AuctionEvent | None:
+        rows = self._table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        source = self._proxy.mapToSource(rows[0])
+        return self._model.row_at(source.row()).event
+
+    def _clear_detail(self) -> None:
+        self._detail_table.setRowCount(0)
+        self._detail_header.setText("Select an event to see the cards it covered.")
+
+    def _show_detail(self) -> None:
+        self._update_state()
+        event = self._selected_event()
+        if event is None:
+            self._clear_detail()
+            return
+        t = theme.active()
+        title = event.title or "(untitled)"
+        self._detail_header.setText(
+            f"<b>{title}</b> &nbsp;·&nbsp; <span style='color:{t.ink2}'>"
+            f"{event.kind} · {event.card_count} card"
+            f"{'' if event.card_count == 1 else 's'} · {money(event.value_cents)}"
+            "</span>"
+        )
+        cards = event.snapshot_cards()
+        self._detail_table.setRowCount(len(cards))
+        for i, card in enumerate(cards):
+            values = [
+                card.name,
+                card.set_name or "",
+                str(card.quantity),
+                money(card.market_value_cents),
+            ]
+            for col, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                if col >= 2:
+                    item.setTextAlignment(int(Qt.AlignRight | Qt.AlignVCenter))
+                    item.setFont(QFont(theme.mono_family()))
+                self._detail_table.setItem(i, col, item)
+        if not cards:
+            # Only a delete carries a payload; say so rather than looking broken.
+            self._detail_header.setText(
+                self._detail_header.text() + f" &nbsp;<span style='color:{t.ink3}'>"
+                "— no card snapshot for this event</span>"
+            )
+
+    # -- restore ------------------------------------------------------------
+
+    def _restore_selected(self) -> None:
+        event = self._selected_event()
+        if event is None or not event.restorable or self._events is None:
+            return
+        title = event.title or "(untitled)"
+        confirm = QMessageBox.question(
+            self,
+            "Restore auction",
+            f"Put “{title}” back on the watchlist?\n\n"
+            f"{event.card_count} card{'' if event.card_count == 1 else 's'} "
+            f"({money(event.value_cents)}) return as a new watchlist entry — the "
+            "original numbering is not reused.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            restored = self._events.restore(event.id)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Could not restore", str(exc))
+            self.refresh()
+            return
+        self.refresh()
+        QMessageBox.information(
+            self,
+            "Auction restored",
+            f"“{restored.title or '(untitled)'}” is back on the watchlist"
+            f"{' (archived)' if restored.archived else ''}.",
+        )
+        self.changed.emit()
+
+
 class HistoryView(QWidget):
     edit_requested = Signal(int)  # transaction id to edit
     changed = Signal()  # a void changed the ledger
@@ -1221,10 +1576,20 @@ class HistoryView(QWidget):
     export_to_transaction = Signal(object)
     export_to_auction = Signal(object)
 
-    def __init__(self, conn: sqlite3.Connection, vision_repo=None) -> None:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        vision_repo=None,
+        auctions_conn: sqlite3.Connection | None = None,
+    ) -> None:
         super().__init__()
         self._conn = conn
         self._vision_repo = vision_repo  # for the Recognition History page
+        # Passed in, never opened here: MainWindow hands both this view and
+        # AuctionsView the *same* auctions.db connection, and a bare
+        # HistoryView(conn) gets an empty Auction History rather than touching
+        # the user's real watchlist file.
+        self._auctions_conn = auctions_conn
         self._txns = TransactionRepository(conn)
         self._lines = TransactionLineRepository(conn)
         self._consumptions = LotConsumptionRepository(conn)
@@ -1236,9 +1601,10 @@ class HistoryView(QWidget):
         self._resolver: _ThumbResolver | None = None
         self._parked: list = []  # workers stopping but not yet exited
         self._thumb_gen = 0  # bumps each refresh so stale resolver emits are ignored
-        # Per-page freshness (0 Transaction, 1 Recognition): a page is rebuilt on
-        # its first show and after a data change, never on a plain mode toggle.
-        self._stale = {0: True, 1: True}
+        # Per-page freshness (0 Transaction, 1 Recognition, 2 Auction): a page is
+        # rebuilt on its first show and after a data change, never on a plain
+        # mode toggle.
+        self._stale = {0: True, 1: True, 2: True}
         # Preview state: one (card_id, image_url) per *detail* row (None when the
         # card has no art), plus which row the pointer is currently over.
         self._detail_art: list[tuple[str, str] | None] = []
@@ -1404,9 +1770,14 @@ class HistoryView(QWidget):
         self._rec = _RecHistoryPanel(self._conn, vision_repo=self._vision_repo)
         self._rec.export_to_transaction.connect(self.export_to_transaction)
         self._rec.export_to_auction.connect(self.export_to_auction)
+        self._auc = _AucHistoryPanel(auctions_conn=self._auctions_conn)
+        # A restore puts an auction back on the watchlist, so the eBay Auctions
+        # window is out of date — the same `changed` every other mutation uses.
+        self._auc.changed.connect(self.changed)
         self._pages = QStackedWidget()
         self._pages.addWidget(txn_page)  # 0 Transaction
         self._pages.addWidget(self._rec)  # 1 Recognition
+        self._pages.addWidget(self._auc)  # 2 Auction
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -1415,14 +1786,20 @@ class HistoryView(QWidget):
 
         self._set_mode(0)  # default: Transaction History (refreshes it)
 
-    # -- mode toggle (Transaction / Recognition) ----------------------------
+    # -- mode toggle (Transaction / Recognition / Auction) ------------------
+
+    def _mode_buttons(self):
+        """(page index, button) for every page — the one place the toggle's
+        membership is written down, so a fourth page is one line."""
+        return ((0, self._mode_txn), (1, self._mode_rec), (2, self._mode_auc))
 
     def _build_mode_toggle(self):
         self._mode_txn = QPushButton("Transaction History")
         self._mode_rec = QPushButton("Recognition History")
+        self._mode_auc = QPushButton("Auction History")
         bar = QHBoxLayout()
         bar.setSpacing(8)
-        for i, btn in ((0, self._mode_txn), (1, self._mode_rec)):
+        for i, btn in self._mode_buttons():
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
             btn.clicked.connect(lambda _=False, idx=i: self._set_mode(idx))
@@ -1433,7 +1810,7 @@ class HistoryView(QWidget):
     def _set_mode(self, index: int) -> None:
         t = theme.active()
         self._pages.setCurrentIndex(index)
-        for i, btn in ((0, self._mode_txn), (1, self._mode_rec)):
+        for i, btn in self._mode_buttons():
             active = i == index
             btn.setChecked(active)
             if active:
@@ -1530,8 +1907,10 @@ class HistoryView(QWidget):
             return
         if index == 0:
             self._refresh_txn()
-        else:
+        elif index == 1:
             self._rec.refresh()
+        else:
+            self._auc.refresh()
         self._stale[index] = False
 
     def _refresh_txn(self) -> None:
