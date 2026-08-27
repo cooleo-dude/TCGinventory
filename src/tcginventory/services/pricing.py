@@ -90,11 +90,116 @@ _PROMO_SET_ALIASES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Foil treatment
+# ---------------------------------------------------------------------------
+# tcgcsv prices each *treatment* of a product separately, under `subTypeName`.
+# Measured across all 218 English groups: exactly these seven values, and 13,900
+# of 30,457 products (45.6%) carry more than one. They decompose exactly onto the
+# two identity columns migration 0011 already added, so an item always knows
+# which of them it is — the price lookup just has to use it. (Ticket 56.)
+_TREATMENT: dict[tuple[str | None, str | None], str] = {
+    ("NH", None): "Normal",
+    ("NH", "N/A"): "Normal",
+    ("H", None): "Holofoil",
+    ("H", "N/A"): "Holofoil",
+    ("RH", None): "Reverse Holofoil",
+    ("RH", "N/A"): "Reverse Holofoil",
+    ("NH", "1st Edition"): "1st Edition",
+    ("H", "1st Edition"): "1st Edition Holofoil",
+    ("NH", "Unlimited"): "Unlimited",
+    ("H", "Unlimited"): "Unlimited Holofoil",
+}
+
+# How a quote's treatment was arrived at — carried on PriceQuote so the choice is
+# inspectable rather than buried in the provider.
+PICK_EXACT = "exact"  # the item's own treatment was priced
+PICK_ONLY = "only"  # product has one treatment; it cannot be ambiguous
+PICK_CHEAPEST = "cheapest"  # item didn't say; took the least flattering price
+PICK_FALLBACK = "fallback"  # item named a printing this product lacks
+
+
+def treatment_for(item: Item) -> str | None:
+    """The tcgcsv ``subTypeName`` an item's identity columns describe.
+
+    ``None`` when the item does not say (``holo_pattern`` unset) or the pair is
+    one tcgcsv has no name for.
+    """
+    holo = item.holo_pattern.value if item.holo_pattern else None
+    edition = item.edition.value if item.edition else None
+    return _TREATMENT.get((holo, edition))
+
+
+def cheapest_treatment(
+    by_treatment: dict[str | None, int],
+) -> tuple[int, str | None] | None:
+    """The least-flattering priced treatment of a product, or ``None``.
+
+    The shared answer to "several printings exist and nothing says which one this
+    is" — used both by :func:`select_treatment`'s fallback and by the card-entry
+    lookups, which run before an item exists at all. Cheapest rather than
+    dearest because overstating a portfolio inflates unrealized gain and
+    collection value, and because Normal outnumbers the foils.
+    """
+    priced = {k: v for k, v in by_treatment.items() if v is not None}
+    if not priced:
+        return None
+    key = min(priced, key=lambda k: priced[k])
+    return priced[key], key
+
+
+def select_treatment(
+    by_treatment: dict[str | None, int], item: Item
+) -> tuple[int, str | None, str] | None:
+    """Pick one price from a product's treatments → ``(cents, treatment, how)``.
+
+    The rules, in order, and each one recorded in ``how``:
+
+    1. **Exact** — the item says which printing it is and that printing is
+       priced. The normal path.
+    2. **Only** — the product carries a single treatment, so there is nothing to
+       disambiguate and the item's claim cannot change the answer. This covers
+       682 of 759 real items, including every one whose ``holo_pattern`` is the
+       untrustworthy ``NH`` default.
+    3. **Cheapest** — several treatments exist and the item does not say which.
+       Deliberately *not* the dearest: overstating a portfolio inflates
+       unrealized gain and collection value, which is the more damaging
+       direction to be wrong in, and Normal outnumbers the foils anyway.
+    4. **Fallback** — the item names a printing this product does not carry, so
+       take the cheapest and mark it. This started out as "refuse to price it",
+       on the reasoning that a missing price beats a confident wrong one. Running
+       it over the real ledger showed that to be wrong: it dropped 53 items whose
+       product match was perfectly good. Vintage cards exist only as
+       ``1st Edition``/``Unlimited`` with no plain ``Normal``, and holo-only
+       cards are routinely recorded ``NH`` because that is the default — the
+       claim carries almost no information when 93% of items make it. The card is
+       still one of the printings offered, so the cheapest of them is a real
+       answer; refusing merely deleted a price the user had.
+
+    Only a product with nothing priced at all yields ``None``.
+    """
+    priced = {k: v for k, v in by_treatment.items() if v is not None}
+    if not priced:
+        return None
+    want = treatment_for(item)
+    if want is not None and want in priced:
+        return priced[want], want, PICK_EXACT
+    if len(priced) == 1:
+        only = next(iter(priced))
+        return priced[only], only, PICK_ONLY
+    cents, treatment = cheapest_treatment(priced)
+    return cents, treatment, PICK_CHEAPEST if want is None else PICK_FALLBACK
+
+
 @dataclass
 class PriceQuote:
     item_id: int
     price_cents: int
     source: str = "tcgcsv"
+    # Which printing this price is for, and how that was decided (see
+    # select_treatment). None/"" for providers that don't model treatments.
+    treatment: str | None = None
+    picked: str = ""
 
 
 @dataclass
@@ -184,9 +289,14 @@ class TcgcsvProvider:
             pn = _norm_number(prod_number)
             if pn != want and pn != want_base:
                 continue
-            cents = prices.get(product_id)
-            if cents is None:
+            # Card-entry autofill: no item exists yet, so nothing says which
+            # printing this is. Same rule as select_treatment's fallback — the
+            # cheapest, not the dearest. Ticket 57 turns this into a real choice
+            # by requiring a treatment when the catalog says several exist.
+            chosen = cheapest_treatment(prices.get(product_id) or {})
+            if chosen is None:
                 continue
+            cents = chosen[0]
             pnm = _norm(prod_name)
             if want_name and pnm and want_name not in pnm and pnm not in want_name:
                 continue  # have a product name and it disagrees → not this card
@@ -229,9 +339,13 @@ class TcgcsvProvider:
         ):
             if _norm_number(prod_number) != want:
                 continue
-            cents = prices.get(product_id)
-            if cents is None or not url:
+            # As in price_for_card: the Printing dropdown chooses between
+            # *products*, not treatments, so each one is shown at its cheapest
+            # priced printing until ticket 57 makes the treatment explicit.
+            chosen = cheapest_treatment(prices.get(product_id) or {})
+            if chosen is None or not url:
                 continue
+            cents = chosen[0]
             pnm = _norm(prod_name)
             if want_name and pnm and want_name not in pnm and pnm not in want_name:
                 continue
@@ -277,9 +391,21 @@ class TcgcsvProvider:
         for (category, group_id), entries in by_group.items():
             prices = self._prices_for_group(category, group_id)
             for item, product_id in entries:
-                cents = prices.get(product_id)
-                if cents is not None:
-                    quotes.append(PriceQuote(item_id=item.id, price_cents=cents))
+                by_treatment = prices.get(product_id)
+                if not by_treatment:
+                    continue
+                chosen = select_treatment(by_treatment, item)
+                if chosen is None:
+                    continue  # nothing priced on this product at all
+                cents, treatment, picked = chosen
+                quotes.append(
+                    PriceQuote(
+                        item_id=item.id,
+                        price_cents=cents,
+                        treatment=treatment,
+                        picked=picked,
+                    )
+                )
         return quotes
 
     # -- public accessors (used by the catalog-wide price sweep) ------------
@@ -290,7 +416,9 @@ class TcgcsvProvider:
         return self._resolve_group(set_name, set_code, category)
 
     def market_prices(self, category: int, group_id: int) -> dict[int, int]:
-        return self._prices_for_group(category, group_id)
+        """One price per product, for the catalog-wide sweep. See
+        :meth:`_collapse_dearest` for why this still takes the dearest."""
+        return self._collapse_dearest(self._prices_for_group(category, group_id))
 
     def products(self, category: int, group_id: int) -> list[tuple[int, str, str, str]]:
         return self._products_for_group(category, group_id)
@@ -395,21 +523,50 @@ class TcgcsvProvider:
             self._group_cache[category] = (index, candidates)
         return self._group_cache[category]
 
-    def _prices_for_group(self, category: int, group_id: int) -> dict[int, int]:
+    def _prices_for_group(
+        self, category: int, group_id: int
+    ) -> dict[int, dict[str | None, int]]:
+        """``{product_id: {subTypeName: cents}}`` for one tcgcsv group.
+
+        Every treatment is kept. This used to collapse them with ``max()``, which
+        reported the dearest printing as *the* price for the product — so a plain
+        Normal card was valued at its Reverse Holofoil, and a Shadowless
+        Charizard in Unlimited Holo ($2,146) was recorded at the 1st Edition
+        Holo's $10,000. See :func:`select_treatment`. (Ticket 56.)
+        """
         key = (category, group_id)
         if key not in self._price_cache:
             data = self._fetch(f"{_BASE_URL}/{category}/{group_id}/prices")
-            prices: dict[int, int] = {}
+            prices: dict[int, dict[str | None, int]] = {}
             for row in _results(data):
                 pid = row.get("productId")
                 market = row.get("marketPrice")
                 if pid is None or market is None:
                     continue
+                sub = row.get("subTypeName")
                 cents = round(float(market) * 100)
-                # A product may list several sub-types; keep the highest market.
-                prices[pid] = max(prices.get(pid, 0), cents)
+                # Same product + same sub-type twice would be a source anomaly;
+                # keep the dearest so the shape stays one price per treatment.
+                bucket = prices.setdefault(pid, {})
+                bucket[sub] = max(bucket.get(sub, 0), cents)
             self._price_cache[key] = prices
         return self._price_cache[key]
+
+    @staticmethod
+    def _collapse_dearest(
+        by_product: dict[int, dict[str | None, int]],
+    ) -> dict[int, int]:
+        """One price per product, taking the dearest treatment.
+
+        This is what the whole provider used to do, kept **only** for
+        :meth:`market_prices` and the catalog-wide sweep behind it. That sweep
+        prices *catalog cards*, which have no owner and therefore no treatment to
+        select by, so it has nothing better to choose on. Preserved byte-for-byte
+        so a year of ``pricehistory.db`` series — and the Inventory sparkline,
+        trends and Market signals built on them — do not silently change meaning.
+        Switching it to a preferred order is a separate decision. (Ticket 56.)
+        """
+        return {pid: max(subs.values()) for pid, subs in by_product.items() if subs}
 
 
 def _results(data) -> list:

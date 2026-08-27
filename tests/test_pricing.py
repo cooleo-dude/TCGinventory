@@ -52,8 +52,13 @@ def test_provider_joins_price_by_product_id(conn):
     item = ItemRepository(conn).add(_pikachu())
     quotes = TcgcsvProvider(fetch_json=_fake_fetch).quotes_for([item])
     assert len(quotes) == 1
-    # Highest sub-type market price wins (999c holofoil over 425c normal).
-    assert quotes[0].price_cents == 999
+    # This Pikachu declares no holo_pattern, so nothing says which printing it
+    # is. Ticket 56 takes the CHEAPEST of the product's treatments (425c normal
+    # over 999c holofoil), not the dearest: overstating a portfolio inflates
+    # unrealized gain and collection value. This assertion was `== 999` before
+    # that ticket, which was the bug written down as a test.
+    assert quotes[0].price_cents == 425
+    assert quotes[0].treatment == "Normal"
     assert quotes[0].item_id == item.id
 
 
@@ -68,10 +73,10 @@ def test_refresh_writes_snapshot_and_updates_current_value(conn):
 
     history = PriceSnapshotRepository(conn).history_for_item(item.id)
     assert len(history) == 1
-    assert history[0].price_cents == 999
+    assert history[0].price_cents == 425  # cheapest treatment; see ticket 56
     assert history[0].source == "tcgcsv"
     # Current market value on the item is updated for the dashboard/columns.
-    assert items.get(item.id).market_value_cents == 999
+    assert items.get(item.id).market_value_cents == 425
 
 
 def _base_fetch(url: str):
@@ -593,7 +598,7 @@ def test_latest_prices_and_history_since(conn):
     svc.refresh(as_of="2026-05-01T00:00:00+00:00")
     svc.refresh(as_of="2026-07-01T00:00:00+00:00")
 
-    assert snaps.latest_prices()[item.id] == 999
+    assert snaps.latest_prices()[item.id] == 425  # cheapest treatment (ticket 56)
     recent = snaps.history_for_item(item.id, since="2026-06-01")
     assert len(recent) == 1  # only the July snapshot is within range
 

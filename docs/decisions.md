@@ -2845,3 +2845,71 @@ item-level Notes on one grid row changed all three copies. (Ticket 52.)
   **22,827 artists (96.9%), rarity and supertype 100%, zero errors, 174s**, and
   `base1-4` / `sv09-001` / `swsh9-018` each matching independently-checked ground
   truth.
+
+### 2026-08-26 — Price the printing the card actually is, not the dearest one
+
+- **Bug:** `TcgcsvProvider._prices_for_group` collapsed a product's foil
+  treatments with `max()` — one line, commented "keep the highest market" — so
+  the app recorded the dearest printing as *the* price for the card. A plain
+  Normal copy was valued at its Reverse Holofoil. Worst in the catalog: a
+  Shadowless Base Set Charizard in Unlimited Holo ($2,146.38) recorded at the
+  1st Edition Holo's **$10,000.00**; Legendary Collection Charmander, Normal
+  $2.24, recorded at **$616.33** — 275x. 786 products carry a gap >= $50.
+- **The data was already being downloaded.** tcgcsv mirrors TCGplayer's own
+  model: one price row per product **per `subTypeName`**. Measured across all 218
+  English groups, zero fetch errors — exactly **seven** values (Normal 19,241 ·
+  Reverse Holofoil 13,602 · Holofoil 10,463 · Unlimited 761 · 1st Edition 760 ·
+  Unlimited Holofoil 179 · 1st Edition Holofoil 174) and **13,900 of 30,457
+  products (45.6%) carry more than one**. The collapse was throwing it away.
+- **Nothing new needed modelling.** `_ITEM_IDENTITY_COLUMNS` already contains
+  `holo_pattern` **and** `edition` (migration 0011), so a holo copy and a
+  non-holo copy have always been separate items with separate basis. All seven
+  treatments decompose exactly onto those two enums. The lookup simply had to use
+  what the item already said it was.
+- **Decision:** `_prices_for_group` keeps every treatment
+  (`{product_id: {subtype: cents}}`) and `select_treatment()` picks one, in four
+  recorded steps: **exact** (the item's printing is priced), **only** (the
+  product has one printing, which the item's claim cannot override), **cheapest**
+  (several exist, the item does not say), **fallback** (the item names one this
+  product lacks). `PriceQuote` carries `treatment` and `picked` so the choice is
+  inspectable rather than buried.
+- **Cheapest, not dearest, when unknown.** Overstating a portfolio inflates
+  unrealized gain and the Collection Value tile — the more damaging direction to
+  be wrong in — and Normal outnumbers the foils anyway.
+- **Rule 4 was wrong on the first attempt, and the real ledger caught it.** It
+  originally *refused* to price a card whose declared printing the product did
+  not carry, reasoning that a missing price beats a confident wrong one. Run
+  against a copy of the live database that **dropped 53 items whose product match
+  was perfectly good**: vintage cards exist only as `1st Edition`/`Unlimited`
+  with no plain `Normal`, and holo-only cards are routinely recorded `NH` because
+  `NH` is the default — the claim carries almost no information when 93% of items
+  make it. The card is still one of the printings offered, so the cheapest of
+  them is a real answer; refusing merely deleted a price the user had. Now it
+  falls back and marks the quote `fallback`, which is also the signal ticket 57
+  will use to decide what to ask about.
+- **Measured, old algorithm vs new, over identical fetched data** (a copy of the
+  real ledger, 1,101 un-graded items, 968 resolving to a priced product):
+  **968 priced before, 968 after — nothing lost** — and **108 of 968 prices
+  corrected, removing $5,476.18 of overstatement.** Picks: 96 exact, 818 only,
+  53 fallback, 1 cheapest. Largest single correction: Dark Slowbro 8/110 from
+  $329.99 to $44.77.
+- **The catalog-wide sweep is deliberately unchanged.** `market_prices()` still
+  collapses to the dearest, now via an explicit `_collapse_dearest()` naming this
+  ticket. That sweep prices *catalog cards*, which have no owner and therefore no
+  treatment to select by, and its output is a year of `pricehistory.db` series
+  behind the Inventory sparkline, `services/trends.py` and Market signals.
+  Changing it would silently redefine every existing series. Whether it should
+  prefer a base printing instead is a separate decision, deliberately left open.
+- **Card-entry autofill follows the same rule.** `price_for_card` and
+  `variants_for_card` run before an item exists, so they use the shared
+  `cheapest_treatment()` rather than the dearest — otherwise the bug survived at
+  the point of entry, where `market_value_cents` is first written.
+- **Rejected: a treatment column on `price_snapshot`.** Records the same wrong
+  number with better provenance; the bug is the selection, not the storage.
+- **Rejected: duplicating cards under a foil alias** (`Geodude 111/102 Holo` as
+  its own card), which was the original proposal. `holo_pattern` already makes
+  them separate items, so an alias would be a second mechanism for one fact, able
+  to disagree with the first — the hazard migration 0022's ADR documents. It also
+  cannot be backfilled and would not survive `replace_for_language`.
+- **No migration.** `price_snapshot` keeps one row per item; the item already
+  encodes its treatment. Ticket 56.
