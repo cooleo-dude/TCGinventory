@@ -94,7 +94,7 @@
     "background_jobs": {"file": "src/tcginventory/ui/views/_worker.py", "rule": "TaskWorker(db_path, task) runs `task(conn) -> sentence` off the UI thread with its own connection. Any 'call a service and report a sentence' job uses it instead of a new QThread subclass."},
     "card_preview": {"files": ["src/tcginventory/ui/card_preview.py", "src/tcginventory/ui/card_gallery.py", "src/tcginventory/ui/thumbcache.py"], "rule": "Hover shows the hovered card; on leave fall back to the selected card, else the last hovered. Platform-wide convention."},
     "table_delegates": ["src/tcginventory/ui/views/_combo_delegate.py", "src/tcginventory/ui/views/_intent_delegate.py", "src/tcginventory/ui/views/_link_delegate.py", "src/tcginventory/ui/views/_review_delegate.py", "src/tcginventory/ui/views/_inventory_delegates.py"],
-    "dialogs": ["src/tcginventory/ui/views/_card_dialogs.py", "src/tcginventory/ui/views/_autofill_dialog.py", "src/tcginventory/ui/views/item_editor.py", "src/tcginventory/ui/views/item_detail.py"],
+    "dialogs": ["src/tcginventory/ui/views/_card_dialogs.py", "src/tcginventory/ui/views/_autofill_dialog.py", "src/tcginventory/ui/views/item_editor.py"],
     "qt_models": ["src/tcginventory/ui/models/inventory_model.py", "src/tcginventory/ui/models/history_model.py", "src/tcginventory/ui/models/recognition_history_model.py", "src/tcginventory/ui/models/auction_history_model.py"]
   },
 
@@ -163,12 +163,12 @@
       "aliases": ["holdings", "grid", "stock", "collection"],
       "class": "InventoryView",
       "file": "src/tcginventory/ui/views/inventory.py",
-      "purpose": "Sortable, filterable grid of holdings — one row per lot with cost, market, unrealized P/L, intent, SKU, review flag and a price sparkline; inline editing of intent/review, item edit and the sanctioned mistaken-entry delete.",
+      "purpose": "Sortable, filterable grid of holdings — one row per lot with cost, market, unrealized P/L, intent, SKU, review flag and a price sparkline — beside a card dossier panel (art, facts, price chart). Inline editing of intent/review, the sanctioned mistaken-entry delete, and a double-click row editor carrying every editable item and lot field.",
       "services": ["services/inventory.py", "services/transactions.py", "services/trends.py", "services/review.py", "services/cardimages.py"],
       "repositories": ["ItemRepository", "LotRepository", "PriceSnapshotRepository"],
       "tables": ["item", "lot", "lot_consumption", "price_snapshot"],
       "other_dbs": ["pricehistory.db (per-row price sparkline)"],
-      "supporting_files": ["ui/models/inventory_model.py", "ui/views/_inventory_delegates.py", "ui/views/_intent_delegate.py", "ui/views/_combo_delegate.py", "ui/views/_link_delegate.py", "ui/views/_review_delegate.py", "ui/views/item_detail.py", "ui/views/item_editor.py"],
+      "supporting_files": ["ui/models/inventory_model.py", "ui/views/_inventory_delegates.py", "ui/views/_intent_delegate.py", "ui/views/_combo_delegate.py", "ui/views/_link_delegate.py", "ui/views/_review_delegate.py", "ui/views/item_editor.py"],
       "tests": ["tests/test_ui_views.py", "tests/test_ui_item_editing.py", "tests/test_ui_inventory_links.py", "tests/test_inventory.py", "tests/test_review.py", "tests/test_review_protection.py", "tests/test_missing_lots.py", "tests/test_lot_sku_split.py", "tests/test_delete_entry.py", "tests/test_item_variant.py"],
       "signals_out": ["changed() -> ledger mutated (intent edit, item edit, entry delete)"],
       "entry_points_in": ["select_item(item_id) from the Dashboard highlights"],
@@ -178,7 +178,10 @@
         "delete_inventory_entry is the ONE hard delete in the app (unsold lot + its now-empty line/txn, with an audit `delete`). Everything else soft-voids.",
         "'Mark for Review' means a manually-set, poll-protected price — a background price sweep must not overwrite it (ADR 2026-07-10).",
         "Missing/stolen items are a reversible $0 impairment, not a transaction (ADR 2026-07-27).",
-        "Sorting/filtering runs through a QSortFilterProxyModel; add columns in ui/models/inventory_model.py, not by hand in the view."
+        "Sorting/filtering runs through a QSortFilterProxyModel; add columns in ui/models/inventory_model.py, not by hand in the view.",
+        "Double-click opens ItemEditorDialog(conn, item_id, lot_id=...) — ONE dialog with every editable field. There is no read-only detail dialog any more (ticket 61) and no field is behind a second dialog; keep it that way, tests/test_ui_item_editing.py asserts it.",
+        "A row is a LOT but most editor fields live on the shared ITEM. The editor's section captions say 'applies to all N copies' when a card has several — the visible form of the ticket-52 rule that Variant is not inline-editable. Per-copy fields live only in its 'This copy' section.",
+        "The editor applies on Save. Ticking review there does NOT write until Save — unlike the grid's inline review button, which is immediate."
       ],
       "specs": ["specs/03-features.md (F-VW-1/5/9, F-SE-1/2)", "specs/04-ui-ux.md"]
     },

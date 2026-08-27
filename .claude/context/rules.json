@@ -420,7 +420,7 @@
       "source": {
         "file": ".claude/context/app-map.json",
         "anchor": "windows",
-        "excerpt_sha256": "243a0005e76daa0e"
+        "excerpt_sha256": "6dbf327dc07b572e"
       },
       "scope": [
         "src/tcginventory/**/*.py"
