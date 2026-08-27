@@ -319,6 +319,72 @@ def test_editor_exposes_every_editable_field_on_one_screen(app, conn):
     dlg.deleteLater()
 
 
+def test_every_editable_field_is_visible_without_scrolling(app, conn):
+    """Having a widget is not the same as being findable.
+
+    Mark-for-review shipped in a Filing section 157px below the fold and was
+    reported missing the same day. Only the read-only Ledger may sit below it.
+    """
+    from PySide6.QtWidgets import QScrollArea
+
+    dlg, _lot = _row_editor(conn)
+    dlg.show()
+    app.processEvents()
+    scroll = dlg.findChild(QScrollArea)
+    fold = scroll.viewport().height()
+
+    fields = [
+        "_name",
+        "_category",
+        "_set_code",
+        "_set_name",
+        "_card_number",
+        "_variant",
+        "_language",
+        "_graded",
+        "_condition",
+        "_holo",
+        "_edition",
+        "_company",
+        "_grade",
+        "_cert",
+        "_market",
+        "_review",
+        "_tcgplayer",
+        "_ebay",
+        "_location",
+        "_notes",
+        "_intent",
+        "_lot_market",
+        "_source",
+        "_lot_notes",
+        "_missing",
+    ]
+    below = {}
+    for name in fields:
+        widget = getattr(dlg, name)
+        bottom = widget.mapTo(scroll.widget(), widget.rect().bottomLeft()).y()
+        if bottom > fold:
+            below[name] = bottom - fold
+    assert not below, f"below the fold by (px): {below}"
+    dlg.deleteLater()
+
+
+def test_review_sits_with_the_price_it_protects(app, conn):
+    """Review is a pricing control, not a filing one — it belongs beside Market
+    value, which is also what keeps it above the fold."""
+    dlg, _lot = _row_editor(conn)
+    dlg.show()
+    app.processEvents()  # geometry is all zeroes until the layout runs
+    section = dlg._market.parent().parent()  # the Pricing & links frame
+    assert dlg._review.parent() is section
+    # …and directly under the value, not above it.
+    market_y = dlg._market.mapTo(section, dlg._market.rect().bottomLeft()).y()
+    review_y = dlg._review.mapTo(section, dlg._review.rect().topLeft()).y()
+    assert review_y > market_y
+    dlg.deleteLater()
+
+
 def test_editor_round_trips_the_per_copy_lot_fields(app, conn):
     """Source and lot notes were editable nowhere in the UI before this."""
     dlg, lot = _row_editor(conn)

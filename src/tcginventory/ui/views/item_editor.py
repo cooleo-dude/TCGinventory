@@ -297,7 +297,9 @@ class ItemEditorDialog(QDialog):
         self.setWindowTitle(f"{item.name if item else 'Item'} — edit")
         # Wide rather than tall: the sections sit two to a row, so a ribbon-shaped
         # dialog is what the old flat form looked like. Qt clamps to the screen.
-        self.resize(1080, 880)
+        # The height is set so every *editable* field clears the fold — only the
+        # read-only Ledger is below it. tests/test_ui_item_editing.py asserts that.
+        self.resize(1080, 940)
 
         # How many copies share this item: decides whether the item-scoped
         # sections need the "applies to all N copies" warning.
@@ -530,31 +532,37 @@ class ItemEditorDialog(QDialog):
         _row(form, "Cert #", self._cert)
         grid.addWidget(grading, 0, 1)
 
+        # Review lives here, immediately under the value it protects — it is a
+        # pricing concern ("the price is manual"), not a filing one. It also has
+        # to stay above the fold: parked in Filing it sat 157px below it, which
+        # is how it went missing (reported 2026-08-27).
         pricing, form = _section("Pricing & links", self._shared_note)
         _row(
             form,
             "Market value",
             self._market,
-            "The shown current market price. Marking for review freezes it "
-            "against the background price refresh.",
+            "The shown current market price.",
         )
+        form.addRow(self._review)
         _row(form, "TCGplayer URL", self._tcgplayer)
         _row(
             form, "eBay URL", self._ebay, "Blank uses the derived sold-listings search."
         )
-        if self._lot is not None:
-            grid.addWidget(pricing, 1, 0)
-            grid.addWidget(self._build_copy_section(), 1, 1)
-        else:
-            # No row to edit, so nothing sits beside it — take the full width
-            # rather than leaving half the panel empty.
-            grid.addWidget(pricing, 1, 0, 1, 2)
 
         filing, form = _section("Filing", self._shared_note)
         _row(form, "Location", self._location)
         _row(form, "Notes", self._notes)
-        form.addRow(self._review)
-        grid.addWidget(filing, 2, 0, 1, 2)
+
+        if self._lot is not None:
+            # Pricing and Filing stack in the left column, opposite the taller
+            # per-copy panel — which both fills its dead space and keeps every
+            # editable field above the fold.
+            grid.addWidget(pricing, 1, 0)
+            grid.addWidget(filing, 2, 0)
+            grid.addWidget(self._build_copy_section(), 1, 1, 2, 1)
+        else:
+            grid.addWidget(pricing, 1, 0)
+            grid.addWidget(filing, 1, 1)
 
         if item is not None:
             grid.addWidget(self._build_ledger_section(item.id), 3, 0, 1, 2)
