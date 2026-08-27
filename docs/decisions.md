@@ -2969,3 +2969,62 @@ item-level Notes on one grid row changed all three copies. (Ticket 52.)
 - Migration 0024, applied to a copy of the live ledger: schema 23 → 24, all
   53,289 catalog rows preserved, `item`/`lot` untouched at 1,115/1,371, and the
   new table empty until the next pull. Ticket 55.
+
+### 2026-08-26 — Card entry offers only the printings a card actually comes in
+
+- **Why:** ticket 56 made pricing respect an item's `holo_pattern`, which is
+  only worth as much as that column is accurate — and it is not. The real ledger
+  carries **1,040 NH / 20 H / 10 RH / 45 unset**, about **93% on the default**,
+  against a catalog where **45.6% of products have more than one printing**. That
+  distribution cannot be true; it is the shape of a field nobody was asked to
+  fill in, the same "the default is anti-correlated with truth" pattern already
+  found for the condition heuristic.
+- **There was no new widget to build.** Both card-entry screens already had
+  `self.holo = _combo(HoloPattern)` listing all three foils for every card and
+  defaulting to NON_HOLO. The fix is to make that combo *truthful*: offer only
+  the printings tcgcsv says the product comes in, and let the choice drive the
+  price.
+- **Treatments belong on `CardVariant`, not on the card.** Foil is a property of
+  the *product*: a stamped variant can offer a different set than the base print.
+  So `variants_for_card` now returns `treatments: dict[str, int]` — the printings
+  **and their individual prices** — and re-narrowing happens whenever the
+  Printing dropdown changes. This closes ticket 56's loop at the point of entry:
+  picking Reverse Holofoil applies the reverse holo's price, not the cheapest.
+- **This does not read `card_catalog_treatment` (ticket 55), deliberately.**
+  Entry resolves treatments live from the price file it is already fetching, so
+  the picker works with no catalog re-pull. Ticket 55's table answers a different
+  question — *which cards exist in a printing*, including ones the user does not
+  own — which a live per-card lookup cannot, because a checklist must enumerate
+  absences. Same vocabulary, two directions.
+- **It lives in `CardEntryMixin`, not in either row.** `CARD-ENTRY-STANDARD`
+  forbids forking the shared component, and Transaction and Auctions both build
+  the same combo. `apply_treatment_choice` prefers the host's own
+  `set_market_cents` where one exists, because Auctions tracks whether a price
+  was user-edited and writing its spin box directly would register our change as
+  a manual override — silently disabling future auto-pricing for that row.
+- **An unresolved product leaves the combo unconstrained.** An empty treatment
+  set means "could not tell", **not** "only one printing". Narrowing on a guess
+  would be worse than the default it replaces, so the full list comes back.
+- **`edition` is set alongside `holo_pattern`.** Both are identity columns;
+  recording only the foil would make a 1st-edition and an unlimited copy the same
+  item. `TREATMENT_IDENTITY` is derived from `_TREATMENT` rather than written
+  twice, and a test round-trips every entry so the two cannot drift.
+- **Bug caught by an existing test while building this:** filtering treatments to
+  named ones *before* choosing a price dropped any tcgcsv row with no
+  `subTypeName`, which cost the card its price entirely. A row without a
+  treatment label still prices the card; it just cannot say which printing it is.
+  Price selection now runs over all rows and only the *offer* is filtered.
+- **Rejected: making the treatment mandatory before submit.** The ticket proposed
+  blocking submission until an ambiguous row is resolved. Rejected on measurement:
+  narrowing already removes the wrong options, so the first entry in a narrowed
+  combo is a real printing rather than a default — a hard block would add friction
+  to every row while the remaining error case (two genuine printings, user picks
+  the first without looking) is not one a modal can fix.
+- **Split out, not dropped:** correcting the **existing** 1,040 defaults. Changing
+  `holo_pattern` on a saved item re-identifies it — it is in
+  `_ITEM_IDENTITY_COLUMNS`, so a correction can collide with another item and
+  must move lots the way `split_lot_to_new_item` does, with an audit row. That is
+  a money-path operation deserving its own ticket rather than a tail on a UI one.
+  Ticket 57 stops the bleeding; the backfill is filed separately.
+- Suite 1,071 passing. Reverting the narrowing turns **eight** tests red across
+  both hosts. Ticket 57.

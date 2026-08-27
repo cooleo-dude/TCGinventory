@@ -278,10 +278,113 @@ class CardEntryMixin:
         """
         return len(getattr(self, "_variants", [])) > 1
 
+    def current_variant(self):
+        """The printing currently selected, or the base one, or ``None``."""
+        chosen = self.printing.currentData() if hasattr(self, "printing") else None
+        if chosen is not None:
+            return chosen
+        variants = getattr(self, "_variants", [])
+        return variants[0] if variants else None
+
+    def treatments_for_current_printing(self) -> dict[str, int]:
+        """``{treatment: cents}`` the selected printing comes in.
+
+        Empty when the lookup could not resolve the product — which is *not* the
+        same as "this card has one printing", so a host must fall back to
+        offering everything rather than silently narrowing to a guess.
+        """
+        variant = self.current_variant()
+        return dict(getattr(variant, "treatments", {}) or {}) if variant else {}
+
     def _on_printing_changed(self, *_args) -> None:
         variant = self.printing.currentData()
         if variant is not None:
             self._apply_variant(variant)
+
+    # -- foil treatment -----------------------------------------------------
+    #
+    # Lives here rather than in either host because both Transaction and
+    # Auctions build a `self.holo = _combo(HoloPattern)` that lists all three
+    # foils for every card and defaults to NON_HOLO. That default is why 1,040
+    # of 1,115 real items carry NH — it was never a considered answer. tcgcsv
+    # says which printings a product actually comes in (45.6% have more than
+    # one), so narrow the combo to those and let the choice drive the price.
+    # CARD-ENTRY-STANDARD: one implementation, not one per screen. (Ticket 57.)
+
+    def init_treatments(self) -> None:
+        """Wire the host's ``holo`` combo. Call after it exists."""
+        self._treatment_prices: dict[str, int] = {}
+        self.holo.activated.connect(lambda *_: self.apply_treatment_choice())
+
+    def offer_treatments(self) -> None:
+        """Narrow ``holo`` to the printings the selected product comes in.
+
+        An unresolved product leaves the combo unconstrained: an empty treatment
+        set means "could not tell", **not** "only one printing", and narrowing on
+        a guess would be worse than the default it replaces.
+        """
+        from tcginventory.services.pricing import TREATMENT_IDENTITY
+
+        treatments = self.treatments_for_current_printing()
+        pairs = [
+            (t, TREATMENT_IDENTITY[t])
+            for t in sorted(treatments)
+            if t in TREATMENT_IDENTITY
+        ]
+        if not pairs:
+            self.restore_full_foil_choices()
+            return
+        self._treatment_prices = dict(treatments)
+        self.holo.blockSignals(True)
+        self.holo.clear()
+        for label, (holo, _edition) in pairs:
+            self.holo.addItem(label, holo)
+        self.holo.setCurrentIndex(0)
+        self.holo.blockSignals(False)
+        self.apply_treatment_choice()
+
+    def restore_full_foil_choices(self) -> None:
+        """Fall back to the unconstrained combo when the catalog cannot say."""
+        from tcginventory.domain.enums import HoloPattern
+
+        self._treatment_prices = {}
+        keep = self.holo.currentData()
+        self.holo.blockSignals(True)
+        self.holo.clear()
+        for v in HoloPattern:
+            self.holo.addItem(v.value, v.value)
+        pos = self.holo.findData(keep or HoloPattern.NON_HOLO.value)
+        self.holo.setCurrentIndex(max(pos, 0))
+        self.holo.blockSignals(False)
+
+    def apply_treatment_choice(self) -> None:
+        """Price the printing chosen, and record it in the identity columns.
+
+        ``edition`` is half of the identity — recording only the foil would make
+        a 1st-edition and an unlimited copy the same item — so a host that has an
+        edition combo gets it set too.
+        """
+        from tcginventory.services.pricing import TREATMENT_IDENTITY
+
+        identity = TREATMENT_IDENTITY.get(self.holo.currentText())
+        edition = getattr(self, "edition", None)
+        if identity is not None and edition is not None:
+            from tcginventory.domain.enums import Edition
+
+            pos = edition.findData(identity[1] or Edition.NA.value)
+            if pos >= 0:
+                edition.setCurrentIndex(pos)
+        cents = getattr(self, "_treatment_prices", {}).get(self.holo.currentText())
+        if cents is None:
+            return
+        # Prefer the host's own setter where it has one: Auctions tracks whether
+        # a price was user-edited, and writing the spin box behind its back would
+        # register our own change as a manual override.
+        setter = getattr(self, "set_market_cents", None)
+        if callable(setter):
+            setter(cents)
+        elif getattr(self, "market", None) is not None:
+            self.market.setValue(cents / 100)
 
     def _apply_variant(self, variant) -> None:  # pragma: no cover - overridden
         """Apply a chosen printing's price/URL. Host-specific; must override."""
