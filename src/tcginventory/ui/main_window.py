@@ -129,19 +129,20 @@ class MainWindow(QMainWindow):
 
         # Watched auctions live in their own file; mirror the main DB's storage
         # nature so an in-memory app (tests) doesn't touch the real auctions.db.
+        # Opened here rather than inside a builder because *two* views read it —
+        # eBay Auctions owns the watchlist, History reads its lifecycle log — and
+        # History is built first. One connection, not two writers on one file.
+        self._auctions_conn = open_auctions(None if self._db_file else ":memory:")
         builders = (
             ("Dashboard", lambda: DashboardView(conn)),
             ("Transaction", lambda: TransactionView(conn)),
             ("Inventory", lambda: InventoryView(conn)),
-            ("History", lambda: HistoryView(conn)),
+            ("History", lambda: HistoryView(conn, auctions_conn=self._auctions_conn)),
             ("Calendar", lambda: CalendarView(conn)),
             ("Price Lookup", lambda: PriceLookupView(conn)),
             (
                 "eBay Auctions",
-                lambda: AuctionsView(
-                    conn,
-                    auctions_conn=open_auctions(None if self._db_file else ":memory:"),
-                ),
+                lambda: AuctionsView(conn, auctions_conn=self._auctions_conn),
             ),
             ("Recognition", lambda: RecognitionView(conn, prewarm=True)),
             ("Market", lambda: MarketView(conn)),
@@ -195,6 +196,12 @@ class MainWindow(QMainWindow):
         self._dashboard.item_activated.connect(self._show_item_in_inventory)
         self._dashboard.show_date_activated.connect(self._show_date_in_calendar)
         self._auctions.export_to_transaction.connect(self._export_from_auction)
+        # Deleting / archiving a watchlist entry writes an Auction History row.
+        self._auctions.changed.connect(self._on_ledger_changed)
+        # …and a transaction actually posted from an auction prefill closes the
+        # loop: the auction was won. Routed through MainWindow because views
+        # never talk to each other directly.
+        self._transaction.posted_from_auction.connect(self._auctions.mark_won)
         self._recognition.export_to_transaction.connect(
             self._export_recognition_to_transaction
         )
@@ -447,12 +454,18 @@ class MainWindow(QMainWindow):
 
     def _export_from_auction(self, payload) -> None:
         """Auction → Transaction: prefill a fresh purchase with the auction's
-        cards (you enter the winning bid as cash out)."""
-        title, incoming = payload
-        self._transaction.clear()
+        cards (you enter the winning bid as cash out).
+
+        ``auction_id`` is None for an unsaved editor bundle — there is no
+        watchlist entry to mark won if this gets posted.
+        """
+        title, incoming, auction_id = payload
+        self._transaction.clear()  # also clears any previous auction tag
         for card in incoming:
             self._transaction.add_incoming(card)
-        self._transaction.set_deal_context(counterparty="eBay", reference=title)
+        self._transaction.set_deal_context(
+            counterparty="eBay", reference=title, auction_id=auction_id
+        )
         self._nav.setCurrentRow(_TRANSACTION_INDEX)
 
     def _export_recognition_to_transaction(self, cards) -> None:

@@ -979,6 +979,10 @@ class _CardCascade(QWidget):
 
 class TransactionView(QWidget):
     posted = Signal()
+    # (auction_id, transaction_id) — a post that came from an auction prefill.
+    # Emitted only on a successful *new* post, never on an edit: an edit voids
+    # and re-posts an existing transaction, which is not winning anything.
+    posted_from_auction = Signal(int, int)
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         super().__init__()
@@ -991,6 +995,12 @@ class TransactionView(QWidget):
         self._receive_rows: list[_ReceiveRow] = []
         self._price_workers: list[PriceLookupWorker] = []
         self._edit_id: int | None = None
+        # The watchlist auction this form was prefilled from, if any. Inert
+        # context — it never reaches the request or the posting algorithm, and
+        # exists only so a successful post can be reported back as that auction
+        # having been won. Cleared by clear(), so it cannot leak into the next
+        # transaction the user types by hand.
+        self._source_auction_id: int | None = None
         self._inference_pipeline = None  # lazily built (image -> [Detection])
         # Owned by the view, so closing it cancels a pending sync. A bare
         # QTimer.singleShot outlives its target and fires against widgets Qt
@@ -1818,8 +1828,9 @@ class TransactionView(QWidget):
 
     def submit(self) -> None:
         request = self.build_request()
+        editing = self._edit_id is not None
         try:
-            if self._edit_id is not None:
+            if editing:
                 old_margin = self._reporting.transaction_margin_cents(self._edit_id)
                 result = self._service.edit(self._edit_id, request)
                 self._show_success(
@@ -1831,8 +1842,12 @@ class TransactionView(QWidget):
         except (ServiceError, ValueError) as exc:
             QMessageBox.warning(self, "Could not post", str(exc))
             return
+        # Read before clear() wipes it — that is what makes the auction "won".
+        won_auction = None if editing else self._source_auction_id
         self.clear()
         self.posted.emit()
+        if won_auction is not None:
+            self.posted_from_auction.emit(won_auction, result.transaction.id)
 
     _ITEMS_PER_COLUMN = 25
 
@@ -1969,6 +1984,7 @@ class TransactionView(QWidget):
         self._counterparty.clear()
         self._reference.clear()
         self._edit_id = None
+        self._source_auction_id = None
         self._edit_banner.setText("")
         self._update_summary()
 
@@ -1976,13 +1992,23 @@ class TransactionView(QWidget):
         self._update_summary()
 
     def set_deal_context(
-        self, *, counterparty: str | None = None, reference: str | None = None
+        self,
+        *,
+        counterparty: str | None = None,
+        reference: str | None = None,
+        auction_id: int | None = None,
     ) -> None:
-        """Prefill the counterparty / reference (e.g. when exporting an auction)."""
+        """Prefill the counterparty / reference (e.g. when exporting an auction).
+
+        ``auction_id`` tags the form as having come from that watchlist entry,
+        so posting it can be logged as the auction being won.
+        """
         if counterparty is not None:
             self._counterparty.setText(counterparty)
         if reference is not None:
             self._reference.setText(reference)
+        if auction_id is not None:
+            self._source_auction_id = auction_id
         self._update_summary()
 
     # -- edit pre-load ------------------------------------------------------

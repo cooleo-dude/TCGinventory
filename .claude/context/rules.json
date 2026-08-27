@@ -404,7 +404,7 @@
       "source": {
         "file": ".claude/context/app-map.json",
         "anchor": "databases",
-        "excerpt_sha256": "af09d7b2399b8627"
+        "excerpt_sha256": "64b34d5430b69c7c"
       },
       "scope": [
         "src/tcginventory/data/**/*.py",
@@ -420,7 +420,7 @@
       "source": {
         "file": ".claude/context/app-map.json",
         "anchor": "windows",
-        "excerpt_sha256": "d9c29b2e50945c04"
+        "excerpt_sha256": "243a0005e76daa0e"
       },
       "scope": [
         "src/tcginventory/**/*.py"
