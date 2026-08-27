@@ -3257,3 +3257,35 @@ meant clicking **Edit item…** inside it to open a second dialog,
   `lot`, `card_catalog`, `transaction_line` and `audit_log` counts identical.
   Base Set 102 slots / 9 importable, Journey Together 190 / 15, Trainer Gallery
   120 / 31, at **3–8 ms** per collection. Suite 1,167 passing. Ticket 60.
+
+### 2026-08-27 — "N/A" and NULL are the same edition (ticket 62)
+
+- **Bug:** master-mode Collections slots recognised **no owned card at all** —
+  Base Set 9 importable by number but **0** in master mode, Journey Together 15
+  vs 0, an Arita run 26 vs 0. A master-set collection was unusable.
+- **Cause:** `_apply_ownership` compared
+  `(r["edition"] or None) == (want[1] or None)`. `TREATMENT_IDENTITY` yields
+  `None` for the plain printings, because the reverse map skips the `"N/A"`
+  spellings — but `Edition.NA.value` **is** the string `"N/A"`, and that is what
+  **1,055 of 1,115 items** store. `"N/A" == None` is false, so 95% of real items
+  were rejected from every plain-printing slot. Two spellings of one fact
+  ("this card has no edition distinction"), compared as if they differed.
+- **Found by running the real catalog update, not by a test.** Ticket 60's
+  master-mode tests used `edition=None` or a real edition; neither used the value
+  95% of rows actually carry. The fixtures were self-consistent and the
+  production data was not.
+- **Decision:** `_same_edition()` normalises both sides — `None`, `""` and
+  `"N/A"` are one value, anything else compares exactly.
+- **Rejected: making `TREATMENT_IDENTITY` yield `"N/A"`.** It moves the mismatch:
+  the same map is used by card entry (ticket 57) to *set* the edition combo,
+  where `None` is the right fallback.
+- **Rejected: backfilling `item.edition` to NULL.** `edition` is in
+  `_ITEM_IDENTITY_COLUMNS`, so rewriting 1,055 rows to fix a comparison would
+  re-identify every one of them.
+- **Master mode still reports fewer than by-number, and that is correct.**
+  By-number asks "do you own this card"; master asks "do you own *this
+  printing*". A Base Set holo recorded `NH` cannot fill a Holofoil slot, and
+  `holo_pattern` is ~93% the default. That is honest reporting of unknown foil
+  data — the thing ticket 57's entry picker fixes going forward — not a matching
+  failure. Base Set master now finds 3 of 9, an Arita run 6 of 26.
+- Suite 1,182 passing; reverting the comparison turns the new test red.

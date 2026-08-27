@@ -166,6 +166,27 @@ class Progress:
         return (self.filled / self.total * 100) if self.total else 0.0
 
 
+def _no_edition(value: str | None) -> bool:
+    """Whether an edition value means "this card has no edition distinction".
+
+    ``Edition.NA.value`` is the *string* ``"N/A"``, and an unset column is
+    ``None`` — semantically the same thing, and both are what the overwhelming
+    majority of cards are. ``TREATMENT_IDENTITY`` yields ``None`` for the
+    plain printings (Normal, Holofoil, Reverse Holofoil), so a master-mode slot
+    comparing raw values against an item rejected every one of the 1,055 of 1,115
+    real items that store ``"N/A"`` — master mode found nothing ownable at all.
+    """
+    return value in (None, "", "N/A")
+
+
+def _same_edition(item_edition: str | None, wanted: str | None) -> bool:
+    """Compare an item's edition with a treatment's, treating "no edition" as one
+    value however it is spelled."""
+    if _no_edition(wanted):
+        return _no_edition(item_edition)
+    return item_edition == wanted
+
+
 def collector_key(number: str | None) -> tuple[str, int, str]:
     """Natural sort key for a collector number.
 
@@ -393,7 +414,7 @@ class CollectionService:
                     r
                     for r in lots
                     if r["holo_pattern"] == want[0]
-                    and (r["edition"] or None) == (want[1] or None)
+                    and _same_edition(r["edition"], want[1])
                 ]
             if not lots:
                 return
