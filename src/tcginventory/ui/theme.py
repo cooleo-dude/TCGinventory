@@ -248,6 +248,24 @@ def _stylesheet(t: Tokens) -> str:
         selection-color: {t.accent_ink};
     }}
 
+    /* ---- checkboxes --------------------------------------------------- */
+    /* Unstyled, Qt's indicator all but vanishes on a dark palette — an empty
+       box the same colour as the panel behind it. Checked reads as an accent
+       fill rather than a glyph, so no image asset is needed. */
+    QCheckBox {{ color: {t.ink}; spacing: 8px; }}
+    QCheckBox::indicator {{
+        width: 14px; height: 14px; border-radius: 4px;
+        border: 1px solid {t.line2}; background-color: {t.surface};
+    }}
+    QCheckBox::indicator:hover {{ border-color: {t.accent}; }}
+    QCheckBox::indicator:checked {{
+        background-color: {t.accent}; border-color: {t.accent};
+    }}
+    QCheckBox:disabled {{ color: {t.ink3}; }}
+    QCheckBox::indicator:disabled {{
+        border-color: {t.line}; background-color: {t.surface2};
+    }}
+
     /* ---- tables ------------------------------------------------------ */
     QTableView, QTableWidget, QTreeView {{
         background-color: {t.surface}; alternate-background-color: {t.zebra};

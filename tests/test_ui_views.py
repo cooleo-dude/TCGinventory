@@ -308,13 +308,13 @@ def test_dashboard_builds_charts(app, seeded_conn):
     view.deleteLater()
 
 
-def test_item_detail_dialog_opens(app, seeded_conn):
+def test_row_editor_dialog_opens(app, seeded_conn):
     from tcginventory.data.repositories import ItemRepository
-    from tcginventory.ui.views.item_detail import ItemDetailDialog
+    from tcginventory.ui.views.item_editor import ItemEditorDialog
 
     item = ItemRepository(seeded_conn).list_all()[0]
-    dialog = ItemDetailDialog(seeded_conn, item.id)
-    assert dialog.windowTitle().endswith("detail")
+    dialog = ItemEditorDialog(seeded_conn, item.id)
+    assert dialog.windowTitle().endswith("edit")
     dialog.deleteLater()
 
 
