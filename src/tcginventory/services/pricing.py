@@ -119,6 +119,19 @@ PICK_CHEAPEST = "cheapest"  # item didn't say; took the least flattering price
 PICK_FALLBACK = "fallback"  # item named a printing this product lacks
 
 
+# The same map read backwards: a tcgcsv treatment → the identity columns that
+# record it. Card entry uses this to set holo_pattern/edition from the printing
+# the user picked, so the item is stored as the thing that was actually priced.
+# Built from _TREATMENT rather than written twice, so the two cannot drift; the
+# ``N/A`` spellings are skipped because ``None`` is the canonical edition for a
+# card that has no edition distinction.
+TREATMENT_IDENTITY: dict[str, tuple[str, str | None]] = {
+    treatment: (holo, edition)
+    for (holo, edition), treatment in _TREATMENT.items()
+    if edition != "N/A"
+}
+
+
 def treatment_for(item: Item) -> str | None:
     """The tcgcsv ``subTypeName`` an item's identity columns describe.
 
@@ -210,6 +223,13 @@ class CardVariant:
     tcgplayer_url: str
     price_cents: int
     is_base: bool = False
+    # Which foil treatments this *product* comes in, and what each costs:
+    # {"Normal": 224, "Reverse Holofoil": 61633}. Foil is a property of the
+    # product, not of the card — a stamped variant may offer a different set
+    # than the base print — so it belongs here rather than on the card. Lets
+    # card entry offer only the printings that exist and price the one chosen.
+    # (Ticket 57.)
+    treatments: dict[str, int] = field(default_factory=dict)
 
 
 def _variant_label(prod_name: str | None) -> tuple[str, bool]:
@@ -339,18 +359,25 @@ class TcgcsvProvider:
         ):
             if _norm_number(prod_number) != want:
                 continue
-            # As in price_for_card: the Printing dropdown chooses between
-            # *products*, not treatments, so each one is shown at its cheapest
-            # priced printing until ticket 57 makes the treatment explicit.
-            chosen = cheapest_treatment(prices.get(product_id) or {})
+            # The Printing dropdown chooses between *products*; each product is
+            # shown at its cheapest printing until the user picks a treatment,
+            # at which point that treatment's own price applies (ticket 57).
+            all_prices = prices.get(product_id) or {}
+            chosen = cheapest_treatment(all_prices)
             if chosen is None or not url:
                 continue
             cents = chosen[0]
+            # Only *named* treatments are offered as a choice — a row with no
+            # subTypeName still prices the card, it just cannot say which
+            # printing it is, and dropping it would cost the price too.
+            by_treatment = {k: v for k, v in all_prices.items() if k}
             pnm = _norm(prod_name)
             if want_name and pnm and want_name not in pnm and pnm not in want_name:
                 continue
             label, is_base = _variant_label(prod_name)
-            variants.append(CardVariant(label, url, cents, is_base))
+            variants.append(
+                CardVariant(label, url, cents, is_base, treatments=dict(by_treatment))
+            )
         variants.sort(key=lambda v: (not v.is_base, len(v.label), v.label))
         return variants
 
