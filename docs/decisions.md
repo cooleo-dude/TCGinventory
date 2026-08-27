@@ -3096,6 +3096,81 @@ auction is restorable from it.
 - Suite 1,071 passing. Reverting the narrowing turns **eight** tests red across
   both hosts. Ticket 57.
 
+### 2026-08-27 — The Inventory row editor is one dialog, not two (ticket 61)
+
+Double-clicking an Inventory row opened `ItemDetailDialog`, and changing anything
+meant clicking **Edit item…** inside it to open a second dialog,
+`ItemEditorDialog`. Both are now one themed editor, and `item_detail.py` is gone.
+
+- **It was never a missing-stylesheet problem.** `theme._stylesheet` already
+  covered `QDialog` / `QPushButton` / `QLineEdit` / `QComboBox` / `QTableWidget`,
+  so both dialogs *did* render dark. Rendered offscreen, they were a Windows
+  property sheet in dark paint: no header band, section headers as bare
+  `QLabel("<b>Lots</b>")`, the position line a `·`-joined run of text with
+  hardcoded `"   ·   "` spacing, no sign tint on Unrealized P/L,
+  `QHeaderView.Stretch` giving SKU the same width as Source, and a flat 20-row
+  `QFormLayout` 441px wide by 778px tall. Neither file imported `theme` or
+  `icons` at all. The editor's `QDialogButtonBox` was why **Save never got
+  `objectName="primary"`** and so never picked up the accent button style.
+- **The read-only half was redundant.** `_build_dossier` in `inventory.py`
+  already shows the selected card's art, name, subline, SKU, Acquired, Cost
+  basis, Market, Unrealized, Return and Sold-for plus a price chart — themed,
+  and three inches to the left of the dialog. A modal whose unique content was
+  the Lots/History tables did not earn a dialog; those tables became a read-only
+  **Ledger** section of the editor instead.
+- **`ItemEditorDialog` is the surviving name**, taking
+  `(conn, item_id, lot_id=None, parent=None)`. It is the accurate name for what
+  the thing is, and three of the five affected tests kept importing the same
+  symbol. `lot_id=None` hides the per-copy section, which is how it stays
+  constructible from a bare item.
+- **The substantive gap was lot fields, not paint.** A grid row is a *lot*;
+  `_open_detail` passed `row.item.id` and dropped `row.lot_id`. So `intent`,
+  `acquired_market_value_cents`, `missing`, `source`, `notes`, `acquired_at` and
+  `sku` were absent from the dialog — and **`Lot.source` and `Lot.notes` were
+  editable nowhere in the UI**. They now live in a **This copy** section.
+- **`missing` goes through `InventoryService.set_lot_missing`, not the
+  repository.** It is a reversible impairment that moves money, so it writes an
+  append-only `audit_log` row (Invariant 9). Proven by mutation: replacing it
+  with `lot.missing = …; self._lots.update(lot)` flips the flag and the audit
+  count assertion fails `1 > 1`.
+- **`SKU` and `Acquired` are shown but not editable.** SKUs are minted at
+  acquisition and are stable lookup keys; `acquired_at` is what FIFO orders
+  disposals by. Editable identity keys are a riskier ticket than a restyle.
+- **The lot/item split is now stated in the UI rather than enforced by
+  omission.** When a card has more than one copy, the Identity / Pricing / Filing
+  captions read *"applies to all N copies of this card"*, and Variant's hint
+  points at **Separate this copy…**. This is the visible form of the rule in
+  `inventory_model.py` that keeps Variant out of inline editing (ticket 52) —
+  a dialog opened from a lot row that edits item fields walks straight back
+  toward that surprise unless it says so.
+- **The editor applies on Save, including review.** The old detail dialog wrote
+  the review flag the instant its checkbox was ticked — the one field in the app
+  that committed without a Save, and a second write path beside the editor's own
+  `item.review` + note sync. There is now exactly one. The grid's inline review
+  button is unaffected and stays immediate.
+- **`without_review_note` learned about newlines** (`services/review.py`). It was
+  `" ".join(notes.split())`, harmless while every notes editor was a single-line
+  `QLineEdit`. The editor's notes field is a `QPlainTextEdit`, so toggling review
+  on a card would have silently flattened the user's paragraphs into one line.
+  Within a line whitespace still collapses, so single-line input round-trips
+  exactly as before. Proven by mutation: restoring the flat join fails both the
+  service test and the editor's round-trip test, printing the two lines joined.
+- **`QCheckBox` got a theme rule** — a global `theme.py` change, deliberately
+  beyond the dialog. Unstyled, Qt's indicator is all but invisible on this
+  palette: an empty box the same colour as the panel behind it, which was a large
+  part of the stock-Windows read. Checked is an accent fill rather than a glyph,
+  so no image asset and no `ICONS-LUCIDE` exception is needed. It affects every
+  checkbox in the app.
+- **Three layout bugs found by rendering, not by tests.** The caption `QWidget`
+  had a default expanding vertical policy, so in any panel stretched taller than
+  its content the title floated into the middle of its own section. Side-by-side
+  panels sharing a grid row's height pushed their fields apart instead of parking
+  the slack at the bottom. And the Ledger tables kept Qt's Expanding policy, so
+  a one-lot card got a tall empty table — the same void the old dialog had, for
+  the same reason.
+- Ticket 61. Verified: 1,109 tests green offscreen (11 new), ruff clean, both
+  dialogs rendered before and the editor after, and the two guards that matter —
+  the audit row and the notes line breaks — proven red under mutation.
 ### 2026-08-27 — Personal Collection: ownership is membership
 
 - **Why:** Inventory is one row per *lot* and can only draw what is held. A

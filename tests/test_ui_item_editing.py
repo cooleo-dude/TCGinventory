@@ -248,3 +248,190 @@ def test_item_editor_toggles_grading(app, conn):
     assert item.grading_company is GradingCompany.PSA
     assert item.grade == "10"
     dlg.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# the row editor: one screen, every field (ticket 61)
+# ---------------------------------------------------------------------------
+
+
+def _row_editor(conn, name="Charizard", **kw):
+    """Post a purchase and open the editor on that row — item *and* lot."""
+    from tcginventory.ui.views.item_editor import ItemEditorDialog
+
+    result = buy(TransactionService(conn), name, 4000, 6000, "2026-01-01", **kw)
+    lot = result.lots[0]
+    return ItemEditorDialog(conn, lot.item_id, lot_id=lot.id), lot
+
+
+def test_double_click_opens_the_editor_not_a_read_only_dialog(app, conn):
+    """The whole point of the ticket: no read-only hop, no "Edit item…" button."""
+    from tcginventory.ui.views.inventory import InventoryView
+    from tcginventory.ui.views.item_editor import ItemEditorDialog
+
+    buy(TransactionService(conn), "Snorlax", 1000, 1000, "2026-01-01")
+    view = InventoryView(conn)
+    opened: list = []
+    view._open_editor = lambda idx: opened.append(idx)  # capture the wiring
+    view._table.doubleClicked.emit(view._proxy.index(0, view._col("Name")))
+    assert opened, "double-click is not wired to the row editor"
+
+    # And the retired dialog really is gone, not merely unused.
+    with pytest.raises(ModuleNotFoundError):
+        __import__("tcginventory.ui.views.item_detail")
+    assert not hasattr(ItemEditorDialog, "_edit_item")  # no second-dialog hop
+    view.deleteLater()
+
+
+def test_editor_exposes_every_editable_field_on_one_screen(app, conn):
+    """Guard against a field being re-gated behind another dialog later.
+
+    Each name is a column the user is meant to be able to change from the row
+    editor; if one loses its widget, this goes red rather than the field quietly
+    becoming unreachable.
+    """
+    dlg, _lot = _row_editor(conn)
+    item_fields = [
+        "_name",
+        "_category",
+        "_set_code",
+        "_set_name",
+        "_card_number",
+        "_variant",
+        "_language",
+        "_graded",
+        "_condition",
+        "_holo",
+        "_edition",
+        "_company",
+        "_grade",
+        "_cert",
+        "_market",
+        "_location",
+        "_tcgplayer",
+        "_ebay",
+        "_notes",
+        "_review",
+    ]
+    lot_fields = ["_intent", "_lot_market", "_source", "_lot_notes", "_missing"]
+    missing = [f for f in item_fields + lot_fields if getattr(dlg, f, None) is None]
+    assert not missing, f"no widget for: {missing}"
+    dlg.deleteLater()
+
+
+def test_editor_round_trips_the_per_copy_lot_fields(app, conn):
+    """Source and lot notes were editable nowhere in the UI before this."""
+    dlg, lot = _row_editor(conn)
+    dlg._select(dlg._intent, Intent.PERSONAL.value)
+    dlg._lot_market.setValue(72.50)
+    dlg._source.setText("Toronto show, table 14")
+    dlg._lot_notes.setText("Slight edge wear on this copy")
+    dlg._save()
+
+    saved = LotRepository(conn).get(lot.id)
+    assert saved.intent is Intent.PERSONAL
+    assert saved.acquired_market_value_cents == 7250
+    assert saved.source == "Toronto show, table 14"
+    assert saved.notes == "Slight edge wear on this copy"
+    dlg.deleteLater()
+
+
+def test_editing_market_at_purchase_does_not_move_cost_basis(app, conn):
+    """It is an acquisition *snapshot*, not a valuation input (spec 02)."""
+    dlg, lot = _row_editor(conn)
+    before = LotRepository(conn).get(lot.id).unit_cost_cents
+    dlg._lot_market.setValue(999.00)
+    dlg._save()
+    after = LotRepository(conn).get(lot.id)
+    assert after.acquired_market_value_cents == 99_900
+    assert after.unit_cost_cents == before  # allocation was not re-run
+    dlg.deleteLater()
+
+
+def test_editor_missing_toggle_goes_through_the_service(app, conn):
+    """`missing` moves money, so it must write an append-only audit row — a raw
+    `lot.missing = ...` would flip the flag and skip it (Invariant 9)."""
+    dlg, lot = _row_editor(conn)
+    before = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+
+    dlg._missing.setChecked(True)
+    dlg._save()
+
+    saved = LotRepository(conn).get(lot.id)
+    assert saved.missing is True
+    assert conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0] > before
+    dlg.deleteLater()
+
+
+def test_editor_unticking_missing_restores_the_lot(app, conn):
+    dlg, lot = _row_editor(conn)
+    dlg._missing.setChecked(True)
+    dlg._save()
+    assert LotRepository(conn).get(lot.id).missing is True
+
+    from tcginventory.ui.views.item_editor import ItemEditorDialog
+
+    again = ItemEditorDialog(conn, lot.item_id, lot_id=lot.id)
+    assert again._missing.isChecked()  # reflects stored state
+    again._missing.setChecked(False)
+    again._save()
+    restored = LotRepository(conn).get(lot.id)
+    assert restored.missing is False
+    assert restored.remaining_qty == lot.remaining_qty
+    dlg.deleteLater()
+    again.deleteLater()
+
+
+def test_editor_notes_keep_their_line_breaks(app, conn):
+    """Notes is multi-line now, and toggling review must not flatten it."""
+    dlg, lot = _row_editor(conn)
+    dlg._notes.setPlainText("Signed by artist\nCorner ding, back left")
+    dlg._review.setChecked(True)
+    dlg._save()
+    notes = ItemRepository(conn).get(lot.item_id).notes
+    assert "Signed by artist\nCorner ding, back left" in notes
+    assert "Manual price changed detected." in notes
+
+    from tcginventory.ui.views.item_editor import ItemEditorDialog
+
+    again = ItemEditorDialog(conn, lot.item_id, lot_id=lot.id)
+    # The marker is stripped for display, the user's two lines survive.
+    assert again._notes.toPlainText() == "Signed by artist\nCorner ding, back left"
+    again._review.setChecked(False)
+    again._save()
+    assert ItemRepository(conn).get(lot.item_id).notes == (
+        "Signed by artist\nCorner ding, back left"
+    )
+    dlg.deleteLater()
+    again.deleteLater()
+
+
+def test_editor_without_a_lot_hides_the_per_copy_section(app, conn):
+    """Constructible from a bare item — that is how it is reached outside the
+    grid, and the per-copy fields have nothing to point at."""
+    from tcginventory.ui.views.item_editor import ItemEditorDialog
+
+    result = buy(TransactionService(conn), "Gengar", 1000, 1000, "2026-01-01")
+    dlg = ItemEditorDialog(conn, result.lots[0].item_id)
+    assert dlg._lot is None
+    dlg._save()  # must not blow up with no lot to write
+    dlg.deleteLater()
+
+
+def test_editor_warns_when_item_fields_are_shared_by_several_copies(app, conn):
+    """The visible form of the ticket-52 rule: a row is a lot, but Identity /
+    Pricing / Filing are item-wide."""
+    from tcginventory.ui.views.item_editor import ItemEditorDialog
+
+    svc = TransactionService(conn)
+    first = buy(svc, "Rayquaza", 1000, 1000, "2026-01-01")
+    item_id = first.lots[0].item_id
+    lone = ItemEditorDialog(conn, item_id, lot_id=first.lots[0].id)
+    assert lone._shared_note is None  # one copy → nothing to warn about
+    lone.deleteLater()
+
+    buy(svc, "Rayquaza", 1200, 1200, "2026-02-01")  # a second copy of the card
+    shared = ItemEditorDialog(conn, item_id, lot_id=first.lots[0].id)
+    assert shared._shared_note is not None
+    assert "2 copies" in shared._shared_note
+    shared.deleteLater()

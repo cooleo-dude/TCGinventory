@@ -28,11 +28,23 @@ def with_review_note(notes: str | None) -> str:
 
 
 def without_review_note(notes: str | None) -> str | None:
-    """Remove the review marker, preserving any user-authored text."""
+    """Remove the review marker, preserving any user-authored text.
+
+    Line structure survives. This used to be a flat ``" ".join(notes.split())``,
+    which was harmless while every notes editor was a single-line QLineEdit — but
+    the item editor's notes field is multi-line, and toggling the review flag on
+    a card would otherwise silently flatten the user's paragraphs into one line.
+    Within a line, runs of whitespace still collapse, so single-line input comes
+    back exactly as it did before.
+    """
     if not notes:
         return None
-    cleaned = " ".join(notes.replace(REVIEW_NOTE, "").split())
-    return cleaned or None
+    lines = [" ".join(ln.split()) for ln in notes.replace(REVIEW_NOTE, "").splitlines()]
+    while lines and not lines[-1]:  # trim blank lines the marker left behind
+        lines.pop()
+    while lines and not lines[0]:
+        lines.pop(0)
+    return "\n".join(lines) or None
 
 
 def set_item_review(

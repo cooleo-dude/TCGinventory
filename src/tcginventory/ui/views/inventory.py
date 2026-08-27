@@ -98,7 +98,7 @@ from tcginventory.ui.views._inventory_delegates import (
 from tcginventory.ui.views._link_delegate import LinkButtonDelegate
 from tcginventory.ui.views._review_delegate import ReviewPriceDelegate
 from tcginventory.ui.views._worker import retire
-from tcginventory.ui.views.item_detail import ItemDetailDialog
+from tcginventory.ui.views.item_editor import ItemEditorDialog
 
 
 class _Segmented(QWidget):
@@ -468,7 +468,7 @@ class InventoryView(QWidget):
         # isn't wide); the freed horizontal space flows to the dossier, which
         # grows with the window (see the splitter stretch factors below).
         self._table.horizontalHeader().setStretchLastSection(False)
-        self._table.doubleClicked.connect(self._open_detail)
+        self._table.doubleClicked.connect(self._open_editor)
         self._table.clicked.connect(self._edit_on_click)
         self._table.selectionModel().selectionChanged.connect(self._on_selection)
         # Hover a row to show that card in the dossier (art + details + chart).
@@ -882,7 +882,13 @@ class InventoryView(QWidget):
         self.refresh()
         self.changed.emit()  # portfolio totals moved → refresh dashboard
 
-    def _open_detail(self, proxy_index: QModelIndex) -> None:
+    def _open_editor(self, proxy_index: QModelIndex) -> None:
+        """Double-click → the row editor: every editable field on one screen.
+
+        ``lot_id`` goes along with the item id, because a grid row is a *lot* and
+        the editor's "This copy" section edits that lot's own fields (intent,
+        acquisition snapshot, source, notes, stolen flag).
+        """
         source_index = self._proxy.mapToSource(proxy_index)
         row = self._model.row_at(source_index.row())
         # The Card (Name) cell and any read-only column open the full item
@@ -891,8 +897,9 @@ class InventoryView(QWidget):
         editable = bool(self._model.flags(source_index) & Qt.ItemIsEditable)
         if editable and source_index.column() != name_col:
             return
-        ItemDetailDialog(self._conn, row.item.id, parent=self).exec()
-        self.refresh()  # reflect any edits made in the detail/editor
+        ItemEditorDialog(self._conn, row.item.id, lot_id=row.lot_id, parent=self).exec()
+        self.refresh()  # reflect any edits made in the editor
+        self.changed.emit()  # intent / missing / market moved → other screens
 
     def _edit_on_click(self, proxy_index: QModelIndex) -> None:
         """Open the cell's editor on a single click. Skipped for: the Current

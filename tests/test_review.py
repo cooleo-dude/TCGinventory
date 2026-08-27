@@ -151,12 +151,16 @@ def test_view_manual_price_and_unmark(app, conn):
     view.deleteLater()
 
 
-def test_detail_dialog_marks_item_for_review(app, conn):
-    from tcginventory.ui.views.item_detail import ItemDetailDialog
+def test_row_editor_marks_item_for_review(app, conn):
+    from tcginventory.ui.views.item_editor import ItemEditorDialog
 
     item = _post_pikachu(conn, review=False)
-    dlg = ItemDetailDialog(conn, item.id)
+    dlg = ItemEditorDialog(conn, item.id)
     dlg._review.setChecked(True)  # user ticks "Mark for review"
+    # The editor applies on Save — the old read-only detail dialog wrote the flag
+    # the instant the box was ticked, which was the one field in the app that
+    # committed without a Save (ticket 61).
+    dlg._save()
     marked = ItemRepository(conn).get(item.id)
     assert marked.review is True
     assert "Manual price changed detected." in (marked.notes or "")
@@ -173,3 +177,41 @@ def test_armed_button_reverts_when_selection_moves(app, conn):
     delegate.note_selected_item(999)  # selecting a different card
     assert delegate._armed_item_id is None  # reverted to stage one
     view.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# the review marker vs. multi-line notes
+# ---------------------------------------------------------------------------
+
+
+def test_stripping_the_review_note_keeps_line_structure():
+    """The item editor's notes field is multi-line, so toggling review must not
+    flatten the user's paragraphs into one line."""
+    from tcginventory.services.review import (
+        REVIEW_NOTE,
+        with_review_note,
+        without_review_note,
+    )
+
+    authored = "Signed by artist\nCorner ding, back left\nBought at Toronto show"
+    marked = with_review_note(authored)
+    assert REVIEW_NOTE in marked
+
+    back = without_review_note(marked)
+    assert back == authored
+    assert back.count("\n") == 2
+
+
+def test_stripping_the_review_note_still_tidies_within_a_line():
+    """Unchanged for single-line notes: runs of whitespace inside a line collapse,
+    which is what the flag toggle relied on before it learned about newlines."""
+    from tcginventory.services.review import with_review_note, without_review_note
+
+    assert without_review_note(with_review_note("Signed   by  artist")) == (
+        "Signed by artist"
+    )
+    assert without_review_note(with_review_note("")) is None
+    assert without_review_note(None) is None
+    # A marker on its own leaves nothing behind, not a blank line.
+    assert without_review_note("Manual price changed detected.") is None
+    assert without_review_note("\n\nSigned\n\n") == "Signed"
