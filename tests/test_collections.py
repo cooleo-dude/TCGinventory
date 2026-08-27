@@ -33,6 +33,7 @@ from tcginventory.services.collections import (
     TEMPLATE_SUBSET,
     TEMPLATES,
     CollectionService,
+    _same_edition,
     collector_key,
     summarise,
 )
@@ -630,3 +631,85 @@ def test_a_set_collections_slots_come_out_in_collector_order(conn):
     )
     slots = CollectionService(conn).slots_for(_collection(conn, selector="Big Set"))
     assert [s.number for s in slots] == ["1", "2", "10", "11", "100", "102"]
+
+
+# ---------------------------------------------------------------------------
+# master mode and the "N/A" edition (ticket 62)
+# ---------------------------------------------------------------------------
+
+
+def test_no_edition_compares_equal_however_it_is_spelled():
+    """Edition.NA.value is the string "N/A"; an unset column is None. They mean
+    the same thing, and TREATMENT_IDENTITY yields None for plain printings."""
+    assert _same_edition("N/A", None)
+    assert _same_edition(None, None)
+    assert _same_edition("", None)
+    assert _same_edition("1st Edition", "1st Edition")
+
+
+def test_a_real_edition_still_has_to_match():
+    assert not _same_edition("N/A", "1st Edition")
+    assert not _same_edition("1st Edition", "Unlimited")
+    assert not _same_edition("1st Edition", None)
+
+
+def test_a_default_edition_card_can_fill_a_master_mode_slot(conn):
+    """The bug: 1,055 of 1,115 real items store edition "N/A", and master mode
+    compared it against TREATMENT_IDENTITY's None — so every one of them was
+    rejected and master mode found nothing ownable at all."""
+    _set_of_three(conn)
+    CardTreatmentRepository(conn).replace_for_language(
+        [("s1-1", "Normal"), ("s1-1", "Reverse Holofoil")], "EN"
+    )
+    _own(
+        conn,
+        "Alpha",
+        "Set One",
+        "1",
+        intent=Intent.RESALE,
+        holo=HoloPattern.NON_HOLO,
+        edition=Edition.NA,
+    )
+    conn.commit()
+    slots = {
+        s.treatment: s
+        for s in CollectionService(conn).slots_for(
+            _collection(conn, slot_mode=SLOT_MASTER)
+        )
+        if s.card_id == "s1-1"
+    }
+    assert slots["Normal"].state == IMPORTABLE
+    assert slots["Reverse Holofoil"].state == MISSING
+
+
+def test_master_mode_still_separates_first_edition_from_unlimited(conn):
+    """The fix must not make every edition match everything."""
+    _catalog(
+        conn,
+        [
+            CatalogCard(
+                card_id="b-4", name="Chari", set_id="b", set_name="Base", number="4"
+            )
+        ],
+    )
+    CardTreatmentRepository(conn).replace_for_language(
+        [("b-4", "1st Edition Holofoil"), ("b-4", "Unlimited Holofoil")], "EN"
+    )
+    _own(
+        conn,
+        "Chari",
+        "Base",
+        "4",
+        intent=Intent.PERSONAL,
+        holo=HoloPattern.HOLO,
+        edition=Edition.UNLIMITED,
+    )
+    conn.commit()
+    slots = {
+        s.treatment: s
+        for s in CollectionService(conn).slots_for(
+            _collection(conn, selector="Base", slot_mode=SLOT_MASTER)
+        )
+    }
+    assert slots["Unlimited Holofoil"].state == FILLED
+    assert slots["1st Edition Holofoil"].state == MISSING
