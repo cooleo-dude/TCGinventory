@@ -2913,3 +2913,59 @@ item-level Notes on one grid row changed all three copies. (Ticket 52.)
   cannot be backfilled and would not survive `replace_for_language`.
 - **No migration.** `price_snapshot` keeps one row per item; the item already
   encodes its treatment. Ticket 56.
+
+### 2026-08-26 — Which foil printings a card comes in, as catalog reference data
+
+- **Why:** the Collections window needs "every reverse holo in this set" to be an
+  enumerable checklist, and nothing in the catalog said which treatments a card
+  exists in. `card_catalog` carried name/set/number/rarity/supertype/artist and
+  no foil.
+- **Not a column — a child table.** 45.6% of TCGplayer products carry more than
+  one treatment (measured: 13,900 of 30,457), so a single column could record
+  only one of them and would lose the question being asked. On the real catalog,
+  **68.3% of resolved cards have more than one**.
+- **Source: tcgcsv, in files the app already downloads.** Its price rows carry a
+  `subTypeName` per product. TCGdex knows the same thing as
+  `variants: {normal, holo, reverse, firstEdition, wPromo}`, but only on its
+  **per-card** endpoint — `?variants=` filters nothing — so that route is 23,546
+  requests. Reading it off the price files costs group resolution and a cached
+  fetch per set instead. Measured on the live catalog: **37 seconds**.
+- **Measured coverage: 22,274 of 23,444 English cards (95.0%)**, 37,528
+  (card, treatment) pairs, one set unresolved (`fut2020`, which has no tcgcsv
+  group). Vocabulary found matches the sweep of all 218 groups exactly: Reverse
+  Holofoil 14,243 · Normal 13,127 · Holofoil 8,327 · Unlimited 739 · 1st Edition
+  738 · Unlimited Holofoil 182 · 1st Edition Holofoil 172.
+- **Correctness signal worth recording: Base Set resolves to 0 reverse holos**,
+  15 holo and 86 normal. Reverse holos did not exist until Legendary Collection
+  in 2002, so a Base Set with reverse holos would have meant the join was wrong.
+  Journey Together, by contrast, gives 143 reverse holo / 63 holo / 127 normal.
+- **Stored as tcgcsv's raw string**, decomposed on read via
+  `services/pricing._TREATMENT`. The vendor vocabulary is the source of truth and
+  is open-ended in principle; a closed enum would be wrong within a release —
+  the same reasoning migration 0022 applied to `variant`.
+- **No foreign key, and rewritten in the same transaction as the cards.**
+  `CardCatalogRepository.replace_for_language` DELETEs and re-inserts a whole
+  language on every pull, so an FK would either block that or cascade the
+  treatments away mid-rebuild. Writing both inside one transaction is what keeps
+  them consistent; a test asserts zero orphaned rows after two consecutive pulls,
+  and the real sweep confirmed **0 orphans** over 37,528 rows.
+- **`language` is denormalised onto the table** so a pull can clear exactly its
+  own rows without joining back to a catalog that is mid-delete.
+- **Failure is isolated**, matching ticket 54's shape: a set that will not
+  resolve is recorded and skipped, a set whose fetch explodes costs only itself,
+  and a wholly dead sweep still writes a complete catalog with no treatments.
+  `CatalogUpdateSummary.treatments` reports how many cards were resolved, so a
+  pull that silently found none says so.
+- **`TcgcsvProvider.treatments_by_product()`** exposes the per-treatment data
+  ticket 56 started keeping — the sweep needs to know a card comes in Reverse
+  Holofoil without caring what it costs.
+- **Rejected: deriving treatments from the items the user owns.** It can only
+  describe what is already held, so it could never populate an unowned slot,
+  which is the entire point of a collection checklist.
+- **Rejected: JP coverage for now.** JP `card_id` is already a tcgcsv product id
+  so the join is cheaper there, but JP price files use different group ids and
+  the subtype vocabulary is unverified. English first, and a foil template must
+  say so rather than appearing empty for half the catalog.
+- Migration 0024, applied to a copy of the live ledger: schema 23 → 24, all
+  53,289 catalog rows preserved, `item`/`lot` untouched at 1,115/1,371, and the
+  new table empty until the next pull. Ticket 55.

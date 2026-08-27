@@ -22,7 +22,10 @@ from dataclasses import dataclass, field
 from urllib.parse import quote
 
 from tcginventory.data.db import now_iso
-from tcginventory.data.repositories import CardCatalogRepository
+from tcginventory.data.repositories import (
+    CardCatalogRepository,
+    CardTreatmentRepository,
+)
 from tcginventory.domain.models import CatalogCard
 
 # tcgcsv embeds the collector number in the product name to disambiguate
@@ -82,6 +85,10 @@ class CatalogUpdateSummary:
     # sweep is best-effort: a pull that quietly resolved none of them still
     # succeeds, and this is the number that says so.
     artists: int = 0
+    # Cards for which at least one foil printing was resolved. Reported because
+    # the treatment sweep is best-effort: a pull that resolved none still
+    # succeeds, and this is the number that says so. (Ticket 55.)
+    treatments: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -370,10 +377,68 @@ def _sweep_attributes(
     return {attr: _resolve_longest(a) for attr, a in claims.items()}, errors
 
 
+# ---------------------------------------------------------------------------
+# Foil treatments
+# ---------------------------------------------------------------------------
+
+
+def _sweep_treatments(
+    cards: list[CatalogCard],
+    provider,
+    category: int = 3,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """``[(card_id, treatment)]`` for every card a tcgcsv product can be found for.
+
+    Which foil printings a card exists in is not in any catalog feed, but it *is*
+    in the tcgcsv price files the pricing service already downloads: one row per
+    product per ``subTypeName``. So this costs group resolution and a cached
+    fetch per set, not a per-card request — the alternative, TCGdex's per-card
+    ``variants``, is 23,546 requests because ``?variants=`` filters nothing.
+
+    Joined set-by-set the way ``marketprices._process_set`` already does it:
+    resolve the set to a tcgcsv group, index that group's products by normalised
+    collector number, and read the treatments off the price rows. A set that will
+    not resolve is recorded and skipped rather than failing the pull.
+    """
+    from tcginventory.services.pricing import _norm_number
+
+    rows: list[tuple[str, str]] = []
+    errors: list[str] = []
+    by_set: dict[str, list[CatalogCard]] = {}
+    for card in cards:
+        by_set.setdefault(card.set_id, []).append(card)
+
+    for set_id, group in by_set.items():
+        sample = group[0]
+        try:
+            group_id = provider.resolve_group(
+                sample.set_name, sample.set_code, category
+            )
+            if group_id is None:
+                errors.append(f"{set_id}: no tcgcsv group")
+                continue
+            prices = provider.treatments_by_product(category, group_id)
+            by_number: dict[str, int] = {}
+            for pid, number, _url, _name in provider.products(category, group_id):
+                by_number.setdefault(_norm_number(number), pid)
+        except Exception as exc:
+            errors.append(f"{set_id}: {exc}")
+            continue
+        for card in group:
+            pid = by_number.get(_norm_number(card.number))
+            if pid is None:
+                continue
+            for treatment in prices.get(pid, ()):
+                if treatment:
+                    rows.append((card.card_id, treatment))
+    return rows, errors
+
+
 def update_catalog(
     conn: sqlite3.Connection,
     fetch_json: Callable[[str], object] | None = None,
     on_progress: Callable[[int, int], None] | None = None,
+    price_provider=None,
 ) -> CatalogUpdateSummary:
     """Pull the full English card dataset from **TCGdex** into ``card_catalog``.
 
@@ -467,14 +532,35 @@ def update_catalog(
     summary.artists = sum(1 for c in cards if c.artist)
 
     _fill_missing_images(cards, fetch)
+
+    # Which foil printings each card comes in. Best-effort like the attribute
+    # sweep: a total failure still writes a complete catalog, just with no
+    # treatments — a Collections foil template then has nothing to offer, which
+    # is the honest state and better than a half-filled one that looks whole.
+    treatments: list[tuple[str, str]] = []
     try:
+        if price_provider is None:
+            from tcginventory.services.pricing import TcgcsvProvider
+
+            price_provider = TcgcsvProvider()
+        treatments, treatment_errors = _sweep_treatments(cards, price_provider)
+        summary.errors.extend(treatment_errors)
+    except Exception as exc:
+        summary.errors.append(f"treatment sweep: {exc}")
+
+    try:
+        # One transaction: replace_for_language DELETEs and re-inserts every card
+        # row, so treatments written outside it would reference card_ids that no
+        # longer exist (or be wiped by the next pull).
         CardCatalogRepository(conn).replace_for_language(cards, "EN", now_iso())
+        CardTreatmentRepository(conn).replace_for_language(treatments, "EN")
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     summary.sets = total
     summary.cards = len(cards)
+    summary.treatments = len({card_id for card_id, _ in treatments})
     return summary
 
 

@@ -420,6 +420,21 @@ class TcgcsvProvider:
         :meth:`_collapse_dearest` for why this still takes the dearest."""
         return self._collapse_dearest(self._prices_for_group(category, group_id))
 
+    def treatments_by_product(
+        self, category: int, group_id: int
+    ) -> dict[int, list[str]]:
+        """``{product_id: [subTypeName, …]}`` — which printings each product has.
+
+        The same price file the group's prices come from, read for its
+        *treatments* rather than its numbers. Exposed for the catalog treatment
+        sweep (ticket 55), which needs to know a card comes in Reverse Holofoil
+        without caring what it costs.
+        """
+        return {
+            pid: sorted(t for t in subs if t)
+            for pid, subs in self._prices_for_group(category, group_id).items()
+        }
+
     def products(self, category: int, group_id: int) -> list[tuple[int, str, str, str]]:
         return self._products_for_group(category, group_id)
 
