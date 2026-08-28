@@ -713,3 +713,79 @@ def test_master_mode_still_separates_first_edition_from_unlimited(conn):
     }
     assert slots["Unlimited Holofoil"].state == FILLED
     assert slots["1st Edition Holofoil"].state == MISSING
+
+
+# ---------------------------------------------------------------------------
+# the unmatched count (ticket 64)
+# ---------------------------------------------------------------------------
+
+
+def test_unmatched_ignores_case_and_surrounding_space(conn):
+    """The set-difference rewrite must normalise exactly as the old
+    LOWER(TRIM(...)) SQL did, or the count changes meaning."""
+    _catalog(
+        conn,
+        [CatalogCard(card_id="s-1", name="Alpha", set_id="s", set_name="Set One",
+                     number="1", printed_total=1)],
+    )
+    _own(conn, "  alpha  ", "  SET ONE  ", "1")   # same card, sloppily entered
+    conn.commit()
+    assert CollectionService(conn).unmatched_items() == 0
+
+
+def test_unmatched_counts_a_card_the_catalog_does_not_have(conn):
+    _catalog(
+        conn,
+        [CatalogCard(card_id="s-1", name="Alpha", set_id="s", set_name="Set One",
+                     number="1", printed_total=1)],
+    )
+    _own(conn, "Alpha", "Set One", "1")
+    _own(conn, "Ghost", "Nowhere", "9")
+    conn.commit()
+    assert CollectionService(conn).unmatched_items() == 1
+
+
+def test_unmatched_is_scoped_by_language(conn):
+    _catalog(
+        conn,
+        [CatalogCard(card_id="s-1", name="Alpha", set_id="s", set_name="Set One",
+                     number="1", printed_total=1)],
+    )
+    _own(conn, "Alpha", "Set One", "1")
+    conn.commit()
+    assert CollectionService(conn).unmatched_items("EN") == 0
+    # No JP catalog rows and no JP items: nothing to count either way.
+    assert CollectionService(conn).unmatched_items("JP") == 0
+
+
+def test_unmatched_treats_a_null_set_as_empty_not_as_a_mismatch(conn):
+    """COALESCE(set_name,'') on both sides in the old SQL; the key must agree."""
+    _catalog(conn, [CatalogCard(card_id="s-1", name="Promo", set_id="s",
+                                set_name=None, number="1")])
+    _own(conn, "Promo", None, "1")
+    conn.commit()
+    assert CollectionService(conn).unmatched_items() == 0
+
+
+def test_unmatched_does_not_scan_the_catalog_per_item(conn):
+    """The regression guard. The old form was a correlated subquery: O(items x
+    catalog) with LOWER(TRIM()) on both sides, 11.3 s on the real ledger. This
+    builds a key set once, so the work is O(items + catalog) — a few hundred rows
+    here must not take anything like a second."""
+    import time
+
+    _catalog(
+        conn,
+        [
+            CatalogCard(card_id=f"s-{i}", name=f"C{i}", set_id="s",
+                        set_name="Big", number=str(i), printed_total=800)
+            for i in range(800)
+        ],
+    )
+    for i in range(200):
+        _own(conn, f"Owned{i}", "Elsewhere", str(i))
+    conn.commit()
+
+    t0 = time.perf_counter()
+    assert CollectionService(conn).unmatched_items() == 200
+    assert (time.perf_counter() - t0) < 1.0

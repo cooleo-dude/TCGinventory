@@ -450,12 +450,17 @@ class CollectionsView(QWidget):
         value = sum(p.value_cents for p in progress.values())
         importable_value = sum(p.importable_value_cents for p in progress.values())
         done = sum(1 for p in progress.values() if p.total and p.filled == p.total)
+        # One global number, computed once here rather than per collection — see
+        # CollectionService.unmatched_items. Shown only when there are any.
+        unmatched = self._service.unmatched_items()
         facts = [
             ("Slots filled", f"{filled:,}", f"of {total:,}"),
             ("Collections", str(len(collections)), f"{done} complete"),
             ("In collection", money(value), "at market"),
             ("Importable", f"{importable:,}", money(importable_value)),
         ]
+        if unmatched:
+            facts.append(("Unmatched", f"{unmatched:,}", "no card in database"))
         for label, value_text, note in facts:
             self._facts_row.addWidget(_fact(label, value_text, note))
 
@@ -563,12 +568,10 @@ class CollectionsView(QWidget):
                 "slots are shown as one and the master-set total is a floor, not "
                 "a count."
             )
-        unmatched = self._service.unmatched_items(collection.language)
-        if unmatched:
-            notes.append(
-                f"{unmatched} owned card(s) match no card in the database, so they "
-                "cannot fill a slot. They are still in Inventory."
-            )
+        # The unmatched count is portfolio-wide, not per-collection: it used to be
+        # recomputed here on every click into a collection, which was the whole of
+        # the reported lag. It now lives on the grid page's fact strip, computed
+        # once per refresh. (Ticket 64.)
         self._legend.setText("  —  ".join(notes))
 
     # -- the import ---------------------------------------------------------
