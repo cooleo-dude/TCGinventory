@@ -52,6 +52,7 @@ from tcginventory.services.collections import (
     TEMPLATES_BY_ID,
     CollectionService,
     Slot,
+    art_gap,
     summarise,
 )
 from tcginventory.services.inventory import InventoryService
@@ -70,6 +71,9 @@ from tcginventory.ui.models.collection_model import (
     CollectionSlotModel,
 )
 from tcginventory.ui.pager import Pager
+from tcginventory.ui.spinner import BusyChip
+from tcginventory.ui.views._art_warm import ArtWarmWorker
+from tcginventory.ui.views._worker import retire
 from tcginventory.ui.views.inventory import _Chip, _Segmented
 
 _COLUMNS = 4  # blocks per row before wrapping
@@ -355,6 +359,11 @@ class CollectionsView(QWidget):
         # True while we move the navigator ourselves; see _sync_nav_to.
         self._syncing_nav = False
         self._view_mode = "grid"
+        # One art-warm worker at a time, with retired ones parked until they
+        # actually stop (WORKER-RETIRE-NOT-REPLACE: overwriting a running QThread
+        # aborts the process).
+        self._warm: ArtWarmWorker | None = None
+        self._parked_warms: list = []
         self.setStyleSheet(_qss(theme.active()))
 
         self._pages = QStackedWidget()
@@ -458,9 +467,16 @@ class CollectionsView(QWidget):
         col.addWidget(self._detail_meta)
 
         col.addSpacing(13)
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(11)
         self._detail_progress = QLabel()
         self._detail_progress.setObjectName("pcProgress")
-        col.addWidget(self._detail_progress)
+        progress_row.addWidget(self._detail_progress)
+        # Appears only if a warm is still running after a moment — see _warm_art.
+        self._busy = BusyChip()
+        progress_row.addWidget(self._busy)
+        progress_row.addStretch(1)
+        col.addLayout(progress_row)
 
         col.addSpacing(12)
 
@@ -682,6 +698,9 @@ class CollectionsView(QWidget):
         # despite the guard, the *last* render is still the collection asked for.
         self._sync_nav_to(collection)
         self._show_detail(collection)
+        # Also warm on open: collections created before this existed have cold
+        # art, and a catalog re-pull can introduce cards with new images.
+        self._warm_art(collection)
 
     def _sync_nav_to(self, collection: Collection) -> None:
         """Highlight a collection's row without treating it as a click.
@@ -791,13 +810,73 @@ class CollectionsView(QWidget):
         self.changed.emit()
         self.refresh()
 
+    # -- background art warm -------------------------------------------------
+
+    # Below this, a warm is not worth telling anyone about: it finishes before a
+    # spinner would finish fading in. Measured, most collections need 0-4 images.
+    _WARM_ANNOUNCE_AT = 3
+    # Long enough that a quick warm never flashes a spinner at anyone.
+    _WARM_REVEAL_MS = 400
+
+    def _warm_art(self, collection: Collection | None) -> int:
+        """Fetch any missing card art for ``collection`` in the background.
+
+        Returns how many images were queued, so callers and tests can tell the
+        difference between "nothing to do" and "started".
+
+        Cards the catalog has **no image URL for** are not work and are not
+        queued: on the real catalog they are the large majority of missing art
+        (a 5,805-slot rarity run had 224 without art, 220 of them with no URL),
+        and queueing them would retry a permanent gap on every open.
+        """
+        if collection is None:
+            return 0
+        gap = art_gap(self._service.slots_for(collection))
+        if not gap.fetchable:
+            return 0
+        # Never overwrite a running worker; park the old one until it stops.
+        retire(self._warm, self._parked_warms)
+        worker = ArtWarmWorker(gap.fetchable)
+        self._warm = worker
+        total = len(gap.fetchable)
+        worker.progress.connect(self._on_warm_progress)
+        worker.finished_with.connect(self._on_warm_finished)
+        if total >= self._WARM_ANNOUNCE_AT:
+            self._busy.begin(
+                f"Fetching card art · 0 of {total}", delay_ms=self._WARM_REVEAL_MS
+            )
+        worker.start()
+        return total
+
+    def _on_warm_progress(self, done: int, total: int) -> None:
+        if total >= self._WARM_ANNOUNCE_AT:
+            self._busy.update_text(f"Fetching card art · {done} of {total}")
+
+    def _on_warm_finished(self, fetched: int, failed: int) -> None:
+        self._busy.end()
+        if not fetched:
+            return
+        # New files on disk; the thumbnail cache holds "no art" as a decoded
+        # absence, so it has to be dropped before the grid will show them.
+        card_thumbs.clear()
+        if self._pages.currentIndex() == 1:
+            self._render_grid_page()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        """Stop a warm rather than leaving a thread downloading after teardown."""
+        retire(self._warm, self._parked_warms)
+        super().closeEvent(event)
+
     def _new_collection(self) -> None:
         dialog = _NewCollectionDialog(self._service, self)
         if dialog.exec() != QDialog.Accepted:
             return
-        self._service.collections.add(dialog.to_collection())
+        created = self._service.collections.add(dialog.to_collection())
         self._conn.commit()
         self.refresh()
+        # Warm the new collection's art now rather than letting it fill in over
+        # the network the first time it is opened.
+        self._warm_art(created)
 
 
 def _fact(label: str, value: str, note: str) -> QWidget:

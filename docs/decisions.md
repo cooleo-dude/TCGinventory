@@ -3362,3 +3362,49 @@ meant clicking **Edit item…** inside it to open a second dialog,
   `processEvents()`: before layout every button reports geometry `(0, 0, 26, 26)`,
   so every sample read the same spot.)
 - Suite 1,226 passing. Ticket 64.
+
+### 2026-08-28 — Warming a collection's card art, and a spinner that earns its place (ticket 65)
+
+- **Why:** deferred out of ticket 64 on the grounds that ~98% of English art was
+  already cached; asked for explicitly, with a loading indicator if the work is
+  slow. Measured first, and both halves are true at different times.
+- **Most "missing art" is not work.** The catalog has no `image_small` for ~880
+  English cards, and those dominate every gap: a 5,805-slot rarity run had **224
+  cards without art, 220 of them with no URL**, leaving four to fetch. `art_gap`
+  therefore reports `fetchable` and `no_source` separately, and only the first is
+  ever queued — queueing the rest would retry a permanent hole on every open and
+  never converge.
+- **On a cold cache it is real work**, so the indicator has to exist: an empty
+  cache on Base Set is 102 images, measured end-to-end at **0.14 s each at six in
+  flight**, so ~14 s.
+- **One QThread with a pool inside, not the shared hover queue.**
+  `card_preview._fetch_queue()` deliberately **drops the oldest** request past 48
+  pending — correct for hovers, where a stale one no longer matters, and fatal
+  for a bulk warm of 200 cards. So the warm owns a single thread
+  (`QTHREAD-LIFETIME`) and runs six fetches inside it, matching that queue's
+  process-wide ceiling. Interruptible between items, and retired rather than
+  replaced (`WORKER-RETIRE-NOT-REPLACE`).
+- **The spinner only appears if the work is slow.** `BusyChip.begin(text,
+  delay_ms)` reveals on a single-shot timer, so a warm finishing in 300 ms never
+  flashes anything; under three images it is not announced at all. The arc stops
+  its timer when hidden — a `QTimer` on a hidden widget repaints forever, which on
+  a screen nobody is looking at is pure battery.
+- **Warms on create *and* on open.** Creation was the ask, but collections made
+  before this existed have cold art and a catalog re-pull can add new images.
+  `art_gap` only stats the cache, so repeating the check is cheap.
+- **Rejected: an always-visible progress bar.** On a warm cache the work is about
+  four images; a bar that flashes on every open is noise. **Rejected: the
+  existing `opBar` rail alone** — the house style for a tile with one job, but it
+  cannot carry "12 of 40".
+- **Two bugs found by rendering it.** The chip's pill was invisible: a plain
+  `QWidget` does not paint its stylesheet background or border without
+  `WA_StyledBackground` (a `QFrame` gets it for free). And a visibility test
+  asserted the wrong predicate — `isVisible()` is False for a widget inside a
+  `QStackedWidget` page on a view the test never shows, however the chip was set,
+  so the tests use `isHidden()`, which asks whether the widget hid *itself*.
+- **And one test helper that lied:** the first `qt_wait` built a `QEventLoop` and
+  never `exec()`d it, so it waited ~20 ms instead of 140 and the reveal test
+  failed for the wrong reason.
+- Verified end-to-end over the real network: 12 of 12 fetched in 1.6 s, 12
+  progress events, and `art_gap` dropping 102 -> 90 — exactly the twelve.
+  Suite 1,253 passing; mutation-checked both rules.
