@@ -82,6 +82,16 @@ def view(app, conn):
     v.deleteLater()
 
 
+def _slots(view):
+    """The collection's slots as the model holds them (unfiltered, source order)."""
+    return [view._model.slot_at(r) for r in range(view._model.rowCount())]
+
+
+def _first(view, state):
+    """The first slot in a given state — what a click would act on."""
+    return next(s for s in _slots(view) if s.state == state)
+
+
 # ---------------------------------------------------------------------------
 # the window builds and shows both states
 # ---------------------------------------------------------------------------
@@ -105,19 +115,16 @@ def test_opening_a_block_shows_the_checklist(view, conn):
     assert "Set One" in view._detail_title.text()
 
 
-def test_the_checklist_has_a_tile_per_slot_including_unowned(view, conn):
+def test_the_checklist_has_a_row_per_slot_including_unowned(view, conn):
     """The property Inventory cannot express."""
     _seed(conn)
     view.refresh()
     view._open(view._nav_order[0])
-    assert view._slots.count() == 2
-    states = {
-        view._slots.itemAt(i).widget().slot.name: view._slots.itemAt(i)
-        .widget()
-        .slot.state
-        for i in range(view._slots.count())
+    assert view._model.rowCount() == 2
+    assert {s.name: s.state for s in _slots(view)} == {
+        "Alpha": IMPORTABLE,
+        "Beta": MISSING,
     }
-    assert states == {"Alpha": IMPORTABLE, "Beta": MISSING}
 
 
 def test_nav_lists_every_collection(view, conn):
@@ -136,22 +143,13 @@ def test_importing_a_single_copy_flips_intent_and_fills_the_slot(view, conn):
     item, _coll = _seed(conn, intent=Intent.RESALE, qty=1)
     view.refresh()
     view._open(view._nav_order[0])
-    slot = next(
-        view._slots.itemAt(i).widget().slot
-        for i in range(view._slots.count())
-        if view._slots.itemAt(i).widget().slot.state == IMPORTABLE
-    )
+    slot = _first(view, IMPORTABLE)
     view._import_slot(slot)
 
     lots = LotRepository(conn).list_for_item(item.id)
     assert len(lots) == 1
     assert lots[0].intent is Intent.PERSONAL
-    filled = [
-        view._slots.itemAt(i).widget().slot
-        for i in range(view._slots.count())
-        if view._slots.itemAt(i).widget().slot.state == FILLED
-    ]
-    assert len(filled) == 1
+    assert len([s for s in _slots(view) if s.state == FILLED]) == 1
 
 
 def test_importing_from_a_multi_copy_lot_splits_it(view, conn):
@@ -159,11 +157,7 @@ def test_importing_from_a_multi_copy_lot_splits_it(view, conn):
     item, _coll = _seed(conn, intent=Intent.RESALE, qty=3)
     view.refresh()
     view._open(view._nav_order[0])
-    slot = next(
-        view._slots.itemAt(i).widget().slot
-        for i in range(view._slots.count())
-        if view._slots.itemAt(i).widget().slot.state == IMPORTABLE
-    )
+    slot = _first(view, IMPORTABLE)
     view._import_slot(slot)
 
     lots = sorted(LotRepository(conn).list_for_item(item.id), key=lambda x: x.quantity)
@@ -182,11 +176,7 @@ def test_an_import_does_not_move_any_total(view, conn):
     before_value = rep.collection_value_cents()
     view.refresh()
     view._open(view._nav_order[0])
-    slot = next(
-        view._slots.itemAt(i).widget().slot
-        for i in range(view._slots.count())
-        if view._slots.itemAt(i).widget().slot.state == IMPORTABLE
-    )
+    slot = _first(view, IMPORTABLE)
     view._import_slot(slot)
     assert rep.cost_basis_cents() == before_basis
     assert rep.collection_value_cents() == before_value
@@ -198,11 +188,7 @@ def test_an_import_is_audited(view, conn):
     item, _coll = _seed(conn, intent=Intent.RESALE, qty=2)
     view.refresh()
     view._open(view._nav_order[0])
-    slot = next(
-        view._slots.itemAt(i).widget().slot
-        for i in range(view._slots.count())
-        if view._slots.itemAt(i).widget().slot.state == IMPORTABLE
-    )
+    slot = _first(view, IMPORTABLE)
     lot_id = LotRepository(conn).list_for_item(item.id)[0].id
     view._import_slot(slot)
     assert AuditLogRepository(conn).list_for_entity("lot", lot_id)
@@ -214,11 +200,7 @@ def test_an_import_emits_changed_so_other_screens_refresh(view, conn):
     view.changed.connect(lambda: seen.append(1))
     view.refresh()
     view._open(view._nav_order[0])
-    slot = next(
-        view._slots.itemAt(i).widget().slot
-        for i in range(view._slots.count())
-        if view._slots.itemAt(i).widget().slot.state == IMPORTABLE
-    )
+    slot = _first(view, IMPORTABLE)
     view._import_slot(slot)
     assert seen, "intent moved; the Dashboard filter and Inventory must be told"
 
@@ -227,9 +209,8 @@ def test_importing_an_already_personal_copy_is_harmless(view, conn):
     item, _coll = _seed(conn, intent=Intent.PERSONAL, qty=1)
     view.refresh()
     view._open(view._nav_order[0])
-    tile = view._slots.itemAt(0).widget()
-    assert tile.slot.state == FILLED
-    view._import_slot(tile.slot)  # no-op path
+    slot = _first(view, FILLED)
+    view._import_slot(slot)  # no-op path
     lots = LotRepository(conn).list_for_item(item.id)
     assert len(lots) == 1 and lots[0].intent is Intent.PERSONAL
 
@@ -250,11 +231,7 @@ def test_a_refused_split_shows_a_message_and_does_not_write(view, conn, monkeypa
     )
     view.refresh()
     view._open(view._nav_order[0])
-    slot = next(
-        view._slots.itemAt(i).widget().slot
-        for i in range(view._slots.count())
-        if view._slots.itemAt(i).widget().slot.state == IMPORTABLE
-    )
+    slot = _first(view, IMPORTABLE)
     view._import_slot(slot)
     assert warned, "a refusal must be reported"
     assert len(LotRepository(conn).list_for_item(item.id)) == 1

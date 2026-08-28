@@ -104,6 +104,7 @@ from tcginventory.ui import icons, theme
 from tcginventory.ui.card_gallery import CardGallery
 from tcginventory.ui.clipboard_images import clipboard_image_paths
 from tcginventory.ui.formatting import money, percent
+from tcginventory.ui.pager import Pager
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
 from tcginventory.ui.views._card_entry import CardEntryMixin, PriceLookupWorker
 
@@ -1200,11 +1201,12 @@ class AuctionsView(QWidget):
         self._row.setContentsMargins(0, 0, 0, 0)
         self._row.setSpacing(14)
 
-        self._pager_host = QWidget()
-        self._pager = QHBoxLayout(self._pager_host)
-        self._pager.setContentsMargins(0, 4, 0, 2)
-        self._pager.setSpacing(6)
-        self._pager_host.setVisible(False)
+        # The shared, windowed page selector (ui/pager.py). This used to be built
+        # inline here, one button per page — fine for a watchlist, but the
+        # Personal Collection reuses it at 100+ pages. (Ticket 64.)
+        self._pager = Pager()
+        self._pager.page_changed.connect(self._goto)
+        self._pager.setVisible(False)
 
         wrap = QWidget()
         wl = QVBoxLayout(wrap)
@@ -1213,7 +1215,7 @@ class AuctionsView(QWidget):
         wl.addWidget(self._empty)
         wl.addWidget(self._row_host)
         wl.addStretch(1)
-        wl.addWidget(self._pager_host)
+        wl.addWidget(self._pager)
         wrap.installEventFilter(self)  # leave -> revert gallery
         self._watch_widget = wrap
         return wrap
@@ -1270,7 +1272,7 @@ class AuctionsView(QWidget):
         return max(1, (width + gap) // (card_w + gap))
 
     def _render_page(self) -> None:
-        """Show only the current page's cards in the single row + build pager."""
+        """Show only the current page's cards in the single row."""
         per = self._cards_per_page()
         n = len(self._cards)
         pages = max(1, (n + per - 1) // per)
@@ -1284,60 +1286,12 @@ class AuctionsView(QWidget):
         for card in self._cards[start : start + per]:
             self._row.addWidget(card)
         self._row.addStretch(1)  # left-align the row
-        self._build_pager(pages)
+        self._pager.set_pages(pages, page=self._page)
 
     def _goto(self, page: int) -> None:
         self._page = page
         self._shown_key = None
         self._render_page()
-
-    def _build_pager(self, pages: int) -> None:
-        t = theme.active()
-        while self._pager.count():
-            item = self._pager.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        self._pager_host.setVisible(pages > 1)
-        if pages <= 1:
-            return
-        self._pager.addStretch(1)
-        prev = self._pager_arrow("‹", self._page > 0)
-        prev.clicked.connect(lambda: self._goto(self._page - 1))
-        self._pager.addWidget(prev)
-        for i in range(pages):
-            on = i == self._page
-            dot = QPushButton(str(i + 1))
-            dot.setCursor(Qt.PointingHandCursor)
-            dot.setFixedSize(26, 26)
-            dot.setStyleSheet(
-                f"QPushButton{{border:1px solid {t.accent if on else t.line2};"
-                f"border-radius:7px;background:"
-                f"{t.accent_soft if on else 'transparent'};"
-                f"color:{t.accent_ink if on else t.ink2};font-size:11px;"
-                f"font-weight:700;}}"
-                f"QPushButton:hover{{border-color:{t.accent};}}"
-            )
-            dot.clicked.connect(lambda _=False, p=i: self._goto(p))
-            self._pager.addWidget(dot)
-        nxt = self._pager_arrow("›", self._page < pages - 1)
-        nxt.clicked.connect(lambda: self._goto(self._page + 1))
-        self._pager.addWidget(nxt)
-        self._pager.addStretch(1)
-
-    def _pager_arrow(self, glyph: str, enabled: bool) -> QPushButton:
-        t = theme.active()
-        b = QPushButton(glyph)
-        b.setFixedSize(28, 26)
-        b.setEnabled(enabled)
-        b.setCursor(Qt.PointingHandCursor)
-        b.setStyleSheet(
-            f"QPushButton{{border:none;background:transparent;color:{t.ink2};"
-            f"font-size:17px;font-weight:700;}}"
-            f"QPushButton:hover{{color:{t.accent_ink};}}"
-            f"QPushButton:disabled{{color:{t.ink3};}}"
-        )
-        return b
 
     # -- split sizing (watchlist hugs the single card row) -----------------
 
@@ -1364,9 +1318,7 @@ class AuctionsView(QWidget):
         if total <= 0:
             return
         card_h = self._cards[0].sizeHint().height() if self._cards else 200
-        pager_h = (
-            self._pager_host.sizeHint().height() if self._pager_host.isVisible() else 0
-        )
+        pager_h = self._pager.sizeHint().height() if self._pager.isVisible() else 0
         needed = card_h + pager_h + 22
         top = max(200, min(needed, total - 240))  # keep the composer usable
         self._fitting = True

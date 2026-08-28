@@ -17,6 +17,7 @@ import sqlite3
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -32,6 +34,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
@@ -41,6 +44,7 @@ from tcginventory.domain.models import Collection
 from tcginventory.services.collections import (
     FILLED,
     IMPORTABLE,
+    MISSING,
     SLOT_BY_NUMBER,
     SLOT_MASTER,
     TEMPLATE_CUSTOM,
@@ -51,8 +55,22 @@ from tcginventory.services.collections import (
     summarise,
 )
 from tcginventory.services.inventory import InventoryService
-from tcginventory.ui import icons, theme
+from tcginventory.ui import card_thumbs, icons, theme
 from tcginventory.ui.formatting import money
+from tcginventory.ui.models.collection_model import (
+    CARD_COL,
+    FILTER_ALL,
+    FILTER_DUPLICATES,
+    FILTER_FILLED,
+    FILTER_IMPORTABLE,
+    FILTER_MISSING,
+    NUMBER_COL,
+    SLOT_ROLE,
+    CollectionFilterProxy,
+    CollectionSlotModel,
+)
+from tcginventory.ui.pager import Pager
+from tcginventory.ui.views.inventory import _Chip, _Segmented
 
 _COLUMNS = 4  # blocks per row before wrapping
 
@@ -232,26 +250,75 @@ class _Block(QFrame):
         super().mouseReleaseEvent(event)
 
 
-class _SlotTile(QFrame):
-    """One position in the checklist — owned, importable, or an empty slot."""
+# One grid cell. Card proportions (5:7), big enough for the art to be the thing
+# you read rather than a swatch beside a number. Fixed rather than
+# viewport-derived so the thumbnail cache has one size to hold per card instead
+# of a new decode every time the window is dragged.
+_CELL_W = 150
+_CELL_ART_H = card_thumbs.height_for(_CELL_W)
+_CELL_H = _CELL_ART_H + 34  # art plus the caption strip
+_CELL_GAP = 12
+
+
+class _SlotCell(QFrame):
+    """One position in the checklist, as a card.
+
+    Missing slots still get a cell — that is the whole point of a collection —
+    drawn as a dashed outline with the collector number, so a gap in a set reads
+    as a gap rather than as absence.
+    """
 
     def __init__(self, slot: Slot, on_import) -> None:
         super().__init__()
         self.slot = slot
         self.setObjectName(
             {
-                FILLED: "pcSlotFilled",
-                IMPORTABLE: "pcSlotImportable",
-            }.get(slot.state, "pcSlotMissing")
+                FILLED: "pcCellFilled",
+                IMPORTABLE: "pcCellImportable",
+            }.get(slot.state, "pcCellMissing")
         )
-        self.setFixedSize(52, 72)
+        self.setFixedSize(_CELL_W, _CELL_H)
         self._on_import = on_import
-        label = QLabel(slot.number or "?", self)
-        label.setObjectName("pcSlotNumber")
-        label.setAlignment(Qt.AlignCenter)
-        label.setGeometry(0, 0, 52, 72)
-        label.setWordWrap(True)
 
+        box = QVBoxLayout(self)
+        box.setContentsMargins(4, 4, 4, 3)
+        box.setSpacing(2)
+
+        art = QLabel()
+        art.setFixedHeight(_CELL_ART_H - 8)
+        art.setAlignment(Qt.AlignCenter)
+        art.setObjectName("pcCellArt")
+        # Owned or not, the art is the card's — a missing slot showing its own
+        # picture is exactly what makes a checklist worth looking at. Only the
+        # frame says whether you have it.
+        pixmap = card_thumbs.thumbnail(slot.card_id, _CELL_W - 16)
+        if pixmap is not None:
+            art.setPixmap(pixmap)
+            if slot.state == MISSING:
+                art.setObjectName("pcCellArtMissing")  # dimmed by the stylesheet
+        else:
+            art.setText(slot.number or "?")
+            art.setObjectName("pcCellArtNone")
+        box.addWidget(art, 1)
+
+        caption = QLabel(self._caption(slot))
+        caption.setObjectName("pcCellCaption")
+        caption.setAlignment(Qt.AlignCenter)
+        box.addWidget(caption)
+
+        self.setToolTip(self._tooltip(slot))
+        if slot.state == IMPORTABLE:
+            self.setCursor(Qt.PointingHandCursor)
+
+    @staticmethod
+    def _caption(slot: Slot) -> str:
+        number = slot.number or "?"
+        if slot.qty > 1:
+            return f"{number}  ×{slot.qty}"
+        return number
+
+    @staticmethod
+    def _tooltip(slot: Slot) -> str:
         detail = f"{slot.name} · {slot.number or '?'}"
         if slot.treatment:
             detail += f" · {slot.treatment}"
@@ -261,12 +328,11 @@ class _SlotTile(QFrame):
             detail += "\nIn this collection"
         elif slot.state == IMPORTABLE:
             detail += "\nIn inventory as resale — click to bring in"
-            self.setCursor(Qt.PointingHandCursor)
         else:
             detail += "\nNot owned"
         if slot.market_value_cents:
             detail += f"\n{money(slot.market_value_cents)}"
-        self.setToolTip(detail)
+        return detail
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 (Qt override)
         if event.button() == Qt.LeftButton and self.slot.state == IMPORTABLE:
@@ -288,6 +354,7 @@ class CollectionsView(QWidget):
         self._nav_order: list[Collection] = []
         # True while we move the navigator ourselves; see _sync_nav_to.
         self._syncing_nav = False
+        self._view_mode = "grid"
         self.setStyleSheet(_qss(theme.active()))
 
         self._pages = QStackedWidget()
@@ -396,18 +463,74 @@ class CollectionsView(QWidget):
         col.addWidget(self._detail_progress)
 
         col.addSpacing(12)
-        col.addWidget(_eyebrow("Checklist"))
-        col.addSpacing(7)
-        self._slots_host = QWidget()
-        self._slots = QGridLayout(self._slots_host)
-        self._slots.setContentsMargins(0, 0, 0, 0)
-        self._slots.setSpacing(6)
-        self._slots.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setWidget(self._slots_host)
-        col.addWidget(scroll, 1)
+
+        # One model and one proxy behind both views, so a chip or a sort applies
+        # to whichever is showing and they can never disagree. (Ticket 64.)
+        self._model = CollectionSlotModel(self)
+        self._proxy = CollectionFilterProxy(self)
+        self._proxy.setSourceModel(self._model)
+        self._proxy.sort(NUMBER_COL, Qt.AscendingOrder)
+
+        controls = QHBoxLayout()
+        controls.setSpacing(9)
+        self._view_toggle = _Segmented([("Grid", "grid"), ("List", "list")])
+        self._view_toggle.changed.connect(self._set_view_mode)
+        controls.addWidget(self._view_toggle)
+        self._chips: dict[str, _Chip] = {}
+        for label, key in (
+            ("All", FILTER_ALL),
+            ("In collection", FILTER_FILLED),
+            ("Importable", FILTER_IMPORTABLE),
+            ("Missing", FILTER_MISSING),
+            ("Duplicates", FILTER_DUPLICATES),
+        ):
+            chip = _Chip(label)
+            chip.setChecked(key == FILTER_ALL)
+            chip.clicked.connect(lambda _=False, k=key: self._set_state_filter(k))
+            self._chips[key] = chip
+            controls.addWidget(chip)
+        controls.addStretch(1)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Filter this collection…")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedWidth(210)
+        self._search.textChanged.connect(self._proxy.set_text_filter)
+        controls.addWidget(self._search)
+        col.addLayout(controls)
+        col.addSpacing(9)
+
+        # Grid: one bounded page of large cells, so art decoding is capped by the
+        # page size rather than by the collection's length.
+        self._grid_host = QWidget()
+        self._grid = QGridLayout(self._grid_host)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setSpacing(_CELL_GAP)
+        self._grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+
+        self._table = QTableView()
+        self._table.setObjectName("pcTable")
+        self._table.setModel(self._proxy)
+        self._table.setSortingEnabled(True)
+        self._table.sortByColumn(NUMBER_COL, Qt.AscendingOrder)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setStretchLastSection(False)
+        self._table.horizontalHeader().setSectionResizeMode(
+            CARD_COL, QHeaderView.Stretch
+        )
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.doubleClicked.connect(self._table_activated)
+
+        self._view_stack = QStackedWidget()
+        self._view_stack.addWidget(self._grid_host)
+        self._view_stack.addWidget(self._table)
+        col.addWidget(self._view_stack, 1)
+
+        self._pager = Pager()
+        self._pager.page_changed.connect(lambda _p: self._render_grid_page())
+        col.addWidget(self._pager)
 
         self._legend = QLabel()
         self._legend.setObjectName("pcNote")
@@ -416,6 +539,66 @@ class CollectionsView(QWidget):
         col.addSpacing(14)
         row.addWidget(body, 1)
         return page
+
+    # -- the two views ------------------------------------------------------
+
+    def _set_view_mode(self, mode: str) -> None:
+        self._view_mode = mode
+        self._view_stack.setCurrentIndex(0 if mode == "grid" else 1)
+        # The pager belongs to the grid; the table scrolls, as tables do.
+        self._pager.setVisible(mode == "grid" and self._pager.pages > 1)
+        if mode == "grid":
+            self._render_grid_page()
+
+    def _set_state_filter(self, key: str) -> None:
+        for other, chip in self._chips.items():
+            chip.setChecked(other == key)
+        self._proxy.set_state_filter(key)
+
+    def _cells_per_page(self) -> int:
+        """How many cells fit, from the actual viewport width and height."""
+        width = self._view_stack.width() or self.width() or 900
+        height = self._view_stack.height() or 460
+        cols = max(1, (width + _CELL_GAP) // (_CELL_W + _CELL_GAP))
+        rows = max(1, (height + _CELL_GAP) // (_CELL_H + _CELL_GAP))
+        return cols * rows
+
+    def _render_grid_page(self) -> None:
+        """Draw the current page of the *filtered, sorted* rows."""
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                # Detach now, delete later: paging rebuilds this grid, and
+                # deleteLater alone leaves the previous page's cells parented and
+                # visible until the event loop runs.
+                widget.setParent(None)
+                widget.deleteLater()
+        per = self._cells_per_page()
+        total = self._proxy.rowCount()
+        pages = max(1, (total + per - 1) // per)
+        if pages != self._pager.pages:
+            self._pager.set_pages(pages)
+        page = min(self._pager.page, pages - 1)
+        cols = max(1, (self._view_stack.width() + _CELL_GAP) // (_CELL_W + _CELL_GAP))
+        for offset, slot in enumerate(self._proxy.visible_slots(page * per, per)):
+            self._grid.addWidget(
+                _SlotCell(slot, self._import_slot), offset // cols, offset % cols
+            )
+        self._pager.setVisible(self._view_mode == "grid" and pages > 1)
+
+    def _table_activated(self, index) -> None:
+        """Double-clicking an importable row brings that copy in, as a cell click
+        does — the two views offer the same action."""
+        slot = index.data(SLOT_ROLE)
+        if slot is not None and slot.state == IMPORTABLE:
+            self._import_slot(slot)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().resizeEvent(event)
+        # Page size follows the window, so re-paginate rather than clip.
+        if getattr(self, "_view_mode", "grid") == "grid" and self._pages.currentIndex():
+            self._render_grid_page()
 
     # -- data ---------------------------------------------------------------
 
@@ -450,12 +633,17 @@ class CollectionsView(QWidget):
         value = sum(p.value_cents for p in progress.values())
         importable_value = sum(p.importable_value_cents for p in progress.values())
         done = sum(1 for p in progress.values() if p.total and p.filled == p.total)
+        # One global number, computed once here rather than per collection — see
+        # CollectionService.unmatched_items. Shown only when there are any.
+        unmatched = self._service.unmatched_items()
         facts = [
             ("Slots filled", f"{filled:,}", f"of {total:,}"),
             ("Collections", str(len(collections)), f"{done} complete"),
             ("In collection", money(value), "at market"),
             ("Importable", f"{importable:,}", money(importable_value)),
         ]
+        if unmatched:
+            facts.append(("Unmatched", f"{unmatched:,}", "no card in database"))
         for label, value_text, note in facts:
             self._facts_row.addWidget(_fact(label, value_text, note))
 
@@ -543,15 +731,11 @@ class CollectionsView(QWidget):
             f"{round(p.percent)}% &nbsp;·&nbsp; {money(p.value_cents)} in collection"
         )
 
-        while self._slots.count():
-            item = self._slots.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        per_row = 14
-        for index, slot in enumerate(slots):
-            self._slots.addWidget(
-                _SlotTile(slot, self._import_slot), index // per_row, index % per_row
-            )
+        # Hand the slots to the model; both views read them through the proxy, so
+        # neither the sort nor the filter has to be applied twice.
+        self._model.set_slots(slots)
+        self._pager.set_pages(1, page=0)  # a new collection starts on page 1
+        self._render_grid_page()
 
         notes = [
             f"{p.filled} in the collection · {p.importable} owned as resale "
@@ -563,12 +747,10 @@ class CollectionsView(QWidget):
                 "slots are shown as one and the master-set total is a floor, not "
                 "a count."
             )
-        unmatched = self._service.unmatched_items(collection.language)
-        if unmatched:
-            notes.append(
-                f"{unmatched} owned card(s) match no card in the database, so they "
-                "cannot fill a slot. They are still in Inventory."
-            )
+        # The unmatched count is portfolio-wide, not per-collection: it used to be
+        # recomputed here on every click into a collection, which was the whole of
+        # the reported lag. It now lives on the grid page's fact strip, computed
+        # once per refresh. (Ticket 64.)
         self._legend.setText("  —  ".join(notes))
 
     # -- the import ---------------------------------------------------------
@@ -684,15 +866,30 @@ def _qss(t) -> str:
     QListWidget#pcNav::item:selected {{ background:{t.accent_soft};
         color:{t.ink}; border-left:2px solid {t.accent}; }}
 
-    QFrame#pcSlotFilled {{ background:{t.accent_soft};
-        border:1px solid {t.accent}; border-radius:4px; }}
-    QFrame#pcSlotImportable {{ background:{t.surface2};
-        border:1px solid {t.info}; border-radius:4px; }}
-    QFrame#pcSlotMissing {{ background:transparent;
-        border:1px dashed {t.line2}; border-radius:4px; }}
-    QFrame#pcSlotFilled QLabel#pcSlotNumber {{ color:{t.ink};
-        font-size:10px; font-weight:600; }}
-    QFrame#pcSlotImportable QLabel#pcSlotNumber {{ color:{t.info};
-        font-size:10px; font-weight:600; }}
-    QFrame#pcSlotMissing QLabel#pcSlotNumber {{ color:{t.ink3}; font-size:10px; }}
+    /* Checklist cells. The frame carries the state; the art is the card's own
+       whether owned or not, because a picture of what is missing is the point. */
+    QFrame#pcCellFilled {{ background:{t.accent_soft};
+        border:1px solid {t.accent}; border-radius:6px; }}
+    QFrame#pcCellImportable {{ background:{t.surface2};
+        border:1px solid {t.info}; border-radius:6px; }}
+    QFrame#pcCellMissing {{ background:{t.surface};
+        border:1px dashed {t.line2}; border-radius:6px; }}
+    QFrame#pcCellFilled:hover, QFrame#pcCellImportable:hover,
+    QFrame#pcCellMissing:hover {{ border-color:{t.accent}; }}
+    QLabel#pcCellArtNone {{ color:{t.ink3}; font-size:12px; font-weight:600; }}
+    QFrame#pcCellFilled QLabel#pcCellCaption {{ color:{t.ink};
+        font-size:10.5px; font-weight:600; }}
+    QFrame#pcCellImportable QLabel#pcCellCaption {{ color:{t.info};
+        font-size:10.5px; font-weight:600; }}
+    QFrame#pcCellMissing QLabel#pcCellCaption {{ color:{t.ink3};
+        font-size:10.5px; }}
+
+    QTableView#pcTable {{ background:{t.surface}; alternate-background-color:{t.zebra};
+        gridline-color:{t.line}; color:{t.ink2}; border:1px solid {t.line};
+        border-radius:8px; font-size:12.5px; }}
+    QTableView#pcTable::item:selected {{ background:{t.accent_soft};
+        color:{t.ink}; }}
+    QTableView#pcTable QHeaderView::section {{ background:{t.surface2};
+        color:{t.ink3}; border:none; border-bottom:1px solid {t.line};
+        padding:6px 10px; font-size:10px; font-weight:600; }}
     """

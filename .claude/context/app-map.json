@@ -465,7 +465,7 @@
       ],
       "class": "CollectionsView",
       "file": "src/tcginventory/ui/views/collections.py",
-      "purpose": "Collecting projects as a block grid over an in-window navigator, each opening a checklist with one slot per collector number (or per printing in master mode). Shows the cards you do NOT own, which Inventory cannot.",
+      "purpose": "Collecting projects as a block grid over an in-window navigator, each opening a checklist in two views: a paginated grid of card art, and a sortable table. Shows the cards you do NOT own, which Inventory cannot.",
       "services": [
         "src/tcginventory/services/collections.py",
         "src/tcginventory/services/inventory.py"
@@ -485,11 +485,17 @@
         "item",
         "lot"
       ],
-      "supporting_files": [],
+      "supporting_files": [
+        "src/tcginventory/ui/models/collection_model.py",
+        "src/tcginventory/ui/pager.py",
+        "src/tcginventory/ui/card_thumbs.py"
+      ],
       "tests": [
         "tests/test_collections.py",
         "tests/test_lot_intent_split.py",
-        "tests/test_ui_collections.py"
+        "tests/test_ui_collections.py",
+        "tests/test_ui_collection_views.py",
+        "tests/test_ui_pager.py"
       ],
       "signals_out": [
         "changed() -> a lot's intent moved (a card was brought in)"
@@ -503,7 +509,10 @@
         "Master mode needs card_catalog_treatment (95% coverage). A card with no treatments renders as ONE slot flagged unknown, never as single-printing, or a master set reads complete when it is not.",
         "Slots sort by collector_key(), not by number: SQL orders '10' before '2' and a checklist has to read 1, 2, 3.",
         "Set and artist templates are English-only: JP has no printed_total and no artist.",
-        "'Personal Collection' is the hobby sense. The Dashboard's 'Collection Value' tile and collection_value_snapshot mean the whole portfolio - do not conflate them."
+        "'Personal Collection' is the hobby sense. The Dashboard's 'Collection Value' tile and collection_value_snapshot mean the whole portfolio - do not conflate them.",
+        "Grid and list read ONE CollectionFilterProxy, so a chip, a search or a sort applies to both. Never filter or order in a view.",
+        "The grid paginates (ui/pager.py) rather than scrolling, so a page is bounded and only ~20 thumbnails are decoded at a time. Art comes from ui/card_thumbs which reads the disk cache ONLY - never fetch on a paint path.",
+        "unmatched_items() is portfolio-wide and belongs on the grid page's fact strip. Calling it per collection cost 11.3 s a click (ticket 64)."
       ],
       "specs": [
         "specs/03-features.md",
@@ -691,9 +700,10 @@
         "pricehistory.db (auto-pricing)"
       ],
       "supporting_files": [
-        "ui/views/_card_entry.py",
+        "src/tcginventory/ui/pager.py",
+        "ui/card_gallery.py",
         "ui/views/_autofill_dialog.py",
-        "ui/card_gallery.py"
+        "ui/views/_card_entry.py"
       ],
       "tests": [
         "tests/test_auctions.py",
