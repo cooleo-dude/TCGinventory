@@ -486,15 +486,19 @@
         "lot"
       ],
       "supporting_files": [
+        "src/tcginventory/ui/card_thumbs.py",
         "src/tcginventory/ui/models/collection_model.py",
         "src/tcginventory/ui/pager.py",
-        "src/tcginventory/ui/card_thumbs.py"
+        "src/tcginventory/ui/spinner.py",
+        "src/tcginventory/ui/views/_art_warm.py"
       ],
       "tests": [
+        "tests/test_art_warm.py",
         "tests/test_collections.py",
         "tests/test_lot_intent_split.py",
-        "tests/test_ui_collections.py",
+        "tests/test_ui_art_warm.py",
         "tests/test_ui_collection_views.py",
+        "tests/test_ui_collections.py",
         "tests/test_ui_pager.py"
       ],
       "signals_out": [
@@ -512,7 +516,8 @@
         "'Personal Collection' is the hobby sense. The Dashboard's 'Collection Value' tile and collection_value_snapshot mean the whole portfolio - do not conflate them.",
         "Grid and list read ONE CollectionFilterProxy, so a chip, a search or a sort applies to both. Never filter or order in a view.",
         "The grid paginates (ui/pager.py) rather than scrolling, so a page is bounded and only ~20 thumbnails are decoded at a time. Art comes from ui/card_thumbs which reads the disk cache ONLY - never fetch on a paint path.",
-        "unmatched_items() is portfolio-wide and belongs on the grid page's fact strip. Calling it per collection cost 11.3 s a click (ticket 64)."
+        "unmatched_items() is portfolio-wide and belongs on the grid page's fact strip. Calling it per collection cost 11.3 s a click (ticket 64).",
+        "Art is warmed in the background on create and on open (ui/views/_art_warm.py). It does NOT use card_preview._fetch_queue(), which drops the oldest request past 48 pending -- right for hovers, fatal for a bulk warm. Cards with no image_small are never queued: they are most of every gap and can never succeed."
       ],
       "specs": [
         "specs/03-features.md",
