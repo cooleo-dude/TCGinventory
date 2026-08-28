@@ -3289,3 +3289,76 @@ meant clicking **Edit item…** inside it to open a second dialog,
   data — the thing ticket 57's entry picker fixes going forward — not a matching
   failure. Base Set master now finds 3 of 9, an Arita run 6 of 26.
 - Suite 1,182 passing; reverting the comparison turns the new test red.
+
+### 2026-08-28 — The collection lag was one query, not the widgets (ticket 64)
+
+- **Reported as** "a large amount of lag clicking into a collection for the first
+  time", with a request to pre-populate on creation instead. Measured first, and
+  the lag was somewhere else entirely:
+
+  | step | Base Set (102 slots) | Sugimori master (2,072) |
+  |---|---|---|
+  | `slots_for()` | 28 ms | 15 ms |
+  | building the tiles | 6 ms | 46 ms |
+  | layout + paint | 179 ms | 1,526 ms |
+  | **`unmatched_items()`** | **11,300 ms** | **11,300 ms** |
+
+- **Cause:** `unmatched_items()` planned as `SCAN i` + a *correlated* `SCAN c` —
+  1,115 items x 53,289 catalog rows is 59.4 million comparisons, and
+  `LOWER(TRIM(...))` on both sides means no index can serve any of them. The
+  window called it on **every** click into a collection.
+- **It is also portfolio-wide**, not per-collection: the same 121 for every
+  project. Rewritten as a two-pass set difference (build the catalog's key set
+  once, probe it) it is **27 ms for the identical answer**, and it moved to the
+  grid page's fact strip, computed once per refresh.
+- **Pre-populating on creation was therefore rejected**: it would have relocated
+  an 11-second stall to the moment of creation rather than removing it. The
+  measurement named the query, so the query is what changed. Measured after:
+  **Base Set 30,876 ms -> 214 ms**, Journey Together 15,819 -> 44, an Arita
+  master run 16,191 -> 184.
+- **One model, two views.** The checklist was hand-built widgets in a
+  `QGridLayout`, with no shared notion of order or filtering — so sorting, a
+  second view and pagination each had nowhere to hook. Now a
+  `CollectionSlotModel` + one `CollectionFilterProxy` carry the sort **and** the
+  filter, and the grid and the table both read it. That is what makes it
+  impossible for the two to disagree about what is shown.
+- **The grid paginates rather than scrolls**, at ~20 large cells a page. A
+  bounded page caps decoded art by construction, so no thumbnail eviction policy
+  has to be exactly right, and it is what was asked for. Sorting and filtering
+  still come from the proxy, so a page is purely a window over an ordered list.
+- **`ui/card_thumbs.py`**: art decoded straight to cell size behind a 512-entry
+  LRU. `CardImagePane` decodes the **full-size** PNG synchronously, which is
+  right for one hovered card and wrong for a wall of them — a decoded 245x342
+  pixmap is ~335 KB, so a 2,072-slot collection would have held about **694 MB**.
+  It reads the disk cache only and never fetches: a network call has no place on
+  a paint path, and an uncached card falls back to its collector number.
+- **Missing slots still show the card's own art**, dimmed. A picture of what you
+  are missing is the reason to look at a checklist; only the frame says whether
+  you have it.
+- **`ui/pager.py`**, extracted from the Auctions watchlist and **windowed**.
+  The inline version drew one button per page, which is fine for a watchlist and
+  absurd at 116 pages. Auctions now uses the shared one, so there is one pager
+  rather than one per screen.
+- **Two bugs found by rendering it, which no test had caught:**
+  1. **The pager digits were never painted.** The app-level stylesheet gives every
+     `QPushButton` `padding: 6px 14px`; these are fixed at 26 px wide, so 28 px of
+     horizontal padding left a negative content box and Qt elided the digit to
+     nothing — a row of empty rounded rectangles. **The inline Auctions version
+     had the same bug**, so it was broken there too and is now fixed for both.
+  2. **Rebuilding with `deleteLater()` alone piled up widgets.** Deletion is
+     deferred to the event loop, so on a control that rebuilds on every page
+     change the previous page's cells stayed parented and visible. Both rebuild
+     loops now `setParent(None)` first. (`ui/card_gallery.py` carries a comment
+     about hitting this before.)
+- **And one bug the test suite caught in the sort:** `collector_key` returns a
+  Python tuple, which Qt cannot order **as a QVariant** — so `sort()` silently did
+  nothing and the grid stayed in source order however the header was clicked. The
+  proxy overrides `lessThan` and compares in Python.
+- **A test that only demonstrated, corrected.** The first pager-padding test
+  asserted `contentsRect()` was wide enough — which passes even when nothing is
+  drawn, because stylesheet padding does not affect `contentsRect()`. It now
+  renders the widget and samples pixels inside each button, and it was verified
+  red against the bug before being accepted. (It also needed `show()` +
+  `processEvents()`: before layout every button reports geometry `(0, 0, 26, 26)`,
+  so every sample read the same spot.)
+- Suite 1,226 passing. Ticket 64.

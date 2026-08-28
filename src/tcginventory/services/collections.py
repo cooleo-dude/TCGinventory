@@ -127,6 +127,10 @@ class Slot:
     number: str | None
     set_name: str | None
     image_url: str | None
+    # Shown as list-view columns, so they come from the same query rather than a
+    # second lookup per row.
+    artist: str | None = None
+    rarity: str | None = None
     treatment: str = ""  # the printing, in master mode; "" in by-number mode
     state: str = MISSING
     # Populated when owned. `lot_ids` is every matching lot, so the UI can offer
@@ -277,8 +281,8 @@ class CollectionService:
         lang = collection.language
         sel = collection.selector
         base = (
-            "SELECT card_id, name, number, set_name, set_id, image_small, artist "
-            "FROM card_catalog WHERE language = ? "
+            "SELECT card_id, name, number, set_name, set_id, image_small, artist, "
+            "rarity FROM card_catalog WHERE language = ? "
         )
         if collection.template == TEMPLATE_CUSTOM:
             picks = self.collections.cards_for(collection.id)
@@ -377,6 +381,8 @@ class CollectionService:
                     number=card["number"],
                     set_name=card["set_name"],
                     image_url=card["image_small"],
+                    artist=card["artist"],
+                    rarity=card["rarity"],
                     treatment=treatment,
                     treatments_unknown=unknown,
                 )

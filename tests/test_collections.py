@@ -725,10 +725,18 @@ def test_unmatched_ignores_case_and_surrounding_space(conn):
     LOWER(TRIM(...)) SQL did, or the count changes meaning."""
     _catalog(
         conn,
-        [CatalogCard(card_id="s-1", name="Alpha", set_id="s", set_name="Set One",
-                     number="1", printed_total=1)],
+        [
+            CatalogCard(
+                card_id="s-1",
+                name="Alpha",
+                set_id="s",
+                set_name="Set One",
+                number="1",
+                printed_total=1,
+            )
+        ],
     )
-    _own(conn, "  alpha  ", "  SET ONE  ", "1")   # same card, sloppily entered
+    _own(conn, "  alpha  ", "  SET ONE  ", "1")  # same card, sloppily entered
     conn.commit()
     assert CollectionService(conn).unmatched_items() == 0
 
@@ -736,8 +744,16 @@ def test_unmatched_ignores_case_and_surrounding_space(conn):
 def test_unmatched_counts_a_card_the_catalog_does_not_have(conn):
     _catalog(
         conn,
-        [CatalogCard(card_id="s-1", name="Alpha", set_id="s", set_name="Set One",
-                     number="1", printed_total=1)],
+        [
+            CatalogCard(
+                card_id="s-1",
+                name="Alpha",
+                set_id="s",
+                set_name="Set One",
+                number="1",
+                printed_total=1,
+            )
+        ],
     )
     _own(conn, "Alpha", "Set One", "1")
     _own(conn, "Ghost", "Nowhere", "9")
@@ -748,8 +764,16 @@ def test_unmatched_counts_a_card_the_catalog_does_not_have(conn):
 def test_unmatched_is_scoped_by_language(conn):
     _catalog(
         conn,
-        [CatalogCard(card_id="s-1", name="Alpha", set_id="s", set_name="Set One",
-                     number="1", printed_total=1)],
+        [
+            CatalogCard(
+                card_id="s-1",
+                name="Alpha",
+                set_id="s",
+                set_name="Set One",
+                number="1",
+                printed_total=1,
+            )
+        ],
     )
     _own(conn, "Alpha", "Set One", "1")
     conn.commit()
@@ -760,8 +784,14 @@ def test_unmatched_is_scoped_by_language(conn):
 
 def test_unmatched_treats_a_null_set_as_empty_not_as_a_mismatch(conn):
     """COALESCE(set_name,'') on both sides in the old SQL; the key must agree."""
-    _catalog(conn, [CatalogCard(card_id="s-1", name="Promo", set_id="s",
-                                set_name=None, number="1")])
+    _catalog(
+        conn,
+        [
+            CatalogCard(
+                card_id="s-1", name="Promo", set_id="s", set_name=None, number="1"
+            )
+        ],
+    )
     _own(conn, "Promo", None, "1")
     conn.commit()
     assert CollectionService(conn).unmatched_items() == 0
@@ -777,8 +807,14 @@ def test_unmatched_does_not_scan_the_catalog_per_item(conn):
     _catalog(
         conn,
         [
-            CatalogCard(card_id=f"s-{i}", name=f"C{i}", set_id="s",
-                        set_name="Big", number=str(i), printed_total=800)
+            CatalogCard(
+                card_id=f"s-{i}",
+                name=f"C{i}",
+                set_id="s",
+                set_name="Big",
+                number=str(i),
+                printed_total=800,
+            )
             for i in range(800)
         ],
     )
