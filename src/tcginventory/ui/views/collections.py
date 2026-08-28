@@ -16,6 +16,7 @@ from __future__ import annotations
 import sqlite3
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -69,10 +70,17 @@ from tcginventory.ui.models.collection_model import (
     SLOT_ROLE,
     CollectionFilterProxy,
     CollectionSlotModel,
+    slot_subline,
 )
 from tcginventory.ui.pager import Pager
 from tcginventory.ui.spinner import BusyChip
 from tcginventory.ui.views._art_warm import ArtWarmWorker
+from tcginventory.ui.views._slot_delegates import (
+    _ROW_H as SLOT_ROW_H,
+)
+from tcginventory.ui.views._slot_delegates import (
+    SlotCardDelegate,
+)
 from tcginventory.ui.views._worker import retire
 from tcginventory.ui.views.inventory import _Chip, _Segmented
 
@@ -260,7 +268,7 @@ class _Block(QFrame):
 # of a new decode every time the window is dragged.
 _CELL_W = 150
 _CELL_ART_H = card_thumbs.height_for(_CELL_W)
-_CELL_H = _CELL_ART_H + 34  # art plus the caption strip
+_CELL_H = _CELL_ART_H + 48  # art plus a name line and a sub-line
 _CELL_GAP = 12
 
 
@@ -305,21 +313,36 @@ class _SlotCell(QFrame):
             art.setObjectName("pcCellArtNone")
         box.addWidget(art, 1)
 
-        caption = QLabel(self._caption(slot))
-        caption.setObjectName("pcCellCaption")
-        caption.setAlignment(Qt.AlignCenter)
-        box.addWidget(caption)
+        # Name over a small "set · number · holo" line, the same shape the
+        # Inventory grid's Card cell uses — a bare collector number said the
+        # least useful thing about a card that is already showing its own art.
+        name = QLabel()
+        name.setObjectName("pcCellName")
+        name.setAlignment(Qt.AlignCenter)
+        name.setText(self._elided(name, self._name_line(slot)))
+        box.addWidget(name)
+
+        sub = QLabel()
+        sub.setObjectName("pcCellSub")
+        sub.setAlignment(Qt.AlignCenter)
+        sub.setText(self._elided(sub, slot_subline(slot)))
+        box.addWidget(sub)
 
         self.setToolTip(self._tooltip(slot))
         if slot.state == IMPORTABLE:
             self.setCursor(Qt.PointingHandCursor)
 
+    def _elided(self, label: QLabel, text: str) -> str:
+        """Trim to the cell's width. A fixed-width cell would otherwise force
+        itself wider for a long card name and break the grid's alignment."""
+        metrics = QFontMetrics(label.font())
+        return metrics.elidedText(text, Qt.ElideRight, _CELL_W - 14)
+
     @staticmethod
-    def _caption(slot: Slot) -> str:
-        number = slot.number or "?"
-        if slot.qty > 1:
-            return f"{number}  ×{slot.qty}"
-        return number
+    def _name_line(slot: Slot) -> str:
+        """The card's name, with a spare count when more than one is held."""
+        name = slot.name or "?"
+        return f"{name}  ×{slot.qty}" if slot.qty > 1 else name
 
     @staticmethod
     def _tooltip(slot: Slot) -> str:
@@ -538,6 +561,11 @@ class CollectionsView(QWidget):
         )
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._table.doubleClicked.connect(self._table_activated)
+        # A small card preview beside the name, matching the Inventory grid's
+        # Card cell. Kept as a delegate so only visible rows decode a thumbnail.
+        self._card_delegate = SlotCardDelegate(self._table)
+        self._table.setItemDelegateForColumn(CARD_COL, self._card_delegate)
+        self._table.verticalHeader().setDefaultSectionSize(SLOT_ROW_H)
 
         self._view_stack = QStackedWidget()
         self._view_stack.addWidget(self._grid_host)
@@ -956,12 +984,13 @@ def _qss(t) -> str:
     QFrame#pcCellFilled:hover, QFrame#pcCellImportable:hover,
     QFrame#pcCellMissing:hover {{ border-color:{t.accent}; }}
     QLabel#pcCellArtNone {{ color:{t.ink3}; font-size:12px; font-weight:600; }}
-    QFrame#pcCellFilled QLabel#pcCellCaption {{ color:{t.ink};
+    QFrame#pcCellFilled QLabel#pcCellName {{ color:{t.ink};
         font-size:10.5px; font-weight:600; }}
-    QFrame#pcCellImportable QLabel#pcCellCaption {{ color:{t.info};
+    QFrame#pcCellImportable QLabel#pcCellName {{ color:{t.info};
         font-size:10.5px; font-weight:600; }}
-    QFrame#pcCellMissing QLabel#pcCellCaption {{ color:{t.ink3};
-        font-size:10.5px; }}
+    QFrame#pcCellMissing QLabel#pcCellName {{ color:{t.ink2};
+        font-size:10.5px; font-weight:600; }}
+    QLabel#pcCellSub {{ color:{t.ink3}; font-size:9px; }}
 
     QTableView#pcTable {{ background:{t.surface}; alternate-background-color:{t.zebra};
         gridline-color:{t.line}; color:{t.ink2}; border:1px solid {t.line};

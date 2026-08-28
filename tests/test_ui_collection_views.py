@@ -297,3 +297,125 @@ def test_thumbnail_height_keeps_card_proportions():
 
     assert card_thumbs.height_for(245) == 342
     assert card_thumbs.height_for(120) == round(120 * 342 / 245)
+
+
+# ---------------------------------------------------------------------------
+# the cell caption and the list thumbnail (ticket 66)
+# ---------------------------------------------------------------------------
+
+
+def test_a_cell_shows_the_card_name_not_a_bare_number(view, conn):
+    """A collector number said the least useful thing about a card that is
+    already showing its own art."""
+    from PySide6.QtWidgets import QLabel
+
+    _open_big(view, conn, n=6, owned=0)
+    cell = view._grid.itemAt(0).widget()
+    name = cell.findChild(QLabel, "pcCellName")
+    sub = cell.findChild(QLabel, "pcCellSub")
+    assert name is not None and sub is not None
+    assert name.text().startswith("Card 1")
+    assert sub.text() == "Big Set · 1"
+    # the old bare-number caption is gone
+    assert cell.findChild(QLabel, "pcCellCaption") is None
+
+
+def test_a_held_spare_is_counted_on_the_name_line(view, conn):
+    from PySide6.QtWidgets import QLabel
+
+    _big(conn, n=4, owned=0)
+    item = ItemRepository(conn).add(
+        Item(
+            name="Card 1",
+            set_name="Big Set",
+            card_number="1",
+            category=Category.SINGLE,
+            condition=Condition.NM,
+        )
+    )
+    LotRepository(conn).add(
+        Lot(
+            item_id=item.id,
+            acquired_at="2026-08-01",
+            quantity=3,
+            remaining_qty=3,
+            unit_cost_cents=10,
+            acquired_market_value_cents=10,
+            intent=Intent.RESALE,
+        )
+    )
+    conn.commit()
+    view.resize(700, 420)
+    view.refresh()
+    view._open(view._nav_order[0])
+    cell = next(
+        view._grid.itemAt(i).widget()
+        for i in range(view._grid.count())
+        if view._grid.itemAt(i).widget().slot.number == "1"
+    )
+    assert "×3" in cell.findChild(QLabel, "pcCellName").text()
+
+
+def test_a_long_card_name_is_elided_rather_than_widening_the_cell(view, conn):
+    """A fixed-width cell would otherwise stretch and break the grid's columns."""
+    from PySide6.QtWidgets import QLabel
+
+    from tcginventory.ui.views.collections import _CELL_W
+
+    CardCatalogRepository(conn).replace_for_language(
+        [
+            CatalogCard(
+                card_id="x-1",
+                name="Some Extremely Long Pokemon Card Name VMAX ex",
+                set_id="x",
+                set_name="X",
+                number="1",
+                printed_total=1,
+            )
+        ],
+        "EN",
+        now_iso(),
+    )
+    coll = CollectionRepository(conn).add(
+        Collection(name="X", template="set", selector="X")
+    )
+    conn.commit()
+    view.resize(700, 420)
+    view.refresh()
+    view._open(coll)
+    cell = view._grid.itemAt(0).widget()
+    assert cell.width() == _CELL_W
+    assert "…" in cell.findChild(QLabel, "pcCellName").text()
+
+
+def test_the_list_paints_a_thumbnail_beside_the_name(view, conn):
+    """The Card column is a delegate so only visible rows decode art."""
+    from tcginventory.ui.models.collection_model import CARD_COL
+    from tcginventory.ui.views._slot_delegates import SlotCardDelegate
+
+    _open_big(view, conn, n=6, owned=1)
+    assert isinstance(view._table.itemDelegateForColumn(CARD_COL), SlotCardDelegate)
+
+
+def test_the_card_delegate_paints_without_a_cached_image(view, conn):
+    """An unended QPainter is its own crash, and most slots have no art in
+    tests — so exercise the placeholder path for real."""
+    from PySide6.QtCore import QRect
+    from PySide6.QtGui import QPainter, QPixmap
+    from PySide6.QtWidgets import QStyleOptionViewItem
+
+    from tcginventory.ui.models.collection_model import CARD_COL
+
+    _open_big(view, conn, n=4, owned=1)
+    delegate = view._table.itemDelegateForColumn(CARD_COL)
+    canvas = QPixmap(240, 44)
+    canvas.fill()
+    painter = QPainter(canvas)
+    try:
+        option = QStyleOptionViewItem()
+        option.rect = QRect(0, 0, 240, 44)
+        for row in range(view._proxy.rowCount()):
+            delegate.paint(painter, option, view._proxy.index(row, CARD_COL))
+    finally:
+        painter.end()
+    assert not canvas.isNull()

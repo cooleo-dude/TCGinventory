@@ -3408,3 +3408,32 @@ meant clicking **Edit item…** inside it to open a second dialog,
 - Verified end-to-end over the real network: 12 of 12 fetched in 1.6 s, 12
   progress events, and `art_gap` dropping 102 -> 90 — exactly the twelve.
   Suite 1,253 passing; mutation-checked both rules.
+
+### 2026-08-28 — A checklist cell says which card it is, not just a number (ticket 66)
+
+- **Why:** the grid cell's caption was the collector number — the least useful
+  thing to say about a card that is already showing its own art, and a duplicate
+  of the list's No. column. And the list had no card preview, unlike the
+  Inventory grid's Card cell.
+- **The sub-line mirrors `inventory_model.subline_for`**, omissions included: a
+  plain non-holo says *nothing* about foil, because `NH` on nine cards in ten is
+  noise rather than information.
+- **Where "holo" comes from depends on what the slot is**, in precedence order:
+  the slot's own `treatment` (master mode, where the printing *is* the identity);
+  else the held copy's `holo` (by number the slot is a collector number, so the
+  copy you own is the only thing that can say "you have the reverse holo"); else
+  the card's **sole known printing**, which is how Base Set 1-16 read as holos
+  without anyone owning them. `"Normal"` is dropped for the same reason `NH` is.
+- **Treatments are now loaded in both slot modes**, not only master. That is what
+  makes the third case possible, and it is the same single batched query master
+  mode already ran — click-in timing is unchanged at ~215 ms for Base Set.
+- **Rejected: inferring the printing when a card has several.** `only_printing`
+  is set only when the catalog knows of exactly one; picking the first of several
+  would be a guess presented as fact.
+- **Rejected: a sub-line in the list too.** Unlike Inventory, that table already
+  has Set, No. and Printing as sortable columns, so repeating them under the name
+  prints the row twice. The list gets the thumbnail and the name only, with
+  unowned rows drawn dimmed rather than hidden.
+- **Rejected: reusing `subline_for`.** It takes an `InventoryRow` — an owned lot —
+  and a checklist exists to show the slots you do *not* own.
+- Suite 1,270 passing.

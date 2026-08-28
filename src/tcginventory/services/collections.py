@@ -132,6 +132,14 @@ class Slot:
     artist: str | None = None
     rarity: str | None = None
     treatment: str = ""  # the printing, in master mode; "" in by-number mode
+    # The foil pattern of the copy actually held, when one is. In master mode the
+    # printing is already known from `treatment`; by number it is not, so this is
+    # the only way the checklist can say "you have the reverse holo".
+    holo: str | None = None
+    # The card's sole printing, when the catalog knows of exactly one. Not an
+    # identity — `treatment` is — just enough to say "this one is a holo" on a
+    # by-number checklist, where every slot is a collector number.
+    only_printing: str | None = None
     state: str = MISSING
     # Populated when owned. `lot_ids` is every matching lot, so the UI can offer
     # an import without re-querying; `qty` is units on hand across them.
@@ -350,11 +358,11 @@ class CollectionService:
         cards = self._catalog_rows(collection)
         owned = self._ownership(collection.language)
         master = collection.slot_mode == SLOT_MASTER
-        treatments = (
-            self.treatments.treatments_for_many([c["card_id"] for c in cards])
-            if master
-            else {}
-        )
+        # Loaded in both modes. Master mode needs them to make a slot per
+        # printing; by number they still say *which* printing a card is when it
+        # only comes one way, which is how a Base Set holo can read as a holo
+        # without anyone owning it. One query either way.
+        treatments = self.treatments.treatments_for_many([c["card_id"] for c in cards])
 
         slots: list[Slot] = []
         # Collector order, not lexicographic. The catalog query cannot do this:
@@ -367,13 +375,16 @@ class CollectionService:
             ),
         )
         for card in cards:
-            printings = treatments.get(card["card_id"], []) if master else [""]
-            unknown = master and not printings
-            if unknown:
-                # Master mode with no treatment data: one slot, flagged. Never
-                # silently one printing — that under-counts a master set and
-                # makes it read complete when it is not.
-                printings = [""]
+            # What the card *is* (every printing the catalog knows of), kept
+            # apart from what produces slots: by number a card is one slot
+            # whatever its printings, and conflating the two made a by-number
+            # slot claim a printing of "".
+            known = treatments.get(card["card_id"], [])
+            unknown = master and not known
+            printings = known if master and known else [""]
+            # Master mode with no treatment data: one slot, flagged. Never
+            # silently one printing — that under-counts a master set and makes it
+            # read complete when it is not.
             for treatment in printings:
                 slot = Slot(
                     card_id=card["card_id"],
@@ -384,6 +395,7 @@ class CollectionService:
                     artist=card["artist"],
                     rarity=card["rarity"],
                     treatment=treatment,
+                    only_printing=(known[0] if len(known) == 1 else None),
                     treatments_unknown=unknown,
                 )
                 self._apply_ownership(slot, owned, master)
@@ -426,6 +438,7 @@ class CollectionService:
                 return
 
         slot.item_id = lots[0]["item_id"]
+        slot.holo = lots[0]["holo_pattern"]
         slot.lot_ids = [r["lot_id"] for r in lots]
         slot.qty = sum(r["remaining_qty"] for r in lots)
         slot.market_value_cents = lots[0]["market_value_cents"]

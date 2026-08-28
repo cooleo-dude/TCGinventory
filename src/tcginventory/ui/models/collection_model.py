@@ -45,6 +45,39 @@ COLUMNS = (
 SLOT_ROLE = Qt.UserRole + 1
 SORT_ROLE = Qt.UserRole + 2
 
+# Same spellings the Inventory grid uses for its Card sub-line, so a card reads
+# the same on both screens.
+_HOLO_LABEL = {"H": "Holo", "RH": "Reverse Holo"}
+
+
+def slot_subline(slot: Slot) -> str:
+    """A slot's secondary line: ``set · number · holo``.
+
+    Mirrors ``inventory_model.subline_for``, including its omissions: a plain
+    non-holo card says nothing about foil, because "NH" on nine cards in ten is
+    noise rather than information.
+
+    In master mode the printing is already the slot's identity, so `treatment`
+    is what gets shown; by number it is not, so the *held* copy's foil is — which
+    is the only way a by-number checklist can say "you have the reverse holo".
+    """
+    parts: list[str] = []
+    if slot.set_name:
+        parts.append(slot.set_name)
+    if slot.number:
+        parts.append(slot.number)
+    if slot.treatment:
+        parts.append(slot.treatment)
+    elif slot.holo and slot.holo != "NH":
+        parts.append(_HOLO_LABEL.get(slot.holo, slot.holo))
+    elif slot.only_printing and slot.only_printing != "Normal":
+        # By number, a card that comes only one way *is* that printing — which
+        # is how Base Set 1-16 read as holos without anyone owning them. "Normal"
+        # is omitted for the same reason "NH" is: it is the default, not news.
+        parts.append(slot.only_printing)
+    return " · ".join(parts)
+
+
 _STATE_LABEL = {
     FILLED: "In collection",
     IMPORTABLE: "Owned · resale",
