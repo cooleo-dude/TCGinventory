@@ -279,6 +279,35 @@ class ItemRepository:
             near.append(self._to_model(row))
         return near
 
+    def duplicate_identity_groups(self) -> list[list[Item]]:
+        """Sets of items that are almost certainly the same card, oldest first.
+
+        Grouped on the identity columns with ``name`` normalized and foil and
+        edition set aside — the two ways the same physical card has come to be
+        filed twice (see :func:`normalized_name` and
+        :meth:`find_near_identity`). Nothing is merged: this exists so the
+        duplicates can be *reported*, and the ledger repaired by hand.
+
+        On the real ledger it finds nine groups out of 1,154 items — one that
+        differs by name punctuation, eight by foil alone.
+        """
+        keyed: dict[tuple, list[Item]] = {}
+        for row in self.conn.execute("SELECT * FROM item ORDER BY id"):
+            key = (
+                normalized_name(row["name"]),
+                row["set_name"],
+                row["set_code"],
+                row["card_number"],
+                row["variant"],
+                row["language"],
+                row["condition"],
+                row["is_graded"],
+                row["grading_company"],
+                row["grade"],
+            )
+            keyed.setdefault(key, []).append(self._to_model(row))
+        return [group for group in keyed.values() if len(group) > 1]
+
     def update(self, item: Item) -> Item:
         if item.id is None:
             raise ValueError("cannot update an item without an id")

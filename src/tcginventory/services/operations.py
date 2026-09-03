@@ -81,6 +81,61 @@ class Operation:
     stale_after_days: int | None = None  # older than this reads as "Stale"
 
 
+def _enum_or_none(value):
+    return value.value if value is not None else None
+
+
+def duplicate_reason(group) -> str:
+    """Which drift filed one card as two — the label the report groups by.
+
+    Reported rather than repaired, deliberately: none of these can be merged
+    without deciding which of two defensible values is the right one, and that
+    is the user's call (ticket 67).
+    """
+    names = {item.name for item in group}
+    foils = {_enum_or_none(item.holo_pattern) for item in group}
+    editions = {_enum_or_none(item.edition) for item in group}
+    if len(foils) > 1:
+        # "unset" is its own story: both rows mean the card is not holo, but one
+        # predates the column being filled in, so they never match. Separated
+        # from a real H-vs-NH disagreement because the fix differs — one is a
+        # backfill, the other a judgement about which printing this copy is.
+        return "foil unset vs stated" if None in foils else "foil"
+    if len(editions) > 1:
+        return "edition unset vs N/A" if None in editions else "edition"
+    if len(names) > 1:
+        return "name spelling"
+    return "identical"
+
+
+def describe_duplicates(groups, unpriced: int) -> str:
+    """The one-line result the Operations run log records."""
+    if not groups and not unpriced:
+        return "no duplicate cards, and every card on hand has a price"
+
+    parts: list[str] = []
+    if groups:
+        counts: dict[str, int] = {}
+        for group in groups:
+            reason = duplicate_reason(group)
+            counts[reason] = counts.get(reason, 0) + 1
+        by_size = ", ".join(
+            f"{n} by {reason}"
+            for reason, n in sorted(counts.items(), key=lambda kv: -kv[1])
+        )
+        examples = ", ".join(
+            f"{g[0].name} #{g[0].card_number or '?'}" for g in groups[:3]
+        )
+        parts.append(
+            f"{len(groups)} duplicate card group(s) — {by_size}. "
+            f"For example: {examples}. Fix them in the Inventory editor; "
+            f"nothing was changed here."
+        )
+    if unpriced:
+        parts.append(f"{unpriced} card(s) on hand have no market price recorded.")
+    return " ".join(parts)
+
+
 OPERATIONS: tuple[Operation, ...] = (
     Operation(
         id="import.items",
@@ -390,6 +445,21 @@ OPERATIONS: tuple[Operation, ...] = (
         verb="Check",
         icon="database",
         kind=KIND_BACKGROUND,
+    ),
+    Operation(
+        id="db.duplicate_scan",
+        group="maintenance",
+        title="Find duplicate and unpriced cards",
+        blurb=(
+            "Look for one card filed as two — the same set, number and grade "
+            "under a different spelling, foil or edition — and for cards on hand "
+            "with no market price. Reports what it finds and changes nothing; "
+            "the fixes are judgement calls only you can make."
+        ),
+        verb="Scan",
+        icon="search",
+        kind=KIND_BACKGROUND,
+        caption="Last scan",
     ),
     Operation(
         id="db.vacuum",

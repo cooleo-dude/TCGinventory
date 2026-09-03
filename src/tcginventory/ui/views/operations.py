@@ -674,6 +674,9 @@ class OperationsView(QWidget):
                 "db.integrity_check", _integrity_check
             ),
             "db.vacuum": lambda: self._task("db.vacuum", _vacuum),
+            "db.duplicate_scan": lambda: self._task(
+                "db.duplicate_scan", _duplicate_scan
+            ),
             "automation.daily_prices": self._toggle_auto_updates,
         }.get(op_id)
 
@@ -972,6 +975,27 @@ def _integrity_check(conn) -> str:
             parts.append(f"{len(orphans)} foreign-key orphan(s)")
         raise RuntimeError("; ".join(parts))
     return "no problems found — pages and foreign keys check out"
+
+
+def _duplicate_scan(conn) -> str:
+    """Report one card filed as two, and cards on hand with no price.
+
+    Read-only by design. Every one of these needs a decision — which of two
+    defensible foils this copy is, which spelling to keep — so the scan reports
+    and the ledger is repaired by hand (ticket 67).
+    """
+    from tcginventory.data.repositories import ItemRepository, PriceSnapshotRepository
+
+    items = ItemRepository(conn)
+    groups = items.duplicate_identity_groups()
+    priced = set(PriceSnapshotRepository(conn).latest_prices())
+    on_hand = {
+        row["item_id"]
+        for row in conn.execute(
+            "SELECT DISTINCT item_id FROM lot WHERE remaining_qty > 0 AND missing = 0"
+        )
+    }
+    return ops.describe_duplicates(groups, len(on_hand - priced))
 
 
 def _vacuum(conn) -> str:
