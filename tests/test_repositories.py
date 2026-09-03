@@ -156,6 +156,34 @@ def test_identity_rename_still_respects_the_other_columns(conn):
     )
 
 
+def test_near_identity_finds_the_same_card_under_another_foil(conn):
+    """The drift normalization cannot cover: holo_pattern (ticket 67).
+
+    A reverse holo really is a different card, so foil can never be normalized
+    away — but it is the column that drifted when card entry began taking the
+    foil from the catalog's treatment table instead of defaulting to non-holo.
+    """
+    repo = ItemRepository(conn)
+    stocked = repo.add(
+        _raw_item(name="Charizard-GX", holo_pattern=HoloPattern.NON_HOLO)
+    )
+
+    # Same card, catalog spelling, and the foil the treatment table now reports.
+    incoming = _raw_item(name="Charizard GX", holo_pattern=HoloPattern.HOLO)
+    assert repo.find_by_identity(incoming) is None  # a genuinely new identity
+    assert [i.id for i in repo.find_near_identity(incoming)] == [stocked.id]
+
+    # An exact identity match is not "near" — there is nothing to warn about.
+    exact = _raw_item(name="Charizard GX", holo_pattern=HoloPattern.NON_HOLO)
+    assert repo.find_near_identity(exact) == []
+
+    # And a different printing is not a near match either.
+    assert (
+        repo.find_near_identity(_raw_item(name="Charizard GX", card_number="011/073"))
+        == []
+    )
+
+
 def test_identity_returns_the_lowest_id_on_a_normalized_tie(conn):
     """Two rows already drifted apart: the older one wins, as before."""
     repo = ItemRepository(conn)

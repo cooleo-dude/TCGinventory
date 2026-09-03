@@ -231,6 +231,54 @@ class ItemRepository:
                 return self._to_model(row)
         return None
 
+    def find_near_identity(self, item: Item) -> list[Item]:
+        """Existing items that are the same card but for foil or edition.
+
+        The guard behind the drift :func:`normalized_name` cannot cover.
+        ``holo_pattern`` genuinely distinguishes cards — a reverse holo is not
+        the same object as a plain one — so it can never be normalized away. But
+        it is also the column most likely to *drift*: since the catalog gained a
+        treatment table, card entry sets the foil from the printing the catalog
+        lists, where it used to default to non-holo. The same physical card
+        therefore acquires a different identity depending on when it was entered,
+        and eight of the nine duplicate groups in the real ledger differ by
+        nothing else (all created on one day, mostly in a single purchase).
+
+        Neither value can be declared wrong, so nothing is merged automatically.
+        Returning the candidates lets the caller say "you may already own this"
+        and leave the judgement where it belongs.
+        """
+        cols = [
+            c
+            for c in _ITEM_IDENTITY_COLUMNS
+            if c not in ("name", "holo_pattern", "edition")
+        ]
+        where = " AND ".join(f"{col} IS ?" for col in cols)
+        params = (
+            item.set_name,
+            item.set_code,
+            item.card_number,
+            item.variant,
+            item.language.value,
+            item.condition.value if item.condition else None,
+            int(item.is_graded),
+            item.grading_company.value if item.grading_company else None,
+            item.grade,
+        )
+        wanted = normalized_name(item.name)
+        holo = item.holo_pattern.value if item.holo_pattern else None
+        edition = item.edition.value if item.edition else None
+        near = []
+        for row in self.conn.execute(
+            f"SELECT * FROM item WHERE {where} ORDER BY id", params
+        ):
+            if normalized_name(row["name"]) != wanted:
+                continue
+            if row["holo_pattern"] == holo and row["edition"] == edition:
+                continue  # an exact identity match, which is not "near"
+            near.append(self._to_model(row))
+        return near
+
     def update(self, item: Item) -> Item:
         if item.id is None:
             raise ValueError("cannot update an item without an id")
