@@ -12,6 +12,7 @@ booleans are stored as 0/1.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Sequence
 
@@ -80,6 +81,23 @@ _ITEM_IDENTITY_COLUMNS = (
     "grading_company",
     "grade",
 )
+
+
+def normalized_name(text: str | None) -> str:
+    """An item name reduced to what identity comparison should care about.
+
+    ``name`` is an identity column, and the catalog has renamed cards across a
+    source change: pokemontcg.io wrote "Charizard-GX" where TCGdex writes
+    "Charizard GX". Compared exactly, that drift silently minted a *second* item
+    for a card already owned — a later sale drew down the new row and left the
+    real copy showing as unsold, while 72 more owned items sat one sale away from
+    the same fault (ticket 67).
+
+    Punctuation and case are never what distinguishes two cards that already
+    agree on set, collector number, variant, condition and grade, so they are
+    dropped **for matching only**. The stored spelling is never rewritten.
+    """
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
 def _opt_enum(enum_cls, value):
@@ -185,10 +203,14 @@ class ItemRepository:
         """Return the existing item matching ``item``'s identity key, or None.
 
         Uses SQLite's NULL-safe ``IS`` so unset identity fields compare equal.
+        ``name`` is the one column not compared in SQL: it goes through
+        :func:`normalized_name`, so a catalog rename cannot mint a duplicate of
+        a card already owned. The lowest id still wins, as the old
+        ``ORDER BY id LIMIT 1`` did.
         """
-        where = " AND ".join(f"{col} IS ?" for col in _ITEM_IDENTITY_COLUMNS)
+        cols = [c for c in _ITEM_IDENTITY_COLUMNS if c != "name"]
+        where = " AND ".join(f"{col} IS ?" for col in cols)
         params = (
-            item.name,
             item.set_name,
             item.set_code,
             item.card_number,
@@ -201,10 +223,13 @@ class ItemRepository:
             item.grading_company.value if item.grading_company else None,
             item.grade,
         )
-        row = self.conn.execute(
-            f"SELECT * FROM item WHERE {where} ORDER BY id LIMIT 1", params
-        ).fetchone()
-        return self._to_model(row) if row else None
+        wanted = normalized_name(item.name)
+        for row in self.conn.execute(
+            f"SELECT * FROM item WHERE {where} ORDER BY id", params
+        ):
+            if normalized_name(row["name"]) == wanted:
+                return self._to_model(row)
+        return None
 
     def update(self, item: Item) -> Item:
         if item.id is None:
@@ -1100,16 +1125,35 @@ class CardCatalogRepository:
         ``Pikachu Celebrations 5``, ``Pikachu 5 Celebrations``,
         ``Wooloo SV103 Shiny Vault`` and ``Wooloo Shiny Vault SV103/SV122`` all
         narrow to the right printing.
+
+        **Results are ranked, not alphabetical.** A token is allowed to match the
+        set as well as the card, which means a set *named* after a card drags its
+        whole contents in: "Charizard ex" matched every card in "SV: Terastal
+        Charizard ex Battle Deck", and ordering by ``name`` then floated
+        ``Arceus V``, ``Artazon``, ``Bibarel`` and ``Bidoof`` to the top on their
+        own unrelated names — pushing the actual Charizard printings past
+        ``limit`` (the 151 one ranked 44th of 146). So rows are ordered by how
+        many tokens matched the card's **own** name or number, then by an exact
+        name match, and only then alphabetically. What *matches* is unchanged;
+        only the order is. (Ticket 67.)
         """
         query = query.strip()
         if not query:
             return []
 
         clauses, params = [], []
+        # Per-token "identifying" predicates: the subset of each token's clause
+        # that hits the card's own name or collector number rather than its set.
+        # Held separately so ORDER BY can rank on them without narrowing what
+        # matches — the two must stay in sync, hence one append per part below.
+        ident_exprs: list[str] = []
+        ident_params: list[str] = []
         for tok in query.split():
             like = f"%{tok}%"
             parts = ["name LIKE ?", "set_name LIKE ?", "set_code LIKE ?"]
             tok_params = [like, like, like]
+            ident = ["name LIKE ?"]
+            ident_tok_params = [like]
             if "/" in tok and any(ch.isdigit() for ch in tok):
                 # A full collector number, in any of its forms: full
                 # ("SV103/SV122"), head ("SV103"), or padded/stripped.
@@ -1117,19 +1161,29 @@ class CardCatalogRepository:
                 for form in dict.fromkeys([tok, *number_forms(head)]):
                     parts.append("number = ? COLLATE NOCASE")
                     tok_params.append(form)
+                    ident.append("number = ? COLLATE NOCASE")
+                    ident_tok_params.append(form)
             elif any(ch.isalpha() for ch in tok):
                 # A lettered token may be a collector-number *prefix* — "SV" and
                 # "SV074" both match "SV074" — so the number can be typed
                 # partially. (A pure word like "Vault" simply matches nothing.)
                 parts.append("number LIKE ? COLLATE NOCASE")
                 tok_params.append(f"{tok}%")
+                ident.append("number LIKE ? COLLATE NOCASE")
+                ident_tok_params.append(f"{tok}%")
             elif tok.isdigit():
                 # A bare number matches exactly (not a prefix, so "1" ≠ "10").
                 for form in number_forms(tok):
                     parts.append("number = ? COLLATE NOCASE")
                     tok_params.append(form)
+                    ident.append("number = ? COLLATE NOCASE")
+                    ident_tok_params.append(form)
             clauses.append("(" + " OR ".join(parts) + ")")
             params += tok_params
+            ident_exprs.append(
+                "(CASE WHEN (" + " OR ".join(ident) + ") THEN 1 ELSE 0 END)"
+            )
+            ident_params += ident_tok_params
 
         # The predicate above stays the authority on what matches. The FTS index
         # only *prunes* the rows it is evaluated against — see _fts_prune.
@@ -1144,11 +1198,17 @@ class CardCatalogRepository:
             else ""
         )
 
+        # Parameters bind in the order they appear in the SQL text, so the
+        # ORDER BY repeats of the identifying predicates come after the WHERE.
         rows = self.conn.execute(
             f"SELECT * FROM card_catalog WHERE {narrow}"
             + " AND ".join(clauses)
-            + " ORDER BY name, set_name, number LIMIT ?",
-            ((prune,) if prune else ()) + (*params, limit),
+            + " ORDER BY "
+            + " + ".join(ident_exprs)
+            + " DESC, (name = ?) DESC, (name = ? COLLATE NOCASE) DESC,"
+            + " name, set_name, number"
+            + " LIMIT ?",
+            ((prune,) if prune else ()) + (*params, *ident_params, query, query, limit),
         ).fetchall()
         return [self._to_model(r) for r in rows]
 

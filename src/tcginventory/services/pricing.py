@@ -17,7 +17,7 @@ from __future__ import annotations
 import difflib
 import re
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 from tcginventory.data.db import now_iso
@@ -33,6 +33,8 @@ _PRODUCT_RE = re.compile(r"/product/(\d+)")
 # the price join is by product ID: a wrong group simply yields no price (never
 # a wrong one), so leaning in favours resolving real sets over false misses.
 _FUZZY_THRESHOLD = 0.6
+# Shortest key the closest-match fallback will consider — see _resolve_group.
+_FUZZY_MIN_KEY = 4
 
 
 def _httpx_get_json(url: str):  # pragma: no cover - real network
@@ -87,6 +89,14 @@ _PROMO_SET_ALIASES = {
     "mepblackstarpromos": "ME: Mega Evolution Promo",
     # Back-compat: items added under the old pokemontcg.io S&V promo name.
     "scarletvioletblackstarpromos": "SV: Scarlet & Violet Promo Cards",
+    # An era's *base* set is the same problem one row down: the catalog names it
+    # after the era ("Sun & Moon", code "SUM") where tcgcsv names it after its
+    # position ("SM Base Set", abbreviation "SM01"). Nothing lexical connects
+    # the two, and before this the short code fuzz-matched "SM9" and priced Sun
+    # & Moon against Team Up (ticket 67). Only eras whose base set actually
+    # diverges need an entry — "Base Set" and "Scarlet & Violet" (code SVI)
+    # already resolve exactly.
+    "sunmoon": "SM Base Set",
 }
 
 
@@ -256,8 +266,15 @@ class TcgcsvProvider:
 
     source = "tcgcsv"
 
-    def __init__(self, fetch_json: Callable[[str], object] | None = None) -> None:
+    def __init__(
+        self,
+        fetch_json: Callable[[str], object] | None = None,
+        set_codes: Mapping[str, str] | None = None,
+    ) -> None:
         self._fetch = fetch_json or _httpx_get_json
+        # Normalized set name -> the catalog's set_code, for items that carry no
+        # set_code of their own. See _group_id for why that is every item.
+        self._set_codes = dict(set_codes or {})
         # Caches are keyed by tcgcsv category (3 = English, 85 = Japanese) so a
         # single provider serves both. group_ids are globally unique, but the
         # per-category price/product files live at different URLs.
@@ -475,8 +492,26 @@ class TcgcsvProvider:
         return int(match.group(1)) if match else None
 
     def _group_id(self, item: Item) -> int | None:
+        """The item's tcgcsv group, borrowing the catalog's set_code if needed.
+
+        **Ledger items never carry a set_code** — card entry records the set
+        *name* the user picked and drops the code, so all 1,154 items in the real
+        ledger have ``set_code IS NULL``. That is the whole reason this path
+        mis-resolved where the catalog-wide sweep (which passes the code) did
+        not: "151" alone fuzzy-matched the abbreviation "M15" and priced against
+        *McDonald's Promos 2015*, and "Scarlet & Violet" is a substring of every
+        "SV: Scarlet & Violet …" group so it tied at 0.9 and took whichever
+        tcgcsv listed first — the 151 group. With the catalog's code, "151"+MEW,
+        "Scarlet & Violet"+SVI and "Sun & Moon"+SUM all resolve exactly.
+
+        The code is looked up here rather than stored on the item on purpose:
+        ``set_code`` is one of the item identity columns, so writing it onto new
+        entries would stop them matching the NULL-coded copies already owned and
+        mint a duplicate for every card — the very fault ticket 67 is about.
+        """
+        set_code = item.set_code or self._set_codes.get(_norm(item.set_name))
         return self._resolve_group_for(
-            item.set_name, item.set_code, item.card_number, self._category_for(item)
+            item.set_name, set_code, item.card_number, self._category_for(item)
         )
 
     def _resolve_group_for(
@@ -531,11 +566,20 @@ class TcgcsvProvider:
         best_gid, best_score = None, 0.0
         for key in (set_name, set_code):
             nkey = _norm(key)
-            if len(nkey) < 3:
+            # Three characters carry too little signal to fuzzy-match on: two
+            # shared out of three already scores 0.667, over the threshold, so a
+            # short key reliably matches a short *abbreviation* it has nothing to
+            # do with. Measured: "151" scored 0.667 against "M15" and priced the
+            # 151 set against McDonald's Promos 2015; "SUM" scored 0.667 against
+            # "SM9" and sent Sun & Moon to Team Up. Both are below the length the
+            # substring boost trusts anyway, so they never had a route to a
+            # *right* answer here — only to a wrong one. Exact index hits (step 2)
+            # and the alias table still cover short keys. (Ticket 67.)
+            if len(nkey) < _FUZZY_MIN_KEY:
                 continue
             for cand_norm, gid in candidates:
                 score = difflib.SequenceMatcher(None, nkey, cand_norm).ratio()
-                if len(nkey) >= 4 and (nkey in cand_norm or cand_norm in nkey):
+                if nkey in cand_norm or cand_norm in nkey:
                     score = max(score, 0.9)
                 if score > best_score:
                     best_gid, best_score = gid, score
@@ -747,12 +791,29 @@ def _poketcg_cards(data) -> list:
     return data or []
 
 
+def set_codes_by_name(conn: sqlite3.Connection) -> dict[str, str]:
+    """``{normalized set name: set_code}`` from the reference catalog.
+
+    Ledger items store the set *name* and no code, which is what made the
+    per-item price path mis-resolve where the catalog sweep did not — see
+    :meth:`TcgcsvProvider._group_id`. One query hands the provider the codes it
+    is missing. Ambiguity is resolved towards the lowest set_id so the answer is
+    stable rather than whatever the scan happened to see last.
+    """
+    rows = conn.execute(
+        "SELECT set_name, set_code FROM card_catalog "
+        "WHERE set_name IS NOT NULL AND set_code IS NOT NULL "
+        "GROUP BY set_name HAVING set_id = MIN(set_id)"
+    ).fetchall()
+    return {_norm(r["set_name"]): r["set_code"] for r in rows}
+
+
 class PricingService:
     def __init__(self, conn: sqlite3.Connection, provider=None) -> None:
         self.conn = conn
         self.items = ItemRepository(conn)
         self.snapshots = PriceSnapshotRepository(conn)
-        self._provider = provider or TcgcsvProvider()
+        self._provider = provider or TcgcsvProvider(set_codes=set_codes_by_name(conn))
 
     def refresh(
         self, items: list[Item] | None = None, as_of: str | None = None

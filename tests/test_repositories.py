@@ -117,6 +117,54 @@ def test_item_find_by_identity_matches_and_distinguishes(conn):
     assert repo.find_by_identity(_raw_item(language=Language.JP)) is None
 
 
+def test_identity_survives_a_catalog_rename(conn):
+    """Punctuation drift in the name must not mint a second item (ticket 67).
+
+    The catalog source change renamed "Charizard-GX" to "Charizard GX". Compared
+    exactly, the next purchase created a new row and the following sale drew it
+    down, leaving the copy actually owned showing as unsold.
+    """
+    repo = ItemRepository(conn)
+    stored = repo.add(_raw_item(name="Charizard-GX"))
+
+    for spelling in ("Charizard GX", "charizard gx", "CharizardGX", "Charizard—GX"):
+        match = repo.find_by_identity(_raw_item(name=spelling))
+        assert match is not None, spelling
+        assert match.id == stored.id, spelling
+
+    # The stored spelling is never rewritten — only matching is relaxed.
+    assert repo.get(stored.id).name == "Charizard-GX"
+
+    # A genuinely different card in the same slot still does not match.
+    assert repo.find_by_identity(_raw_item(name="Charizard VMAX")) is None
+
+
+def test_identity_rename_still_respects_the_other_columns(conn):
+    """The relaxed name must not let a different printing match."""
+    repo = ItemRepository(conn)
+    repo.add(_raw_item(name="Mr. Mime"))
+
+    # Same normalized name, but another identity column differs → no match.
+    assert (
+        repo.find_by_identity(_raw_item(name="Mr Mime", card_number="011/073")) is None
+    )
+    assert (
+        repo.find_by_identity(_raw_item(name="Mr Mime", condition=Condition.LP)) is None
+    )
+    assert (
+        repo.find_by_identity(_raw_item(name="Mr Mime", language=Language.JP)) is None
+    )
+
+
+def test_identity_returns_the_lowest_id_on_a_normalized_tie(conn):
+    """Two rows already drifted apart: the older one wins, as before."""
+    repo = ItemRepository(conn)
+    first = repo.add(_raw_item(name="Charizard-GX"))
+    repo.add(_raw_item(name="Charizard GX"))
+
+    assert repo.find_by_identity(_raw_item(name="Charizard GX")).id == first.id
+
+
 def test_item_round_trips_holo_and_edition(conn):
     repo = ItemRepository(conn)
     item = repo.add(
