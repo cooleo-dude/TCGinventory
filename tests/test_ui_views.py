@@ -525,3 +525,43 @@ def test_nav_refresh_is_gated_until_data_changes(app, seeded_conn):
 
     window.close()
     window.deleteLater()
+
+
+def test_preview_prefetch_isolates_a_failing_row(app, seeded_conn, monkeypatch):
+    """One row that throws must not cost every later row its preview.
+
+    The warming loop's only handler used to sit outside it, so a single bad row
+    abandoned the rest and the grid drew "No preview" for cards whose art was
+    already on disk (ticket 67).
+    """
+    from types import SimpleNamespace
+
+    from tcginventory.services import cardimages
+    from tcginventory.ui.views.inventory import _PreviewPrefetchWorker
+
+    rows = [
+        (1, 101, "Fine One", "151", "199/165"),
+        (2, 102, "Bad One", "151", "176/165"),
+        (3, 103, "Also Fine", "Scarlet & Violet", "211/198"),
+    ]
+
+    def fake_art_for(conn, name, set_name, number):
+        if name == "Bad One":
+            raise RuntimeError("unreadable art")
+        return (f"card-{name}", "https://example/art.png")
+
+    monkeypatch.setattr(cardimages, "art_for", fake_art_for)
+    monkeypatch.setattr(cardimages, "ensure_cached", lambda *a, **k: None)
+
+    worker = _PreviewPrefetchWorker(":memory:", rows, "2026-01-01")
+    snaps = SimpleNamespace(history_for_item=lambda item_id, since: [])
+    trend_svc = SimpleNamespace(trend_for=lambda item, as_of: None)
+
+    images, _history, _trends = worker.warm_rows(
+        seeded_conn, snaps, trend_svc, "2026-09-03"
+    )
+
+    # The row after the failure still got its art — that is the regression.
+    assert 3 in images, "a later row lost its preview to an earlier failure"
+    assert 1 in images
+    assert 2 not in images  # the failing row alone goes without
