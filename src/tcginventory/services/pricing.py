@@ -223,6 +223,10 @@ class PriceQuote:
     # select_treatment). None/"" for providers that don't model treatments.
     treatment: str | None = None
     picked: str = ""
+    # Set only when the item had no saved link and the product was found by
+    # collector number instead, so the refresh can fill the gap in. See
+    # TcgcsvProvider._find_product.
+    tcgplayer_url: str | None = None
 
 
 @dataclass
@@ -314,6 +318,36 @@ class TcgcsvProvider:
         group_id = self._resolve_group_for(set_name, set_code, number, category)
         if group_id is None:
             return None
+        found = self._find_product(category, group_id, number, name)
+        if found is None:
+            return None
+        product_id, url = found
+        # Card-entry autofill: no item exists yet, so nothing says which printing
+        # this is. Same rule as select_treatment's fallback — the cheapest, not
+        # the dearest. Ticket 57 turns this into a real choice by requiring a
+        # treatment when the catalog says several exist.
+        prices = self._prices_for_group(category, group_id)
+        chosen = cheapest_treatment(prices.get(product_id) or {})
+        return (chosen[0], url) if chosen is not None else None
+
+    def _find_product(
+        self,
+        category: int,
+        group_id: int,
+        number: str | None,
+        name: str | None,
+    ) -> tuple[int, str] | None:
+        """``(product_id, tcgplayer_url)`` for a card inside a resolved group.
+
+        The product-matching half of :meth:`price_for_card`, extracted so that
+        :meth:`quotes_for` can apply the *same* rule to an item that has no saved
+        ``tcgplayer_url`` — items entered by hand, or imported, never got one, so
+        pricing skipped them outright however well their set resolved (ticket
+        69). Two copies of this matching would have drifted; there is one.
+
+        Products with no priced treatment are skipped, so the choice can never
+        land on a product the price file says nothing about.
+        """
         want = _norm_number(number)
         want_base = _number_base(want)  # "79a" → "79" (alt-art reprint fallback)
         want_name = _norm(name) if name else None
@@ -326,14 +360,8 @@ class TcgcsvProvider:
             pn = _norm_number(prod_number)
             if pn != want and pn != want_base:
                 continue
-            # Card-entry autofill: no item exists yet, so nothing says which
-            # printing this is. Same rule as select_treatment's fallback — the
-            # cheapest, not the dearest. Ticket 57 turns this into a real choice
-            # by requiring a treatment when the catalog says several exist.
-            chosen = cheapest_treatment(prices.get(product_id) or {})
-            if chosen is None:
-                continue
-            cents = chosen[0]
+            if cheapest_treatment(prices.get(product_id) or {}) is None:
+                continue  # nothing priced on this product at all
             pnm = _norm(prod_name)
             if want_name and pnm and want_name not in pnm and pnm not in want_name:
                 continue  # have a product name and it disagrees → not this card
@@ -344,9 +372,9 @@ class TcgcsvProvider:
                 # closest to the card name, then the shortest (fewest qualifiers).
                 core = pnm.replace(pn, "", 1) if pn else pnm
                 rank = (core != (want_name or ""), len(pnm))
-                exact.append((rank, cents, url))
+                exact.append((rank, product_id, url))
             elif base_match is None:
-                base_match = (cents, url)  # suffix-stripped fallback ("79a" → "79")
+                base_match = (product_id, url)  # "79a" → "79" fallback
         if exact:
             exact.sort(key=lambda t: t[0])
             return exact[0][1], exact[0][2]
@@ -422,19 +450,40 @@ class TcgcsvProvider:
     def quotes_for(self, items: list[Item]) -> list[PriceQuote]:
         # Group items by their (category, resolved group) so each price file is
         # downloaded at most once.
-        by_group: dict[tuple[int, int], list[tuple[Item, int]]] = {}
+        by_group: dict[tuple[int, int], list[Item]] = {}
         for item in items:
-            product_id = self._product_id(item)
             category = self._category_for(item)
             group_id = self._group_id(item)
-            if product_id is None or group_id is None:
+            if group_id is None:
                 continue
-            by_group.setdefault((category, group_id), []).append((item, product_id))
+            by_group.setdefault((category, group_id), []).append(item)
 
         quotes: list[PriceQuote] = []
         for (category, group_id), entries in by_group.items():
             prices = self._prices_for_group(category, group_id)
-            for item, product_id in entries:
+            for item in entries:
+                # The saved link is the fast path and the exact one — it names a
+                # product id outright. Without it, find the product by collector
+                # number in the group already resolved: items entered by hand or
+                # imported never got a link, and skipping them meant a card whose
+                # set resolved perfectly still showed no market value at all
+                # (ticket 69). The url comes back so the refresh can save it.
+                product_id = self._product_id(item)
+                found_url: str | None = None
+                if product_id is None:
+                    # The product list is a second download, and only these
+                    # items need it. If it cannot be had, this one card goes
+                    # unpriced — it must not cost the whole refresh the quotes it
+                    # already has, which is what an escaping error would do.
+                    try:
+                        found = self._find_product(
+                            category, group_id, item.card_number, item.name
+                        )
+                    except Exception:
+                        continue
+                    if found is None:
+                        continue
+                    product_id, found_url = found
                 by_treatment = prices.get(product_id)
                 if not by_treatment:
                     continue
@@ -448,6 +497,7 @@ class TcgcsvProvider:
                         price_cents=cents,
                         treatment=treatment,
                         picked=picked,
+                        tcgplayer_url=found_url,
                     )
                 )
         return quotes
@@ -851,9 +901,23 @@ class PricingService:
                 # History is always recorded; a reviewed item's shown current
                 # value is user-maintained, so don't overwrite it.
                 item = self.items.get(quote.item_id)
-                if item is not None and not item.review:
+                if item is None:
+                    continue
+                changed = False
+                # A link discovered by collector number is saved, so the
+                # Inventory row gains its TCGplayer button and the next refresh
+                # takes the exact fast path. Only ever fills a gap — a link the
+                # user or the catalog already set is never rewritten, and
+                # tcgplayer_url is not an identity column, so this cannot affect
+                # match-or-create.
+                if quote.tcgplayer_url and not item.tcgplayer_url:
+                    item.tcgplayer_url = quote.tcgplayer_url
+                    changed = True
+                if not item.review:
                     item.market_value_cents = quote.price_cents
                     item.market_value_asof = as_of[:10]
+                    changed = True
+                if changed:
                     self.items.update(item)
             self.conn.commit()
         except Exception:
