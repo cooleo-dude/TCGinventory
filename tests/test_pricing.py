@@ -714,6 +714,141 @@ def test_group_resolves_exactly_once_the_set_code_is_known():
     assert p.resolve_group("Sun & Moon", "SUM", 3) == 1863
 
 
+# A group whose products carry tcgcsv's embedded-number naming, as the real
+# files do ("Drowzee - 210/198"), so the name safety net is exercised for real.
+def _linkless_fetch(url: str):
+    if url.endswith("/groups"):
+        return {
+            "results": [
+                {
+                    "groupId": 22873,
+                    "name": "SV01: Scarlet & Violet Base Set",
+                    "abbreviation": "SVI",
+                }
+            ]
+        }
+    if url.endswith("/22873/products"):
+        return {
+            "results": [
+                {
+                    "productId": 490070,
+                    "name": "Drowzee - 210/198",
+                    "url": "https://www.tcgplayer.com/product/490070/drowzee-210-198",
+                    "extendedData": [{"name": "Number", "value": "210/198"}],
+                },
+                {
+                    "productId": 490071,
+                    "name": "Ralts - 211/198",
+                    "url": "https://www.tcgplayer.com/product/490071/ralts-211-198",
+                    "extendedData": [{"name": "Number", "value": "211/198"}],
+                },
+            ]
+        }
+    if url.endswith("/22873/prices"):
+        return {
+            "results": [
+                {"productId": 490070, "marketPrice": 59.34, "subTypeName": "Normal"},
+                {"productId": 490071, "marketPrice": 42.67, "subTypeName": "Normal"},
+            ]
+        }
+    raise AssertionError(f"unexpected url: {url}")
+
+
+def _linkless(name, number, **kw):
+    from tcginventory.domain.enums import HoloPattern
+
+    base = dict(
+        name=name,
+        category=Category.SINGLE,
+        set_name="Scarlet & Violet",
+        card_number=number,
+        holo_pattern=HoloPattern.NON_HOLO,
+        tcgplayer_url=None,
+    )
+    base.update(kw)
+    return Item(**base)
+
+
+def test_prices_an_item_that_has_no_saved_product_link(conn):
+    """Items entered by hand never got a tcgplayer_url, so pricing skipped them.
+
+    A card whose set resolved perfectly still showed no market value at all —
+    the reported Drowzee 210/198 (ticket 69).
+    """
+    item = ItemRepository(conn).add(_linkless("Drowzee", "210/198"))
+    assert item.tcgplayer_url is None
+
+    provider = TcgcsvProvider(
+        fetch_json=_linkless_fetch, set_codes={"scarletviolet": "SVI"}
+    )
+    (quote,) = provider.quotes_for([item])
+
+    assert quote.price_cents == 5934
+    # The link comes back so the refresh can save it.
+    assert quote.tcgplayer_url.endswith("/490070/drowzee-210-198")
+
+
+def test_refresh_saves_a_link_it_discovered_and_keeps_one_it_did_not(conn):
+    """The gap is filled in; an existing link is never rewritten."""
+    items = ItemRepository(conn)
+    found = items.add(_linkless("Drowzee", "210/198"))
+    kept = items.add(_linkless("Ralts", "211/198", tcgplayer_url="mine/490071"))
+
+    provider = TcgcsvProvider(
+        fetch_json=_linkless_fetch, set_codes={"scarletviolet": "SVI"}
+    )
+    PricingService(conn, provider=provider).refresh(items=[found, kept])
+
+    assert items.get(found.id).tcgplayer_url.endswith("/490070/drowzee-210-198")
+    assert items.get(found.id).market_value_cents == 5934
+    # The user's own link stands, and it still priced through it.
+    assert items.get(kept.id).tcgplayer_url == "mine/490071"
+    assert items.get(kept.id).market_value_cents == 4267
+
+
+def test_a_linkless_item_is_not_given_another_cards_product(conn):
+    """The negative case: a number that matches but a name that does not.
+
+    Guessing a product by number alone would attach a wrong link and a wrong
+    price to a card, which is worse than leaving it blank.
+    """
+    item = ItemRepository(conn).add(_linkless("Snorlax", "210/198"))
+
+    provider = TcgcsvProvider(
+        fetch_json=_linkless_fetch, set_codes={"scarletviolet": "SVI"}
+    )
+    assert provider.quotes_for([item]) == []
+    assert item.tcgplayer_url is None
+
+
+def test_an_unreachable_product_list_costs_only_that_card(conn):
+    """One card's fallback lookup must not lose the quotes already gathered.
+
+    The product list is a second download that only link-less items need. When
+    it failed, the error escaped quotes_for and the whole refresh reported zero
+    priced — including every card that had resolved fine through its own link.
+    """
+    items = ItemRepository(conn)
+    linked = items.add(
+        _linkless("Ralts", "211/198", tcgplayer_url="x/product/490071/ralts")
+    )
+    linkless = items.add(_linkless("Drowzee", "210/198"))
+
+    def no_products(url: str):
+        if url.endswith("/products"):
+            raise RuntimeError("tcgcsv product list unavailable")
+        return _linkless_fetch(url)
+
+    provider = TcgcsvProvider(
+        fetch_json=no_products, set_codes={"scarletviolet": "SVI"}
+    )
+    quotes = provider.quotes_for([linked, linkless])
+
+    # The linked card still priced; only the one needing the list went without.
+    assert [q.item_id for q in quotes] == [linked.id]
+    assert quotes[0].price_cents == 4267
+
+
 def test_item_borrows_the_catalog_set_code_for_its_group(conn):
     """Ledger items carry no set_code, so the provider looks one up.
 
