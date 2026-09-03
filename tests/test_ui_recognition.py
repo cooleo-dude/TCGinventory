@@ -408,3 +408,128 @@ def test_deleting_with_nothing_selected_explains_itself(
     assert shown == ["No box selected"]
     assert _numbers(view) == [1]  # and nothing was removed
     view.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# the scene photo survives a draw — PySide6 hands ownership of a top-level item
+# to Python when parentItem() returns None, and the background had no owner
+# ---------------------------------------------------------------------------
+
+
+def _background_count(view):
+    from PySide6.QtWidgets import QGraphicsPixmapItem
+
+    return sum(isinstance(i, QGraphicsPixmapItem) for i in view._scene.items())
+
+
+def _drag(view, start_scene, end_scene):
+    """Drag on the real viewport, the way a user draws a box."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    vp = view._view.viewport()
+    start = view._view.mapFromScene(*start_scene)
+    end = view._view.mapFromScene(*end_scene)
+    QTest.mousePress(vp, Qt.LeftButton, Qt.NoModifier, start)
+    QTest.mouseMove(vp, QPoint(start.x() + 12, start.y() + 12))
+    QTest.mouseMove(vp, end)
+    QTest.mouseRelease(vp, Qt.LeftButton, Qt.NoModifier, end)
+
+
+def test_drawing_a_box_over_bare_image_keeps_the_photo(app, conn, tmp_path):
+    """Regression: the press that starts a box hit-tests what is under the
+    cursor, and walking off the background item with parentItem() gave PySide6
+    ownership of it — so the photo was deleted the moment the wrapper went out
+    of scope, and the window went blank. Reported after accepting detector
+    proposals, which is simply when you draw in the gaps between boxes."""
+    view = _staged(conn, tmp_path, QRectF(10, 10, 100, 120))
+    assert _background_count(view) == 1
+    view._set_draw(True)
+
+    _drag(view, (200.0, 180.0), (300.0, 270.0))
+
+    assert _background_count(view) == 1  # the photo is still there
+    assert _numbers(view) == [1, 2]  # and the box was drawn
+    view.deleteLater()
+
+
+def test_accepted_proposals_then_a_drawn_box_keeps_the_photo(
+    app, conn, tmp_path, monkeypatch
+):
+    """The reported path end to end: detector proposals promoted to real boxes,
+    then one more box drawn by hand."""
+    view = _staged(conn, tmp_path)
+    monkeypatch.setattr(
+        view, "_detect", lambda source, path: [(0.05, 0.05, 0.2, 0.3)], raising=False
+    )
+    view._yolo_toggle.setEnabled(True)
+    view._yolo_toggle.setChecked(True)  # overlays the proposal
+    view._accept_proposals()
+    assert _numbers(view) == [1]
+    view._set_draw(True)
+
+    _drag(view, (200.0, 180.0), (300.0, 270.0))
+
+    assert _background_count(view) == 1
+    assert _numbers(view) == [1, 2]
+    view.deleteLater()
+
+
+def test_hit_testing_never_takes_ownership_of_a_top_level_item(app, conn, tmp_path):
+    """The mechanism, named. Holding a reference to the background hides the
+    bug, so the guard has to be the ownership itself: hit-testing a point with
+    no box under it must report None without C++ handing anything to Python.
+    ``parentItem()`` on a top-level item is what flips this."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtWidgets import QGraphicsPixmapItem
+    from shiboken6 import Shiboken
+
+    view = _staged(conn, tmp_path, QRectF(10, 10, 100, 120))
+    background = next(
+        i for i in view._scene.items() if isinstance(i, QGraphicsPixmapItem)
+    )
+    assert not Shiboken.ownedByPython(background)
+
+    assert view._scene._box_at(QPointF(300.0, 250.0)) is None
+
+    assert not Shiboken.ownedByPython(background)  # still the scene's to delete
+    assert _background_count(view) == 1
+    view.deleteLater()
+
+
+def test_the_background_survives_an_ownership_transfer(app, conn, tmp_path):
+    """What the held reference buys, and the reason to keep it: even if some
+    other call hands the background to Python, the view still owns it, so it
+    cannot be collected out from under the scene."""
+    import gc
+
+    from PySide6.QtWidgets import QGraphicsPixmapItem
+    from shiboken6 import Shiboken
+
+    view = _staged(conn, tmp_path, QRectF(10, 10, 100, 120))
+    transient = next(
+        i for i in view._scene.items() if isinstance(i, QGraphicsPixmapItem)
+    )
+    transient.parentItem()  # the ownership-transferring call, made deliberately
+    assert Shiboken.ownedByPython(transient)
+    del transient
+    gc.collect()
+
+    assert _background_count(view) == 1
+    view.deleteLater()
+
+
+def test_a_press_on_a_box_badge_still_selects_that_box(app, conn, tmp_path):
+    """The behaviour the parent walk exists for: the numbered badge and the
+    corner grips are children of the box, so a press on one belongs to it."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtWidgets import QGraphicsEllipseItem
+
+    view = _staged(conn, tmp_path, QRectF(60, 60, 120, 140))
+    item = view._items[1]
+    badge = next(c for c in item.childItems() if isinstance(c, QGraphicsEllipseItem))
+
+    found = view._scene._box_at(badge.mapToScene(QPointF(0.0, 0.0)))
+
+    assert found is item
+    view.deleteLater()

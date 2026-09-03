@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsItem,
     QGraphicsLineItem,
+    QGraphicsPixmapItem,
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
@@ -79,6 +80,12 @@ _BOX_PEN = QColor(theme.DARK.accent)  # confirmed box — the theme accent
 _BOX_FILL = QColor(theme.DARK.accent)
 _BOX_FILL.setAlpha(40)
 _YOLO_PEN = QColor(theme.DARK.accent2)  # trained-detector proposals (brick red)
+# Data roles on a scene item. 0 carries a box's number (the delete paths read it);
+# 1 marks a box's decorations — the badge, its number, the corner grips — which
+# are always children of a _BoxItem. _box_at walks up through 1 only, and that
+# restriction is load-bearing: see the comment there.
+_NUMBER_ROLE = 0
+_DECOR_ROLE = 1
 # Cosine below this gets a ⚠ in the suggestion list (advisory; frozen DINOv2 on
 # photo-vs-catalog-render is a weak baseline until the M-V2 fine-tune).
 _LOW_CONFIDENCE = 0.6
@@ -177,13 +184,22 @@ class _Scene(QGraphicsScene):
 
     def _box_at(self, pos: QPointF) -> _BoxItem | None:
         """The topmost box under ``pos``, found through its badge and grips —
-        they're children of the box, so a press on one belongs to it."""
+        they're children of the box, so a press on one belongs to it.
+
+        The walk climbs only through items tagged ``_DECOR_ROLE``, and that is
+        not tidiness: in PySide6, ``parentItem()`` returning None hands the
+        item's ownership from C++ to Python, and a scene item nobody holds a
+        Python reference to is then deleted as soon as the wrapper this loop
+        made goes out of scope. Walking off a top-level item deleted the scene's
+        own background pixmap — the photo went blank on the press that started a
+        new box. A decoration always has a parent, so it can never return None.
+        """
         for item in self.items(pos):
             node = item
-            while node is not None:
-                if isinstance(node, _BoxItem):
-                    return node if node.isVisible() else None
+            while node is not None and node.data(_DECOR_ROLE):
                 node = node.parentItem()
+            if isinstance(node, _BoxItem):
+                return node if node.isVisible() else None
         return None
 
     def _start_rubber(self) -> None:
@@ -254,6 +270,7 @@ class _ResizeHandle(QGraphicsRectItem):
         super().__init__(-5, -5, 10, 10, box_item)
         self._box = box_item
         self._corner = corner
+        self.setData(_DECOR_ROLE, True)  # a press here belongs to the parent box
         self.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
         self.setBrush(QBrush(QColor("#ffffff")))
         pen = QPen(QColor(color))
@@ -305,7 +322,9 @@ class _BoxItem(QGraphicsRectItem):
         badge.setBrush(QBrush(QColor(accent)))
         badge.setPen(QPen(Qt.NoPen))
         badge.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        badge.setData(_DECOR_ROLE, True)
         num = QGraphicsSimpleTextItem(str(self._number), badge)
+        num.setData(_DECOR_ROLE, True)
         num.setBrush(QBrush(QColor(accent_on)))
         font = num.font()
         font.setBold(True)
@@ -867,6 +886,11 @@ class RecognitionView(QWidget):
         self._current: int = -1
         self._pair_seq: int = 0  # increments per front/back pair (Include card backs)
         self._items: dict[int, QGraphicsRectItem] = {}  # number -> item (current)
+        # The scene's background photo. Held rather than dropped: a scene item
+        # with no Python reference is only ever as safe as every call made on it
+        # (see _Scene._box_at), and the background is the one item whose loss
+        # blanks the window.
+        self._pixmap_item: QGraphicsPixmapItem | None = None
         self._name_fields: dict[int, _NameField] = {}
         self._suggest_boxes: dict[int, _SuggestBox] = {}
         # detector overlays, per proposer source ("cv" | "yolo")
@@ -1571,6 +1595,7 @@ class RecognitionView(QWidget):
             self._empty_box.setVisible(True)
             self._view.setVisible(False)
             self._zone_bar.setVisible(False)
+            self._pixmap_item = None  # dropped by scene.clear() below
             self._scene.clear()
             self._items.clear()
             self._assess_btn.setEnabled(False)
@@ -1582,12 +1607,13 @@ class RecognitionView(QWidget):
         self._assess_btn.setEnabled(session.side == "back")
         self._zone_bar.setVisible(self._is_transaction())
         self._sync_zone_labels(session)
+        self._pixmap_item = None  # dropped by scene.clear() below
         self._scene.clear()
         self._items.clear()
         for items in self._proposals.values():
             items.clear()  # scene.clear() already dropped the items
         self._divider = None
-        self._scene.addPixmap(session.pixmap)
+        self._pixmap_item = self._scene.addPixmap(session.pixmap)
         self._scene.setSceneRect(QRectF(session.pixmap.rect()))
         for box in session.boxes:
             self._add_box_item(box)
@@ -1658,7 +1684,7 @@ class RecognitionView(QWidget):
         t = theme.active()
         item = _BoxItem(box.rect, box.number, self._on_box_hover)
         item.setBrush(QBrush(_BOX_FILL))
-        item.setData(0, box.number)
+        item.setData(_NUMBER_ROLE, box.number)
         item.setVisible(box.visible)
         self._scene.addItem(item)  # the box (and its badge/grips) must join the scene
         # build_decorations sets the resting pen; hover and selection restyle it.
@@ -1669,7 +1695,7 @@ class RecognitionView(QWidget):
         """Delete whatever is selected on the stage (toolbar, stage trash, Del)."""
         numbers = [
             n
-            for n in (item.data(0) for item in self._scene.selectedItems())
+            for n in (item.data(_NUMBER_ROLE) for item in self._scene.selectedItems())
             if n is not None
         ]
         if not numbers:
@@ -2474,6 +2500,7 @@ class RecognitionView(QWidget):
         for items in self._proposals.values():
             items.clear()
         self._divider = None
+        self._pixmap_item = None
         self._strip.blockSignals(True)
         self._strip.clear()
         self._strip.blockSignals(False)
