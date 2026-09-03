@@ -472,6 +472,40 @@ def test_ui_give_dialog_sku_lookup(app, conn):
     dialog.deleteLater()
 
 
+def test_give_row_finds_a_card_across_a_punctuation_rename(app, conn):
+    """Searching the catalog's current name must find the copy on hand.
+
+    The row matched the typed text as a raw substring, so typing "Charizard GX"
+    listed nothing while "Charizard-GX" sat in stock — and a sale then got
+    recorded against a fresh $0 lot instead of the copy owned (ticket 67).
+    """
+    from conftest import buy
+    from tcginventory.services.inventory import InventoryService
+    from tcginventory.services.transactions import TransactionService
+    from tcginventory.ui.views.transaction import _GiveRow
+
+    svc = TransactionService(conn)
+    buy(
+        svc,
+        "Charizard-GX",
+        1000,
+        1000,
+        "2026-01-01",
+        set_name="SM Black Star Promos",
+        card_number="SM60/SM248",
+    )
+    sellable = InventoryService(conn).sellable_items()
+    row = _GiveRow(conn, sellable, lambda: None)
+
+    for typed in ("Charizard GX", "charizard gx", "Charizard-GX", "CharizardGX"):
+        row._fill(typed)
+        assert row._model.rowCount() == 1, typed
+
+    # A card that genuinely is not there still matches nothing.
+    row._fill("Blastoise")
+    assert row._model.rowCount() == 0
+
+
 def test_removing_a_middle_receive_row_does_not_crash(app, conn):
     from tcginventory.ui.views.transaction import TransactionView
 

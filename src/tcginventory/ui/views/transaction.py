@@ -73,6 +73,7 @@ from tcginventory.data.repositories import (
     LotRepository,
     TransactionLineRepository,
     TransactionRepository,
+    normalized_name,
 )
 from tcginventory.domain.enums import (
     Category,
@@ -364,6 +365,14 @@ class _GiveRow:
         # one at a time rescans every sibling (196 ms a keystroke at 769 cards).
         items = [item for item, _avail in sellable]
         self._labels = dict(zip((i.id for i in items), item_labels(items), strict=True))
+        # The same labels with punctuation and case removed, so searching the
+        # card's current name finds a copy stored under the catalog's older
+        # spelling. Typing "Charizard GX" used to match nothing while
+        # "Charizard-GX" sat on hand, which is how a sale came to be recorded
+        # against a fresh $0 lot instead of the copy owned (ticket 67).
+        self._norm_labels = {
+            item_id: normalized_name(label) for item_id, label in self._labels.items()
+        }
         self._sink = sink
         self._on_change = on_change
         self._chosen_id: int | None = None
@@ -408,12 +417,17 @@ class _GiveRow:
     def _fill(self, needle: str) -> None:
         self._model.clear()
         needle = needle.strip().lower()
+        norm_needle = normalized_name(needle)
         shown = 0
         for item, _available in self._sellable:
             if shown >= _MATCH_LIMIT:
                 break
             label = self._label(item)
-            if needle and needle not in label.lower():
+            if (
+                needle
+                and needle not in label.lower()
+                and norm_needle not in self._norm_labels[item.id]
+            ):
                 continue
             entry = QStandardItem(label)
             entry.setData(item.id, self._ITEM_ID_ROLE)
