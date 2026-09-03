@@ -108,6 +108,23 @@ class PostResult:
 
 
 @dataclass
+class NearMatch:
+    """ "You may already own this" — one incoming card against a stocked item.
+
+    ``on_hand`` is what makes it worth saying: a card you hold nothing of is
+    simply a new printing, while one you hold copies of is probably the same
+    physical card entered under a different foil.
+    """
+
+    incoming_name: str
+    item_id: int
+    item_name: str
+    holo_pattern: str | None
+    edition: str | None
+    on_hand: int
+
+
+@dataclass
 class TransactionPreview:
     """Read-only preview of what a request would post — powers the live footer.
 
@@ -124,6 +141,11 @@ class TransactionPreview:
     realized_pl_cents: int  # estimated margin on cards out (FIFO)
     feasible: bool
     shortfalls: dict[int, int]  # item_id → missing units
+    # Cards being received that look like one already on hand under a different
+    # foil or edition — "Charizard GX (Holofoil)" against a stock "Charizard GX
+    # (non-holo)". Advisory only: it never blocks a post, because neither value
+    # can be shown to be the wrong one. See ItemRepository.find_near_identity.
+    near_matches: list[NearMatch] = field(default_factory=list)
 
 
 def _as_date(iso: str) -> str:
@@ -497,7 +519,41 @@ class TransactionService:
             realized_pl_cents=realized,
             feasible=feasible,
             shortfalls=shortfalls,
+            near_matches=self._near_matches(request),
         )
+
+    def _near_matches(self, request: TransactionRequest) -> list[NearMatch]:
+        """Incoming cards that look like stock held under a different foil.
+
+        Only cards with **no exact identity match** are reported: if the item
+        already exists as typed, the acquisition will land on it and there is
+        nothing to warn about. And only near-matches with units on hand, since
+        that is what distinguishes "the same card, entered differently" from
+        "a printing you have not owned before".
+        """
+        out: list[NearMatch] = []
+        for inc in request.incoming:
+            if self.items.find_by_identity(inc.item) is not None:
+                continue
+            for cand in self.items.find_near_identity(inc.item):
+                on_hand = sum(
+                    lot.remaining_qty for lot in self.lots.open_lots_for_item(cand.id)
+                )
+                if on_hand <= 0:
+                    continue
+                out.append(
+                    NearMatch(
+                        incoming_name=inc.item.name,
+                        item_id=cand.id,
+                        item_name=cand.name,
+                        holo_pattern=(
+                            cand.holo_pattern.value if cand.holo_pattern else None
+                        ),
+                        edition=cand.edition.value if cand.edition else None,
+                        on_hand=on_hand,
+                    )
+                )
+        return out
 
     def adjust_found(
         self,

@@ -723,6 +723,9 @@ class ItemEditorDialog(QDialog):
             self.reject()
             return
         item = self._item
+        # The identity this card had before the edit, read back from the DB —
+        # the form below mutates `item` in place, so it has to be taken first.
+        stored = self._items.get(item.id)
         graded = self._graded.isChecked()
         item.name = self._name.text().strip() or item.name
         item.category = Category(self._category.currentData())
@@ -753,10 +756,42 @@ class ItemEditorDialog(QDialog):
             if item.review
             else without_review_note(item.notes)
         )
+        if not self._identity_is_free(item, stored):
+            return
         self._items.update(item)
         self._save_lot()
         self._conn.commit()
         self.accept()
+
+    def _identity_is_free(self, item, stored) -> bool:
+        """False (having explained why) if this edit would duplicate another card.
+
+        The identity columns had no uniqueness guard at all: an edit that gave
+        one card another's name, set, number and grade simply produced two rows
+        with the same identity, and match-or-create then had two candidates for
+        every future purchase (ticket 67).
+
+        A collision that *already* existed is allowed through. The nine
+        duplicate groups in the real ledger are exactly what someone opens this
+        dialog to clean up, and refusing to save them would block the repair.
+        Only an edit that newly creates a clash is stopped.
+        """
+        clash = self._items.find_by_identity(item)
+        if clash is None or clash.id == item.id:
+            return True
+        already = self._items.find_by_identity(stored) if stored else None
+        if already is not None and already.id == clash.id:
+            return True  # the clash predates this edit; not ours to refuse
+        QMessageBox.warning(
+            self,
+            "Another card already has this identity",
+            f"“{clash.name}” (#{clash.id}) is already recorded as this set, "
+            f"collector number, variant, condition and grade.\n\n"
+            f"Two cards with one identity make every later purchase ambiguous, "
+            f"so this change was not saved. Adjust a field that tells them "
+            f"apart, or move this copy's lots onto that card instead.",
+        )
+        return False
 
     def _save_lot(self) -> None:
         """Persist the per-copy fields. Caller commits.

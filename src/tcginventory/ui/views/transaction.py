@@ -73,6 +73,7 @@ from tcginventory.data.repositories import (
     LotRepository,
     TransactionLineRepository,
     TransactionRepository,
+    normalized_name,
 )
 from tcginventory.domain.enums import (
     Category,
@@ -343,6 +344,27 @@ class _FocusLineEdit(QLineEdit):
         self.focused.emit()
 
 
+_HOLO_WORD = {"H": "holo", "RH": "reverse holo", "NH": "non-holo"}
+
+
+def _near_match_note(matches: list) -> str:
+    """The "you may already own this" line for the footer.
+
+    Advisory, never a block: the foil recorded on the stocked copy and the one
+    the catalog now reports can both be defensible, so the choice is the user's.
+    See ``ItemRepository.find_near_identity``.
+    """
+    first = matches[0]
+    printing = _HOLO_WORD.get(first.holo_pattern or "", first.holo_pattern or "no foil")
+    note = (
+        f"⚠ you already hold {first.on_hand} × {first.item_name} ({printing}) — "
+        f"this would file “{first.incoming_name}” as a separate card"
+    )
+    if len(matches) > 1:
+        note += f", and {len(matches) - 1} more like it"
+    return note
+
+
 class _GiveRow:
     """Inline row for a card you give: search your on-hand cards + quantity.
 
@@ -364,6 +386,14 @@ class _GiveRow:
         # one at a time rescans every sibling (196 ms a keystroke at 769 cards).
         items = [item for item, _avail in sellable]
         self._labels = dict(zip((i.id for i in items), item_labels(items), strict=True))
+        # The same labels with punctuation and case removed, so searching the
+        # card's current name finds a copy stored under the catalog's older
+        # spelling. Typing "Charizard GX" used to match nothing while
+        # "Charizard-GX" sat on hand, which is how a sale came to be recorded
+        # against a fresh $0 lot instead of the copy owned (ticket 67).
+        self._norm_labels = {
+            item_id: normalized_name(label) for item_id, label in self._labels.items()
+        }
         self._sink = sink
         self._on_change = on_change
         self._chosen_id: int | None = None
@@ -408,12 +438,17 @@ class _GiveRow:
     def _fill(self, needle: str) -> None:
         self._model.clear()
         needle = needle.strip().lower()
+        norm_needle = normalized_name(needle)
         shown = 0
         for item, _available in self._sellable:
             if shown >= _MATCH_LIMIT:
                 break
             label = self._label(item)
-            if needle and needle not in label.lower():
+            if (
+                needle
+                and needle not in label.lower()
+                and norm_needle not in self._norm_labels[item.id]
+            ):
                 continue
             entry = QStandardItem(label)
             entry.setData(item.id, self._ITEM_ID_ROLE)
@@ -1794,7 +1829,16 @@ class TransactionView(QWidget):
             self._r_stats["margin"].setText("—")
             self._r_stats["margin"].setStyleSheet(f"color:{t.ink3};")
 
-        self._warn.setText("" if preview.feasible else "⚠ oversell — reduce quantity")
+        # One warning line, oversell first: that one blocks the post, so it must
+        # not be displaced by an advisory that does not.
+        if not preview.feasible:
+            self._warn.setText("⚠ oversell — reduce quantity")
+            self._warn.setStyleSheet(f"color:{t.neg};font-size:12px;font-weight:600;")
+        elif preview.near_matches:
+            self._warn.setText(_near_match_note(preview.near_matches))
+            self._warn.setStyleSheet(f"color:{t.warn};font-size:12px;font-weight:600;")
+        else:
+            self._warn.setText("")
         self._submit.setEnabled(preview.inferred_type is not None and preview.feasible)
 
     def _badge_text_style(self, ttype: str | None) -> str:

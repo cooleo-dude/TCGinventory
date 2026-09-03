@@ -159,6 +159,7 @@ def test_sections_do_not_mix_unrelated_jobs():
     assert {op.id for op in ops.in_group("maintenance")} == {
         "db.integrity_check",
         "db.vacuum",
+        "db.duplicate_scan",
     }
     assert {op.id for op in ops.in_group("data_in")} == {
         "import.items",
@@ -722,3 +723,68 @@ def test_detect_gpu_is_none_without_the_driver(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", boom)
     assert trainingenv.detect_gpu() is None
+
+
+# -- duplicate / unpriced scan (ticket 67) ----------------------------------
+
+
+def _dup(name, holo=None, edition=None):
+    from tcginventory.domain.enums import Category, Edition, HoloPattern
+    from tcginventory.domain.models import Item
+
+    return Item(
+        name=name,
+        category=Category.SINGLE,
+        set_name="151",
+        card_number="199/165",
+        holo_pattern=HoloPattern(holo) if holo else None,
+        edition=Edition(edition) if edition else None,
+    )
+
+
+def test_duplicate_reason_separates_the_drift_classes():
+    """Each class needs a different fix, so the report must not blur them."""
+    assert ops.duplicate_reason(
+        [_dup("Charizard-GX", "NH"), _dup("Charizard GX", "NH")]
+    ) == ("name spelling")
+    # A real disagreement about which printing this copy is.
+    assert ops.duplicate_reason([_dup("A", "NH"), _dup("A", "H")]) == "foil"
+    # Both say "not holo"; one just predates the column being filled in.
+    assert ops.duplicate_reason([_dup("A"), _dup("A", "NH")]) == "foil unset vs stated"
+    # The ticket-62 pair, one level down: NULL and "N/A" are the same edition.
+    assert (
+        ops.duplicate_reason([_dup("A", "H"), _dup("A", "H", "N/A")])
+        == "edition unset vs N/A"
+    )
+
+
+def test_describe_duplicates_reports_counts_and_changes_nothing():
+    groups = [
+        [_dup("Charizard-GX", "NH"), _dup("Charizard GX", "NH")],
+        [_dup("Doublade", "NH"), _dup("Doublade", "H")],
+        [_dup("Eevee", "NH"), _dup("Eevee", "H")],
+    ]
+    summary = ops.describe_duplicates(groups, unpriced=74)
+
+    assert "3 duplicate card group(s)" in summary
+    assert "2 by foil" in summary
+    assert "1 by name spelling" in summary
+    assert "74 card(s) on hand have no market price" in summary
+    assert "nothing was changed" in summary
+
+
+def test_describe_duplicates_is_quiet_on_a_clean_ledger():
+    assert "no duplicate cards" in ops.describe_duplicates([], unpriced=0)
+
+
+def test_duplicate_scan_finds_a_drifted_pair_end_to_end(conn):
+    """The repository half: the scan groups what identity matching does not."""
+    from tcginventory.data.repositories import ItemRepository
+
+    items = ItemRepository(conn)
+    first = items.add(_dup("Charizard-GX", "NH"))
+    second = items.add(_dup("Charizard GX", "H"))
+    items.add(_dup("Blastoise", "H"))  # unrelated, must not be grouped
+
+    (group,) = items.duplicate_identity_groups()
+    assert [i.id for i in group] == [first.id, second.id]  # oldest first

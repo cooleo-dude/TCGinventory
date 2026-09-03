@@ -239,6 +239,64 @@ def test_search_matches_lettered_number_prefix(conn):
     assert repo.search("Falinks 109")[0].number == "109"
 
 
+def _ranking_catalog(conn):
+    """A set *named* after a card, plus a vintage and a modern printing of it.
+
+    The real shape behind ticket 67: "SV: Terastal Charizard ex Battle Deck"
+    made every card in it match the token "Charizard", and alphabetical ordering
+    floated them above the card actually being searched for.
+    """
+    from tcginventory.domain.models import CatalogCard
+
+    def card(card_id, name, set_id, set_name, number):
+        return CatalogCard(
+            card_id=card_id,
+            name=name,
+            set_id=set_id,
+            set_name=set_name,
+            number=number,
+        )
+
+    CardCatalogRepository(conn).replace_all(
+        [
+            # Cards whose only tie to the query is their set's name. They sort
+            # first alphabetically, which is exactly the bug.
+            card("d1", "Arceus V", "deck", "SV: Terastal Charizard ex Deck", "009"),
+            card("d2", "Artazon", "deck", "SV: Terastal Charizard ex Deck", "020"),
+            card("d3", "Bibarel", "deck", "SV: Terastal Charizard ex Deck", "008"),
+            card("d4", "Bidoof", "deck", "SV: Terastal Charizard ex Deck", "007"),
+            # The vintage uppercase printing. BINARY collation sorts "EX" before
+            # "ex", so this used to beat the modern card on an exact-name tie.
+            card("v1", "Charizard EX", "flf", "Flashfire", "11"),
+            # The card the search is actually for.
+            card("m1", "Charizard ex", "sv03.5", "151", "199"),
+        ],
+        "t",
+    )
+    return CardCatalogRepository(conn)
+
+
+def test_search_ranks_own_name_above_set_name_matches(conn):
+    """A card matched only through its set name must not crowd out the card."""
+    repo = _ranking_catalog(conn)
+
+    # All six still match — the predicate is unchanged, only the order is.
+    assert len(repo.search("Charizard ex")) == 6
+
+    # The two Charizards rank above the four deck fillers, so a short popup
+    # still shows them. Pre-fix this returned Arceus V and Artazon.
+    top = [c.name for c in repo.search("Charizard ex", limit=2)]
+    assert top == ["Charizard ex", "Charizard EX"]
+
+
+def test_search_prefers_the_case_the_user_typed(conn):
+    """ "Charizard ex" means the modern card; "Charizard EX" the vintage one."""
+    repo = _ranking_catalog(conn)
+
+    assert repo.search("Charizard ex", limit=1)[0].card_id == "m1"
+    assert repo.search("Charizard EX", limit=1)[0].card_id == "v1"
+
+
 def test_full_number_combines_number_with_set_total():
     from tcginventory.domain.models import CatalogCard
 

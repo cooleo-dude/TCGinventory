@@ -501,3 +501,116 @@ def test_editor_warns_when_item_fields_are_shared_by_several_copies(app, conn):
     assert shared._shared_note is not None
     assert "2 copies" in shared._shared_note
     shared.deleteLater()
+
+
+def _identical(name: str):
+    """An item whose identity columns are all explicit, so the editor's combos
+    round-trip them unchanged — only the name distinguishes two of these."""
+    from tcginventory.domain.enums import Category, Edition, HoloPattern
+    from tcginventory.domain.models import Item
+
+    return Item(
+        name=name,
+        category=Category.SINGLE,
+        set_name="151",
+        card_number="199/165",
+        condition=Condition.NM,
+        holo_pattern=HoloPattern.NON_HOLO,
+        edition=Edition.NA,
+        language=Language.EN,
+    )
+
+
+@pytest.fixture
+def shown_warnings(monkeypatch):
+    """Swallow the editor's modal warnings and record their titles."""
+    from PySide6.QtWidgets import QMessageBox
+
+    seen: list[str] = []
+
+    def capture(_parent, title, _text, *a, **k):
+        seen.append(title)
+        return QMessageBox.Ok
+
+    monkeypatch.setattr(QMessageBox, "warning", capture)
+    return seen
+
+
+def test_editor_refuses_an_edit_that_duplicates_another_card(app, conn, shown_warnings):
+    """The negative case: renaming one card onto another's identity is stopped.
+
+    Nothing guarded the identity columns, so this used to save happily and leave
+    two rows that match-or-create could not choose between (ticket 67).
+    """
+    from PySide6.QtWidgets import QDialog
+
+    from tcginventory.ui.views.item_editor import ItemEditorDialog
+
+    items = ItemRepository(conn)
+    keep = items.add(_identical("Rayquaza"))
+    other = items.add(_identical("Charizard"))
+
+    dlg = ItemEditorDialog(conn, other.id, lot_id=None)
+    dlg._name.setText("Rayquaza")  # every other identity field already agrees
+    dlg._save()
+
+    # Refused: the dialog stayed open, said why, and wrote nothing.
+    assert dlg.result() != QDialog.Accepted
+    assert shown_warnings == ["Another card already has this identity"]
+    assert items.get(other.id).name == "Charizard"
+    assert items.get(keep.id).name == "Rayquaza"
+    dlg.deleteLater()
+
+
+def test_editor_still_saves_an_ordinary_edit(app, conn):
+    """The guard must not stand in the way of a normal change."""
+    from tcginventory.services.transactions import TransactionService
+    from tcginventory.ui.views.item_editor import ItemEditorDialog
+
+    svc = TransactionService(conn)
+    bought = buy(svc, "Rayquaza", 1000, 1000, "2026-01-01")
+    item_id = bought.lots[0].item_id
+
+    dlg = ItemEditorDialog(conn, item_id, lot_id=bought.lots[0].id)
+    dlg._name.setText("Rayquaza V")
+    dlg._save()
+
+    assert ItemRepository(conn).get(item_id).name == "Rayquaza V"
+    dlg.deleteLater()
+
+
+def test_editor_lets_a_pre_existing_duplicate_be_edited(app, conn):
+    """A clash that predates the edit is what someone is here to clean up.
+
+    Normalized-name matching means the nine duplicate groups in the real ledger
+    now find each other, so a strict guard would refuse to save either row and
+    lock the user out of the repair.
+    """
+    from dataclasses import replace
+
+    from tcginventory.services.transactions import TransactionService
+    from tcginventory.ui.views.item_editor import ItemEditorDialog
+
+    svc = TransactionService(conn)
+    first = buy(svc, "Charizard-GX", 1000, 1000, "2026-01-01")
+    items = ItemRepository(conn)
+    original_id = first.lots[0].item_id
+
+    # A second row for the same card, as the catalog rename used to produce.
+    twin = items.add(
+        replace(
+            items.get(original_id),
+            id=None,
+            created_at=None,
+            updated_at=None,
+            name="Charizard GX",
+        )
+    )
+    assert items.find_by_identity(items.get(twin.id)).id == original_id
+
+    dlg = ItemEditorDialog(conn, twin.id, lot_id=None)
+    dlg._location.setText("Binder 3")
+    dlg._save()
+
+    assert items.get(twin.id).location == "Binder 3"
+    dlg.deleteLater()

@@ -659,3 +659,91 @@ def test_variants_for_card_lists_base_first():
         ("Pokemon Center Exclusive", 9413, False),
     ]
     assert variants[0].tcgplayer_url == "eevee-base"
+
+
+# ---------------------------------------------------------------------------
+# Group resolution (ticket 67)
+# ---------------------------------------------------------------------------
+
+# The real collision, trimmed to what reproduces it: the 151 set's own group,
+# the McDonald's group whose *abbreviation* is "M15", and the SM-era groups
+# whose abbreviations "SM9"/"SM01" a 3-character "SUM" scores 0.667 against.
+_GROUPS_67 = {
+    "results": [
+        {"groupId": 1694, "name": "McDonald's Promos 2015", "abbreviation": "M15"},
+        {"groupId": 23237, "name": "SV: Scarlet & Violet 151", "abbreviation": "MEW"},
+        {
+            "groupId": 22873,
+            "name": "SV01: Scarlet & Violet Base Set",
+            "abbreviation": "SVI",
+        },
+        {"groupId": 2377, "name": "SM - Team Up", "abbreviation": "SM9"},
+        {"groupId": 1863, "name": "SM Base Set", "abbreviation": "SM01"},
+    ]
+}
+
+
+def _groups_only_fetch(url: str):
+    if url.endswith("/groups"):
+        return _GROUPS_67
+    raise AssertionError(f"unexpected url: {url}")
+
+
+def test_a_three_character_key_does_not_fuzzy_match_an_abbreviation():
+    """The negative case the fuzzy floor exists for.
+
+    "151" shares two characters with "M15" and scored 0.667 — over the 0.6
+    threshold — so the 151 set was priced against McDonald's Promos 2015. The
+    same happened to "SUM" against "SM9". Neither may resolve on fuzz alone.
+    """
+    p = TcgcsvProvider(fetch_json=_groups_only_fetch)
+
+    assert p.resolve_group("151", None, 3) is None
+    assert p.resolve_group(None, "SUM", 3) is None
+    # A long enough name still fuzzy-matches, so the fallback is not disabled.
+    assert p.resolve_group("Scarlet & Violet Base", None, 3) == 22873
+
+
+def test_group_resolves_exactly_once_the_set_code_is_known():
+    """The codes the catalog holds resolve all three sets exactly."""
+    p = TcgcsvProvider(fetch_json=_groups_only_fetch)
+
+    assert p.resolve_group("151", "MEW", 3) == 23237
+    assert p.resolve_group("Scarlet & Violet", "SVI", 3) == 22873
+    # "Sun & Moon"/"SUM" matches no group name or code; the alias bridges it.
+    assert p.resolve_group("Sun & Moon", "SUM", 3) == 1863
+
+
+def test_item_borrows_the_catalog_set_code_for_its_group(conn):
+    """Ledger items carry no set_code, so the provider looks one up.
+
+    Without it, "151" reached the fuzzy fallback and priced against McDonald's.
+    """
+    from tcginventory.data.repositories import CardCatalogRepository
+    from tcginventory.domain.models import CatalogCard
+    from tcginventory.services.pricing import set_codes_by_name
+
+    item = _pikachu(set_name="151", set_code=None, card_number="199/165")
+    assert item.set_code is None  # true of every item in the real ledger
+
+    bare = TcgcsvProvider(fetch_json=_groups_only_fetch)
+    assert bare._group_id(item) is None  # nothing left to resolve on
+
+    coded = TcgcsvProvider(fetch_json=_groups_only_fetch, set_codes={"151": "MEW"})
+    assert coded._group_id(item) == 23237
+
+    # And the map the service builds carries the code the catalog holds.
+    CardCatalogRepository(conn).replace_all(
+        [
+            CatalogCard(
+                card_id="c1",
+                name="Charizard ex",
+                set_id="sv03.5",
+                set_name="151",
+                set_code="MEW",
+                number="199",
+            )
+        ],
+        "t",
+    )
+    assert set_codes_by_name(conn)["151"] == "MEW"

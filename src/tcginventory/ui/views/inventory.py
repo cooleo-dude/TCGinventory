@@ -245,6 +245,45 @@ class _PreviewPrefetchWorker(QThread):
         self.history: dict[int, list] = {}
         self.trends: dict[int, object] = {}
 
+    def warm_rows(self, conn, snaps, trend_svc, today):
+        """Resolve art, price history and trend per row; returns the three maps.
+
+        Split out of :meth:`run` so the per-row isolation is testable without a
+        thread or a network.
+        """
+        images: dict[int, tuple[str, str]] = {}
+        history: dict[int, list] = {}
+        trends: dict[int, object] = {}
+        for lot_id, item_id, name, set_name, number in self._rows:
+            if self.isInterruptionRequested():
+                break
+            # Isolated per row, not per loop. run()'s outer handler used to be
+            # the only one, so a single row that threw — a bad URL, an unreadable
+            # cache file, one item's history — abandoned the loop and published
+            # whatever had accumulated so far. Every later lot then had no entry
+            # in `images`, and the grid drew "No preview" for it while the art
+            # sat on disk (ticket 67).
+            try:
+                hit = cardimages.art_for(conn, name, set_name, number)
+                if hit:
+                    images[lot_id] = hit
+                    cardimages.ensure_cached(hit[0], hit[1])  # warm disk
+                if item_id not in history:
+                    history[item_id] = snaps.history_for_item(
+                        item_id, since=self._since
+                    )
+                if item_id not in trends:
+                    item = SimpleNamespace(
+                        id=item_id,
+                        name=name,
+                        set_name=set_name,
+                        card_number=number,
+                    )
+                    trends[item_id] = trend_svc.trend_for(item, as_of=today)
+            except Exception:
+                continue  # this row goes without art; the rest do not
+        return images, history, trends
+
     def run(self) -> None:  # pragma: no cover - exercised via the UI
         from tcginventory.data.db import connect
         from tcginventory.data.pricehistory import open_history
@@ -260,28 +299,12 @@ class _PreviewPrefetchWorker(QThread):
                     hist_conn = open_history()
                 except Exception:
                     hist_conn = None  # no catalog history → snapshot fallback
-                snaps = PriceSnapshotRepository(conn)
-                trend_svc = TrendService(conn, hist_conn)
-                today = date.today()
-                for lot_id, item_id, name, set_name, number in self._rows:
-                    if self.isInterruptionRequested():
-                        break
-                    hit = cardimages.art_for(conn, name, set_name, number)
-                    if hit:
-                        images[lot_id] = hit
-                        cardimages.ensure_cached(hit[0], hit[1])  # warm disk
-                    if item_id not in history:
-                        history[item_id] = snaps.history_for_item(
-                            item_id, since=self._since
-                        )
-                    if item_id not in trends:
-                        item = SimpleNamespace(
-                            id=item_id,
-                            name=name,
-                            set_name=set_name,
-                            card_number=number,
-                        )
-                        trends[item_id] = trend_svc.trend_for(item, as_of=today)
+                images, history, trends = self.warm_rows(
+                    conn,
+                    PriceSnapshotRepository(conn),
+                    TrendService(conn, hist_conn),
+                    date.today(),
+                )
             finally:
                 conn.close()
                 if hist_conn is not None:

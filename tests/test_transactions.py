@@ -13,6 +13,7 @@ from tcginventory.data.repositories import (
 )
 from tcginventory.domain.enums import (
     AuditAction,
+    Condition,
     Direction,
     Intent,
     TransactionStatus,
@@ -402,3 +403,108 @@ def test_multiqty_indivisible_trade_away_reconciles_exactly(svc, conn):
     assert realized == result.realized_pl_cents == preview.realized_pl_cents
     for ln in out:
         assert _consumed(conn, ln.id) == ln.quantity
+
+
+def test_preview_flags_a_card_already_held_under_another_foil(conn):
+    """The advisory that stops the holo drift minting silent duplicates.
+
+    Eight of the nine duplicate groups in the real ledger differ by nothing but
+    holo_pattern, all created the day card entry began taking the foil from the
+    catalog (ticket 67). Neither value is provably wrong, so this warns and lets
+    the post through.
+    """
+    from tcginventory.domain.enums import HoloPattern
+
+    svc = TransactionService(conn)
+    buy(
+        svc,
+        "Charizard-GX",
+        1000,
+        1000,
+        "2026-01-01",
+        set_name="SM Black Star Promos",
+        card_number="SM60/SM248",
+        condition=Condition.NM,
+        holo_pattern=HoloPattern.NON_HOLO,
+    )
+
+    # The same card again, as the catalog now spells and foils it.
+    req = TransactionRequest(
+        occurred_at="2026-02-01",
+        cash_out_cents=1200,
+        incoming=[
+            incoming(
+                "Charizard GX",
+                1200,
+                set_name="SM Black Star Promos",
+                card_number="SM60/SM248",
+                condition=Condition.NM,
+                holo_pattern=HoloPattern.HOLO,
+            )
+        ],
+    )
+    preview = svc.preview(req)
+
+    (near,) = preview.near_matches
+    assert near.incoming_name == "Charizard GX"
+    assert near.item_name == "Charizard-GX"
+    assert near.holo_pattern == "NH"
+    assert near.on_hand == 1
+    # Advisory only — the post is still allowed.
+    assert preview.feasible
+
+
+def test_preview_does_not_flag_a_card_that_matches_exactly(conn):
+    """Re-buying a card you already own is ordinary, not suspicious."""
+    from tcginventory.domain.enums import HoloPattern
+
+    svc = TransactionService(conn)
+    kw = dict(
+        set_name="SM Black Star Promos",
+        card_number="SM60/SM248",
+        condition=Condition.NM,
+        holo_pattern=HoloPattern.HOLO,
+    )
+    buy(svc, "Charizard GX", 1000, 1000, "2026-01-01", **kw)
+
+    req = TransactionRequest(
+        occurred_at="2026-02-01",
+        cash_out_cents=1200,
+        incoming=[incoming("Charizard GX", 1200, **kw)],
+    )
+    assert svc.preview(req).near_matches == []
+
+
+def test_preview_does_not_flag_a_near_match_with_nothing_on_hand(conn):
+    """A printing you have owned but sold out of is not a duplicate risk."""
+    from tcginventory.domain.enums import HoloPattern
+
+    svc = TransactionService(conn)
+    kw = dict(
+        set_name="SM Black Star Promos",
+        card_number="SM60/SM248",
+        condition=Condition.NM,
+    )
+    bought = buy(
+        svc,
+        "Charizard-GX",
+        1000,
+        1000,
+        "2026-01-01",
+        holo_pattern=HoloPattern.NON_HOLO,
+        **kw,
+    )
+    svc.post(
+        TransactionRequest(
+            occurred_at="2026-01-15",
+            cash_in_cents=1500,
+            outgoing=[OutgoingCard(item_id=bought.lots[0].item_id, quantity=1)],
+        )
+    )
+
+    req = TransactionRequest(
+        occurred_at="2026-02-01",
+        cash_out_cents=1200,
+        incoming=[incoming("Charizard GX", 1200, holo_pattern=HoloPattern.HOLO, **kw)],
+    )
+    assert svc.preview(req).near_matches == []

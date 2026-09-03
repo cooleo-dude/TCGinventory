@@ -117,6 +117,82 @@ def test_item_find_by_identity_matches_and_distinguishes(conn):
     assert repo.find_by_identity(_raw_item(language=Language.JP)) is None
 
 
+def test_identity_survives_a_catalog_rename(conn):
+    """Punctuation drift in the name must not mint a second item (ticket 67).
+
+    The catalog source change renamed "Charizard-GX" to "Charizard GX". Compared
+    exactly, the next purchase created a new row and the following sale drew it
+    down, leaving the copy actually owned showing as unsold.
+    """
+    repo = ItemRepository(conn)
+    stored = repo.add(_raw_item(name="Charizard-GX"))
+
+    for spelling in ("Charizard GX", "charizard gx", "CharizardGX", "Charizard—GX"):
+        match = repo.find_by_identity(_raw_item(name=spelling))
+        assert match is not None, spelling
+        assert match.id == stored.id, spelling
+
+    # The stored spelling is never rewritten — only matching is relaxed.
+    assert repo.get(stored.id).name == "Charizard-GX"
+
+    # A genuinely different card in the same slot still does not match.
+    assert repo.find_by_identity(_raw_item(name="Charizard VMAX")) is None
+
+
+def test_identity_rename_still_respects_the_other_columns(conn):
+    """The relaxed name must not let a different printing match."""
+    repo = ItemRepository(conn)
+    repo.add(_raw_item(name="Mr. Mime"))
+
+    # Same normalized name, but another identity column differs → no match.
+    assert (
+        repo.find_by_identity(_raw_item(name="Mr Mime", card_number="011/073")) is None
+    )
+    assert (
+        repo.find_by_identity(_raw_item(name="Mr Mime", condition=Condition.LP)) is None
+    )
+    assert (
+        repo.find_by_identity(_raw_item(name="Mr Mime", language=Language.JP)) is None
+    )
+
+
+def test_near_identity_finds_the_same_card_under_another_foil(conn):
+    """The drift normalization cannot cover: holo_pattern (ticket 67).
+
+    A reverse holo really is a different card, so foil can never be normalized
+    away — but it is the column that drifted when card entry began taking the
+    foil from the catalog's treatment table instead of defaulting to non-holo.
+    """
+    repo = ItemRepository(conn)
+    stocked = repo.add(
+        _raw_item(name="Charizard-GX", holo_pattern=HoloPattern.NON_HOLO)
+    )
+
+    # Same card, catalog spelling, and the foil the treatment table now reports.
+    incoming = _raw_item(name="Charizard GX", holo_pattern=HoloPattern.HOLO)
+    assert repo.find_by_identity(incoming) is None  # a genuinely new identity
+    assert [i.id for i in repo.find_near_identity(incoming)] == [stocked.id]
+
+    # An exact identity match is not "near" — there is nothing to warn about.
+    exact = _raw_item(name="Charizard GX", holo_pattern=HoloPattern.NON_HOLO)
+    assert repo.find_near_identity(exact) == []
+
+    # And a different printing is not a near match either.
+    assert (
+        repo.find_near_identity(_raw_item(name="Charizard GX", card_number="011/073"))
+        == []
+    )
+
+
+def test_identity_returns_the_lowest_id_on_a_normalized_tie(conn):
+    """Two rows already drifted apart: the older one wins, as before."""
+    repo = ItemRepository(conn)
+    first = repo.add(_raw_item(name="Charizard-GX"))
+    repo.add(_raw_item(name="Charizard GX"))
+
+    assert repo.find_by_identity(_raw_item(name="Charizard GX")).id == first.id
+
+
 def test_item_round_trips_holo_and_edition(conn):
     repo = ItemRepository(conn)
     item = repo.add(
