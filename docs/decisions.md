@@ -3437,3 +3437,44 @@ meant clicking **Edit item…** inside it to open a second dialog,
 - **Rejected: reusing `subline_for`.** It takes an `InventoryRow` — an owned lot —
   and a checklist exists to show the slots you do *not* own.
 - Suite 1,270 passing.
+
+### 2026-09-03 — `parentItem()` deleted the scene photo (ticket 68)
+
+- **Symptom:** in Recognition, drawing a box made the photo go blank. Reported
+  as "accept the YOLO proposals, then draw a new box", but it reproduced with no
+  proposals at all: any draw-mode press landing on bare image rather than on an
+  existing box destroyed the background. A press that lands *on* a box returns
+  early and was safe, which is what made it look proposal-specific — accepting
+  proposals is simply what leaves you drawing in the gaps.
+- **Cause: in PySide6, `QGraphicsItem.parentItem()` returning `None` transfers
+  that item's ownership from C++ to Python.** `Shiboken.ownedByPython(item)` goes
+  `False -> True` across the call. `_Scene._box_at` walked `node.parentItem()` to
+  find the `_BoxItem` behind a badge or grip; the background was added as
+  `addPixmap(...)` with the return value dropped, so nothing held a Python
+  reference, and the transient wrapper the walk created took the item with it
+  when it was refcounted away. Deleting the item removes it from the scene.
+  Measured: `items=16 pixmaps=1` before the drag, `items=22 pixmaps=0` after,
+  and the loss happens on the **press**, not the release.
+- Introduced 2026-08-07 in `b745e0c`, the commit that added `_box_at` — the
+  parent walk is what bought "a click selects a box while draw mode is on".
+- **The fix is to tag the decorations and climb only through them.** Badge,
+  badge number and the four grips carry `_DECOR_ROLE`; the walk runs
+  `while node is not None and node.data(_DECOR_ROLE)`. A decoration always has a
+  parent, so `parentItem()` can no longer return `None`, and `_BoxItem` carries
+  no tag so the loop terminates on it. Role `0` stays the box number, which the
+  delete paths read.
+- **Rejected: an `isinstance` tuple of the decoration types.** Works today, but
+  it is a list of every decoration that will ever exist and breaks silently the
+  next time one is added. A tag travels with the item that needs it.
+- **Rejected: only holding a reference to the background.** A referenced item
+  survives the flip, so it fixes the symptom — and leaves the trap armed for
+  every other top-level item the walk touches. `_DividerLine` is flipped today
+  too, and survives only because `self._divider` happens to hold it.
+- The held reference is kept anyway, as defence in depth: `self._pixmap_item`,
+  dropped before each `scene.clear()`. Belt-and-braces, not the fix.
+- **The guard had to be the ownership, not the pixel.** Holding the reference
+  hides the walk regressing, so the test asserts
+  `not Shiboken.ownedByPython(background)` after a hit-test. Checked both ways:
+  reverting the walk reddens that test, reverting the reference reddens the
+  defence test. `_box_at` is the only `parentItem()` call in `ui/`.
+- Suite 1,275 passing.
