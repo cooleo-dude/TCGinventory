@@ -77,6 +77,84 @@ def test_inventory_mark_missing_from_view(app, seeded_conn):
     view.deleteLater()
 
 
+def test_name_tag_labels_stolen_sold_partial(app, svc, inv, conn):
+    """Ticket 70: a stolen lot gets its own pill beside the card name, and it
+    wins over the sold states. The sold/partial pills are unchanged.
+
+    Rows are built here rather than taken from the demo seed, which carries no
+    partly-sold lot."""
+    from conftest import buy, sell
+    from tcginventory.ui import theme
+    from tcginventory.ui.views._inventory_delegates import name_tag
+
+    keeper = buy(svc, "Keeper", 1000, 1200, "2026-01-01").lots[0]
+    flip = buy(svc, "Flip", 1000, 1200, "2026-01-02").lots[0]
+    sell(svc, flip.item_id, 1, 1500, "2026-02-01")
+    part = buy(svc, "Part", 1000, 1200, "2026-01-03", quantity=2).lots[0]
+    sell(svc, part.item_id, 1, 1500, "2026-02-02")
+    conn.commit()
+
+    def row_for(lot_id):
+        return next(r for r in inv.inventory_rows() if r.lot_id == lot_id)
+
+    t = theme.active()
+
+    assert row_for(keeper.id).sold_status == "unsold"
+    assert name_tag(row_for(keeper.id)) is None  # nothing to say about it
+
+    assert name_tag(row_for(flip.id))[0] == "Sold"
+    assert name_tag(row_for(flip.id))[1] == t.ink2
+
+    assert name_tag(row_for(part.id))[0] == "Partial"
+    assert name_tag(row_for(part.id))[1] == t.warn
+
+    # Mark the untouched lot stolen → the Stolen pill, in the loss colour.
+    inv.set_lot_missing(keeper.id, True)
+    conn.commit()
+    label, fg, bg = name_tag(row_for(keeper.id))
+    assert label == "Stolen"
+    assert fg == t.neg
+    assert bg.alpha() < 255  # a soft fill, like the other pills
+
+    # A part-sold lot that is also stolen shows Stolen, not Partial.
+    inv.set_lot_missing(part.id, True)
+    conn.commit()
+    assert row_for(part.id).sold_status == "Missing"
+    assert name_tag(row_for(part.id))[0] == "Stolen"
+
+    assert name_tag(None) is None  # an empty cell paints no pill
+
+
+def test_inventory_stolen_filter_segment(app, seeded_conn):
+    """Ticket 70: the Sold filter's Stolen segment shows exactly the stolen
+    lots, and selecting it drops the contradictory In-stock chip."""
+    from tcginventory.services.inventory import InventoryService
+    from tcginventory.ui.views.inventory import InventoryView
+
+    view = InventoryView(seeded_conn)
+    stolen_lot = view._model.row_at(0).lot_id
+    InventoryService(seeded_conn).set_lot_missing(stolen_lot, True)
+    seeded_conn.commit()
+    view.refresh()
+
+    # "In stock" on top of "Stolen" would be an empty grid — the chip gives way.
+    view._in_stock.setChecked(True)
+    view._sold.select("Missing")
+    assert not view._in_stock.isChecked()
+
+    visible = [
+        view._model.row_at(view._proxy.mapToSource(view._proxy.index(i, 0)).row())
+        for i in range(view._proxy.rowCount())
+    ]
+    assert [r.lot_id for r in visible] == [stolen_lot]
+    assert all(r.missing for r in visible)
+
+    # Back to All → the stolen row is still there, beside everything else.
+    view._sold.select("All")
+    assert view._proxy.rowCount() == view._model.rowCount()
+    view.deleteLater()
+
+
 def test_inventory_ebay_link_auto_populated(app, seeded_conn):
     from tcginventory.services.inventory import InventoryService
     from tcginventory.ui.models.inventory_model import (
