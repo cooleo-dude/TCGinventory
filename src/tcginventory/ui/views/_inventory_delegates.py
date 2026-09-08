@@ -1,5 +1,5 @@
-"""Stylized Inventory-grid delegates: the composite Card cell (art + name + sold
-tag + sub-line), the condition/grade badge, and the intent chip.
+"""Stylized Inventory-grid delegates: the composite Card cell (art + name +
+status tag + sub-line), the condition/grade badge, and the intent chip.
 
 They paint against the Ember Duo theme and draw their own row background so the
 custom cells match the view's selection / alternate-row / hover states.
@@ -63,8 +63,30 @@ def _soft(hex_color: str, alpha: int = 40) -> QColor:
     return c
 
 
+def name_tag(row) -> tuple[str, str, QColor] | None:
+    """The pill drawn beside a card name in the Card column, as
+    ``(label, text colour, fill)`` — or ``None`` when the row needs none.
+
+    A stolen/missing lot wins over the sold states: the impairment is the more
+    consequential fact, and ``InventoryRow.sold_status`` already reports
+    ``"Missing"`` in place of sold/partial for one (ADR 2026-07-27). Kept out of
+    :meth:`CardCellDelegate.paint` so the decision is assertable in a test.
+    """
+    if row is None:
+        return None
+    t = theme.active()
+    if row.missing:
+        return ("Stolen", t.neg, _soft(t.neg, 40))
+    if row.sold_status == "sold":
+        return ("Sold", t.ink2, _soft(t.ink3, 55))
+    if row.sold_status == "partial":
+        return ("Partial", t.warn, _soft(t.warn, 40))
+    return None
+
+
 class CardCellDelegate(QStyledItemDelegate):
-    """The Card column: thumbnail + card name + Sold/Partial tag + sub-line."""
+    """The Card column: thumbnail + card name + Stolen/Sold/Partial tag +
+    sub-line."""
 
     def __init__(self, view, thumb_provider) -> None:
         super().__init__(view)
@@ -101,13 +123,11 @@ class CardCellDelegate(QStyledItemDelegate):
         fm = painter.fontMetrics()
         name_cy = r.top() + r.height() // 2 - fm.height() // 2 + fm.ascent()
 
-        # Sold / Partial tag, right-aligned on the name line.
+        # Stolen / Sold / Partial tag, right-aligned on the name line.
         tag_left = right
-        status = row.sold_status if row is not None else "unsold"
-        if status in ("sold", "partial"):
-            label = "Sold" if status == "sold" else "Partial"
-            tag_fg = t.ink2 if status == "sold" else t.warn
-            tag_bg = _soft(t.ink3, 55) if status == "sold" else _soft(t.warn, 40)
+        tag = name_tag(row)
+        if tag is not None:
+            label, tag_fg, tag_bg = tag
             small = QFont(option.font)
             small.setPointSizeF(max(7.0, option.font.pointSizeF() - 2))
             small.setBold(True)

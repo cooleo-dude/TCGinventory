@@ -428,9 +428,12 @@ class InventoryView(QWidget):
                 ("Unsold", "unsold"),
                 ("Partial", "partial"),
                 ("Sold", "sold"),
+                # Value is the service's word ("Missing"), label the user's.
+                ("Stolen", "Missing"),
             ]
         )
         self._sold.changed.connect(self._proxy.set_sold)
+        self._sold.changed.connect(self._on_sold_filter)
         self._sold.changed.connect(lambda *_: self._update_summary())
 
         self._graded = _Segmented(
@@ -662,6 +665,13 @@ class InventoryView(QWidget):
         self._table.scrollTo(index, QAbstractItemView.PositionAtCenter)
         self._table.setFocus(Qt.OtherFocusReason)
         return True
+
+    def _on_sold_filter(self, value: str) -> None:
+        """A stolen lot is by definition not on hand, so leaving the In-stock
+        chip active would make the Stolen segment show an empty grid. Drop the
+        chip instead of dead-ending the filter."""
+        if value == "Missing" and self._in_stock.isChecked():
+            self._in_stock.setChecked(False)  # → set_in_stock_only(False)
 
     def _clear_filters(self) -> None:
         """Reset the filter bar to 'show everything' (widgets included, so the
