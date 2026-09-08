@@ -101,3 +101,62 @@ def test_inventory_rows_partial_sale(svc, inv):
     assert row.on_hand == 2
     assert row.acquired_qty == 3
     assert row.sold_status == "partial"
+
+
+# --- sellable_cost_groups: the give picker split by purchase price (71) -------
+
+
+def test_cost_groups_split_one_item_by_purchase_price(svc, inv):
+    # The same card bought twice at different prices: $20 then $50.
+    buy(svc, "Charizard", 2000, 6000, "2026-01-01")
+    buy(svc, "Charizard", 5000, 6000, "2026-02-01")
+
+    groups = inv.sellable_cost_groups()
+    assert [(g.item.name, g.unit_cost_cents, g.available) for g in groups] == [
+        ("Charizard", 2000, 1),
+        ("Charizard", 5000, 1),
+    ]
+    # sellable_items still sums them into one entry — the two views disagree
+    # deliberately, and that is the point of the split.
+    assert [(i.name, avail) for i, avail in inv.sellable_items()] == [("Charizard", 2)]
+
+
+def test_cost_groups_merge_lots_bought_at_the_same_price(svc, inv):
+    # Two separate purchases at the same price are one pickable group: the user
+    # cannot tell them apart, so offering two entries would be a false choice.
+    buy(svc, "Pikachu", 2000, 1500, "2026-01-01", quantity=2)  # $10 a unit
+    buy(svc, "Pikachu", 1000, 1500, "2026-03-01")  # the same $10 a unit
+
+    (group,) = inv.sellable_cost_groups()
+    assert group.unit_cost_cents == 1000
+    assert group.available == 3
+
+
+def test_cost_groups_ordered_oldest_acquisition_first(svc, inv):
+    # Bought expensive first, cheap second → the expensive group leads, because
+    # that is the one an unrestricted FIFO sale would have consumed.
+    buy(svc, "Mewtwo", 9000, 9000, "2026-01-01")
+    buy(svc, "Mewtwo", 1000, 9000, "2026-06-01")
+
+    assert [g.unit_cost_cents for g in inv.sellable_cost_groups()] == [9000, 1000]
+
+
+def test_cost_groups_exclude_ripping_personal_and_missing(svc, inv, conn):
+    buy(svc, "Stock", 1000, 1000, "2026-01-01")
+    buy(svc, "Booster Box", 12000, 12000, "2026-01-02", intent=Intent.RIPPING)
+    buy(svc, "Keeper", 2000, 2000, "2026-01-03", intent=Intent.PERSONAL)
+    stolen = buy(svc, "Stolen", 3000, 3000, "2026-01-04")
+    inv.set_lot_missing(stolen.lots[0].id, True)
+    conn.commit()
+
+    assert [g.item.name for g in inv.sellable_cost_groups()] == ["Stock"]
+
+
+def test_cost_groups_drop_a_group_once_it_is_sold_out(svc, inv):
+    cheap = buy(svc, "Snorlax", 1000, 4000, "2026-01-01")
+    buy(svc, "Snorlax", 3000, 4000, "2026-02-01")
+    item_id = cheap.lots[0].item_id
+
+    # FIFO takes the $10 lot, so the $10 group empties and stops being offered.
+    sell(svc, item_id, 1, 4000, "2026-03-01")
+    assert [g.unit_cost_cents for g in inv.sellable_cost_groups()] == [3000]

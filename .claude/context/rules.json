@@ -21,7 +21,7 @@
       "source": {
         "file": "CLAUDE.md",
         "anchor": "## Non-negotiable architecture rules",
-        "excerpt_sha256": "ac6adee038463cef"
+        "excerpt_sha256": "9d46e834c2c3785a"
       },
       "scope": [
         "src/tcginventory/**/*.py"
@@ -36,7 +36,7 @@
       "source": {
         "file": "CLAUDE.md",
         "anchor": "## Non-negotiable architecture rules",
-        "excerpt_sha256": "ac6adee038463cef"
+        "excerpt_sha256": "9d46e834c2c3785a"
       },
       "scope": [
         "src/tcginventory/services/allocation.py",
@@ -47,12 +47,12 @@
     {
       "id": "FIFO-DRAWDOWN",
       "lane": "invariants",
-      "rule": "Disposals draw down lots FIFO.",
+      "rule": "Disposals draw down lots FIFO: within the cost group an outgoing card names, else across all of that item's lots. A named group is still consumed oldest-first.",
       "violation": "A disposal path without a deterministic acquisition ordering, or a batching rewrite that loses it.",
       "source": {
         "file": "CLAUDE.md",
         "anchor": "## Non-negotiable architecture rules",
-        "excerpt_sha256": "ac6adee038463cef"
+        "excerpt_sha256": "9d46e834c2c3785a"
       },
       "scope": [
         "src/tcginventory/services/**/*.py",
@@ -68,7 +68,7 @@
       "source": {
         "file": "CLAUDE.md",
         "anchor": "## Non-negotiable architecture rules",
-        "excerpt_sha256": "ac6adee038463cef"
+        "excerpt_sha256": "9d46e834c2c3785a"
       },
       "scope": [
         "src/tcginventory/services/**/*.py",
@@ -84,7 +84,7 @@
       "source": {
         "file": "CLAUDE.md",
         "anchor": "## Non-negotiable architecture rules",
-        "excerpt_sha256": "ac6adee038463cef"
+        "excerpt_sha256": "9d46e834c2c3785a"
       },
       "scope": [
         "src/tcginventory/services/**/*.py"
@@ -115,7 +115,7 @@
       "source": {
         "file": "CLAUDE.md",
         "anchor": "## Non-negotiable architecture rules",
-        "excerpt_sha256": "ac6adee038463cef"
+        "excerpt_sha256": "9d46e834c2c3785a"
       },
       "scope": [
         "src/tcginventory/domain/**/*.py",
@@ -131,7 +131,7 @@
       "source": {
         "file": "CLAUDE.md",
         "anchor": "## Non-negotiable architecture rules",
-        "excerpt_sha256": "ac6adee038463cef"
+        "excerpt_sha256": "9d46e834c2c3785a"
       },
       "scope": [
         "src/tcginventory/ui/**/*.py"
@@ -298,7 +298,7 @@
       "source": {
         "file": "CLAUDE.md",
         "anchor": "## Non-negotiable architecture rules",
-        "excerpt_sha256": "ac6adee038463cef"
+        "excerpt_sha256": "9d46e834c2c3785a"
       },
       "scope": [
         "src/tcginventory/services/**/*.py"
@@ -404,7 +404,7 @@
       "source": {
         "file": ".claude/context/app-map.json",
         "anchor": "databases",
-        "excerpt_sha256": "f77282cca65d7fc0"
+        "excerpt_sha256": "b2a9a1d263ad489d"
       },
       "scope": [
         "src/tcginventory/data/**/*.py",

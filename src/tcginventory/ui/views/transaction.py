@@ -91,7 +91,7 @@ from tcginventory.services import cardimages, tcgplayer
 from tcginventory.services.ebay import sold_search_url
 from tcginventory.services.exceptions import ServiceError
 from tcginventory.services.inference import write_back as inference_write_back
-from tcginventory.services.inventory import InventoryService
+from tcginventory.services.inventory import InventoryService, SellableGroup
 from tcginventory.services.reporting import ReportingService
 from tcginventory.services.transactions import (
     IncomingCard,
@@ -107,7 +107,13 @@ from tcginventory.ui.card_preview import (
 )
 from tcginventory.ui.clipboard_images import clipboard_image_paths
 from tcginventory.ui.completer_popup import show_fitted
-from tcginventory.ui.formatting import item_labels, money, percent
+from tcginventory.ui.formatting import (
+    cost_group_label,
+    cost_group_labels,
+    item_labels,
+    money,
+    percent,
+)
 from tcginventory.ui.views._autofill_dialog import AutofillDialog
 from tcginventory.ui.views._card_entry import (
     CardEntryMixin,
@@ -303,9 +309,19 @@ def _recognized_name(card) -> str:
     return " ".join(parts)
 
 
-def _match_sellable(sellable, card) -> int | None:
-    """Best-effort match of a recognized card to an owned sellable lot's item id,
-    by name (+ collector number, then set). Returns None when nothing matches."""
+def _match_sellable(groups, card) -> int | None:
+    """Best-effort match of a recognized card to an owned item id, by name
+    (+ collector number, then set). Returns None when nothing matches.
+
+    Matches on **identity only** — a recognized photo says which card it is, not
+    which copy of it. The caller therefore fills the row unrestricted and lets
+    FIFO decide, exactly as it did before cost groups existed (ticket 71); the
+    user can narrow it to a price by hand afterwards.
+    """
+    seen: dict[int, Item] = {}
+    for group in groups:
+        seen.setdefault(group.item.id, group.item)
+    sellable = [(item, 0) for item in seen.values()]
 
     def norm(text) -> str:
         return (text or "").strip().casefold()
@@ -373,30 +389,47 @@ class _GiveRow:
     image in the shared card display.
     """
 
-    _ITEM_ID_ROLE = Qt.UserRole + 1
+    # The row of the completion model holds an index into ``self._groups``,
+    # because a pickable entry is a (card, price) pair and no single int
+    # identifies one.
+    _GROUP_ROLE = Qt.UserRole + 1
 
-    def __init__(
-        self, conn, sellable: list[tuple[Item, int]], on_change, sink=None
-    ) -> None:
+    def __init__(self, conn, groups: list[SellableGroup], on_change, sink=None) -> None:
         self._conn = conn
-        self._sellable = sellable  # [(Item, available)]
-        self._by_id = {item.id: (item, avail) for item, avail in sellable}
+        self._groups = groups
+        # A selection is keyed ``(item_id, unit_cost_cents)``, and a *None* price
+        # means "any copy" — no restriction, plain FIFO. Only the programmatic
+        # paths produce that key (see ``set_item``); everything picked out of the
+        # popup names a price.
+        self._keys = [(g.item.id, g.unit_cost_cents) for g in groups]
+        self._by_key = dict(zip(self._keys, groups, strict=True))
         # Labels are computed once for the whole picker, not per lookup: the row
         # refills its completion model on every keystroke, and a label derived
         # one at a time rescans every sibling (196 ms a keystroke at 769 cards).
-        items = [item for item, _avail in sellable]
-        self._labels = dict(zip((i.id for i in items), item_labels(items), strict=True))
+        self._labels = dict(zip(self._keys, cost_group_labels(groups), strict=True))
         # The same labels with punctuation and case removed, so searching the
         # card's current name finds a copy stored under the catalog's older
         # spelling. Typing "Charizard GX" used to match nothing while
         # "Charizard-GX" sat on hand, which is how a sale came to be recorded
         # against a fresh $0 lot instead of the copy owned (ticket 67).
         self._norm_labels = {
-            item_id: normalized_name(label) for item_id, label in self._labels.items()
+            key: normalized_name(label) for key, label in self._labels.items()
         }
+        # Per-item fallbacks for an unrestricted selection: its plain label and
+        # the units on hand across every one of its groups.
+        items = list({g.item.id: g.item for g in groups}.values())
+        self._items_by_id = {item.id: item for item in items}
+        self._any_labels = dict(
+            zip((i.id for i in items), item_labels(items), strict=True)
+        )
+        self._any_available: dict[int, int] = {}
+        for group in groups:
+            self._any_available[group.item.id] = (
+                self._any_available.get(group.item.id, 0) + group.available
+            )
         self._sink = sink
         self._on_change = on_change
-        self._chosen_id: int | None = None
+        self._chosen: tuple[int, int | None] | None = None
 
         self.name = _FocusLineEdit()
         self.name.setPlaceholderText("Type to search your cards to give…")
@@ -425,33 +458,46 @@ class _GiveRow:
     def widgets(self) -> list[QWidget]:
         return [self.name, self.qty]
 
-    def _label(self, item: Item) -> str:
+    def _label(self, key: tuple[int, int | None]) -> str:
         """Name, set and number, plus whatever tells this card apart from the
-        other sellable rows sharing that much — see ``formatting.item_labels``.
+        other sellable rows sharing that much — see ``formatting.item_labels`` —
+        and the price paid where the card is held at more than one.
 
         A dictionary lookup, not a computation: ``_on_text_changed`` re-derives
         this on every edit to decide the selection still stands, and the labels
         were settled once against the row's fixed sellable set.
         """
-        return self._labels[item.id]
+        item_id, unit_cost_cents = key
+        if unit_cost_cents is None:
+            return self._any_labels[item_id]
+        return self._labels[key]
+
+    def _available(self, key: tuple[int, int | None]) -> int:
+        item_id, unit_cost_cents = key
+        if unit_cost_cents is None:
+            return self._any_available.get(item_id, 0)
+        return self._by_key[key].available
+
+    def _item(self, key: tuple[int, int | None]) -> Item:
+        return self._items_by_id[key[0]]
 
     def _fill(self, needle: str) -> None:
         self._model.clear()
         needle = needle.strip().lower()
         norm_needle = normalized_name(needle)
         shown = 0
-        for item, _available in self._sellable:
+        for index, key in enumerate(self._keys):
             if shown >= _MATCH_LIMIT:
                 break
-            label = self._label(item)
+            label = self._labels[key]
             if (
                 needle
                 and needle not in label.lower()
-                and norm_needle not in self._norm_labels[item.id]
+                and norm_needle not in self._norm_labels[key]
             ):
                 continue
             entry = QStandardItem(label)
-            entry.setData(item.id, self._ITEM_ID_ROLE)
+            entry.setData(index, self._GROUP_ROLE)
             self._model.appendRow(entry)
             shown += 1
 
@@ -478,28 +524,32 @@ class _GiveRow:
 
     def _on_text_changed(self, *_) -> None:
         # Editing away from the chosen card's label drops the selection.
-        if self._chosen_id is not None:
-            item, _available = self._by_id[self._chosen_id]
-            if self.name.text() != self._label(item):
-                self._chosen_id = None
-                self.qty.setMaximum(1)
+        if self._chosen is not None and self.name.text() != self._label(self._chosen):
+            self._chosen = None
+            self.qty.setMaximum(1)
         self._on_change()
 
+    def _key_at(self, index: QModelIndex) -> tuple[int, int | None] | None:
+        row = index.data(self._GROUP_ROLE)
+        return self._keys[row] if row is not None else None
+
     def _on_popup_hover(self, index: QModelIndex) -> None:
-        self._preview(index.data(self._ITEM_ID_ROLE))
+        self._preview(self._key_at(index))
 
     def _pick(self, index: QModelIndex) -> None:
-        self._set_chosen(index.data(self._ITEM_ID_ROLE))
+        key = self._key_at(index)
+        if key is not None:
+            self._set_chosen(key)
 
-    def _set_chosen(self, item_id) -> None:
-        pair = self._by_id.get(item_id)
-        if pair is None:
+    def _set_chosen(self, key: tuple[int, int | None]) -> None:
+        if key[0] not in self._items_by_id:
             return
-        item, available = pair
-        self._chosen_id = item_id
-        self.name.setText(self._label(item))
-        self.qty.setMaximum(max(1, available))
-        self._preview(item_id)
+        if key[1] is not None and key not in self._by_key:
+            return
+        self._chosen = key
+        self.name.setText(self._label(key))
+        self.qty.setMaximum(max(1, self._available(key)))
+        self._preview(key)
         self._on_change()
 
     def _image_for(self, item: Item) -> tuple[str, str] | None:
@@ -507,27 +557,58 @@ class _GiveRow:
             self._conn, item.name, item.set_name, item.card_number
         )
 
-    def _preview(self, item_id) -> None:
-        if self._sink is None or item_id is None:
+    def _preview(self, key) -> None:
+        if self._sink is None or key is None:
             return
-        pair = self._by_id.get(item_id)
-        if pair is not None:
-            res = self._image_for(pair[0])
+        item = self._items_by_id.get(key[0])
+        if item is not None:
+            res = self._image_for(item)
             self._sink.show_card(*(res if res else (None, None)))
 
     def _hover_card(self) -> tuple[str, str] | None:
-        if self._chosen_id is None:
+        if self._chosen is None:
             return None
-        return self._image_for(self._by_id[self._chosen_id][0])
+        return self._image_for(self._item(self._chosen))
 
-    def set_item(self, item_id: int, quantity: int) -> None:
-        self._set_chosen(item_id)
+    def set_item(
+        self, item_id: int, quantity: int, unit_cost_cents: int | None = None
+    ) -> None:
+        """Fill the row programmatically — the edit-load and recognition paths.
+
+        ``unit_cost_cents`` names a cost group; omitting it selects the card
+        **unrestricted**, so FIFO decides as it always did. That matters for the
+        recognition import in particular: a photo identifies the card, not the
+        copy, and silently restricting it to one price would refuse a quantity
+        that legitimately spans two of them.
+        """
+        key = (item_id, unit_cost_cents)
+        if unit_cost_cents is not None and key not in self._by_key:
+            if item_id not in self._items_by_id:
+                return  # nothing of this card is sellable at all
+            # The group is off the shelf because the transaction being edited is
+            # what consumed it. An edit voids before it re-posts, so those units
+            # come back — registering the group here keeps the restriction rather
+            # than silently dropping to FIFO and moving the basis.
+            group = SellableGroup(
+                item=self._items_by_id[item_id],
+                unit_cost_cents=unit_cost_cents,
+                available=quantity,
+            )
+            self._by_key[key] = group
+            self._keys.append(key)
+            self._labels[key] = cost_group_label(group, self._any_labels[item_id])
+            self._norm_labels[key] = normalized_name(self._labels[key])
+        self._set_chosen(key)
         self.qty.setValue(quantity)
 
     def to_card(self):
-        if self._chosen_id is None:
+        if self._chosen is None:
             return None
-        return OutgoingCard(item_id=self._chosen_id, quantity=self.qty.value())
+        return OutgoingCard(
+            item_id=self._chosen[0],
+            quantity=self.qty.value(),
+            unit_cost_cents=self._chosen[1],
+        )
 
     def widget(self, on_delete) -> QWidget:
         """A styled give card-row: search field + quantity + remove."""
@@ -1529,7 +1610,7 @@ class TransactionView(QWidget):
         self._update_summary()
 
     def _add_give_row(self) -> _GiveRow | None:
-        sellable = self._inventory.sellable_items()
+        sellable = self._inventory.sellable_cost_groups()
         if not sellable:
             QMessageBox.information(
                 self, "Nothing to give", "No sellable cards on hand."
@@ -1597,7 +1678,7 @@ class TransactionView(QWidget):
     def add_outgoing(self, card: OutgoingCard, display_name: str = "") -> None:
         row = self._add_give_row()
         if row is not None:
-            row.set_item(card.item_id, card.quantity)
+            row.set_item(card.item_id, card.quantity, card.unit_cost_cents)
             self._update_summary()
 
     def add_incoming(self, card: IncomingCard) -> None:
@@ -1623,7 +1704,7 @@ class TransactionView(QWidget):
         matched to owned sellable lots. Returns the display names of any give
         cards with no matching inventory lot (skipped)."""
         self.clear()
-        sellable = self._inventory.sellable_items()
+        sellable = self._inventory.sellable_cost_groups()
         unmatched: list[str] = []
         for card in cards:
             if getattr(card, "side", None) == "give":
@@ -2084,7 +2165,11 @@ class TransactionView(QWidget):
             item = items.get(line.item_id)
             if line.direction is Direction.OUT:
                 self.add_outgoing(
-                    OutgoingCard(item_id=line.item_id, quantity=line.quantity)
+                    OutgoingCard(
+                        item_id=line.item_id,
+                        quantity=line.quantity,
+                        unit_cost_cents=line.chosen_unit_cost_cents,
+                    )
                 )
             elif item is not None:
                 line_lots = lots.list_for_acquired_line(line.id)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from tcginventory.data.db import connect
 from tcginventory.data.migrator import (
+    apply_migration,
     available_migrations,
     current_version,
     migrate,
@@ -167,3 +168,44 @@ def test_lot_consumption_lot_index_added_by_0018():
         )
     }
     assert "idx_consumption_lot" in indexes
+
+
+def test_0026_adds_the_chosen_cost_group_column():
+    conn = connect(":memory:")
+    migrate(conn)
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info('transaction_line')")}
+    assert "chosen_unit_cost_cents" in columns
+
+
+def test_0026_leaves_an_existing_line_unrestricted():
+    """A line posted before the column existed must stay plain FIFO.
+
+    Upgrading is not allowed to invent a lot choice for a disposal that never
+    made one: a NULL there is what keeps an old sale editable without its basis
+    moving (ticket 71).
+    """
+    conn = connect(":memory:")
+    for migration in available_migrations():
+        if migration.version >= 26:
+            break
+        apply_migration(conn, migration)
+    conn.execute(
+        "INSERT INTO item (id, name, category, created_at, updated_at) "
+        "VALUES (1, 'Old Card', 'single', '2026-01-01', '2026-01-01')"
+    )
+    conn.execute(
+        'INSERT INTO "transaction" (id, type, occurred_at, cash_delta_cents, '
+        "status, created_at) "
+        "VALUES (1, 'sale', '2026-01-01', 1500, 'posted', '2026-01-01')"
+    )
+    conn.execute(
+        "INSERT INTO transaction_line (id, transaction_id, item_id, direction, "
+        "quantity, unit_price_cents) VALUES (1, 1, 1, 'out', 1, 1500)"
+    )
+    conn.commit()
+
+    assert 26 in migrate(conn)
+    row = conn.execute(
+        "SELECT chosen_unit_cost_cents FROM transaction_line WHERE id = 1"
+    ).fetchone()
+    assert row["chosen_unit_cost_cents"] is None

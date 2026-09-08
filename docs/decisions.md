@@ -4,6 +4,64 @@ Lightweight ADR-style record of significant decisions. Newest first.
 
 ---
 
+### 2026-09-08 — Giving a specific copy: cost groups, not lots (ticket 71)
+
+- **Decision:** the I Give picker offers one entry per **cost group** — the copies
+  of an item that share a `lot.unit_cost_cents` — and picking one **restricts the
+  disposal to that group's lots**, consumed oldest-first within it. An
+  `OutgoingCard` with no group named keeps plain across-all-lots FIFO, unchanged.
+  This is the "specific-lot selection" that `specs/02-data-model.md` § Cost-basis
+  method has listed as a planned enhancement since V1.
+- **Why the group and not the lot.** Two lots acquired at the same price are
+  indistinguishable in the picker, so a lot-keyed entry would offer a choice the
+  user cannot see or make meaningfully. The group is exactly the granularity the
+  UI can show, and FIFO inside it keeps the deterministic acquisition ordering
+  that `FIFO-DRAWDOWN` actually guards.
+- **The display split alone was rejected.** Splitting the picker by price while
+  leaving `_consume_fifo` untouched is about a fifth of the work, and it was the
+  original recommendation on cost grounds. The user overruled it, correctly: the
+  picker would read "paid $50.00" while FIFO consumed the $20.00 copy, so the row
+  clicked would disagree with the realized P/L that came out. Recorded so it is not
+  re-proposed as a simplification.
+- **`lot_consumption` was not enough, and this is the interesting part.** The first
+  design derived the restriction from the consumption rows on edit — no migration
+  needed, since they already say which lots went. That is wrong: they record the
+  **outcome**, not the **choice**. An unrestricted FIFO line that happened to land
+  inside one lot is indistinguishable from a line the user restricted to that lot's
+  price, so re-posting the first as if it were the second would silently narrow the
+  edit — raising the quantity would be refused where it used to spill into the next
+  lot. Migration **0026** therefore adds `transaction_line.chosen_unit_cost_cents`,
+  NULL for every line posted before it and for every adjustment.
+- **The edit path is where this feature is dangerous.** `edit` is void + re-post
+  from the *lines*, which works precisely because a line never had to remember a lot
+  choice. `load_transaction` now carries `chosen_unit_cost_cents` into the rebuilt
+  `OutgoingCard`; without it, editing a specific-lot sale for an unrelated reason
+  would re-post it against the cheaper lot and move realized P/L — a divergence
+  that would not surface until a later P/L report.
+- **A consumed group still has to be pickable.** Reloading a sale for edit finds its
+  group *off the shelf*, because that sale consumed it and the void has not happened
+  yet. `_GiveRow.set_item` registers the group rather than dropping to FIFO; the
+  units come back when the edit voids. Found by the end-to-end test, not by reading.
+- **`preview()` keeps one queue per item, and restricted lines skip non-matching
+  slots.** Keying the simulated queue by `(item, cost)` instead would let a
+  restricted and an unrestricted line for the same item each see the full pool and
+  both look feasible. A test pins the mixed case.
+- Availability is measured against the **group** on the oversell path, so asking for
+  2 of the $50 copies is refused while the item holds plenty at another price.
+- **Not touched:** `sellable_items()` and `OutgoingCardDialog` still work in the
+  aggregate-per-item shape. The dialog has no constructor anywhere in `src/` — it is
+  reachable only from its own test — so it is dead app code kept alive by coverage,
+  and `sellable_items()` now survives largely for it. Flagged for
+  `/dead-code-sweep` rather than removed under this ticket.
+- **Pre-existing gap, left alone:** editing a sale that disposed of an item's *last*
+  copy still cannot prefill its give row, because the row is built from sellable
+  stock and the item has none. That predates cost groups (`_by_id.get` returned
+  `None` and `_set_chosen` bailed); the new code preserves it rather than widening
+  it.
+- The eight rules co-sealed against CLAUDE.md's non-negotiables block were re-sealed
+  after the FIFO bullet was qualified, and `LEDGER-VS-DERIVED` after the app-map's
+  migration range moved. Suite 1,326 passing.
+
 ### 2026-08-10 — The ticket lives on GitHub, and a pull request is an issue (46#)
 
 - **Decision:** there is no local ticket storage. `.claude/context/tickets/` is

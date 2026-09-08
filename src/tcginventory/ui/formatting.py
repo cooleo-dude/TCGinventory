@@ -10,6 +10,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 
 from tcginventory.domain.models import Item
+from tcginventory.services.inventory import SellableGroup
 from tcginventory.services.review import without_review_note
 
 # What separates the parts inside a label's parenthetical, matching the catalog
@@ -155,3 +156,39 @@ def item_labels(items: Sequence[Item]) -> list[str]:
 
     pairs = zip(items, bases, strict=True)
     return [_label_for(item, varying[base]) for item, base in pairs]
+
+
+def cost_group_labels(groups: Sequence[SellableGroup]) -> list[str]:
+    """Give-picker labels for cost groups, in input order (ticket 71).
+
+    The price suffix is added **only where it disambiguates** — an item held at a
+    single price reads exactly as it did before the split, so the common case
+    keeps a clean label and the marker means "there is another price to choose".
+    That mirrors how :func:`item_label` treats its discriminators.
+
+    Availability rides along because a group holds fewer copies than the item
+    does, and a picker that showed the item total would invite an oversell the
+    post is going to refuse.
+    """
+    labels = item_labels([g.item for g in groups])
+    prices_per_item: dict[int, set[int]] = defaultdict(set)
+    for group in groups:
+        prices_per_item[group.item.id].add(group.unit_cost_cents)
+    out: list[str] = []
+    for group, label in zip(groups, labels, strict=True):
+        if len(prices_per_item[group.item.id]) < 2:
+            out.append(label)
+            continue
+        out.append(cost_group_label(group, label))
+    return out
+
+
+def cost_group_label(group: SellableGroup, label: str) -> str:
+    """``label`` with one group's price and availability appended.
+
+    Split out so the give row can label a group that is **not** currently on the
+    shelf — an edit reloads the sale that consumed it, and the restriction has to
+    survive that (ticket 71) — without re-deriving the composition by hand.
+    """
+    paid = money(group.unit_cost_cents)
+    return f"{label}{_SEP}paid {paid}{_SEP}{group.available} left"

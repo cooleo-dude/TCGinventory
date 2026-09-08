@@ -610,6 +610,7 @@ class TransactionLineRepository:
             unit_price_cents=row["unit_price_cents"],
             realized_pl_cents=row["realized_pl_cents"],
             notes=row["notes"],
+            chosen_unit_cost_cents=row["chosen_unit_cost_cents"],
         )
 
     def add(self, line: TransactionLine) -> TransactionLine:
@@ -617,8 +618,9 @@ class TransactionLineRepository:
             """
             INSERT INTO transaction_line (
                 transaction_id, item_id, direction, quantity,
-                unit_price_cents, realized_pl_cents, notes
-            ) VALUES (?,?,?,?,?,?,?)
+                unit_price_cents, realized_pl_cents, notes,
+                chosen_unit_cost_cents
+            ) VALUES (?,?,?,?,?,?,?,?)
             """,
             (
                 line.transaction_id,
@@ -628,6 +630,7 @@ class TransactionLineRepository:
                 line.unit_price_cents,
                 line.realized_pl_cents,
                 line.notes,
+                line.chosen_unit_cost_cents,
             ),
         )
         line.id = cur.lastrowid
@@ -660,7 +663,8 @@ class TransactionLineRepository:
             """
             UPDATE transaction_line SET
                 transaction_id = ?, item_id = ?, direction = ?, quantity = ?,
-                unit_price_cents = ?, realized_pl_cents = ?, notes = ?
+                unit_price_cents = ?, realized_pl_cents = ?, notes = ?,
+                chosen_unit_cost_cents = ?
             WHERE id = ?
             """,
             (
@@ -671,6 +675,7 @@ class TransactionLineRepository:
                 line.unit_price_cents,
                 line.realized_pl_cents,
                 line.notes,
+                line.chosen_unit_cost_cents,
                 line.id,
             ),
         )

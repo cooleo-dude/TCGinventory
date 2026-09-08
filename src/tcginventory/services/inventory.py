@@ -35,6 +35,20 @@ class Position:
     unrealized_pl_cents: int
 
 
+@dataclass(frozen=True)
+class SellableGroup:
+    """One give-picker entry: the copies of an item that share a purchase price.
+
+    ``available`` is the units on hand across that group's lots, and
+    ``unit_cost_cents`` doubles as the group's identity — it is what an
+    ``OutgoingCard`` carries to say which copies to consume.
+    """
+
+    item: Item
+    unit_cost_cents: int  # per-unit basis shared by this group's lots
+    available: int
+
+
 @dataclass
 class InventoryRow:
     """One inventory-grid row per **lot** (per SKU / acquired copy).
@@ -157,6 +171,44 @@ class InventoryService:
             (item, available_by_item[item.id])
             for item in self.items.list_all()
             if available_by_item.get(item.id, 0) > 0
+        ]
+
+    def sellable_cost_groups(self) -> list[SellableGroup]:
+        """Sellable stock split by what each copy **cost**, for the give picker.
+
+        :meth:`sellable_items` sums every lot of an item into one entry, so two
+        copies bought at $2 and $5 read as a single "2 available" the user cannot
+        choose between. Here they are two entries, and picking one draws that
+        group's lots down (ticket 71) — so the basis on the entry is the basis
+        that leaves.
+
+        The group, not the lot, is the unit because that is the distinction the
+        user can *see*: two lots acquired at the same price are indistinguishable
+        in the picker, and a lot-keyed entry would offer a choice with no visible
+        difference. Within a group, disposal stays FIFO.
+
+        Groups are ordered **oldest acquisition first** within an item, so the
+        entry an unrestricted FIFO sale would have taken is the top one. Same
+        filters as :meth:`sellable_items`: only **resale** lots, never ripping
+        (invariant 8) or missing (invariant 9).
+        """
+        rows = self.conn.execute(
+            "SELECT item_id, unit_cost_cents, SUM(remaining_qty) AS available "
+            "FROM lot "
+            "WHERE remaining_qty > 0 AND missing = 0 AND intent = ? "
+            "GROUP BY item_id, unit_cost_cents "
+            "ORDER BY MIN(acquired_at), MIN(id)",
+            (Intent.RESALE.value,),
+        ).fetchall()
+        groups_by_item: dict[int, list[tuple[int, int]]] = {}
+        for row in rows:
+            groups_by_item.setdefault(row["item_id"], []).append(
+                (row["unit_cost_cents"], row["available"])
+            )
+        return [
+            SellableGroup(item=item, unit_cost_cents=cost, available=available)
+            for item in self.items.list_all()
+            for cost, available in groups_by_item.get(item.id, ())
         ]
 
     def inventory_rows(self) -> list[InventoryRow]:

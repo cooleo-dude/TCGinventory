@@ -125,15 +125,22 @@ The `type` is derived from the two sides, not chosen by the user:
 
 ## Cost-basis method (disposal)
 
-**V1 default: FIFO** (first-in, first-out) per item, with the design allowing
+**Default: FIFO** (first-in, first-out) per item, with the design allowing
 other methods later.
 
 - Each item has an ordered set of open lots (by acquisition date, then id).
 - A disposal consumes from the oldest open lot first, then the next, etc.
 - Realized P/L for a disposal line =
   `proceeds − Σ(consumed_qty × lot_unit_cost)`.
-- **Specific-lot selection** (let the user pick which lot to sell from) is a
-  V1.1 enhancement; the `LotConsumption` structure already supports it.
+- **Specific-lot selection** — shipped in ticket 71, as this section anticipated.
+  An outgoing card may name a **cost group**: the copies of that item that share
+  one `unit_cost_cents`. The disposal is then restricted to that group's lots and
+  still consumes them **FIFO**, so acquisition order remains the tiebreak and no
+  part of the algorithm becomes non-deterministic. The *group*, not the lot, is
+  the unit of choice because that is the distinction the picker can show — two
+  lots bought at the same price are indistinguishable to the user, so offering
+  them separately would be a false choice. An outgoing card naming no group keeps
+  plain across-all-lots FIFO, unchanged.
 
 > Alternative methods (average cost, LIFO) are out of scope for V1 but the
 > `LotConsumption` join table keeps the door open without schema changes.
@@ -351,7 +358,9 @@ transaction**.
    counterparty, and the two sides.
 2. **Outgoing side** — for each card given out (`direction=out`):
    consume open lots **FIFO** into `lot_consumption`, decrementing
-   `remaining_qty`; reject if quantity exceeds on-hand
+   `remaining_qty` — narrowed to the card's **cost group** when it names one
+   (see [cost-basis method](#cost-basis-method-disposal)); reject if quantity
+   exceeds the on-hand units *that side of the narrowing*
    (`InsufficientQuantityError`). Realized P/L for the line =
    `agreed_value − Σ(consumed unit_cost)`.
 3. **Net consideration in** = `cash_out + Σ(agreed value of cards out) − cash_in`.
