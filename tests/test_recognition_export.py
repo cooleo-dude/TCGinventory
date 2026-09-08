@@ -128,6 +128,7 @@ def test_transaction_import_fills_receive_and_reports_unmatched_give(app, conn):
 
 
 def test_match_sellable_by_identity():
+    from tcginventory.services.inventory import SellableGroup
     from tcginventory.ui.views.transaction import _match_sellable
 
     def item(id_, name, number, set_name=None):
@@ -140,9 +141,12 @@ def test_match_sellable_by_identity():
         it.id = id_
         return it
 
+    # Cost groups now, not (item, qty) pairs: two prices for the Charizard, so
+    # the matcher has to look past the group and answer with the *item*.
     sellable = [
-        (item(1, "Charizard", "4/102", "Base"), 3),
-        (item(2, "Blastoise", "2/102", "Base"), 1),
+        SellableGroup(item(1, "Charizard", "4/102", "Base"), 2000, 2),
+        SellableGroup(item(1, "Charizard", "4/102", "Base"), 5000, 1),
+        SellableGroup(item(2, "Blastoise", "2/102", "Base"), 1000, 1),
     ]
     assert _match_sellable(sellable, _rc("Charizard", card_number="4/102")) == 1
     assert _match_sellable(sellable, _rc("Blastoise", card_number="2")) == 2

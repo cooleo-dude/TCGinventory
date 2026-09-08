@@ -508,3 +508,219 @@ def test_preview_does_not_flag_a_near_match_with_nothing_on_hand(conn):
         incoming=[incoming("Charizard GX", 1200, holo_pattern=HoloPattern.HOLO, **kw)],
     )
     assert svc.preview(req).near_matches == []
+
+
+# --- specific-lot give: the cost group you pick is the one consumed (71) ------
+
+
+def _two_price_stock(svc):
+    """One card held twice: the $20 copy bought first, the $50 copy after."""
+    cheap = buy(svc, "Charizard", 2000, 6000, "2026-01-01")
+    dear = buy(svc, "Charizard", 5000, 6000, "2026-02-01")
+    return cheap.lots[0].item_id, cheap.lots[0].id, dear.lots[0].id
+
+
+def _consumed_lots(conn, transaction_id):
+    """``(lot_id, qty)`` pairs the transaction out lines actually drew down."""
+    rows = conn.execute(
+        "SELECT lc.lot_id, lc.quantity FROM lot_consumption lc "
+        "JOIN transaction_line tl ON tl.id = lc.transaction_line_id "
+        "WHERE tl.transaction_id = ? ORDER BY lc.id",
+        (transaction_id,),
+    ).fetchall()
+    return [(r["lot_id"], r["quantity"]) for r in rows]
+
+
+def test_unrestricted_give_still_takes_the_oldest_lot(svc, conn):
+    item_id, cheap_lot, _dear_lot = _two_price_stock(svc)
+    result = svc.post(
+        TransactionRequest(
+            occurred_at="2026-03-01",
+            outgoing=[OutgoingCard(item_id=item_id, quantity=1)],
+            cash_in_cents=7000,
+        )
+    )
+    assert _consumed_lots(conn, result.transaction.id) == [(cheap_lot, 1)]
+    assert result.realized_pl_cents == 7000 - 2000
+
+
+def test_restricted_give_consumes_the_group_it_names(svc, conn):
+    item_id, _cheap_lot, dear_lot = _two_price_stock(svc)
+    result = svc.post(
+        TransactionRequest(
+            occurred_at="2026-03-01",
+            outgoing=[OutgoingCard(item_id=item_id, quantity=1, unit_cost_cents=5000)],
+            cash_in_cents=7000,
+        )
+    )
+    # The $50 copy left even though a $20 one was older and on hand — and the
+    # realized P/L is against *that* basis, which is the whole point.
+    assert _consumed_lots(conn, result.transaction.id) == [(dear_lot, 1)]
+    assert result.realized_pl_cents == 7000 - 5000
+
+
+def test_restricted_give_records_the_choice_on_the_line(svc):
+    item_id, _cheap, _dear = _two_price_stock(svc)
+    result = svc.post(
+        TransactionRequest(
+            occurred_at="2026-03-01",
+            outgoing=[OutgoingCard(item_id=item_id, quantity=1, unit_cost_cents=5000)],
+            cash_in_cents=7000,
+        )
+    )
+    (line,) = [ln for ln in result.lines if ln.direction is Direction.OUT]
+    assert line.chosen_unit_cost_cents == 5000
+
+
+def test_unrestricted_give_records_no_choice(svc):
+    item_id, _cheap, _dear = _two_price_stock(svc)
+    result = svc.post(
+        TransactionRequest(
+            occurred_at="2026-03-01",
+            outgoing=[OutgoingCard(item_id=item_id, quantity=1)],
+            cash_in_cents=7000,
+        )
+    )
+    (line,) = [ln for ln in result.lines if ln.direction is Direction.OUT]
+    assert line.chosen_unit_cost_cents is None
+
+
+def test_restricted_give_is_fifo_within_the_group(svc, conn):
+    # Three lots: $20 (Jan), $20 (Feb), $50 (Mar). Restricted to $20 the January
+    # copy goes first, so ordering inside a group stays deterministic.
+    jan = buy(svc, "Gengar", 2000, 6000, "2026-01-01")
+    feb = buy(svc, "Gengar", 2000, 6000, "2026-02-01")
+    buy(svc, "Gengar", 5000, 6000, "2026-03-01")
+    item_id = jan.lots[0].item_id
+
+    result = svc.post(
+        TransactionRequest(
+            occurred_at="2026-04-01",
+            outgoing=[OutgoingCard(item_id=item_id, quantity=2, unit_cost_cents=2000)],
+            cash_in_cents=9000,
+        )
+    )
+    assert _consumed_lots(conn, result.transaction.id) == [
+        (jan.lots[0].id, 1),
+        (feb.lots[0].id, 1),
+    ]
+
+
+def test_restricted_give_refuses_oversell_of_its_own_group(svc):
+    # 3 units on hand, but only 1 at $50. Asking for 2 of the $50 copies is an
+    # oversell even though the item has plenty: the group is what was asked for.
+    item_id, _cheap, _dear = _two_price_stock(svc)
+    buy(svc, "Charizard", 2000, 6000, "2026-02-15")
+
+    with pytest.raises(InsufficientQuantityError) as excinfo:
+        svc.post(
+            TransactionRequest(
+                occurred_at="2026-03-01",
+                outgoing=[
+                    OutgoingCard(item_id=item_id, quantity=2, unit_cost_cents=5000)
+                ],
+                cash_in_cents=14000,
+            )
+        )
+    assert "only 1 on hand" in str(excinfo.value)
+
+
+def test_restricted_give_cannot_reach_a_ripping_lot(svc):
+    # The only $120 copies are held for ripping, so never sellable (invariant 8).
+    box = buy(svc, "Booster Box", 12000, 12000, "2026-01-01", intent=Intent.RIPPING)
+    with pytest.raises(RippingNotSellableError):
+        svc.post(
+            TransactionRequest(
+                occurred_at="2026-02-01",
+                outgoing=[
+                    OutgoingCard(
+                        item_id=box.lots[0].item_id, quantity=1, unit_cost_cents=12000
+                    )
+                ],
+                cash_in_cents=15000,
+            )
+        )
+
+
+def test_preview_margin_matches_the_restricted_post(svc):
+    item_id, _cheap, _dear = _two_price_stock(svc)
+    req = TransactionRequest(
+        occurred_at="2026-03-01",
+        outgoing=[OutgoingCard(item_id=item_id, quantity=1, unit_cost_cents=5000)],
+        cash_in_cents=7000,
+    )
+    preview = svc.preview(req)
+    assert preview.feasible
+    assert preview.realized_pl_cents == 2000  # 7000 - 5000, not 7000 - 2000
+    assert svc.post(req).realized_pl_cents == preview.realized_pl_cents
+
+
+def test_preview_shares_availability_between_restricted_and_free_lines(svc):
+    # One $20 copy and one $50 copy. A restricted line for the $50 and a free
+    # line for 1 more must both fit; a free line for 2 must not, because the
+    # restricted line has already claimed one of the two units.
+    item_id, _cheap, _dear = _two_price_stock(svc)
+    ok = TransactionRequest(
+        occurred_at="2026-03-01",
+        outgoing=[
+            OutgoingCard(item_id=item_id, quantity=1, unit_cost_cents=5000),
+            OutgoingCard(item_id=item_id, quantity=1),
+        ],
+        cash_in_cents=12000,
+    )
+    assert svc.preview(ok).feasible
+
+    too_many = TransactionRequest(
+        occurred_at="2026-03-01",
+        outgoing=[
+            OutgoingCard(item_id=item_id, quantity=1, unit_cost_cents=5000),
+            OutgoingCard(item_id=item_id, quantity=2),
+        ],
+        cash_in_cents=18000,
+    )
+    assert not svc.preview(too_many).feasible
+
+
+def test_preview_infeasible_when_the_group_is_too_small(svc):
+    item_id, _cheap, _dear = _two_price_stock(svc)
+    preview = svc.preview(
+        TransactionRequest(
+            occurred_at="2026-03-01",
+            outgoing=[OutgoingCard(item_id=item_id, quantity=2, unit_cost_cents=5000)],
+            cash_in_cents=14000,
+        )
+    )
+    assert not preview.feasible
+    assert preview.shortfalls == {item_id: 1}
+
+
+def test_edit_with_no_changes_reconsumes_the_same_lots(svc, conn):
+    """The edit-path guard: void + re-post must not silently re-pick lots."""
+    item_id, _cheap, dear_lot = _two_price_stock(svc)
+    posted = svc.post(
+        TransactionRequest(
+            occurred_at="2026-03-01",
+            outgoing=[OutgoingCard(item_id=item_id, quantity=1, unit_cost_cents=5000)],
+            cash_in_cents=7000,
+        )
+    )
+    before_pl = posted.realized_pl_cents
+
+    # Rebuild the request the way the edit path does, from the stored line.
+    (line,) = [ln for ln in posted.lines if ln.direction is Direction.OUT]
+    reposted = svc.edit(
+        posted.transaction.id,
+        TransactionRequest(
+            occurred_at="2026-03-01",
+            outgoing=[
+                OutgoingCard(
+                    item_id=line.item_id,
+                    quantity=line.quantity,
+                    unit_cost_cents=line.chosen_unit_cost_cents,
+                )
+            ],
+            cash_in_cents=7000,
+        ),
+    )
+    assert _consumed_lots(conn, reposted.transaction.id) == [(dear_lot, 1)]
+    assert reposted.realized_pl_cents == before_pl

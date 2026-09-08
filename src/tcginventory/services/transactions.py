@@ -67,6 +67,11 @@ class OutgoingCard:
     item_id: int
     quantity: int
     notes: str | None = None
+    # Which copies to give: the per-unit basis shared by the lots this disposal
+    # is restricted to (ticket 71). ``None`` means "any of them" — plain FIFO
+    # across every open lot, which is what every caller did before this existed.
+    # Within a named group the drawdown is still oldest-first.
+    unit_cost_cents: int | None = None
 
 
 @dataclass
@@ -490,6 +495,8 @@ class TransactionService:
             for slot in queue_for(out.item_id):
                 if remaining == 0:
                     break
+                if out.unit_cost_cents is not None and slot[1] != out.unit_cost_cents:
+                    continue  # another cost group — not the copies being given
                 take = min(slot[0], remaining)
                 slot[0] -= take
                 cost += take * slot[1]
@@ -733,9 +740,12 @@ class TransactionService:
                         quantity=sub_qty,
                         unit_price_cents=unit_price,
                         notes=out.notes,
+                        chosen_unit_cost_cents=out.unit_cost_cents,
                     )
                 )
-                cost = self._consume_fifo(out.item_id, sub_qty, line.id)
+                cost = self._consume_fifo(
+                    out.item_id, sub_qty, line.id, out.unit_cost_cents
+                )
                 line.realized_pl_cents = unit_price * sub_qty - cost
                 self.lines.update(line)
                 lines.append(line)
@@ -796,27 +806,60 @@ class TransactionService:
             lots=created_lots,
         )
 
-    def _consume_fifo(self, item_id: int, quantity: int, line_id: int) -> int:
+    def _consume_fifo(
+        self,
+        item_id: int,
+        quantity: int,
+        line_id: int,
+        unit_cost_cents: int | None = None,
+    ) -> int:
         """Consume ``quantity`` units FIFO from non-ripping open lots.
 
         Records ``lot_consumption`` rows, decrements ``remaining_qty``, and
         returns the total consumed cost in cents. Raises before any write if
         there is not enough sellable inventory.
+
+        ``unit_cost_cents`` narrows the draw-down to one **cost group** — the
+        lots whose per-unit basis is exactly that — so the user can give the copy
+        they paid $5 for while a cheaper one sits on hand (ticket 71). Order
+        inside the group is still oldest-first, so the algorithm stays
+        deterministic; ``None`` draws across every open lot as before. Note the
+        availability check then measures the *group*, not the item: refusing an
+        oversell with the item's total would let a line through that the group
+        cannot fill.
         """
         open_lots = self.lots.open_lots_for_item(item_id)
         sellable = [lot for lot in open_lots if lot.intent is not Intent.RIPPING]
+        if unit_cost_cents is not None:
+            sellable = [
+                lot for lot in sellable if lot.unit_cost_cents == unit_cost_cents
+            ]
         available = sum(lot.remaining_qty for lot in sellable)
         if available < quantity:
+            # A restricted give reports against its own group, and counts only
+            # the ripping units *in* that group — the ripping hint exists to say
+            # "you own these but they are never sold", and units at another
+            # price are not the ones being asked for.
+            in_scope = [
+                lot
+                for lot in open_lots
+                if unit_cost_cents is None or lot.unit_cost_cents == unit_cost_cents
+            ]
             ripping_qty = sum(
-                lot.remaining_qty for lot in open_lots if lot.intent is Intent.RIPPING
+                lot.remaining_qty for lot in in_scope if lot.intent is Intent.RIPPING
+            )
+            scope = (
+                "" if unit_cost_cents is None else f" at {unit_cost_cents} cents a unit"
             )
             if ripping_qty > 0 and available + ripping_qty >= quantity:
                 raise RippingNotSellableError(
-                    f"item {item_id}: {quantity} requested but only {available} "
-                    f"sellable ({ripping_qty} held as ripping, never sold)"
+                    f"item {item_id}{scope}: {quantity} requested but only "
+                    f"{available} sellable ({ripping_qty} held as ripping, "
+                    f"never sold)"
                 )
             raise InsufficientQuantityError(
-                f"item {item_id}: {quantity} requested but only {available} on hand"
+                f"item {item_id}{scope}: {quantity} requested but only "
+                f"{available} on hand"
             )
 
         remaining = quantity
@@ -928,6 +971,10 @@ class TransactionService:
                     "quantity": ln.quantity,
                     "unit_price_cents": ln.unit_price_cents,
                     "realized_pl_cents": ln.realized_pl_cents,
+                    # Part of what the line *is*, not just how it turned out —
+                    # a void/edit is only reconstructible from the audit if the
+                    # cost group the user picked is in it (ticket 71).
+                    "chosen_unit_cost_cents": ln.chosen_unit_cost_cents,
                 }
                 for ln in lines
             ],

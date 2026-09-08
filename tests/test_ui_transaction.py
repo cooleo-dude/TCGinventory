@@ -358,7 +358,7 @@ def test_give_row_picks_the_second_of_two_identical_looking_cards(app, conn):
     )
     entry = row._model.item(wanted)
 
-    row._set_chosen(entry.data(row._ITEM_ID_ROLE))
+    row._set_chosen(row._keys[entry.data(row._GROUP_ROLE)])
 
     card = row.to_card()
     assert card is not None, "the label write-back cleared the selection"
@@ -533,7 +533,7 @@ def test_give_row_finds_a_card_across_a_punctuation_rename(app, conn):
         set_name="SM Black Star Promos",
         card_number="SM60/SM248",
     )
-    sellable = InventoryService(conn).sellable_items()
+    sellable = InventoryService(conn).sellable_cost_groups()
     row = _GiveRow(conn, sellable, lambda: None)
 
     for typed in ("Charizard GX", "charizard gx", "Charizard-GX", "CharizardGX"):
@@ -736,4 +736,104 @@ def test_receive_row_graded_switch_is_captioned_and_reacts_to_its_state(app, con
     row.graded.setChecked(True)
     assert row.graded.styleSheet() != off
     assert row._graded_cap.styleSheet() != off_cap
+    view.deleteLater()
+
+
+# --- give by purchase price, through the window (ticket 71) ------------------
+
+
+def test_give_picker_offers_one_entry_per_purchase_price(app, conn):
+    """Two copies at two prices are two pickable rows, not one saying "2"."""
+    from conftest import buy
+    from tcginventory.services.transactions import TransactionService
+    from tcginventory.ui.views.transaction import TransactionView
+
+    svc = TransactionService(conn)
+    buy(svc, "Charizard", 2000, 6000, "2026-01-01")
+    buy(svc, "Charizard", 5000, 6000, "2026-02-01")
+
+    view = TransactionView(conn)
+    row = view._add_give_row()
+    row._fill("Charizard")
+    labels = [row._model.item(i).text() for i in range(row._model.rowCount())]
+    assert len(labels) == 2
+    assert any("paid $20.00" in text and "2 left" not in text for text in labels)
+    assert any("paid $50.00" in text for text in labels)
+    view.deleteLater()
+
+
+def test_giving_the_dearer_copy_consumes_that_lot_through_the_window(app, conn):
+    """The end-to-end guard: what the user clicked is what leaves the ledger."""
+    from conftest import buy
+    from tcginventory.services.transactions import TransactionService
+    from tcginventory.ui.views.transaction import TransactionView
+
+    svc = TransactionService(conn)
+    cheap = buy(svc, "Charizard", 2000, 6000, "2026-01-01")
+    dear = buy(svc, "Charizard", 5000, 6000, "2026-02-01")
+
+    view = TransactionView(conn)
+    row = view._add_give_row()
+    row._fill("Charizard")
+    wanted = next(
+        i
+        for i in range(row._model.rowCount())
+        if "paid $50.00" in row._model.item(i).text()
+    )
+    entry = row._model.item(wanted)
+    row._set_chosen(row._keys[entry.data(row._GROUP_ROLE)])
+    view._cash_in.setValue(70.0)
+    view._date.setText("2026-03-01")
+    view.submit()
+
+    consumed = conn.execute(
+        "SELECT lc.lot_id FROM lot_consumption lc "
+        "JOIN transaction_line tl ON tl.id = lc.transaction_line_id "
+        "WHERE tl.direction = 'out'"
+    ).fetchall()
+    assert [r["lot_id"] for r in consumed] == [dear.lots[0].id]
+    assert cheap.lots[0].id not in {r["lot_id"] for r in consumed}
+    view.deleteLater()
+
+
+def test_editing_a_specific_lot_sale_keeps_its_basis(app, conn):
+    """Reload for edit and re-post: the same copy leaves, so P/L does not move.
+
+    Without the cost group stored on the line, the reload would rebuild the row
+    unrestricted and the re-post would draw the *cheaper* lot by FIFO, quietly
+    changing realized P/L on an edit the user made for another reason.
+    """
+    from conftest import buy
+    from tcginventory.services.transactions import (
+        OutgoingCard,
+        TransactionRequest,
+        TransactionService,
+    )
+    from tcginventory.ui.views.transaction import TransactionView
+
+    svc = TransactionService(conn)
+    buy(svc, "Charizard", 2000, 6000, "2026-01-01")
+    dear = buy(svc, "Charizard", 5000, 6000, "2026-02-01")
+    item_id = dear.lots[0].item_id
+    posted = svc.post(
+        TransactionRequest(
+            occurred_at="2026-03-01",
+            outgoing=[OutgoingCard(item_id=item_id, quantity=1, unit_cost_cents=5000)],
+            cash_in_cents=7000,
+        )
+    )
+
+    view = TransactionView(conn)
+    assert view.load_transaction(posted.transaction.id)
+    (give,) = view._give_rows
+    assert give.to_card().unit_cost_cents == 5000  # the choice survived the reload
+    view.submit()
+
+    line = conn.execute(
+        "SELECT tl.realized_pl_cents, tl.chosen_unit_cost_cents FROM transaction_line "
+        'tl JOIN "transaction" t ON t.id = tl.transaction_id '
+        "WHERE tl.direction = 'out' AND t.status = 'posted'"
+    ).fetchone()
+    assert line["chosen_unit_cost_cents"] == 5000
+    assert line["realized_pl_cents"] == 2000  # 7000 - 5000, not 7000 - 2000
     view.deleteLater()

@@ -164,3 +164,34 @@ def test_every_distinct_item_gets_a_distinct_label():
 
     labels = [item_label(c, cards) for c in cards]
     assert len(set(labels)) == len(cards), labels
+
+
+def test_cost_group_label_marks_the_price_only_when_there_is_a_choice():
+    """A card held at one price reads exactly as it did before the split."""
+    from tcginventory.services.inventory import SellableGroup
+    from tcginventory.ui.formatting import cost_group_labels
+
+    lone = _card(name="Snorlax")
+    lone.id = 1
+    (label,) = cost_group_labels(
+        [SellableGroup(item=lone, unit_cost_cents=2500, available=2)]
+    )
+    assert label == "Snorlax (Fossil · 6/62)"
+
+
+def test_cost_group_label_shows_price_and_availability_when_prices_differ():
+    from tcginventory.services.inventory import SellableGroup
+    from tcginventory.ui.formatting import cost_group_labels
+
+    card = _card(name="Charizard")
+    card.id = 7
+    labels = cost_group_labels(
+        [
+            SellableGroup(item=card, unit_cost_cents=2000, available=2),
+            SellableGroup(item=card, unit_cost_cents=5000, available=1),
+        ]
+    )
+    assert labels == [
+        "Charizard (Fossil · 6/62) · paid $20.00 · 2 left",
+        "Charizard (Fossil · 6/62) · paid $50.00 · 1 left",
+    ]

@@ -1,0 +1,13 @@
+-- Ticket 71: an 'out' line records the cost group the user picked, if any.
+--
+-- Which lots a disposal consumed is already in lot_consumption — but that is the
+-- *outcome*, not the *choice*. They differ exactly where this feature lives: an
+-- unrestricted FIFO line that happened to land inside one lot is indistinguishable
+-- from a line the user restricted to that lot's price, and re-posting the first as
+-- if it were the second would silently narrow an edit (raising the quantity would
+-- then be refused where it used to spill into the next lot).
+--
+-- So the choice is stored. NULL means "no group named" — plain across-all-lots
+-- FIFO, which is what every line posted before this migration was, and what the
+-- adjustment paths (lost/stolen write-downs) always are.
+ALTER TABLE transaction_line ADD COLUMN chosen_unit_cost_cents INTEGER;

@@ -106,7 +106,7 @@
     "_note": "Four separate SQLite files. Only inventory.db is the ledger; the other three are derived/ephemeral and are NOT migrated by data/migrator.py.",
     "inventory.db": {
       "module": "src/tcginventory/data/db.py",
-      "migrations": "src/tcginventory/data/migrations/ (0001..0025, forward-only)",
+      "migrations": "src/tcginventory/data/migrations/ (0001..0026, forward-only)",
       "repositories": "src/tcginventory/data/repositories.py",
       "tables": [
         "item",

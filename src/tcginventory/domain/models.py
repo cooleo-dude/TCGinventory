@@ -107,6 +107,11 @@ class TransactionLine:
     unit_price_cents: int
     realized_pl_cents: int | None = None  # set for 'out' lines at post time
     notes: str | None = None
+    # The cost group the user picked for this disposal, if any (ticket 71): the
+    # per-unit basis the drawdown was restricted to. None = plain FIFO across
+    # every lot, which is every line posted before migration 0026 and every
+    # adjustment.
+    chosen_unit_cost_cents: int | None = None
     id: int | None = None
 
 

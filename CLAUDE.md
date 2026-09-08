@@ -122,7 +122,8 @@ offline; no external price feeds in V1.
   `type` is inferred from which sides carry cards.
 - **Cost basis is inferred** by market-value-weighted split of
   `net_consideration_in = cash_out + Σ(cards out) − cash_in`; rounding residual
-  goes to the largest-value line. Disposals draw down lots **FIFO**.
+  goes to the largest-value line. Disposals draw down lots **FIFO** — within the
+  cost group an outgoing card names, else across all of that item's lots.
 - **Intent** is per-lot: `personal | resale | ripping`. Ripping lots are valued
   at **$0** (shown as a loss = cost basis), never sold.
 - **Transactions are never hard-deleted** — soft-void + append-only `audit_log`;
