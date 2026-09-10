@@ -1884,3 +1884,46 @@ class CalendarEntryRepository:
             "SELECT * FROM calendar_entry ORDER BY starts_on, id"
         ).fetchall()
         return [self._to_model(r) for r in rows]
+
+
+class AppMetaRepository:
+    """Facts about *this ledger* rather than about any row in it (app_meta).
+
+    One key/value pair per fact. The first is ``ledger_id``, minted by migration
+    0026 so that a published snapshot can say which ledger it came from and a
+    reader can refuse one that belongs to a different install.
+    """
+
+    LEDGER_ID = "ledger_id"
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+
+    def get(self, key: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT value FROM app_meta WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def set(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO app_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+    def ledger_id(self) -> str:
+        """This ledger's identity.
+
+        Migration 0026 mints it, so it is always present on a migrated database.
+        A missing one means the caller is holding something that is not a
+        TCGinventory ledger, and saying so beats publishing under a blank prefix
+        that would collide with every other blank one.
+        """
+        value = self.get(self.LEDGER_ID)
+        if not value:
+            raise LookupError(
+                "this database has no ledger_id — it may not be a TCGinventory "
+                "ledger, or migrations have not been run"
+            )
+        return value
