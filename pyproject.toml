@@ -20,6 +20,12 @@ dependencies = [
     "Pillow>=10.0",
     # DINOv2 identifier backend; the model itself ships as package data (LFS).
     "onnxruntime>=1.17",
+    # Phone snapshot (ticket 74). AES-GCM has no stdlib equivalent; the R2
+    # keys belong in Windows Credential Manager rather than preferences.json;
+    # segno renders the pairing QR (pure Python, no native code).
+    "cryptography>=42.0",
+    "keyring>=25.0",
+    "segno>=1.6",
 ]
 
 [project.optional-dependencies]

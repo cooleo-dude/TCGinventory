@@ -33,3 +33,19 @@ class TransactionStateError(ServiceError):
     e.g. voiding an already-voided transaction, or voiding one whose created
     lots have since been (partially) consumed by a later transaction.
     """
+
+
+class SnapshotError(ServiceError):
+    """Publishing or reading a phone snapshot failed."""
+
+
+class SnapshotDecryptError(SnapshotError):
+    """A snapshot payload would not decrypt — wrong key, or tampered bytes.
+
+    Deliberately does not distinguish the two: AES-GCM cannot tell them apart
+    and neither should the message, since guessing is what an attacker does.
+    """
+
+
+class SnapshotNotConfiguredError(SnapshotError):
+    """A publish was asked for before the remote was connected."""
