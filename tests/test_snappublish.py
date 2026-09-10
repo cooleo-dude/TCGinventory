@@ -298,6 +298,15 @@ def test_pairing_encodes_to_a_scannable_qr(stocked):
     assert "<path" in svg or "<rect" in svg
 
 
+def test_the_qr_paints_its_own_light_background(stocked):
+    """segno defaults to dark modules on a *transparent* background, which on
+    this app's dark theme renders black-on-near-black and does not scan at all.
+    Reverting the explicit ``light`` removes this path entirely."""
+    svg = pairing.qr_svg(pairing.payload(stocked)).lower()
+    assert 'fill="#fff"' in svg or 'fill="#ffffff"' in svg
+    assert 'stroke="#000"' in svg or 'stroke="#000000"' in svg
+
+
 def test_pairing_without_a_connection_says_so(stocked):
     snapsecrets.forget()
     with pytest.raises(LookupError):

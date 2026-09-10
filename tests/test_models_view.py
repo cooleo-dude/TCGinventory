@@ -108,6 +108,7 @@ def test_operations_no_longer_carries_the_model_sections():
     assert [g.id for g in ops.GROUPS] == [
         "data_in",
         "data_out",
+        "snapshot",
         "prices",
         "reference",
         "automation",

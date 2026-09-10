@@ -416,3 +416,138 @@ def test_menu_and_nav_both_reach_the_operations_screen(shell):
 
     assert shell._nav.currentRow() == _OPERATIONS_INDEX
     assert shell._stack.currentWidget() is shell._operations
+
+
+# ---------------------------------------------------------------------------
+# Phone snapshot (tickets 73/74)
+# ---------------------------------------------------------------------------
+
+
+def test_the_snapshot_tiles_are_drawn_and_wired(app, seeded_conn):
+    from tcginventory.ui.views.operations import OperationsView
+
+    view = OperationsView(seeded_conn)
+    for op_id in (
+        "snapshot.connect",
+        "snapshot.publish",
+        "snapshot.export",
+        "snapshot.pair",
+    ):
+        assert op_id in view._tiles, f"{op_id} has no tile"
+        assert view._runner(op_id) is not None, f"{op_id} has no runner"
+    view.deleteLater()
+
+
+def test_a_failed_publish_is_logged_as_a_failure(app, seeded_conn):
+    from tcginventory.ui.views.operations import OperationsView
+
+    view = OperationsView(seeded_conn)
+    view._on_task_done("snapshot.publish", (False, "HTTP 403: AccessDenied"))
+
+    _when, line, ok = ops.activity(seeded_conn)[0]
+    assert ok is False and "AccessDenied" in line
+    view.deleteLater()
+
+
+def test_a_no_change_publish_is_a_success_not_a_warning(app, seeded_conn):
+    """'Nothing changed' is a successful run and reads better as a status than
+    as a popup."""
+    from tcginventory.ui.views.operations import OperationsView
+
+    view = OperationsView(seeded_conn)
+    view._on_task_done("snapshot.publish", (True, "no change - 12 rows published"))
+
+    _when, line, ok = ops.activity(seeded_conn)[0]
+    assert ok is True and "no change" in line
+    view.deleteLater()
+
+
+def test_the_publish_task_returns_the_summary_sentence(seeded_conn, monkeypatch):
+    """The task function is a plain callable over a connection, so it is driven
+    directly rather than through a thread."""
+    from tcginventory.services import snappublish
+    from tcginventory.ui.views.operations import _publish_snapshot_task
+
+    monkeypatch.setattr(
+        snappublish,
+        "publish",
+        lambda conn: snappublish.PublishResult(
+            published=True,
+            rows=1479,
+            in_stock=969,
+            payload_bytes=98571,
+            art_bytes=0,
+            pruned=2,
+            summary="1,479 rows | 96 KB | pruned 2",
+        ),
+    )
+    assert _publish_snapshot_task(seeded_conn) == "1,479 rows | 96 KB | pruned 2"
+
+
+def test_the_connect_dialog_refuses_incomplete_input(app):
+    """Half a connection should not be storable -- it would fail later, with a
+    signature error, far from where it was typed."""
+    from tcginventory.services import snapsecrets
+    from tcginventory.ui.views.operations import _ConnectStoreDialog
+
+    snapsecrets.set_backend(snapsecrets.MemoryBackend())
+    try:
+        dialog = _ConnectStoreDialog()
+        assert dialog._ok.isEnabled() is False  # bucket pre-filled, keys are not
+
+        dialog._account.setText("acct123")
+        dialog._access.setText("AKIA")
+        assert dialog._ok.isEnabled() is False
+        dialog._secret.setText("shhh")
+        assert dialog._ok.isEnabled() is True
+
+        assert dialog.values() == {
+            "account_id": "acct123",
+            "bucket": "tcginventory-snapshots",
+            "access_key_id": "AKIA",
+            "secret_access_key": "shhh",
+        }
+        dialog.deleteLater()
+    finally:
+        snapsecrets.set_backend(None)
+
+
+def test_the_connect_dialog_never_shows_a_stored_secret_back(
+    app, tmp_path, monkeypatch
+):
+    """Pre-filling a stored key is how it ends up in a screenshot."""
+    from tcginventory.services import snapsecrets
+    from tcginventory.ui.views.operations import _ConnectStoreDialog
+
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    snapsecrets.set_backend(snapsecrets.MemoryBackend())
+    try:
+        snapsecrets.save_credentials(
+            account_id="acct123",
+            bucket="already-set",
+            access_key_id="SECRET_ID",
+            secret_access_key="SECRET_KEY",
+        )
+        dialog = _ConnectStoreDialog()
+        assert dialog._account.text() == "acct123"  # non-secrets come back
+        assert dialog._bucket.text() == "already-set"
+        assert dialog._access.text() == ""  # secrets do not
+        assert dialog._secret.text() == ""
+        dialog.deleteLater()
+    finally:
+        snapsecrets.set_backend(None)
+
+
+def test_the_pairing_dialog_names_the_bucket_and_warns(app):
+    """The payload is a secret in full, so the dialog has to say so."""
+    import segno
+    from PySide6.QtWidgets import QLabel
+
+    from tcginventory.ui.views.operations import _PairingDialog
+
+    svg = segno.make("probe").svg_inline()
+    dialog = _PairingDialog(svg, "my-bucket", None)
+    text = " ".join(label.text() for label in dialog.findChildren(QLabel))
+    assert "my-bucket" in text
+    assert "password" in text
+    dialog.deleteLater()

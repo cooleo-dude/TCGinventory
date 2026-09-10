@@ -37,12 +37,29 @@ class Group:
     label: str
 
 
+def _snapshot_credentials():
+    """The connected object store, or ``None``. Never raises.
+
+    Reaching the keychain can fail (locked, absent, a machine with no keyring at
+    all) and a status provider must not be able to take the window down with it —
+    an unreadable keychain reads the same as "not connected yet", which is the
+    honest answer and the one whose next step is the same.
+    """
+    try:
+        from tcginventory.services import snapsecrets
+
+        return snapsecrets.load_credentials()
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+
 # Display order of the sections, and the order of the in-page navigator beside
 # them. Operations is about the **ledger**: getting data in and out, keeping
 # prices and the card database current, and looking after the file itself.
 GROUPS: tuple[Group, ...] = (
     Group("data_in", "Bring data in"),
     Group("data_out", "Get data out"),
+    Group("snapshot", "Phone snapshot"),
     Group("prices", "Prices"),
     Group("reference", "Reference data"),
     Group("automation", "Automation"),
@@ -213,6 +230,57 @@ OPERATIONS: tuple[Operation, ...] = (
         verb="Back up…",
         icon="database",
         caption="Automatic backups",
+    ),
+    Operation(
+        id="snapshot.connect",
+        group="snapshot",
+        title="Connect the snapshot store",
+        blurb=(
+            "Point the app at a Cloudflare R2 bucket to publish to. Keys are kept "
+            "in Windows Credential Manager, never in the settings file."
+        ),
+        verb="Connect…",
+        icon="database",
+        caption="Store",
+    ),
+    Operation(
+        id="snapshot.publish",
+        group="snapshot",
+        title="Publish inventory to your phone",
+        blurb=(
+            "Encrypt a read-only copy of your inventory and upload it, so the "
+            "phone can show what you own and what you paid with no signal. "
+            "Publishes nothing when the ledger hasn't changed."
+        ),
+        verb="Publish",
+        icon="upload",
+        kind=KIND_BACKGROUND,
+        caption="Last publish",
+        stale_after_days=7,
+    ),
+    Operation(
+        id="snapshot.export",
+        group="snapshot",
+        title="Save a snapshot to a file",
+        blurb=(
+            "The same inventory projection written to a file you choose — to "
+            "hand over by AirDrop, or to look at what gets published."
+        ),
+        verb="Save…",
+        icon="save",
+        caption="Last saved",
+    ),
+    Operation(
+        id="snapshot.pair",
+        group="snapshot",
+        title="Pair a phone",
+        blurb=(
+            "Show a QR code carrying the bucket, the read key and the decryption "
+            "key. Scanning it is how a phone learns to find this ledger."
+        ),
+        verb="Show QR…",
+        icon="scan-line",
+        caption="Pairing",
     ),
     Operation(
         id="prices.refresh",
@@ -722,6 +790,26 @@ def status_for(conn, op: Operation, *, history_conn=None) -> Status:
             f"{count} kept · newest {when(stamp)} · {human_bytes(total)}", READY
         )
 
+    if op.id == "snapshot.connect":
+        creds = _snapshot_credentials()
+        if creds is None:
+            return Status("not connected", NEVER, verb="Connect…")
+        return Status(f"{creds.bucket}", READY, detail=creds.base_url(), verb="Change…")
+
+    if op.id in ("snapshot.publish", "snapshot.pair"):
+        # Both need somewhere to publish to, so neither is actionable until the
+        # store is connected — and the tile says which one to run first rather
+        # than failing when it is pressed.
+        if _snapshot_credentials() is None:
+            return Status(
+                "not connected",
+                NEVER,
+                detail="Connect the snapshot store first.",
+                actionable=False,
+            )
+        if op.id == "snapshot.pair":
+            return Status("ready to pair", READY)
+
     if op.id == "shows.refresh":
         from tcginventory.data.repositories import CardShowRepository
 
@@ -1219,6 +1307,11 @@ def system_facts(conn) -> list[Fact]:
     )
     priced = PriceSnapshotRepository(conn).latest_as_of()
 
+    from tcginventory.data.repositories import OperationRunRepository
+
+    published = OperationRunRepository(conn).last_run("snapshot.publish")
+    snapshot_fact = when(published["started_at"]) if published else "never"
+
     return [
         Fact("Database", where),
         Fact("Items", f"{items:,} cards · {copies:,} copies"),
@@ -1227,6 +1320,7 @@ def system_facts(conn) -> list[Fact]:
             "Card database",
             f"{en_cards + jp_cards:,} cards · {languages}" if languages else "empty",
         ),
+        Fact("Phone snapshot", snapshot_fact, "pos" if published else None),
         Fact("Schema", f"v{current_version(conn)}"),
     ]
 

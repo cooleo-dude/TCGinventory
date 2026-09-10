@@ -20,12 +20,17 @@ import sqlite3
 
 from PySide6.QtCore import QSize, Qt, QThread, Signal
 from PySide6.QtGui import QDesktopServices, QFont
+from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMessageBox,
     QProgressBar,
@@ -50,6 +55,10 @@ _SECTION_NOTES = {
     "data_in": "Spreadsheets in — cards you own, or purchases with their cost basis.",
     "data_out": (
         "Copies you can keep: readable exports, and the backup a restore reads."
+    ),
+    "snapshot": (
+        "A read-only copy of your inventory, encrypted and published so a phone "
+        "can read it at a show with no signal."
     ),
     "prices": "What your cards are worth, and the history behind the trends.",
     "reference": "The card database and show listings everything else looks up.",
@@ -665,6 +674,10 @@ class OperationsView(QWidget):
             "export.inventory": self._export_inventory,
             "export.full": self._export_all,
             "backup.database": self._backup_database,
+            "snapshot.connect": self._connect_snapshot_store,
+            "snapshot.publish": self._publish_snapshot,
+            "snapshot.export": self._export_snapshot,
+            "snapshot.pair": self._pair_phone,
             "prices.refresh": self.refresh_prices,
             "prices.market_sweep": self._market_sweep,
             "catalog.update_en": lambda: self._update_catalog("EN"),
@@ -748,6 +761,74 @@ class OperationsView(QWidget):
             self._log("backup.database", False, str(exc))
             return
         self._log("backup.database", True, f"saved to {_short(path)}")
+
+    # ---------------------------------------------------------------- snapshot
+
+    def _connect_snapshot_store(self) -> None:
+        """Collect the R2 connection and verify it before saving anything.
+
+        Verified first on purpose: a set of keys that cannot list the bucket is
+        worth reporting now, at the moment they were typed, rather than at the
+        first publish when the context has gone.
+        """
+        from tcginventory.services import s3, snapsecrets
+
+        dialog = _ConnectStoreDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        values = dialog.values()
+        creds = s3.Credentials(
+            account_id=values["account_id"],
+            bucket=values["bucket"],
+            access_key_id=values["access_key_id"],
+            secret_access_key=values["secret_access_key"],
+        )
+        try:
+            s3.ObjectStore(creds, retries=1).list("")
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Could not reach the bucket",
+                f"The keys were not saved.\n\n{exc}",
+            )
+            self._log("snapshot.connect", False, f"could not reach {values['bucket']}")
+            return
+        snapsecrets.save_credentials(**values)
+        snapsecrets.encryption_key()  # mint it now, so pairing has one to show
+        self._log("snapshot.connect", True, f"connected to {values['bucket']}")
+
+    def _publish_snapshot(self) -> None:
+        self._task("snapshot.publish", _publish_snapshot_task)
+
+    def _export_snapshot(self) -> None:
+        from tcginventory.services import snapshot
+
+        default = str(config.data_dir() / "inventory-snapshot.json.gz")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save snapshot", default, "Snapshot (*.json.gz)"
+        )
+        if not path:
+            return
+        try:
+            snapshot.write_snapshot(self._conn, path)
+        except Exception as exc:  # pragma: no cover - surfaced to the user
+            QMessageBox.warning(self, "Could not save the snapshot", str(exc))
+            self._log("snapshot.export", False, str(exc))
+            return
+        self._log("snapshot.export", True, f"saved to {_short(path)}")
+
+    def _pair_phone(self) -> None:
+        """Show the pairing QR. Nothing is written — this payload is a secret."""
+        from tcginventory.services import pairing
+
+        try:
+            payload = pairing.payload(self._conn)
+            svg = pairing.qr_svg(payload)
+        except Exception as exc:  # pragma: no cover - surfaced to the user
+            QMessageBox.warning(self, "Cannot pair yet", str(exc))
+            return
+        _PairingDialog(svg, payload["bucket"], self).exec()
+        self._log("snapshot.pair", True, "showed the pairing code")
 
     def _import_items(self) -> None:
         self._import("import.items", "items", importexport.import_items)
@@ -960,6 +1041,130 @@ def _refresh_shows(conn) -> str:
     if summary.errors:
         text += f" ({len(summary.errors)} state(s) failed)"
     return text
+
+
+class _ConnectStoreDialog(QDialog):
+    """Collects the R2 connection. Secrets are masked and never defaulted.
+
+    Pre-filling the non-secret fields from what is already stored makes changing
+    a bucket cheap; the keys are deliberately left blank, because showing a
+    stored secret back to the screen is how it ends up in a screenshot.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        from tcginventory.services import snapsecrets
+
+        self.setWindowTitle("Connect the snapshot store")
+        self.setMinimumWidth(460)
+        existing = snapsecrets.load_credentials()
+
+        self._account = QLineEdit(existing.account_id if existing else "")
+        self._account.setPlaceholderText("Cloudflare account ID")
+        self._bucket = QLineEdit(
+            existing.bucket if existing else "tcginventory-snapshots"
+        )
+        self._access = QLineEdit()
+        self._access.setPlaceholderText("R2 access key ID")
+        self._secret = QLineEdit()
+        self._secret.setPlaceholderText("R2 secret access key")
+        self._secret.setEchoMode(QLineEdit.Password)
+
+        note = QLabel(
+            "Create an R2 API token scoped to this bucket. Keys are stored in "
+            "Windows Credential Manager, never in the settings file."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("opDesc")
+
+        form = QFormLayout()
+        form.addRow("Account ID", self._account)
+        form.addRow("Bucket", self._bucket)
+        form.addRow("Access key ID", self._access)
+        form.addRow("Secret access key", self._secret)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self
+        )
+        buttons.button(QDialogButtonBox.Ok).setText("Connect")
+        buttons.accepted.connect(self._accept_if_complete)
+        buttons.rejected.connect(self.reject)
+        self._ok = buttons.button(QDialogButtonBox.Ok)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(note)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        for field in (self._account, self._bucket, self._access, self._secret):
+            field.textChanged.connect(self._sync_ok)
+        self._sync_ok()
+
+    def _complete(self) -> bool:
+        return all(
+            f.text().strip()
+            for f in (self._account, self._bucket, self._access, self._secret)
+        )
+
+    def _sync_ok(self) -> None:
+        self._ok.setEnabled(self._complete())
+
+    def _accept_if_complete(self) -> None:
+        if self._complete():
+            self.accept()
+
+    def values(self) -> dict:
+        return {
+            "account_id": self._account.text().strip(),
+            "bucket": self._bucket.text().strip(),
+            "access_key_id": self._access.text().strip(),
+            "secret_access_key": self._secret.text().strip(),
+        }
+
+
+class _PairingDialog(QDialog):
+    """Shows the pairing QR.
+
+    The payload is a secret in full — anyone who scans it can read every snapshot
+    this ledger publishes — so it is rendered from memory, never written to disk,
+    and the dialog says so rather than leaving it to be assumed.
+    """
+
+    def __init__(self, svg: str, bucket: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Pair a phone")
+
+        code = QSvgWidget()
+        code.load(svg.encode("utf-8"))
+        code.setFixedSize(QSize(320, 320))
+
+        warning = QLabel(
+            f"Scan once, from the phone that should read <b>{bucket}</b>.<br>"
+            "This code carries the read key and the decryption key — treat it "
+            "like a password and don't photograph or share it."
+        )
+        warning.setWordWrap(True)
+        warning.setObjectName("opDesc")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=self)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(code, 0, Qt.AlignHCenter)
+        layout.addWidget(warning)
+        layout.addWidget(buttons)
+
+
+def _publish_snapshot_task(conn) -> str:
+    """Publish the inventory projection. Runs on a worker thread.
+
+    Returns the sentence the tile reports, including the "nothing changed" case —
+    which is a successful run, not a failure, and reads better as a status than
+    as a warning box.
+    """
+    from tcginventory.services import snappublish
+
+    return snappublish.publish(conn).summary
 
 
 def _integrity_check(conn) -> str:

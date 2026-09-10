@@ -60,9 +60,15 @@ def encode(pairing: dict) -> str:
 def qr_svg(pairing: dict, *, scale: int = 4) -> str:
     """The pairing payload as an SVG QR code, as a string.
 
-    Error correction stays at the default ``L``: this is scanned once, held
-    steady, from a screen rather than a crumpled receipt, and every level above L
-    costs capacity that the keys need.
+    Colours are set explicitly — **dark modules on a white quiet zone** — and not
+    left to the default. segno draws black modules on a transparent background,
+    which on this app's dark theme renders black-on-near-black and does not scan
+    at all. The QR ignores the theme on purpose: it is a thing a camera reads,
+    not a thing that should match the window around it.
+
+    Error correction stays at ``L``: this is scanned once, held steady, from a
+    screen rather than a crumpled receipt, and every level above L costs capacity
+    the keys need.
     """
     import io
 
@@ -70,5 +76,12 @@ def qr_svg(pairing: dict, *, scale: int = 4) -> str:
 
     # segno writes encoded bytes even for SVG, so buffer bytes and decode once.
     out = io.BytesIO()
-    segno.make(encode(pairing), error="l").save(out, kind="svg", scale=scale, border=2)
+    segno.make(encode(pairing), error="l").save(
+        out,
+        kind="svg",
+        scale=scale,
+        border=3,
+        dark="#000000",
+        light="#ffffff",
+    )
     return out.getvalue().decode("utf-8")
