@@ -3478,3 +3478,82 @@ meant clicking **Edit item…** inside it to open a second dialog,
   reverting the walk reddens that test, reverting the reference reddens the
   defence test. `_box_at` is the only `parentItem()` call in `ui/`.
 - Suite 1,275 passing.
+
+### 2026-09-10 — An iOS client reads a published snapshot, not the ledger (ticket 73)
+
+- **Decision:** the phone gets a **derived, versioned, immutable projection** of
+  the inventory, published by the desktop. Never a copy of `inventory.db`, never
+  a peer ledger. Transport sits behind that artifact and is interchangeable; the
+  first client is **native SwiftUI**, not PySide6.
+- **Why a projection rather than the database: it is four hundred times smaller.**
+  Measured on the live ledger — `InventoryService.inventory_rows()` returns 1,479
+  rows in 26 ms, which serialise to 1,266 KB of JSON and **106 KB gzipped** (969
+  in-stock rows alone: 70 KB). `inventory.db` is 38 MB, and almost all of it is
+  reference data the phone has no use for: 53,391 `card_catalog` rows, 37,699
+  treatments, 57,315 `price_snapshot` rows. The ledger proper is small — 1,219
+  items, 478 transactions, 2,001 lines, 1,479 lots, 507 audit rows. `InventoryRow`
+  is already flat and self-contained (an `Item` plus about a dozen ints, no
+  catalog join), so the projection is something the app already computes rather
+  than something this work invents.
+- **The scope narrowed twice before this was the question.** "Port the app" became
+  "Transaction and Inventory" became "strictly Inventory". Each cut removed a
+  constraint, and the last one removed the decisive one — see below.
+- **Why the Qt-free boundary is what made any of this cheap.** Exactly one file
+  outside `ui/` imports Qt (`app.py:174`). More usefully, the C-extension
+  dependencies turn out to be confined **entirely** to the vision stack: `numpy`
+  in 12 files, `Pillow` in 12, `onnxruntime` in 4, all of them `condition_*`,
+  `detector*`, `identity_*`, `recognizer`, `vectors`, `exemplars`, `modeljobs`,
+  `corpus`, `inference`, `regioncrops`, `training`. Not one is imported by
+  `transactions.py`, `inventory.py`, `reporting.py`, `allocation.py`,
+  `repositories.py`, `pricing.py` or `catalog.py`, and `ui/` has none at all —
+  its two PIL imports are lazy, inside `recognition.py`. The whole image path is
+  `QPixmap`.
+- **That mattered because Qt 6.12 shipped PySide6-on-iOS**, which would otherwise
+  be the obvious route: cross-compile for `ios_arm64`, generate an Xcode project,
+  keep one codebase. Its documented limitation is that packages with C extensions
+  cannot be used, no iOS wheels existing on PyPI — which rules out the vision
+  stack and nothing else. So the route was live for a Transaction-and-Inventory
+  client.
+- **Rejected: PySide6-on-iOS, once the scope became read-only.** The entire
+  argument for it was keeping **one** implementation of the ledger algorithms. A
+  read-only inventory client has none — no FIFO, no basis allocation, no posting,
+  no audit; the projection is computed on the desktop before it leaves. What
+  remains is a searchable table over a 106 KB file, and paying 1–2 weeks of
+  cross-compile toolchain, no simulator, a hand-rolled Xcode project and a
+  desktop-shaped UI to reuse a `QTableView` is a bad trade. The hover-based
+  preview convention has no touch analogue either. Reconsider **only** if the
+  phone ever needs to post.
+- **Rejected: a writable phone ledger, or bidirectional sync — it is unmergeable
+  by construction, not merely hard.** Every PK is `INTEGER PRIMARY KEY`, so two
+  writers collide on rowids. Worse, item identity is match-or-create via
+  `ORDER BY id LIMIT 1` (`repositories.py:228,273`) and FIFO draw-down is
+  `ORDER BY acquired_at, id` (`repositories.py:419,433`) — so **even with UUIDs
+  the tiebreak is insertion order**, and merging two divergent ledgers silently
+  changes which lots were consumed, which changes cost basis, which changes
+  realized P/L. There is no after-the-fact reconciliation for that. This is the
+  strongest argument for the read-only framing and should be re-read before
+  anyone proposes sync again.
+- **Recorded, not adopted: the staged `TransactionRequest` outbox.** When the
+  phone does need to write, the shape is a phone-side outbox of
+  `TransactionRequest` values replayed on return through the real
+  `TransactionService.post()` — that dataclass is already `post()`'s contract, and
+  replaying keeps the posting algorithm in one implementation running once, which
+  is what the unified-algorithm rule protects. The alternative, leasing the ledger
+  the way `branch_lease.py` leases the checkout, is also correct and less good:
+  it solves the same problem by forbidding concurrency rather than by keeping one
+  writer.
+- **Rejected: iCloud/CloudKit.** The clean answer on a Mac. Windows iCloud Drive
+  cannot write into an arbitrary iOS app container, and an iOS app can only
+  auto-read its own — so the "just use a synced folder" shape does not exist while
+  the desktop is Windows.
+- **Art is the only real payload and it is optional.** The 969 in-stock rows
+  resolve to 770 distinct `card_id`s totalling **77 MB** at 103 KB average, with
+  25 resolving to no art at all. `cardimages.py` is already a lazy `card_id`-keyed
+  cache, so this re-encodes to roughly 10 MB of thumbnails or drops entirely —
+  text rows still answer "do I own this, what did I pay, what is it worth, where
+  is it". Assume **no connectivity at a show**, so whatever ships must ship before
+  leaving, not stream on arrival.
+- Incidental, ticketed separately: `cardimages.art_for()` is called per row from
+  `ui/views/inventory.py:267` — an N+1 costing 711 ms across 969 rows.
+- Nothing is built yet. Ticket 73 is deliberately mutable and carries the phased
+  plan; the provider, credential and encryption decisions are open.
