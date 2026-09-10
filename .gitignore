@@ -46,3 +46,7 @@ htmlcov/
 *credentials*
 *secret*
 *.token
+# ...but a .py is source, never a credential dump, and services/snapsecrets.py
+# is a real module these patterns would otherwise swallow. Negation last so it
+# wins for source files only.
+!*.py
