@@ -41,7 +41,8 @@ htmlcov/
 # Credentials never belong in the tree. The R2 publish token lives in Windows
 # Credential Manager (keyring); these patterns are the backstop for the moment
 # someone stages a token file they meant to keep local (2026-09-10).
-*creds*.json
-*credentials*.json
-*secret*.json
+# Extension-agnostic on purpose: the first real one to land was a .txt.
+*creds*
+*credentials*
+*secret*
 *.token
