@@ -106,7 +106,7 @@
     "_note": "Four separate SQLite files. Only inventory.db is the ledger; the other three are derived/ephemeral and are NOT migrated by data/migrator.py.",
     "inventory.db": {
       "module": "src/tcginventory/data/db.py",
-      "migrations": "src/tcginventory/data/migrations/ (0001..0025, forward-only)",
+      "migrations": "src/tcginventory/data/migrations/ (0001..0026, forward-only)",
       "repositories": "src/tcginventory/data/repositories.py",
       "tables": [
         "item",
@@ -125,7 +125,8 @@
         "card_show_status",
         "calendar_entry",
         "operation_run",
-        "schema_version"
+        "schema_version",
+        "app_meta"
       ]
     },
     "vision.db": {
@@ -924,11 +925,16 @@
         "export",
         "backup",
         "jobs",
-        "file menu"
+        "file menu",
+        "snapshot",
+        "phone snapshot",
+        "publish",
+        "r2",
+        "pair phone"
       ],
       "class": "OperationsView",
       "file": "src/tcginventory/ui/views/operations.py",
-      "purpose": "The maintenance hub. A tile per job with a plain description, its own status and inline progress; an Activity list of what actually happened (backed by operation_run); and a fact strip describing the install. Covers imports/exports, backups, price + catalog updates, the market sweep, card-show scraping, integrity check / VACUUM / corpus re-index, and the daily-update toggle.",
+      "purpose": "The maintenance hub. A tile per job with a plain description, its own status and inline progress; an Activity list of what actually happened (backed by operation_run); and a fact strip describing the install. Covers imports/exports, backups, price + catalog updates, the market sweep, card-show scraping, integrity check / VACUUM / corpus re-index, and the daily-update toggle. Also the Phone snapshot group (tickets 73/74): connect an R2 bucket, publish an encrypted read-only projection of the inventory for a phone to read offline, save the same projection to a file, and show the pairing QR.",
       "services": [
         "services/operations.py (the Qt-free registry)",
         "services/importexport.py",
@@ -936,18 +942,27 @@
         "services/marketprices.py",
         "services/catalog.py",
         "services/cardshows.py",
-        "services/catalog_index.py"
+        "services/catalog_index.py",
+        "services/snapshot.py (the inventory projection; deliberately free of PIL/numpy)",
+        "services/snappublish.py (build -> seal -> upload -> pointer last -> prune)",
+        "services/s3.py (~60 lines of SigV4 over httpx; no boto3)",
+        "services/snapcrypto.py (AES-256-GCM seal/unseal)",
+        "services/snapsecrets.py (keychain for secrets, the preferences file for settings)",
+        "services/artbundle.py (thumbnail zip; the only PIL importer in the snapshot path)",
+        "services/pairing.py (pairing payload + QR)"
       ],
       "repositories": [
         "data/backup.py",
         "data/db.py (open_database)",
-        "data/pricehistory.py"
+        "data/pricehistory.py",
+        "data/repositories.py (AppMetaRepository -> ledger_id)"
       ],
       "tables": [
         "operation_run",
         "price_snapshot",
         "card_catalog",
-        "card_show"
+        "card_show",
+        "app_meta"
       ],
       "supporting_files": [
         "ui/views/_worker.py (TaskWorker)",
@@ -959,7 +974,12 @@
         "tests/test_importexport.py",
         "tests/test_backup.py",
         "tests/test_pricing.py",
-        "tests/test_scheduling.py"
+        "tests/test_scheduling.py",
+        "tests/test_snapshot.py",
+        "tests/test_snappublish.py",
+        "tests/test_s3.py",
+        "tests/test_snapcrypto.py",
+        "tests/test_artbundle.py"
       ],
       "signals_out": [
         "changed() -> an import or price refresh changes every read screen"
@@ -970,11 +990,17 @@
         "Every run (including the daily background task and the startup auto-backup) writes an operation_run row so the Activity list and the 'while you were away' digest stay honest.",
         "The startup price auto-refresh runs THROUGH this screen (MainWindow._maybe_startup_refresh) so a manual and an automatic run report identically.",
         "Restore is not implemented — it is M-Ops2. Backup only.",
-        "A `models` group is reserved in the registry for metrics/triggers."
+        "A `models` group is reserved in the registry for metrics/triggers.",
+        "SNAPSHOT: the pointer object is written LAST. The pointer is what makes a payload live, so a publish that dies half-way leaves the previous snapshot readable. Retention never deletes what the pointer names and sweeps orphans no pointer ever named (a crashed upload can still leave a complete object).",
+        "SNAPSHOT: the payload content_hash excludes generated_at (gzip mtime=0, canonical JSON) so an unchanged ledger publishes nothing; art is gated by its own fingerprint (set of cached owned card_ids) because prices move nightly and would otherwise re-upload ~15 MB.",
+        "SNAPSHOT: secrets (R2 keys, encryption key) live in the OS keychain via snapsecrets, never in the preferences file; tests swap in snapsecrets.MemoryBackend and must never touch Credential Manager. The suite makes no network calls -- s3.ObjectStore takes an injectable transport.",
+        "SNAPSHOT: the pairing QR paints its own white quiet zone; segno's default transparent background is unscannable on the dark theme. The pairing payload is a secret in full and falls back to the PUBLISH key unless a read-only credential is passed."
       ],
       "specs": [
         "specs/03-features.md (F-OP-*)",
-        "docs/decisions.md § ### 2026-08-04 — Operations window (M-Ops1): the File menu becomes a screen"
+        "docs/decisions.md § ### 2026-08-04 — Operations window (M-Ops1): the File menu becomes a screen",
+        "docs/decisions.md § ### 2026-09-10 — An iOS client reads a published snapshot, not the ledger (ticket 73)",
+        "docs/decisions.md § ### 2026-09-10 — Publishing the snapshot: R2, sealed payloads, and a pointer written last (tickets 73, 74)"
       ]
     }
   },
