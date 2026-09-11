@@ -171,3 +171,69 @@ def test_entries_are_stored_not_deflated(conn, svc, monkeypatch):
     with zipfile.ZipFile(io.BytesIO(artbundle.build_bundle(conn))) as archive:
         for info in archive.infolist():
             assert info.compress_type == zipfile.ZIP_STORED
+
+
+# --------------------------------------------------------------------------
+# Resolution cost, and the fingerprint that gates re-uploading
+# --------------------------------------------------------------------------
+
+
+def test_each_distinct_card_is_resolved_once_not_once_per_copy(conn, svc):
+    """Three lots, two distinct printed identities -> two lookups. The per-row
+    shape from ui/views/inventory.py:267 would make three."""
+    buy(svc, "Charizard", 100, 100, DAY, set_name="Base Set", card_number="4/102")
+    buy(
+        svc,
+        "Charizard",
+        120,
+        120,
+        "2026-03-02T12:00:00+00:00",
+        set_name="Base Set",
+        card_number="4/102",
+    )
+    buy(svc, "Blastoise", 100, 100, DAY, set_name="Base Set", card_number="2/102")
+
+    calls = []
+
+    def counting(conn_, name, set_name, number):
+        calls.append((name, set_name, number))
+        return (f"base1-{number.split('/')[0]}", "https://example.test/x.png")
+
+    ids = artbundle.owned_card_ids(conn, resolve=counting)
+    assert sorted(ids) == ["base1-2", "base1-4"]
+    assert len(calls) == 2, f"expected one lookup per distinct card, got {len(calls)}"
+
+
+def test_the_fingerprint_covers_only_cached_owned_art(conn, svc, monkeypatch):
+    buy(svc, "Charizard", 100, 100, DAY)
+    buy(svc, "Blastoise", 100, 100, DAY)
+    monkeypatch.setattr(
+        cardimages,
+        "art_for",
+        _fake_resolver({"Charizard": "base1-4", "Blastoise": "base1-2"}),
+    )
+    _cache_png("base1-4")
+    only_one = artbundle.art_fingerprint(conn)
+
+    # Owning the same cards but with a second image now cached is a different
+    # bundle, so it must be a different fingerprint.
+    _cache_png("base1-2")
+    assert artbundle.art_fingerprint(conn) != only_one
+    # ...and rebuilding with nothing changed is stable.
+    assert artbundle.art_fingerprint(conn) == artbundle.art_fingerprint(conn)
+
+
+def test_the_fingerprint_ignores_prices(conn, svc, monkeypatch):
+    """The whole reason it exists: the nightly price refresh must not look like
+    a change to the art."""
+    result = buy(svc, "Charizard", 100, 100, DAY)
+    monkeypatch.setattr(cardimages, "art_for", _fake_resolver({"Charizard": "base1-4"}))
+    _cache_png("base1-4")
+    before = artbundle.art_fingerprint(conn)
+
+    conn.execute(
+        "UPDATE item SET review = 1, market_value_cents = 99999 WHERE id = ?",
+        (result.lots[0].item_id,),
+    )
+    conn.commit()
+    assert artbundle.art_fingerprint(conn) == before

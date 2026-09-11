@@ -3,17 +3,22 @@
 A phone at a card show has no usable connectivity, so art has to travel *with*
 the snapshot rather than stream on arrival. Measured on the real ledger: the 969
 in-stock rows resolve to 770 distinct ``card_id``s totalling **77 MB** of
-full-size PNG at 103 KB each. Re-encoded to a ~200 px JPEG that is roughly 10 MB
-— worth carrying, where 77 MB is not.
+full-size PNG at 103 KB each. Re-encoded to 200 px JPEG that is **14.7 MB**
+(measured, 768 cards) — worth carrying, where 77 MB is not.
 
 **One zip, not 770 objects.** 770 uploads at ~200 ms each is over two minutes of
 round trips; one object is a single PUT. The zip is stored, not deflated: JPEG
 does not compress again, and asking it to only burns CPU.
 
-**Ids are resolved in one pass.** ``ui/views/inventory.py`` calls
-``cardimages.art_for()`` per row, which costs 711 ms across 969 rows. That shape
-is not copied here — the ids are collected once, deduplicated, and only then
-turned into files.
+**Uploaded only when it changed.** The snapshot's content hash moves with every
+price, and the daily task refreshes prices, so gating art on that hash would
+re-upload ~15 MB nightly for nothing. :func:`art_fingerprint` hashes the set of
+cached owned ids instead — the exact contents of the zip — and an unchanged
+fingerprint carries the previous object forward.
+
+**Ids are resolved once per distinct card, not once per lot.** Duplicate copies
+share a lookup. It is still a lookup per distinct card rather than one bulk
+query; see :func:`owned_card_ids` for why that stays a separate change.
 
 This is the only module in the snapshot path that imports PIL, deliberately:
 :mod:`tcginventory.services.snapshot` stays free of the vision stack's
@@ -27,6 +32,7 @@ from __future__ import annotations
 import io
 import logging
 import zipfile
+from collections.abc import Callable
 
 from tcginventory.services import cardimages
 from tcginventory.services.inventory import InventoryService
@@ -38,21 +44,56 @@ JPEG_QUALITY = 82
 MANIFEST_NAME = "manifest.json"
 
 
-def owned_card_ids(conn) -> list[str]:
-    """Distinct ``card_id``s for the lots currently on hand, resolved once.
+def owned_card_ids(conn, resolve: Callable | None = None) -> list[str]:
+    """Distinct ``card_id``s for the lots currently on hand.
+
+    Resolution goes through ``cardimages.art_for`` **once per distinct printed
+    identity** — ``(name, set, number)`` — not once per lot, so duplicate copies
+    of a card cost one lookup between them. It is still one catalog query per
+    distinct card rather than one query for all of them: ``art_for`` carries
+    fuzzy matching rules (set containment, number-or-name agreement, trusting a
+    sole same-name printing) that a bulk query would have to reproduce exactly,
+    and that is a change to make on its own, with its own tests, not inside the
+    publish job. Measured at ~0.7 s for 969 rows on the real ledger, on a worker
+    thread.
 
     Sold and missing lots are skipped: their art is dead weight in a bundle whose
     whole reason for existing is to be small enough to carry.
     """
-    seen: dict[str, None] = {}
+    resolve = resolve or cardimages.art_for
+    identities: dict[tuple, None] = {}
     for row in InventoryService(conn).inventory_rows():
-        if not row.in_stock:
-            continue
-        item = row.item
-        hit = cardimages.art_for(conn, item.name, item.set_name, item.card_number)
+        if row.in_stock:
+            item = row.item
+            identities.setdefault((item.name, item.set_name, item.card_number), None)
+    seen: dict[str, None] = {}
+    for name, set_name, number in identities:
+        hit = resolve(conn, name, set_name, number)
         if hit:
             seen.setdefault(hit[0], None)
     return list(seen)
+
+
+def art_fingerprint(conn, resolve: Callable | None = None) -> str:
+    """Identity of what the bundle *would* contain, without building it.
+
+    The snapshot's content hash moves whenever a price does, and the daily task
+    refreshes prices — so gating art on that hash re-encodes and re-uploads ~15 MB
+    every night for a bundle that has not changed. This hashes the sorted set of
+    owned ids that are actually cached, which is exactly the set of images that
+    would land in the zip: unchanged fingerprint, unchanged bundle, and the
+    publish carries the previous object forward instead of uploading it again.
+
+    Cached-ness is part of it on purpose. A card whose art arrived in the cache
+    since the last publish should get into the next bundle even though the set
+    of owned cards did not move.
+    """
+    import hashlib
+
+    ids = sorted(
+        i for i in owned_card_ids(conn, resolve) if cardimages.cache_path(i).exists()
+    )
+    return hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()
 
 
 def _thumbnail(path, width: int = THUMB_WIDTH) -> bytes | None:

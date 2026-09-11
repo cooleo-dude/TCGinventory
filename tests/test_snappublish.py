@@ -311,3 +311,122 @@ def test_pairing_without_a_connection_says_so(stocked):
     snapsecrets.forget()
     with pytest.raises(LookupError):
         pairing.payload(stocked)
+
+
+# --------------------------------------------------------------------------
+# Art rides along only when it changed
+# --------------------------------------------------------------------------
+
+
+def _cache_png(card_id: str) -> None:
+    from PIL import Image
+
+    from tcginventory.services import cardimages
+
+    path = cardimages.cache_path(card_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (300, 420), (200, 40, 40)).save(path, format="PNG")
+
+
+def _resolver(mapping):
+    def art_for(conn, name, set_name, number):
+        hit = mapping.get(name)
+        return (hit, f"https://example.test/{hit}.png") if hit else None
+
+    return art_for
+
+
+def _art_puts(store):
+    return [k for k in store.puts if "/art/" in k]
+
+
+def _pointer(store, ledger_id):
+    return json.loads(store.objects[snappublish.pointer_key(ledger_id)])
+
+
+def _bump_price(conn, name, cents):
+    item_id = conn.execute("SELECT id FROM item WHERE name = ?", (name,)).fetchone()[0]
+    conn.execute(
+        "UPDATE item SET review = 1, market_value_cents = ? WHERE id = ?",
+        (cents, item_id),
+    )
+    conn.commit()
+
+
+def test_a_price_only_change_republishes_the_rows_but_not_the_art(stocked, monkeypatch):
+    """The daily task refreshes prices, and prices are in the content hash.
+    Without a separate fingerprint that re-encoded and re-uploaded ~15 MB every
+    night for a bundle that had not changed."""
+    from tcginventory.services import cardimages
+
+    monkeypatch.setattr(
+        cardimages,
+        "art_for",
+        _resolver({"Charizard": "base1-4", "Blastoise": "base1-2"}),
+    )
+    _cache_png("base1-4")
+    _cache_png("base1-2")
+    store = FakeStore()
+    ledger_id = snapshot.build_snapshot(stocked)["ledger_id"]
+
+    first = snappublish.publish(stocked, store=store, include_art=True)
+    assert first.art_bytes > 0 and first.art_reused is False
+    assert len(_art_puts(store)) == 1
+    first_art_key = _pointer(store, ledger_id)["art"]["key"]
+
+    _bump_price(stocked, "Charizard", 77777)  # a price, and nothing else
+
+    second = snappublish.publish(stocked, store=store, include_art=True)
+    assert second.published is True  # the rows did change
+    assert second.art_reused is True and second.art_bytes == 0
+    assert "art unchanged" in second.summary
+    assert len(_art_puts(store)) == 1, "the bundle was uploaded again"
+
+    pointer = _pointer(store, ledger_id)
+    assert pointer["art"]["key"] == first_art_key  # carried forward, still live
+    assert pointer["art"]["fingerprint"]
+    assert first_art_key in store.objects  # and retention left it alone
+
+
+def test_owning_a_new_card_does_republish_the_art(stocked, svc, monkeypatch):
+    from tcginventory.services import cardimages
+
+    monkeypatch.setattr(
+        cardimages,
+        "art_for",
+        _resolver(
+            {"Charizard": "base1-4", "Blastoise": "base1-2", "Venusaur": "base1-15"}
+        ),
+    )
+    _cache_png("base1-4")
+    _cache_png("base1-2")
+    store = FakeStore()
+    snappublish.publish(stocked, store=store, include_art=True)
+    assert len(_art_puts(store)) == 1
+
+    buy(svc, "Venusaur", 3000, 3500, DAY, set_name="Base Set")
+    _cache_png("base1-15")
+    third = snappublish.publish(stocked, store=store, include_art=True)
+    assert third.art_reused is False and third.art_bytes > 0
+    assert len(_art_puts(store)) == 2
+
+
+def test_a_carried_forward_bundle_survives_retention(stocked, monkeypatch):
+    """Ten-plus price-only publishes later the pointer still names the original
+    art object, so prune must never have deleted it."""
+    from tcginventory.services import cardimages
+
+    monkeypatch.setattr(cardimages, "art_for", _resolver({"Charizard": "base1-4"}))
+    _cache_png("base1-4")
+    store = FakeStore()
+    ledger_id = snapshot.build_snapshot(stocked)["ledger_id"]
+    snappublish.publish(stocked, store=store, include_art=True)
+    art_key = _pointer(store, ledger_id)["art"]["key"]
+
+    for cents in range(1, snappublish.KEEP + 4):
+        _bump_price(stocked, "Charizard", cents * 100)
+        snappublish.publish(stocked, store=store, include_art=True)
+
+    assert len(_art_puts(store)) == 1
+    assert art_key in store.objects
+    assert _pointer(store, ledger_id)["art"]["key"] == art_key

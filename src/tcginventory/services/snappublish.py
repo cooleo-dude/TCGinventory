@@ -71,9 +71,10 @@ class PublishResult:
     rows: int
     in_stock: int
     payload_bytes: int
-    art_bytes: int
+    art_bytes: int  # bytes uploaded this run; 0 when the bundle was carried forward
     pruned: int
     summary: str
+    art_reused: bool = False  # the previous bundle was unchanged and kept
 
 
 def _read_pointer(store: s3.ObjectStore, ledger_id: str) -> dict | None:
@@ -137,17 +138,33 @@ def publish(
     store.put(p_key, blob, "application/octet-stream")
 
     art_bytes = 0
-    a_key = None
+    art_entry = None
+    art_reused = False
     want_art = snapsecrets.publish_art() if include_art is None else include_art
     if want_art:
         from tcginventory.services import artbundle
 
-        bundle = artbundle.build_bundle(conn)
-        if bundle:
-            sealed = snapcrypto.seal(key, bundle)
-            a_key = art_key(ledger_id, stamp)
-            store.put(a_key, sealed, "application/octet-stream")
-            art_bytes = len(sealed)
+        fingerprint = artbundle.art_fingerprint(conn)
+        prior = (previous or {}).get("art") or {}
+        if prior.get("key") and prior.get("fingerprint") == fingerprint:
+            # Same set of cached, owned images as last time: the bundle would be
+            # byte-identical, so keep the object we already have rather than
+            # re-encoding ~15 MB and uploading it again. The pointer keeps naming
+            # it, which is what protects it from retention.
+            art_entry = dict(prior)
+            art_reused = True
+        else:
+            bundle = artbundle.build_bundle(conn)
+            if bundle:
+                sealed = snapcrypto.seal(key, bundle)
+                a_key = art_key(ledger_id, stamp)
+                store.put(a_key, sealed, "application/octet-stream")
+                art_bytes = len(sealed)
+                art_entry = {
+                    "key": a_key,
+                    "bytes": art_bytes,
+                    "fingerprint": fingerprint,
+                }
 
     # Only now does any of it become live.
     pointer = {
@@ -159,7 +176,7 @@ def publish(
         "content_hash": digest,
         "counts": payload["counts"],
         "payload": {"key": p_key, "bytes": len(blob)},
-        "art": {"key": a_key, "bytes": art_bytes} if a_key else None,
+        "art": art_entry,
     }
     store.put(
         pointer_key(ledger_id),
@@ -172,6 +189,8 @@ def publish(
     summary = f"{rows:,} rows · {len(blob) / 1024:.0f} KB"
     if art_bytes:
         summary += f" · art {art_bytes / 1048576:.1f} MB"
+    elif art_reused:
+        summary += " · art unchanged"
     if pruned:
         summary += f" · pruned {pruned}"
     return PublishResult(
@@ -182,6 +201,7 @@ def publish(
         art_bytes=art_bytes,
         pruned=pruned,
         summary=summary,
+        art_reused=art_reused,
     )
 
 
