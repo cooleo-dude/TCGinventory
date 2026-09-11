@@ -551,3 +551,110 @@ def test_the_pairing_dialog_names_the_bucket_and_warns(app):
     assert "my-bucket" in text
     assert "password" in text
     dialog.deleteLater()
+
+
+def test_connect_verification_runs_on_a_worker_with_a_short_timeout(monkeypatch):
+    """A network call in a click handler froze the window for the length of the
+    timeout (300 s). The check now goes through the same worker seam as every
+    other job, with a timeout a person can wait out."""
+    from tcginventory.services import s3
+    from tcginventory.ui.views.operations import VERIFY_TIMEOUT_SECONDS, _verify_store
+
+    seen = {}
+
+    class FakeStore:
+        def __init__(self, creds, transport=None, **kw):
+            seen.update(kw, bucket=creds.bucket)
+
+        def list(self, prefix=""):
+            seen["listed"] = prefix
+            return []
+
+    monkeypatch.setattr(s3, "ObjectStore", FakeStore)
+    values = dict(account_id="a", bucket="b", access_key_id="k", secret_access_key="s")
+    assert _verify_store(values) == "reached b"
+    assert seen["listed"] == ""
+    assert seen["retries"] == 1
+    assert seen["timeout"] == VERIFY_TIMEOUT_SECONDS <= 30
+
+
+def test_a_failed_verification_saves_nothing_and_logs_a_failure(app, seeded_conn):
+    from tcginventory.services import snapsecrets
+    from tcginventory.ui.views.operations import OperationsView
+
+    snapsecrets.set_backend(snapsecrets.MemoryBackend())
+    try:
+        view = OperationsView(seeded_conn)
+        values = dict(
+            account_id="a", bucket="b", access_key_id="k", secret_access_key="s"
+        )
+        view._on_store_verified(values, (False, "HTTP 403: AccessDenied"))
+
+        assert snapsecrets.load_credentials() is None  # nothing was written
+        _when, line, ok = ops.activity(seeded_conn)[0]
+        assert ok is False and "could not reach b" in line
+        view.deleteLater()
+    finally:
+        snapsecrets.set_backend(None)
+
+
+def test_a_successful_verification_saves_the_keys_and_mints_the_encryption_key(
+    app, seeded_conn
+):
+    from tcginventory.services import snapsecrets
+    from tcginventory.ui.views.operations import OperationsView
+
+    snapsecrets.set_backend(snapsecrets.MemoryBackend())
+    try:
+        view = OperationsView(seeded_conn)
+        values = dict(
+            account_id="a", bucket="b", access_key_id="k", secret_access_key="s"
+        )
+        view._on_store_verified(values, (True, "reached b"))
+
+        creds = snapsecrets.load_credentials()
+        assert creds is not None and creds.bucket == "b"
+        assert snapsecrets.encryption_key(create=False) is not None
+        _when, line, ok = ops.activity(seeded_conn)[0]
+        assert ok is True and "connected to b" in line
+        view.deleteLater()
+    finally:
+        snapsecrets.set_backend(None)
+
+
+def test_the_connect_handler_does_not_call_the_network_on_the_ui_thread(
+    app, seeded_conn, monkeypatch
+):
+    """The handler's only job is to collect the values and hand them to _start.
+    If it ever lists the bucket itself again, this goes red."""
+    from tcginventory.services import s3
+    from tcginventory.ui.views import operations as opsview
+
+    def forbidden(*a, **k):
+        raise AssertionError("ObjectStore constructed on the UI thread")
+
+    monkeypatch.setattr(s3, "ObjectStore", forbidden)
+
+    values = dict(account_id="a", bucket="b", access_key_id="k", secret_access_key="s")
+
+    class FakeDialog:
+        def __init__(self, parent=None):
+            pass
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+
+            return QDialog.Accepted
+
+        def values(self):
+            return values
+
+    monkeypatch.setattr(opsview, "_ConnectStoreDialog", FakeDialog)
+    started = {}
+    view = opsview.OperationsView(seeded_conn)
+    monkeypatch.setattr(
+        view, "_start", lambda op_id, factory, on_done: started.update(op=op_id)
+    )
+    view._connect_snapshot_store()
+    assert started == {"op": "snapshot.connect"}
+    view.deleteLater()

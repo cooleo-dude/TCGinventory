@@ -27,6 +27,7 @@ Qt-free.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import hashlib
 import hmac
 import logging
@@ -143,8 +144,15 @@ def authorization_header(
     )
 
 
+DEFAULT_TIMEOUT = 300.0  # a 15 MB art bundle on a slow uplink; uploads need room
+
+
 def _send(
-    method: str, url: str, headers: Mapping[str, str], body: bytes
+    method: str,
+    url: str,
+    headers: Mapping[str, str],
+    body: bytes,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> tuple[int, bytes]:  # pragma: no cover - real network
     import httpx
 
@@ -153,7 +161,7 @@ def _send(
         url,
         content=body or None,
         headers=dict(headers),
-        timeout=300.0,
+        timeout=timeout,
     )
     return resp.status_code, resp.content
 
@@ -199,9 +207,18 @@ class ObjectStore:
         retries: int = 3,
         backoff: float = 1.0,
         sleep: Callable[[float], None] = time.sleep,
+        timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
+        """``timeout`` is per request, in seconds.
+
+        The default suits a background upload. Anything a person is waiting on —
+        the connect-and-verify check in Operations — passes something short, so
+        a bad account id or a stalled DNS lookup fails in seconds, not minutes.
+        """
         self._creds = creds
-        self._send = transport or _send
+        # Bind the timeout here so injected transports keep the plain 4-argument
+        # signature and never need to know about it.
+        self._send = transport or functools.partial(_send, timeout=timeout)
         self._retries = max(1, retries)
         self._backoff = backoff
         self._sleep = sleep

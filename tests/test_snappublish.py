@@ -258,7 +258,7 @@ def test_stamps_sort_chronologically():
     """Retention picks the oldest by sorting strings, so the format and the sort
     are coupled -- the same coupling data/backup.py relies on."""
     stamp = snappublish.stamp_for_key()
-    assert len(stamp) == 15 and stamp[8] == "-"
+    assert stamp[8] == "-" and stamp[:8].isdigit() and stamp[9:15].isdigit()
     assert sorted(["20260910-000000", "20250101-235959"])[0] == "20250101-235959"
 
 
@@ -430,3 +430,101 @@ def test_a_carried_forward_bundle_survives_retention(stocked, monkeypatch):
     assert len(_art_puts(store)) == 1
     assert art_key in store.objects
     assert _pointer(store, ledger_id)["art"]["key"] == art_key
+
+
+# --------------------------------------------------------------------------
+# Two writers, one machine
+# --------------------------------------------------------------------------
+
+
+def test_keys_cannot_collide_within_one_second():
+    """The tile and the scheduled task are separate processes. Without the
+    nonce, two publishes in the same second wrote the same key and silently
+    overwrote each other's payload."""
+    stamps = {snappublish.stamp_for_key() for _ in range(50)}
+    assert len(stamps) == 50
+    one = next(iter(stamps))
+    assert len(one) == 22 and one[8] == "-" and one[15] == "-"
+    # Still sorts chronologically to the second -- retention depends on it.
+    assert sorted(["20260910-000000-ffffff", "20250101-235959-000000"])[0].startswith(
+        "20250101"
+    )
+
+
+def test_a_held_lock_turns_a_publish_into_a_skip_not_a_failure(stocked):
+    """Another process is doing this exact work; the right answer is a no-op run,
+    which both the tile and the nightly log can show without alarm."""
+    lock = snappublish.lock_path()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("12345")  # fresh: some other publish holds it
+
+    store = FakeStore()
+    result = snappublish.publish(stocked, store=store, include_art=False)
+
+    assert result.published is False
+    assert "another publish" in result.summary
+    assert store.puts == []
+    assert lock.exists()  # we did not steal it
+
+
+def test_a_stale_lock_is_reclaimed(stocked):
+    """A crashed publish must not stop every future one until someone finds the
+    file by hand."""
+    import os
+    import time
+
+    lock = snappublish.lock_path()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("dead")
+    old = time.time() - snappublish.LOCK_STALE_SECONDS - 60
+    os.utime(lock, (old, old))
+
+    store = FakeStore()
+    result = snappublish.publish(stocked, store=store, include_art=False)
+
+    assert result.published is True
+    assert not lock.exists()  # released after the run
+
+
+def test_the_lock_is_released_after_a_publish_and_after_a_failure(stocked, svc):
+    store = FakeStore()
+    snappublish.publish(stocked, store=store, include_art=False)
+    assert not snappublish.lock_path().exists()
+
+    buy(svc, "Venusaur", 3000, 3500, DAY, set_name="Base Set")
+    store.fail_on = ".json.gz.enc"
+    with pytest.raises(s3.S3Error):
+        snappublish.publish(stocked, store=store, include_art=False)
+    assert not snappublish.lock_path().exists()
+
+
+def test_the_pointer_records_each_objects_sha256(stocked, monkeypatch):
+    from tcginventory.services import cardimages
+
+    monkeypatch.setattr(cardimages, "art_for", _resolver({"Charizard": "base1-4"}))
+    _cache_png("base1-4")
+    store = FakeStore()
+    ledger_id = snapshot.build_snapshot(stocked)["ledger_id"]
+    snappublish.publish(stocked, store=store, include_art=True)
+
+    import hashlib
+
+    pointer = _pointer(store, ledger_id)
+    for part in ("payload", "art"):
+        entry = pointer[part]
+        assert (
+            entry["sha256"] == hashlib.sha256(store.objects[entry["key"]]).hexdigest()
+        )
+
+
+def test_fetch_and_verify_refuses_bytes_that_do_not_match_the_pointer(stocked):
+    """The reason the sha256 is there: an overwritten or torn object must be
+    caught before a decrypt is spent on it, and named for what it is."""
+    store = FakeStore()
+    ledger_id = snapshot.build_snapshot(stocked)["ledger_id"]
+    snappublish.publish(stocked, store=store, include_art=False)
+    key = _pointer(store, ledger_id)["payload"]["key"]
+    store.objects[key] = store.objects[key] + b"x"  # someone else wrote here
+
+    with pytest.raises(ValueError, match="sha256"):
+        snappublish.fetch_and_verify(store, ledger_id)

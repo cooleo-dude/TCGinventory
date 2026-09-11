@@ -19,16 +19,33 @@ not among the newest N is swept.
 hash is read back from ``latest.json`` rather than cached locally, which means
 the decision is self-correcting — wipe the bucket and the next run republishes.
 
+**Two writers, one machine.** The Operations tile and the daily background task
+are separate processes that can both publish, and nothing on the bucket side
+serialises them. Two things keep that safe. A **lock file** in the data
+directory (both processes share it) makes a second publish a *skip*, not a
+race — reported as a no-op run, never an error, and reclaimed if a crashed
+process left it behind. And every key carries a short random suffix after its
+second-resolution stamp, so two publishes in the same second cannot name the
+same object and silently overwrite each other; the pointer records each
+object's sha256 so a reader can tell if that ever happened anyway.
+
 Qt-free. PIL is reached only through :mod:`tcginventory.services.artbundle`, and
 only when art is enabled.
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import logging
+import os
+import secrets
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
+from tcginventory import config
 from tcginventory.data.db import now_iso
 from tcginventory.services import s3, snapcrypto, snapsecrets, snapshot
 from tcginventory.services.exceptions import SnapshotNotConfiguredError
@@ -37,18 +54,73 @@ log = logging.getLogger(__name__)
 
 POINTER_SCHEMA = 1
 KEEP = 10  # matches the startup backup's keep-10 (data/backup.py)
+LOCK_FILENAME = "snapshot.lock"
+# A publish that holds the lock longer than this is presumed dead: the largest
+# real run measured (77 MB of full-size art) took 16 s, so 15 minutes is not a
+# tuning knob, it is "the process crashed".
+LOCK_STALE_SECONDS = 15 * 60
 
 
 def stamp_for_key() -> str:
-    """UTC stamp whose lexicographic order is chronological order.
+    """UTC stamp whose lexicographic order is chronological order, plus a nonce.
 
     Same format and same reason as ``backup.timestamp_for_filename`` — sorting
     keys as strings is how retention picks the oldest, so the coupling between
-    the format and the sort is load-bearing.
+    the format and the sort is load-bearing. The six hex characters after it
+    exist so two publishes in the same second (the tile and the scheduled task)
+    can never produce the same key; ties within a second sort arbitrarily, and
+    both objects are complete snapshots, so that is harmless.
     """
     from datetime import datetime, timezone
 
-    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return (
+        f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
+    )
+
+
+def lock_path() -> Path:
+    return config.data_dir() / LOCK_FILENAME
+
+
+class PublishBusy(Exception):
+    """Another publish holds the lock. Internal; ``publish`` turns it into a skip."""
+
+
+@contextlib.contextmanager
+def _publish_lock(path: Path | None = None):
+    """Hold the cross-process publish lock for the duration of the block.
+
+    ``O_EXCL`` makes creation atomic on both Windows and POSIX. A lock older than
+    :data:`LOCK_STALE_SECONDS` is a crashed publish, not a running one, and is
+    reclaimed — otherwise one crash would stop every future publish until
+    someone found the file.
+    """
+    path = path or lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - path.stat().st_mtime
+            except FileNotFoundError:  # released between our two calls
+                continue
+            if age > LOCK_STALE_SECONDS and attempt == 0:
+                log.warning("reclaiming stale publish lock (%.0f s old)", age)
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+                continue
+            raise PublishBusy(f"another publish holds {path.name}") from None
+    else:  # pragma: no cover - two consecutive vanishing locks
+        raise PublishBusy(f"could not acquire {path.name}")
+    try:
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        yield
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
 
 
 def pointer_key(ledger_id: str) -> str:
@@ -114,6 +186,27 @@ def publish(
             )
         store = s3.ObjectStore(creds)
 
+    try:
+        with _publish_lock():
+            return _publish_locked(conn, store, force=force, include_art=include_art)
+    except PublishBusy as busy:
+        # A skip, not a failure: the other process is doing this exact work.
+        log.info("publish skipped: %s", busy)
+        counts = snapshot.build_snapshot(conn)["counts"]
+        return PublishResult(
+            published=False,
+            rows=counts["rows"],
+            in_stock=counts["in_stock"],
+            payload_bytes=0,
+            art_bytes=0,
+            pruned=0,
+            summary="skipped — another publish is already running",
+        )
+
+
+def _publish_locked(
+    conn, store: s3.ObjectStore, *, force: bool, include_art: bool | None
+) -> PublishResult:
     payload = snapshot.build_snapshot(conn)
     ledger_id = payload["ledger_id"]
     digest = snapshot.content_hash(payload)
@@ -163,10 +256,13 @@ def publish(
                 art_entry = {
                     "key": a_key,
                     "bytes": art_bytes,
+                    "sha256": hashlib.sha256(sealed).hexdigest(),
                     "fingerprint": fingerprint,
                 }
 
-    # Only now does any of it become live.
+    # Only now does any of it become live. Each object's sha256 rides in the
+    # pointer so a reader can prove the bytes it fetched are the bytes that were
+    # published, before it spends a decrypt on them.
     pointer = {
         "schema": POINTER_SCHEMA,
         "payload_schema": snapshot.SCHEMA,
@@ -175,7 +271,11 @@ def publish(
         "published_at": now_iso(),
         "content_hash": digest,
         "counts": payload["counts"],
-        "payload": {"key": p_key, "bytes": len(blob)},
+        "payload": {
+            "key": p_key,
+            "bytes": len(blob),
+            "sha256": hashlib.sha256(blob).hexdigest(),
+        },
         "art": art_entry,
     }
     store.put(
@@ -240,6 +340,9 @@ def fetch_and_verify(store: s3.ObjectStore, ledger_id: str) -> dict:
     if pointer is None:
         raise LookupError(f"no snapshot published for ledger {ledger_id}")
     blob = store.get(pointer["payload"]["key"])
+    expected = pointer["payload"].get("sha256")
+    if expected and hashlib.sha256(blob).hexdigest() != expected:
+        raise ValueError("payload bytes do not match the sha256 the pointer recorded")
     payload = snapshot.decode(snapcrypto.unseal(snapsecrets.encryption_key(), blob))
     if payload["ledger_id"] != ledger_id:
         raise ValueError("published payload belongs to a different ledger")

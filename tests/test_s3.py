@@ -269,3 +269,17 @@ def test_endpoint_defaults_to_the_account_host_and_can_be_overridden():
     assert CREDS.base_url() == "https://acct123.r2.cloudflarestorage.com"
     other = s3.Credentials("a", "b", "k", "s", endpoint="https://example.test/")
     assert other.base_url() == "https://example.test"
+
+
+def test_the_timeout_is_bound_into_the_default_transport():
+    """The connect check passes a short one so a bad account id fails in seconds;
+    a fake transport keeps the plain four-argument signature and never sees it."""
+    import functools
+
+    store = s3.ObjectStore(CREDS, timeout=20.0)
+    assert isinstance(store._send, functools.partial)
+    assert store._send.keywords == {"timeout": 20.0}
+    assert s3.ObjectStore(CREDS)._send.keywords == {"timeout": s3.DEFAULT_TIMEOUT}
+
+    fake = FakeTransport((200, b""))
+    assert s3.ObjectStore(fake and CREDS, fake)._send is fake

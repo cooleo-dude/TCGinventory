@@ -770,29 +770,36 @@ class OperationsView(QWidget):
         Verified first on purpose: a set of keys that cannot list the bucket is
         worth reporting now, at the moment they were typed, rather than at the
         first publish when the context has gone.
-        """
-        from tcginventory.services import s3, snapsecrets
 
+        The verification is a network call, so it runs on a worker like every
+        other job here — never on the UI thread, where a bad account id or a
+        stalled DNS lookup would freeze the window for the length of the
+        timeout. The secrets are then written on the UI thread, in the
+        completion handler, so the keychain and the preferences file are only
+        ever touched from one thread.
+        """
         dialog = _ConnectStoreDialog(self)
         if dialog.exec() != QDialog.Accepted:
             return
         values = dialog.values()
-        creds = s3.Credentials(
-            account_id=values["account_id"],
-            bucket=values["bucket"],
-            access_key_id=values["access_key_id"],
-            secret_access_key=values["secret_access_key"],
+        self._start(
+            "snapshot.connect",
+            lambda db, v=values: TaskWorker(db, lambda _conn: _verify_store(v)),
+            lambda payload, v=values: self._on_store_verified(v, payload),
         )
-        try:
-            s3.ObjectStore(creds, retries=1).list("")
-        except Exception as exc:
+
+    def _on_store_verified(self, values: dict, payload) -> None:
+        ok, summary = payload
+        if not ok:
             QMessageBox.warning(
                 self,
                 "Could not reach the bucket",
-                f"The keys were not saved.\n\n{exc}",
+                f"The keys were not saved.\n\n{summary}",
             )
             self._log("snapshot.connect", False, f"could not reach {values['bucket']}")
             return
+        from tcginventory.services import snapsecrets
+
         snapsecrets.save_credentials(**values)
         snapsecrets.encryption_key()  # mint it now, so pairing has one to show
         self._log("snapshot.connect", True, f"connected to {values['bucket']}")
@@ -1153,6 +1160,28 @@ class _PairingDialog(QDialog):
         layout.addWidget(code, 0, Qt.AlignHCenter)
         layout.addWidget(warning)
         layout.addWidget(buttons)
+
+
+VERIFY_TIMEOUT_SECONDS = 20.0  # a person is waiting on this one
+
+
+def _verify_store(values: dict) -> str:
+    """Prove the typed keys can list the bucket. Runs on a worker thread.
+
+    Short timeout and a single attempt: this is a person waiting for an answer,
+    and the useful answers — wrong account id, wrong key, no such bucket — all
+    arrive in well under a second. Retrying a 403 only delays the message.
+    """
+    from tcginventory.services import s3
+
+    creds = s3.Credentials(
+        account_id=values["account_id"],
+        bucket=values["bucket"],
+        access_key_id=values["access_key_id"],
+        secret_access_key=values["secret_access_key"],
+    )
+    s3.ObjectStore(creds, retries=1, timeout=VERIFY_TIMEOUT_SECONDS).list("")
+    return f"reached {values['bucket']}"
 
 
 def _publish_snapshot_task(conn) -> str:
