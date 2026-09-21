@@ -712,9 +712,28 @@ class CalendarView(QWidget):
     def _render_agenda(self, shows, entries, conflict_ids: set[int]) -> None:
         self._clear_agenda()
         t = theme.active()
-        # The agenda lists only shows you've marked (attending/walking) plus your
+        # Selected day first: *every* scraped show on that date, whatever its
+        # status, so an unmarked/pending/denied show can be reached and marked.
+        # This is the only place a show hidden behind a cell's "+N more" appears.
+        self._agenda_layout.addWidget(self._section_header("Selected day"))
+        self._agenda_layout.addWidget(self._date_header(self._selected))
+        day_shows = sorted(
+            (s for s in shows if s.starts_on == self._selected),
+            key=lambda s: (s.start_time or "", s.name),
+        )
+        for s in day_shows:
+            self._agenda_layout.addWidget(
+                self._show_row(s, s.source_id in conflict_ids)
+            )
+        if not day_shows:
+            none = QLabel("No shows on this day.")
+            none.setStyleSheet(f"color:{t.ink3};padding:4px 6px 8px;")
+            self._agenda_layout.addWidget(none)
+
+        # Then the month: only shows you've marked (attending/walking) plus your
         # personal entries — not every scraped show in the area (those still show
         # as bars on the month grid).
+        self._agenda_layout.addWidget(self._section_header("This month"))
         marked = [s for s in shows if s.status in ("attending", "walking")]
         events = [("show", s.starts_on, s.start_time or "", s) for s in marked]
         events += [("entry", e.starts_on, "", e) for e in entries]
@@ -737,6 +756,15 @@ class CalendarView(QWidget):
             else:
                 self._agenda_layout.addWidget(self._entry_row(obj))
         self._agenda_layout.addStretch(1)
+
+    def _section_header(self, text: str) -> QLabel:
+        t = theme.active()
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            f"color:{t.ink2};font-size:12px;font-weight:700;"
+            f"border-bottom:1px solid {t.line};padding:12px 2px 4px;"
+        )
+        return lbl
 
     def _date_header(self, iso: str) -> QLabel:
         t = theme.active()
