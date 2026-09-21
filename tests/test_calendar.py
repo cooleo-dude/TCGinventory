@@ -128,10 +128,75 @@ def test_agenda_lists_only_marked_shows_and_entries(app, conn, tmp_path, monkeyp
     view._year, view._month, view._states = 2026, 8, ["NJ"]
     view.reload()
 
+    view._selected = "2026-08-01"  # a day with nothing on it
+    view.reload()
+
     texts = _agenda_texts(view)
     assert any("Marked Show" in x for x in texts)  # attending/walking → shown
     assert any("Personal Note" in x for x in texts)  # personal entry → shown
     assert not any("Unmarked Show" in x for x in texts)  # scraped, unmarked → hidden
+    assert any("No shows on this day" in x for x in texts)
+
+    # Selecting the unmarked show's day surfaces it in the "Selected day" block —
+    # the only route to a show you have not marked yet (ticket 75).
+    view._on_day_selected("2026-08-11")
+    texts = _agenda_texts(view)
+    assert any("Unmarked Show" in x for x in texts)
+    assert not any("No shows on this day" in x for x in texts)
+    view.deleteLater()
+
+
+def _show_row_buttons(view, name: str):
+    """The four status buttons on the agenda row whose title is ``name``."""
+    from PySide6.QtWidgets import QLabel, QToolButton
+
+    for lbl in view._agenda_body.findChildren(QLabel):
+        if lbl.text() == name:
+            return lbl.parent().findChildren(QToolButton)
+    raise AssertionError(f"no agenda row titled {name!r}")
+
+
+def test_selected_day_row_sets_status_on_an_unmarked_show(
+    app, conn, tmp_path, monkeypatch
+):
+    """Regression (ticket 75): status buttons lived only on month-agenda rows,
+    which listed only attending/walking shows — so an unmarked, pending or
+    denied show had no reachable buttons and could never be marked."""
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    from tcginventory.ui.views.calendar import CalendarView
+
+    repo = CardShowRepository(conn)
+    repo.upsert(
+        CardShow(
+            source_id=7,
+            name="Fresh Show",
+            state="NJ",
+            starts_on="2026-08-22",
+            fetched_at="t",
+        )
+    )
+    conn.commit()
+
+    view = CalendarView(conn)
+    view._year, view._month, view._states = 2026, 8, ["NJ"]
+    view._on_day_selected("2026-08-22")
+
+    buttons = _show_row_buttons(view, "Fresh Show")
+    assert len(buttons) == 4  # attending / walking / pending / denied
+    buttons[0].click()  # _STATUS_ORDER[0] == attending
+    assert repo.list_for_states(["NJ"])[0].status == "attending"
+    assert view._selected == "2026-08-22"  # the day stays selected
+
+    # Now marked, it appears twice: the selected-day block and the month block.
+    texts = _agenda_texts(view)
+    assert sum(1 for x in texts if x == "Fresh Show") == 2
+
+    # Pending/denied are reachable too, and clicking the active colour clears it.
+    _show_row_buttons(view, "Fresh Show")[2].click()  # pending
+    assert repo.list_for_states(["NJ"])[0].status == "pending"
+    assert sum(1 for x in _agenda_texts(view) if x == "Fresh Show") == 1
+    _show_row_buttons(view, "Fresh Show")[2].click()
+    assert repo.list_for_states(["NJ"])[0].status is None
     view.deleteLater()
 
 
