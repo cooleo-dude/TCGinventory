@@ -234,14 +234,19 @@ def test_no_module_decodes_an_embedding_with_a_hardcoded_dtype():
     import tcginventory
 
     root = Path(tcginventory.__file__).parent
+    # Voice search (ticket 76) decodes *microphone PCM* — a wire format fixed by
+    # the audio device, never a stored blob — so its two files are not readers
+    # of an embedding and sit outside this rule.
+    exempt = {"vectors.py", "vision.py", "voice.py", "_voice_input.py"}
     offenders = [
         path.relative_to(root).as_posix()
         for path in root.rglob("*.py")
         if "frombuffer" in path.read_text(encoding="utf-8")
-        and path.name != "vectors.py"
-        and path.name != "vision.py"  # comment only, asserted below
+        and path.name not in exempt  # vision.py: comment only, asserted below
     ]
     assert offenders == []
+    for name in ("services/voice.py", "ui/views/_voice_input.py"):
+        assert "card_embedding" not in (root / name).read_text(encoding="utf-8")
 
     text = (root / "data" / "vision.py").read_text(encoding="utf-8")
     assert "np.frombuffer" not in text.replace("`np.frombuffer(..., np.float32)`", "")

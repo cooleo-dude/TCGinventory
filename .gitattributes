@@ -1,1 +1,4 @@
 src/tcginventory/models/*.onnx filter=lfs diff=lfs merge=lfs -text
+# Whisper token table: one "token id" per line, read by sherpa-onnx as bytes.
+# Keep LF on every checkout so a CRLF never rides along on the id.
+src/tcginventory/models/*.txt -text
