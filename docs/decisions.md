@@ -3550,3 +3550,83 @@ meant clicking **Edit item…** inside it to open a second dialog,
   `tests/test_ui_views.py`). Frozen build in the worktree: 496 MB onedir, boots
   and creates the databases; both `onnxruntime.dll` copies sit beside their own
   extension module, no top-level collision.
+
+### 2026-09-22 — Voice search hears names, not spellings (ticket 77)
+
+- **Report, same day as ticket 76 shipped:** "Celebi Triumphant" put
+  `celiby triumphant` in the search field — nothing matched. Reproduced on the
+  real ledger: `celiby`→`celebi` scores 0.667 by spelling, under the 0.8 bar,
+  and the bar cannot drop because `mew`→`mewtwo` is also 0.667. The user was
+  certain this was one instance of a class, and asked for options that connect
+  the phonetic output to each unique name and set, not a fix for Celebi.
+- **Measure first.** `training/voice_bench.py` (dev-only, never bundled) speaks
+  every distinct name in a ledger with a Piper VITS voice from sherpa-onnx's
+  TTS release, runs the production path, and scores *hit* (the query would show
+  the row), *wrong card* (it would show a different one) and, with `--unowned`,
+  *false accept* on catalog names the ledger does not hold. Synthetic voices
+  mispronounce ("Bidoof" → "They do"), so the numbers are a floor on systematic
+  mishearings and, above all, a **per-name list** to compare approaches on.
+  915 owned names, one voice:
+
+  | approach | hit | wrong card |
+  |---|---|---|
+  | ticket 76 as shipped (free-form Whisper, spelling snap) | 44.0% | — |
+  | + phonetic snap (Metaphone key, one-edit near channel) | 69.5% | 9.6% |
+  | same, near channel off | 58.1% | 4.7% |
+  | constrained decoding, ungated | 79.1% | 17.4% |
+  | + spoken aliases + phrase penalty, ungated | 80.8% | 18.6% |
+  | **gated at gap 10 with snap fallback (production path)** | **85.6%** | **6.2%** |
+
+  On 200 unowned catalog names the production path names an owned card 34.0%
+  of the time (ungated constrained: 88.5%); what remains is almost all the snap
+  *fallback* phonetically matching an unowned name to an owned one ("Cleffa" →
+  Clefairy), the known ceiling of Option A, recorded below as a follow-up.
+
+- **Option A — snap by sound — is kept as the fallback**, not the answer. A
+  Metaphone-style key (`voice.phonetic_key`, initial vowels folded to `A`
+  because "Obama" / "Aboma" is noise) makes "Celiby", "sell a bee" and "Celebi"
+  the same word, and a one-edit near channel adds 11 points for 5 points of
+  wrong card — kept, measured. Guards the benchmark forced: spans under three
+  letters never snap ("no" ≠ Neo), all-filler spans never snap ("and" ≠ Entei,
+  however alike they sound), name prefixes under four letters are not
+  candidates ("Mr." ≠ "more"), and spoken suffixes fold first ("Charizard X" is
+  *Charizard ex*, not GX). Ceiling: Whisper writing an English *word* — "Santa
+  Scorch" snaps, "They do" cannot.
+- **Option C — constrained decoding — is the answer.** `services/voice_decode.py`
+  drives the bundled Whisper pair on the onnxruntime we already ship (a numpy
+  log-mel front end that reproduces sherpa's transcript byte for byte on its own
+  test clip) and, at every step, masks the logits to continuations of a
+  byte-trie grammar over the grid's names, sets and collector numbers. The
+  output is a real name by construction, chosen by acoustic likelihood among
+  real names. Details that each earned their place on the benchmark:
+  - the trie is walked as a small **NFA** — "Celebi" is a prefix of "Celebi V",
+    so both readings stay alive until the bytes decide;
+  - tokens are indexed by **first byte**, so a step scores the few hundred
+    tokens that can continue the grammar instead of all 51k (7 s → 1 s a clip);
+  - **spoken aliases** (`spoken_variants`): "V Max", "V Star", "X", "E X",
+    "Delta", "Level X", "and" complete the catalog spelling;
+  - a **phrase penalty** (−4 nats to start another phrase) stopped trailing
+    breath being narrated as a second card — two-phrase misses went from dozens
+    to two;
+  - a **reject gate** (`voice.REJECT_GAP = 10`): the constrained path's
+    log-probability against the free transcript's. A grammar always answers
+    *something*; without the gate 88.5% of unowned names were confidently named
+    as some owned card. At 10 nats: 79.5% of owned names kept, wrong card 13.5%
+    → 1.0%, false accept 88.5% → 4.0%, and the refused clips fall back to the
+    snap path, which recovers some and leaves the rest as honest raw text.
+- **Rejected — Option B, a sherpa-onnx transducer with hotword boosting.**
+  Real decode-time biasing, but Whisper is not one of the models that supports
+  it, and a Zipformer trained on LibriSpeech has never seen "Charizard".
+- **Rejected — lowering the spelling threshold, or an alias for Celebi.** Shown
+  above: the threshold cannot separate the Celebi case from the Mew case, and
+  the user ruled out the one-name fix.
+- **Layering unchanged.** Capture is still QtMultimedia in `ui/`; the button
+  now supplies `(names, sets, numbers)` from the grid's rows and calls
+  `voice.recognize`, which owns the grammar cache, the gate and the fallback.
+  `tests/test_vectors.py`'s `frombuffer` guard already exempted `voice.py`.
+- **Cost.** Constrained decoding is ~1 s a clip on CPU (beam 4; the free
+  transcript for the gate adds ~0.4 s); the recogniser and grammar are built
+  once and reused. No new dependency and no new model.
+- **Follow-ups, not in this ticket:** a second synthetic voice and a real-voice
+  sample to check the margin; catalog-wide vocabulary (unowned names as
+  first-class answers) once a use for it exists; wake-word mode.

@@ -2,9 +2,10 @@
 
 One click starts capturing from the default microphone at 16 kHz mono; capture
 stops on its own after about a second of quiet once something has been said, or
-at a hard cap, and the clip is transcribed off the UI thread. What comes back is
-run through :func:`tcginventory.services.voice.parse_query` against the words the
-owning view knows about (card names, set names) and emitted as ``recognized``.
+at a hard cap, and the clip is recognised off the UI thread by
+:func:`tcginventory.services.voice.recognize` against the words the owning view
+knows about — card names, set names, collector numbers — and the result is
+emitted as ``recognized``.
 
 The button is the only place QtMultimedia is touched; the service layer sees PCM
 bytes. It is disabled with an explanatory tooltip when the speech model or the
@@ -33,29 +34,39 @@ NO_SPEECH_MS = 4000
 #: RMS of int16 samples above which a chunk counts as speech (~-36 dBFS).
 SPEECH_RMS = 400.0
 
-Vocabulary = Callable[[], tuple[list[str], list[str]]]
+#: ``() -> (names, sets, numbers)`` — the words a clip may resolve to.
+Vocabulary = Callable[[], tuple[list[str], list[str], list[str]]]
 
 
 class _TranscribeWorker(QThread):
-    """Transcribe one clip and snap it to the vocabulary, off the UI thread."""
+    """Recognise one clip against the vocabulary, off the UI thread."""
 
     done = Signal(str)
 
-    def __init__(self, pcm16: bytes, rate: int, names: list[str], sets: list[str]):
+    def __init__(
+        self,
+        pcm16: bytes,
+        rate: int,
+        names: list[str],
+        sets: list[str],
+        numbers: list[str],
+    ):
         super().__init__()
         self._pcm = pcm16
         self._rate = rate
         self._names = names
         self._sets = sets
+        self._numbers = numbers
 
     def run(self) -> None:  # pragma: no cover - exercised via the button
         import logging
 
         try:
-            text = voice.transcribe(self._pcm, self._rate)
-            query = voice.parse_query(text, self._names, self._sets)
+            query = voice.recognize(
+                self._pcm, self._rate, self._names, self._sets, self._numbers
+            )
         except Exception:
-            logging.getLogger(__name__).exception("voice transcription failed")
+            logging.getLogger(__name__).exception("voice recognition failed")
             query = ""
         self.done.emit(query)
 
@@ -63,9 +74,10 @@ class _TranscribeWorker(QThread):
 class VoiceInputButton(QToolButton):
     """A mic button that turns a spoken phrase into search text.
 
-    ``vocabulary`` is called at capture time and returns ``(names, sets)`` — the
-    values the transcript may snap to. The owning view supplies it from the rows
-    it already holds, so nothing here touches the database.
+    ``vocabulary`` is called at capture time and returns ``(names, sets,
+    numbers)`` — the grammar the clip is decoded against. The owning view
+    supplies it from the rows it already holds, so nothing here touches the
+    database.
     """
 
     recognized = Signal(str)  # the query text to place in a search field
@@ -73,7 +85,7 @@ class VoiceInputButton(QToolButton):
 
     def __init__(self, vocabulary: Vocabulary | None = None, parent=None) -> None:
         super().__init__(parent)
-        self._vocabulary = vocabulary or (lambda: ([], []))
+        self._vocabulary = vocabulary or (lambda: ([], [], []))
         self._source = None  # QAudioSource while capturing
         self._io = None  # its QIODevice
         self._chunks: list[bytes] = []
@@ -205,8 +217,8 @@ class VoiceInputButton(QToolButton):
         if self._worker is not None and self._worker.isRunning():
             return
         retire(self._worker, self._parked)
-        names, sets = self._vocabulary()
-        worker = _TranscribeWorker(pcm16, rate, list(names), list(sets))
+        names, sets, numbers = self._vocabulary()
+        worker = _TranscribeWorker(pcm16, rate, list(names), list(sets), list(numbers))
         worker.done.connect(self._on_done)
         self._worker = worker
         worker.start()
