@@ -3478,3 +3478,167 @@ meant clicking **Edit item…** inside it to open a second dialog,
   reverting the walk reddens that test, reverting the reference reddens the
   defence test. `_box_at` is the only `parentItem()` call in `ui/`.
 - Suite 1,275 passing.
+
+### 2026-09-10 — An iOS client reads a published snapshot, not the ledger (ticket 73)
+
+- **Decision:** the phone gets a **derived, versioned, immutable projection** of
+  the inventory, published by the desktop. Never a copy of `inventory.db`, never
+  a peer ledger. Transport sits behind that artifact and is interchangeable; the
+  first client is **native SwiftUI**, not PySide6.
+- **Why a projection rather than the database: it is four hundred times smaller.**
+  Measured on the live ledger — `InventoryService.inventory_rows()` returns 1,479
+  rows in 26 ms, which serialise to 1,266 KB of JSON and **106 KB gzipped** (969
+  in-stock rows alone: 70 KB). `inventory.db` is 38 MB, and almost all of it is
+  reference data the phone has no use for: 53,391 `card_catalog` rows, 37,699
+  treatments, 57,315 `price_snapshot` rows. The ledger proper is small — 1,219
+  items, 478 transactions, 2,001 lines, 1,479 lots, 507 audit rows. `InventoryRow`
+  is already flat and self-contained (an `Item` plus about a dozen ints, no
+  catalog join), so the projection is something the app already computes rather
+  than something this work invents.
+- **The scope narrowed twice before this was the question.** "Port the app" became
+  "Transaction and Inventory" became "strictly Inventory". Each cut removed a
+  constraint, and the last one removed the decisive one — see below.
+- **Why the Qt-free boundary is what made any of this cheap.** Exactly one file
+  outside `ui/` imports Qt (`app.py:174`). More usefully, the C-extension
+  dependencies turn out to be confined **entirely** to the vision stack: `numpy`
+  in 12 files, `Pillow` in 12, `onnxruntime` in 4, all of them `condition_*`,
+  `detector*`, `identity_*`, `recognizer`, `vectors`, `exemplars`, `modeljobs`,
+  `corpus`, `inference`, `regioncrops`, `training`. Not one is imported by
+  `transactions.py`, `inventory.py`, `reporting.py`, `allocation.py`,
+  `repositories.py`, `pricing.py` or `catalog.py`, and `ui/` has none at all —
+  its two PIL imports are lazy, inside `recognition.py`. The whole image path is
+  `QPixmap`.
+- **That mattered because Qt 6.12 shipped PySide6-on-iOS**, which would otherwise
+  be the obvious route: cross-compile for `ios_arm64`, generate an Xcode project,
+  keep one codebase. Its documented limitation is that packages with C extensions
+  cannot be used, no iOS wheels existing on PyPI — which rules out the vision
+  stack and nothing else. So the route was live for a Transaction-and-Inventory
+  client.
+- **Rejected: PySide6-on-iOS, once the scope became read-only.** The entire
+  argument for it was keeping **one** implementation of the ledger algorithms. A
+  read-only inventory client has none — no FIFO, no basis allocation, no posting,
+  no audit; the projection is computed on the desktop before it leaves. What
+  remains is a searchable table over a 106 KB file, and paying 1–2 weeks of
+  cross-compile toolchain, no simulator, a hand-rolled Xcode project and a
+  desktop-shaped UI to reuse a `QTableView` is a bad trade. The hover-based
+  preview convention has no touch analogue either. Reconsider **only** if the
+  phone ever needs to post.
+- **Rejected: a writable phone ledger, or bidirectional sync — it is unmergeable
+  by construction, not merely hard.** Every PK is `INTEGER PRIMARY KEY`, so two
+  writers collide on rowids. Worse, item identity is match-or-create via
+  `ORDER BY id LIMIT 1` (`repositories.py:228,273`) and FIFO draw-down is
+  `ORDER BY acquired_at, id` (`repositories.py:419,433`) — so **even with UUIDs
+  the tiebreak is insertion order**, and merging two divergent ledgers silently
+  changes which lots were consumed, which changes cost basis, which changes
+  realized P/L. There is no after-the-fact reconciliation for that. This is the
+  strongest argument for the read-only framing and should be re-read before
+  anyone proposes sync again.
+- **Recorded, not adopted: the staged `TransactionRequest` outbox.** When the
+  phone does need to write, the shape is a phone-side outbox of
+  `TransactionRequest` values replayed on return through the real
+  `TransactionService.post()` — that dataclass is already `post()`'s contract, and
+  replaying keeps the posting algorithm in one implementation running once, which
+  is what the unified-algorithm rule protects. The alternative, leasing the ledger
+  the way `branch_lease.py` leases the checkout, is also correct and less good:
+  it solves the same problem by forbidding concurrency rather than by keeping one
+  writer.
+- **Rejected: iCloud/CloudKit.** The clean answer on a Mac. Windows iCloud Drive
+  cannot write into an arbitrary iOS app container, and an iOS app can only
+  auto-read its own — so the "just use a synced folder" shape does not exist while
+  the desktop is Windows.
+- **Art is the only real payload and it is optional.** The 969 in-stock rows
+  resolve to 770 distinct `card_id`s totalling **77 MB** at 103 KB average, with
+  25 resolving to no art at all. `cardimages.py` is already a lazy `card_id`-keyed
+  cache, so this re-encodes to roughly 10 MB of thumbnails or drops entirely —
+  text rows still answer "do I own this, what did I pay, what is it worth, where
+  is it". Assume **no connectivity at a show**, so whatever ships must ship before
+  leaving, not stream on arrival.
+- Incidental, ticketed separately: `cardimages.art_for()` is called per row from
+  `ui/views/inventory.py:267` — an N+1 costing 711 ms across 969 rows.
+- Nothing is built yet. Ticket 73 is deliberately mutable and carries the phased
+  plan; the provider, credential and encryption decisions are open.
+
+### 2026-09-10 — Publishing the snapshot: R2, sealed payloads, and a pointer written last (tickets 73, 74)
+
+- **Decision:** the desktop publishes an encrypted inventory projection to
+  **Cloudflare R2** over the S3 API, with a plaintext `latest.json` pointer
+  written **after** the payloads. Secrets live in Windows Credential Manager;
+  settings live in `preferences.json`. Four tiles in a new Operations group drive
+  it, and the daily background task republishes.
+- **Why R2, when fees could not decide it.** The payload is ~96 KB and a publish
+  a day; every candidate free tier is three to four orders of magnitude oversized,
+  and measured TTFB across seven providers spanned 20–105 ms, which is noise at
+  this size. What *did* discriminate was the shape of the free egress allowance:
+  **ratio-based egress fails on this workload.** B2 and iDrive e2 grant free
+  egress up to 3× stored volume; storing ~1 MB and reading 96 KB thirty times a
+  month is 3.02× — through the line. Tiny stored volume repeatedly read is exactly
+  what a ratio model punishes, and the corollary is perverse: adding the art
+  bundle *fixes* the ratio, so the free tier would depend on storing more than
+  needed. R2's zero egress is unconditional. **AWS S3 was disqualified outright** —
+  for accounts created after 2025-07-15 there is no always-free tier.
+- **R2 required no payment method**, but enabling R2 is a step separate from
+  creating the account, and until it is done the REST API returns `403 / 10042`
+  while `/accounts/{id}` still returns `200`. A valid token and an unusable R2
+  look identical unless the two calls are separated.
+- **No `boto3`.** It and `botocore` would add tens of MB of service descriptions
+  to a 125 MB build, for four request shapes against one endpoint. SigV4 is ~60
+  lines of `hmac`/`hashlib`.
+- **The signer is cross-checked against botocore, not against itself, and that
+  caught a real bug.** `_canonical_query` was re-encoding already-escaped values,
+  so `prefix=abc%2Fx` signed as `abc%252Fx`. Four of five vectors passed; the two
+  that failed were the ones with percent-encoded query values. **The live R2
+  round-trip had already passed** — because `list-type=2` has nothing in it to
+  escape. It would have bitten on the first prefixed list or the first bucket over
+  1,000 objects. botocore was used once, in a scratch dir, and is not a dependency.
+- **`httpx`, never `urllib.request`.** Measured: `urllib` died partway through a
+  10 MB upload with `SSLEOFError`; `httpx` moved 10 MB and 77 MB without complaint.
+- **The pointer is written last, and that is the whole consistency story.**
+  `latest.json` is what makes a payload *live*, so a publish that dies half-way
+  leaves the previous snapshot readable rather than a torn one. Tested by inducing
+  a payload PUT failure and asserting the old pointer still resolves.
+- **Retention sweeps orphans, not just age.** A crashed upload against live R2
+  left a *complete* object in the bucket: a transport error does not prove the
+  write failed. Pruning only the oldest N would let those accumulate forever, so
+  anything under the prefix the pointer does not name, and that is not among the
+  newest N, is swept. Whatever the pointer names is never deleted however old it
+  is — retention must not be able to unpublish what people are reading.
+- **A publish that would change nothing does nothing**, and the previous hash is
+  read back from `latest.json` rather than cached locally, so the decision is
+  self-correcting: wipe the bucket and the next run republishes. This only works
+  because encoding is deterministic — `gzip` with `mtime=0` and zip entries with a
+  fixed date, since both otherwise stamp the current time and every publish would
+  differ.
+- **AES-256-GCM, not a bare cipher.** The interesting failure is not someone
+  reading a snapshot, it is someone *altering* one; GCM authenticates, so a
+  flipped byte fails to open rather than decoding into a ledger with the wrong
+  numbers in it. Losing the key costs a republish, not data — the snapshot is
+  derived — so there is no recovery ceremony.
+- **The pointer stays plaintext** so a reader can validate and decide before
+  decrypting; it carries key names, byte counts, hashes and row counts, and a test
+  asserts no card name appears in it.
+- **Secrets in the keychain, settings in prefs.** `preferences.json` is the file
+  people copy between machines and paste into bug reports; a key in there is a key
+  in a backup, an email and a screenshot. The keychain is reached through an
+  injectable backend so the suite never touches Credential Manager and still runs
+  on a machine that has none.
+- **`ledger_id` is minted in SQL by migration 0026**, not by the first Python
+  caller that notices it missing: a migration runs exactly once inside the
+  runner's transaction, so there is no window for two callers to mint one and no
+  "is it there yet" branch to carry forever. It lives in the database rather than
+  in prefs so a restored backup is still the same ledger.
+- **`artbundle` is the only module in this path that imports PIL**, deliberately,
+  so the ledger projection cannot acquire the vision stack's dependencies by
+  accident — the boundary that made this whole feature cheap in the first place.
+- **The QR was fixed by looking at it.** It rendered black-on-near-black and did
+  not scan, because segno draws dark modules on a *transparent* background and the
+  app's dark theme showed through. It now paints its own white quiet zone and
+  ignores the theme; the test asserts that background path exists, and reverting
+  removes it entirely. Payload 404 chars, QR version 13 of 40.
+- **Measured, against the real ledger and live R2:** migration 25→26 leaves every
+  ledger count identical; 1,479 rows build in 28 ms and seal to 96.3 KB; a publish
+  takes 2.8 s; the payload reads back with 0 money mismatches; a second publish
+  correctly writes nothing. Art is **14.7 MB** for 768 cached cards — 5.2× smaller
+  than the 77 MB of full-size PNG, and above the ~10 MB the plan estimated.
+- Not built: the iOS client. This is the desktop half, and the artifact it will
+  read now exists.
+- Suite 1,393 passing.

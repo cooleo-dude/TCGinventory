@@ -37,3 +37,16 @@ htmlcov/
 # One session, one worktree, one branch — EnterWorktree checks out in here.
 # Without this, every session's worktree is untracked noise in every other one.
 .claude/worktrees/
+
+# Credentials never belong in the tree. The R2 publish token lives in Windows
+# Credential Manager (keyring); these patterns are the backstop for the moment
+# someone stages a token file they meant to keep local (2026-09-10).
+# Extension-agnostic on purpose: the first real one to land was a .txt.
+*creds*
+*credentials*
+*secret*
+*.token
+# ...but a .py is source, never a credential dump, and services/snapsecrets.py
+# is a real module these patterns would otherwise swallow. Negation last so it
+# wins for source files only.
+!*.py

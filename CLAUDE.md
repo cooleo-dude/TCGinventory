@@ -92,6 +92,22 @@ offline; no external price feeds in V1.
   migration 24→25 on a copy of the real ledger leaves every ledger count
   identical; Base Set renders 102 slots / 9 importable in 8 ms).
 
+- **Phone snapshot (tickets 73, 74): done** — the desktop half of a read-only iOS
+  inventory client. A **derived projection** of `inventory_rows()` is sealed with
+  AES-256-GCM and published to **Cloudflare R2**, with a plaintext `latest.json`
+  pointer written **last** so a half-finished publish leaves the previous
+  snapshot readable. New Qt-free services: `snapshot.py` (the projection, and
+  deliberately free of PIL/numpy), `s3.py` (~60 lines of SigV4 over `httpx`, no
+  `boto3`), `snapcrypto.py`, `snapsecrets.py` (keychain for secrets, prefs for
+  settings), `snappublish.py` (publish, retention, orphan sweep), `artbundle.py`
+  (the only PIL importer in the path), `pairing.py` (QR). Migration 0026 mints
+  `ledger_id` in SQL. Four tiles in a new Operations **Phone snapshot** group;
+  the daily background task republishes. Measured on the real ledger: 1,479 rows
+  → **96.3 KB** sealed, published in 2.8 s, read back with 0 money mismatches;
+  art 14.7 MB for 768 cards. Verified on Python 3.12.10 (ruff clean, 1,393 tests
+  pass; migration 25→26 leaves every ledger count identical). **The iOS client
+  itself is not built** — this is the artifact it will read.
+
 ## Source of truth
 
 - **`specs/`** — what we're building and why. Read [`specs/02-data-model.md`](specs/02-data-model.md)

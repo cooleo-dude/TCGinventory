@@ -63,3 +63,110 @@ def test_headless_refresh_runs_pricing(monkeypatch, tmp_path):
 
     assert refresh_prices_headless() == 0
     assert calls == {"built": True, "refreshed": True}
+
+
+# --------------------------------------------------------------------------
+# The nightly publish rides the price refresh (tickets 73/74)
+# --------------------------------------------------------------------------
+
+
+def _headless_db(tmp_path, monkeypatch):
+    db = tmp_path / "inv.db"
+    conn = open_database(db)
+    ItemRepository(conn).add(Item(name="X", category=Category.SINGLE))
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("TCGINVENTORY_DB", str(db))
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+
+    class _NoPricing:
+        def __init__(self, conn):
+            pass
+
+        def refresh(self):
+            return RefreshSummary(priced=0)
+
+    monkeypatch.setattr("tcginventory.services.pricing.PricingService", _NoPricing)
+    return db
+
+
+def _runs(db, op):
+    import sqlite3
+
+    c = sqlite3.connect(db)
+    c.row_factory = sqlite3.Row
+    return c.execute(
+        "SELECT ok, source, summary FROM operation_run WHERE op = ?", (op,)
+    ).fetchall()
+
+
+def test_headless_skips_the_snapshot_when_no_store_is_connected(monkeypatch, tmp_path):
+    """Not configuring it is a choice, not a nightly failure to report."""
+    from tcginventory.services import snapsecrets
+
+    db = _headless_db(tmp_path, monkeypatch)
+    snapsecrets.set_backend(snapsecrets.MemoryBackend())
+    try:
+        from tcginventory.app import refresh_prices_headless
+
+        assert refresh_prices_headless() == 0
+        assert _runs(db, "snapshot.publish") == []
+    finally:
+        snapsecrets.set_backend(None)
+
+
+def test_headless_publishes_and_records_a_scheduled_run(monkeypatch, tmp_path):
+    from tcginventory.services import snappublish, snapsecrets
+
+    db = _headless_db(tmp_path, monkeypatch)
+    snapsecrets.set_backend(snapsecrets.MemoryBackend())
+    try:
+        snapsecrets.save_credentials(
+            account_id="a", bucket="b", access_key_id="k", secret_access_key="s"
+        )
+        monkeypatch.setattr(
+            snappublish,
+            "publish",
+            lambda conn: snappublish.PublishResult(
+                published=True,
+                rows=1,
+                in_stock=1,
+                payload_bytes=10,
+                art_bytes=0,
+                pruned=0,
+                summary="1 row | 0 KB",
+            ),
+        )
+        from tcginventory.app import refresh_prices_headless
+
+        assert refresh_prices_headless() == 0
+        rows = _runs(db, "snapshot.publish")
+        assert len(rows) == 1
+        assert rows[0]["ok"] == 1 and rows[0]["source"] == "scheduled"
+        assert rows[0]["summary"] == "1 row | 0 KB"
+    finally:
+        snapsecrets.set_backend(None)
+
+
+def test_headless_records_a_failed_publish_and_exits_non_zero(monkeypatch, tmp_path):
+    from tcginventory.services import snappublish, snapsecrets
+
+    db = _headless_db(tmp_path, monkeypatch)
+    snapsecrets.set_backend(snapsecrets.MemoryBackend())
+    try:
+        snapsecrets.save_credentials(
+            account_id="a", bucket="b", access_key_id="k", secret_access_key="s"
+        )
+
+        def boom(conn):
+            raise RuntimeError("HTTP 403: AccessDenied")
+
+        monkeypatch.setattr(snappublish, "publish", boom)
+        from tcginventory.app import refresh_prices_headless
+
+        assert refresh_prices_headless() == 1
+        rows = _runs(db, "snapshot.publish")
+        assert len(rows) == 1
+        assert rows[0]["ok"] == 0 and "AccessDenied" in rows[0]["summary"]
+    finally:
+        snapsecrets.set_backend(None)

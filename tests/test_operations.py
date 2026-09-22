@@ -14,6 +14,7 @@ from tcginventory.data.repositories import (
 )
 from tcginventory.domain.models import CatalogCard, PriceSnapshot
 from tcginventory.services import operations as ops
+from tcginventory.services import snapsecrets
 
 
 def _iso(days_ago: float) -> str:
@@ -788,3 +789,114 @@ def test_duplicate_scan_finds_a_drifted_pair_end_to_end(conn):
 
     (group,) = items.duplicate_identity_groups()
     assert [i.id for i in group] == [first.id, second.id]  # oldest first
+
+
+# ---------------------------------------------------------------------------
+# Phone snapshot (tickets 73/74)
+# ---------------------------------------------------------------------------
+
+
+def test_the_snapshot_section_holds_exactly_its_four_jobs():
+    assert {op.id for op in ops.in_group("snapshot")} == {
+        "snapshot.connect",
+        "snapshot.publish",
+        "snapshot.export",
+        "snapshot.pair",
+    }
+
+
+def test_publish_and_pair_are_not_actionable_until_the_store_is_connected(
+    conn, tmp_path, monkeypatch
+):
+    """The tile says which job to run first, rather than failing when pressed."""
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    snapsecrets.set_backend(snapsecrets.MemoryBackend())
+    try:
+        for op_id in ("snapshot.publish", "snapshot.pair"):
+            status = ops.status_for(conn, ops.BY_ID[op_id])
+            assert status.actionable is False
+            assert "onnect" in (status.detail or "")
+        assert ops.status_for(conn, ops.BY_ID["snapshot.connect"]).value == (
+            "not connected"
+        )
+    finally:
+        snapsecrets.set_backend(None)
+
+
+def test_connecting_makes_them_actionable_and_names_the_bucket(
+    conn, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    snapsecrets.set_backend(snapsecrets.MemoryBackend())
+    try:
+        snapsecrets.save_credentials(
+            account_id="acct123",
+            bucket="my-bucket",
+            access_key_id="k",
+            secret_access_key="s",
+        )
+        assert ops.status_for(conn, ops.BY_ID["snapshot.connect"]).value == "my-bucket"
+        assert ops.status_for(conn, ops.BY_ID["snapshot.publish"]).actionable is True
+        assert ops.status_for(conn, ops.BY_ID["snapshot.pair"]).actionable is True
+    finally:
+        snapsecrets.set_backend(None)
+
+
+def test_an_unreadable_keychain_reads_as_not_connected(conn, tmp_path, monkeypatch):
+    """A status provider must not be able to take the window down; a locked or
+    absent keychain has the same next step as never having connected."""
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+
+    class Exploding:
+        def get_password(self, service, username):
+            raise RuntimeError("keychain is locked")
+
+        def set_password(self, service, username, password):
+            raise RuntimeError("keychain is locked")
+
+        def delete_password(self, service, username):
+            raise RuntimeError("keychain is locked")
+
+    snapsecrets.set_backend(Exploding())
+    try:
+        assert ops.status_for(conn, ops.BY_ID["snapshot.connect"]).state == ops.NEVER
+    finally:
+        snapsecrets.set_backend(None)
+
+
+def test_the_publish_status_falls_back_to_the_run_log(conn, tmp_path, monkeypatch):
+    """A new operation gets its status for free from the default branch."""
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    snapsecrets.set_backend(snapsecrets.MemoryBackend())
+    try:
+        snapsecrets.save_credentials(
+            account_id="a", bucket="b", access_key_id="k", secret_access_key="s"
+        )
+        ops.record(conn, "snapshot.publish", summary="1,479 rows · 96 KB")
+        status = ops.status_for(conn, ops.BY_ID["snapshot.publish"])
+        assert "1,479 rows" in status.value
+        assert status.state == ops.READY
+    finally:
+        snapsecrets.set_backend(None)
+
+
+def test_a_failed_publish_reads_stale_not_ready(conn, tmp_path, monkeypatch):
+    monkeypatch.setenv("TCGINVENTORY_DATA_DIR", str(tmp_path))
+    snapsecrets.set_backend(snapsecrets.MemoryBackend())
+    try:
+        snapsecrets.save_credentials(
+            account_id="a", bucket="b", access_key_id="k", secret_access_key="s"
+        )
+        ops.record(conn, "snapshot.publish", ok=False, summary="HTTP 403")
+        assert ops.status_for(conn, ops.BY_ID["snapshot.publish"]).state == ops.STALE
+    finally:
+        snapsecrets.set_backend(None)
+
+
+def test_the_fact_strip_reports_when_the_phone_copy_was_published(conn):
+    facts = {f.caption: f for f in ops.system_facts(conn)}
+    assert facts["Phone snapshot"].value == "never"
+    ops.record(conn, "snapshot.publish", summary="1,479 rows")
+    facts = {f.caption: f for f in ops.system_facts(conn)}
+    assert facts["Phone snapshot"].value.startswith("today")
+    assert facts["Phone snapshot"].tone == "pos"

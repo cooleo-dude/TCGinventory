@@ -148,6 +148,33 @@ def refresh_prices_headless() -> int:
                     source="scheduled",
                 )
                 had_error = True
+
+        # Prices moving is exactly when the phone's copy goes stale, so the
+        # snapshot is republished here rather than on a schedule of its own.
+        # Silent when the store isn't connected: not configuring it is a choice,
+        # not a nightly failure to report.
+        from tcginventory.services import snappublish, snapsecrets
+
+        if snapsecrets.is_configured():
+            try:
+                result = snappublish.publish(conn)
+                log.info("headless snapshot publish: %s", result.summary)
+                record(
+                    conn,
+                    "snapshot.publish",
+                    summary=result.summary,
+                    source="scheduled",
+                )
+            except Exception as exc:
+                log.exception("headless snapshot publish failed")
+                record(
+                    conn,
+                    "snapshot.publish",
+                    ok=False,
+                    summary=str(exc)[:200],
+                    source="scheduled",
+                )
+                had_error = True
     finally:
         conn.close()
     return 1 if had_error else 0
