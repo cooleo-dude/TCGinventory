@@ -393,7 +393,8 @@
         "services/transactions.py",
         "services/trends.py",
         "services/review.py",
-        "services/cardimages.py"
+        "services/cardimages.py",
+        "services/voice.py"
       ],
       "repositories": [
         "ItemRepository",
@@ -416,7 +417,8 @@
         "ui/views/_combo_delegate.py",
         "ui/views/_link_delegate.py",
         "ui/views/_review_delegate.py",
-        "ui/views/item_editor.py"
+        "ui/views/item_editor.py",
+        "ui/views/_voice_input.py"
       ],
       "tests": [
         "tests/test_ui_views.py",
@@ -428,7 +430,8 @@
         "tests/test_missing_lots.py",
         "tests/test_lot_sku_split.py",
         "tests/test_delete_entry.py",
-        "tests/test_item_variant.py"
+        "tests/test_item_variant.py",
+        "tests/test_voice.py"
       ],
       "signals_out": [
         "changed() -> ledger mutated (intent edit, item edit, entry delete)"

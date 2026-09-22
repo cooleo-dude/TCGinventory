@@ -20,6 +20,9 @@ dependencies = [
     "Pillow>=10.0",
     # DINOv2 identifier backend; the model itself ships as package data (LFS).
     "onnxruntime>=1.17",
+    # Whisper runtime for voice search (ticket 76); the model ships as package
+    # data (LFS) like the identifier.
+    "sherpa-onnx>=1.12",
 ]
 
 [project.optional-dependencies]
@@ -48,7 +51,7 @@ where = ["src"]
     "assets/fonts/*.ttf",
     "assets/icons/*.svg",
 ]
-"tcginventory" = ["models/*.onnx"]
+"tcginventory" = ["models/*.onnx", "models/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

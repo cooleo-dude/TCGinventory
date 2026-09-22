@@ -3478,3 +3478,75 @@ meant clicking **Edit item…** inside it to open a second dialog,
   reverting the walk reddens that test, reverting the reference reddens the
   defence test. `_box_at` is the only `parentItem()` call in `ui/`.
 - Suite 1,275 passing.
+
+### 2026-09-22 — Voice search on the Inventory filter bar (ticket 76)
+
+- **What:** a push-to-talk microphone beside the Inventory search field. One
+  click (or Ctrl+M) captures a spoken phrase — "Pikachu", "Pikachu Base Set",
+  "Pikachu 25 out of 102" — transcribes it offline, snaps it to the grid's own
+  card and set names, and places the result in the search field as if typed.
+  Motivation: sorting a binder with both hands busy meant putting cards down to
+  type a name and a collector number.
+- **Engine: Whisper `base.en` (int8) on `sherpa-onnx`.** Whisper is
+  open-vocabulary and pretrained on enough Pokémon text to spell Charizard,
+  Mewtwo and Obsidian Flames. Measured on the release's test clips: model load
+  0.5 s, decode about 0.07× real time (a 6.6 s clip in 0.48 s) on CPU with two
+  threads.
+  - *Rejected — Vosk.* Smaller, and its grammar mode looks ideal for a closed
+    vocabulary, but grammar mode can only recognise words in its English lexicon,
+    which has none of ours. Its headline strength does not apply here.
+  - *Rejected — a Whisper ONNX export on the `onnxruntime` we already ship.* No
+    new dependency, at the price of owning a log-mel front end, a greedy decoder
+    loop and a BPE tokenizer (~300 lines) for no user-visible gain.
+  - *Rejected — faster-whisper / ctranslate2, Windows.Media.SpeechRecognition,
+    any cloud API.* Another native runtime for nothing; Windows-only; not
+    offline.
+  - *Rejected — `tiny.en`.* Weaker on unusual proper nouns, which the snap step
+    cannot always recover. A one-file swap if size ever matters more.
+- **Cost, honestly measured:** the bundled model is **160 MB** (decoder 131 MB
+  + encoder 29 MB + tokens 0.8 MB), not the 60–80 MB estimated when the model
+  was chosen — int8 quantisation does not shrink the decoder's 51k×512 token
+  embedding. The runtime wheel adds ~30 MB including its own `onnxruntime.dll`.
+  Whisper's token table is a `.txt`, so `pyproject` package-data and the
+  PyInstaller spec each gained a `models/*.txt` entry beside the `*.onnx` one.
+- **Interaction: push-to-talk with silence auto-stop**, capture ending after
+  1 s of quiet once speech was heard (RMS ≥ 400 on int16), 4 s with nothing
+  heard, or an 8 s cap. Always-on wake-word listening would be truly hands-free
+  but is a larger design (continuous mic, VAD, a wake-word model, false
+  triggers) — deferred as a follow-up. Hold-to-talk is worse for the hands-busy
+  case that motivates the feature.
+- **The transcript is snapped, not pasted.** `services/voice.parse_query`
+  reads spoken numbers three ways ("one oh two", "one hundred and two", the
+  collector's "one sixty five"), turns "out of / of / over / slash" into `/`,
+  and snaps the remaining words to a card name, set name, or *leading part* of
+  one — saying "Umbreon" against Umbreon VMAX and Umbreon V yields the token
+  both rows carry. The snap chooses the **segmentation** that explains the most
+  of the transcript (`sum(ratio × words covered)`, dynamic programming over at
+  most four-word spans): longest-first mistook "charizard base set" for
+  *charizard* + a stray "set", best-first mistook "charizard vmao" for
+  *charizard* + a stray "vmao". Filler ("um", "show me", "please") is dropped;
+  a word that snaps to nothing is **kept**, so a card the user does not own
+  filters to an honest empty grid rather than to everything.
+- **The search field now matches every token.** "pikachu 25/102" never matched
+  the one-substring haystack `name set number sku`, because the set name sits
+  between name and number. The Inventory proxy splits on whitespace and
+  requires each token somewhere in the haystack; History keeps its own search.
+  Typed search gains the same reach.
+- **Layering.** Capture is QtMultimedia (`QAudioSource`, 16 kHz mono int16),
+  so it lives in `ui/views/_voice_input.py`; the service sees bytes and a rate.
+  Model load and decode run on a purpose-built `QThread` — `TaskWorker` opens a
+  DB connection the transcription never uses — and a click during a decode
+  returns early rather than replacing the worker. The vocabulary comes from the
+  rows the grid already holds, never from SQL. The button is disabled with a
+  tooltip when the runtime or a complete model is missing, located the way the
+  detector's is (bundled copy, then `<data>/voice/models/`).
+- **`tests/test_vectors.py`'s `frombuffer` guard** now exempts the two voice
+  files: it exists to stop a reader decoding a *stored embedding* with a
+  hard-coded dtype, and microphone PCM is a wire format fixed by the device, not
+  a stored blob. The test also asserts neither file mentions `card_embedding`.
+- **Follow-ups, not in this ticket:** wake-word hands-free mode; adopting the
+  mic widget in History, Collections and the card-entry rows.
+- Suite 1,336 passing (29 new in `tests/test_voice.py`, 3 in
+  `tests/test_ui_views.py`). Frozen build in the worktree: 496 MB onedir, boots
+  and creates the databases; both `onnxruntime.dll` copies sit beside their own
+  extension module, no top-level collision.

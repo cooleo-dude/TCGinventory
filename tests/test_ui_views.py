@@ -605,6 +605,86 @@ def test_nav_refresh_is_gated_until_data_changes(app, seeded_conn):
     window.deleteLater()
 
 
+def _visible_rows(view):
+    return [
+        view._model.row_at(view._proxy.mapToSource(view._proxy.index(i, 0)).row())
+        for i in range(view._proxy.rowCount())
+    ]
+
+
+def test_inventory_search_matches_every_token_across_fields(app, seeded_conn):
+    """Ticket 76: "charizard 004/102" finds the row whose name and number live in
+    different fields — one substring never could, since the set name sits
+    between them in the haystack. A token absent from every row empties the grid."""
+    from tcginventory.ui.views.inventory import InventoryView
+
+    view = InventoryView(seeded_conn)
+    target = next(
+        view._model.row_at(i)
+        for i in range(view._model.rowCount())
+        if view._model.row_at(i).item.card_number
+    )
+    first_word = target.item.name.split()[0].lower()
+    view._search.setText(f"{first_word} {target.item.card_number}")
+    visible = _visible_rows(view)
+    assert target.lot_id in [r.lot_id for r in visible]
+    for row in visible:
+        haystack = f"{row.item.name} {row.item.set_name} {row.item.card_number}".lower()
+        assert first_word in haystack and target.item.card_number in haystack
+
+    view._search.setText(f"{first_word} zzzz")
+    assert view._proxy.rowCount() == 0
+    view._search.clear()
+    assert view._proxy.rowCount() == view._model.rowCount()
+    view.deleteLater()
+
+
+def test_inventory_voice_query_lands_in_the_search_field(app, seeded_conn, monkeypatch):
+    """Ticket 76: the mic's transcription path — worker thread, snap against the
+    grid's own names and sets, ``recognized`` → search field — with Whisper
+    replaced by a canned transcript so no microphone or model is involved."""
+    from tcginventory.services import voice
+    from tcginventory.ui.views.inventory import InventoryView
+
+    view = InventoryView(seeded_conn)
+    target = next(
+        view._model.row_at(i)
+        for i in range(view._model.rowCount())
+        if view._model.row_at(i).item.card_number
+    )
+    number = target.item.card_number  # e.g. "004/102"
+    spoken_number = f"{int(number.split('/')[0])} out of {number.split('/')[1]}"
+    # Misspell the last letter: the snap step, fed the grid's names, repairs it.
+    heard = f"Um, {target.item.name[:-1]}o {spoken_number}, please."
+    monkeypatch.setattr(voice, "transcribe", lambda pcm, rate=16000: heard)
+
+    view._mic.transcribe(b"\x00\x10" * 16000)
+    worker = view._mic._worker
+    assert worker is not None and worker.wait(10_000)
+    for _ in range(20):  # deliver the queued cross-thread signal
+        app.processEvents()
+        if view._search.text():
+            break
+    expected_number = f"{int(number.split('/')[0])}/{number.split('/')[1]}"
+    assert view._search.text() == f"{target.item.name.lower()} {expected_number}"
+    # The grid filtered on it: "004" is a substring of "004/102", so the leading
+    # zeros the speaker never says do not matter.
+    assert view._proxy.rowCount() >= 1
+    assert all(r.item.name == target.item.name for r in _visible_rows(view))
+    view.deleteLater()
+
+
+def test_voice_button_hears_speech_above_the_floor_and_not_silence(app):
+    import numpy as np
+
+    from tcginventory.ui.views._voice_input import SPEECH_RMS, _rms
+
+    assert _rms(b"") == 0.0
+    assert _rms(b"\x00" * 3200) == 0.0
+    loud = np.full(1600, 8000, dtype="<i2").tobytes()
+    assert _rms(loud) > SPEECH_RMS
+
+
 def test_preview_prefetch_isolates_a_failing_row(app, seeded_conn, monkeypatch):
     """One row that throws must not cost every later row its preview.
 

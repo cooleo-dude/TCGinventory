@@ -8,6 +8,8 @@
 import glob
 import os
 
+from PyInstaller.utils.hooks import collect_dynamic_libs
+
 ONEFILE = False
 
 spec_dir = SPECPATH  # noqa: F821 - injected by PyInstaller (dir of this .spec)
@@ -46,6 +48,12 @@ datas += [
     (model, "tcginventory/models")
     for model in glob.glob(os.path.join(src, "tcginventory", "models", "*.onnx"))
 ]
+# Whisper base.en token table (ticket 76) — the encoder/decoder are caught by the
+# *.onnx glob above; the vocabulary is a text file and needs its own.
+datas += [
+    (tokens, "tcginventory/models")
+    for tokens in glob.glob(os.path.join(src, "tcginventory", "models", "*.txt"))
+]
 # The training worker — a standalone script the app runs in a *separate*
 # interpreter that has ultralytics (torch is ~2 GB and deliberately unbundled).
 # Shipped as data, not code: it must exist as a real .py on disk for another
@@ -60,7 +68,11 @@ datas += [
 a = Analysis(
     [os.path.join(spec_dir, "entry.py")],
     pathex=[src],
-    binaries=[],
+    # sherpa-onnx keeps its C API DLLs (and its own onnxruntime.dll) beside the
+    # extension module under sherpa_onnx/lib/; collect them there so the .pyd
+    # finds them where it expects, and so they never shadow the onnxruntime
+    # package's own copy.
+    binaries=collect_dynamic_libs("sherpa_onnx"),
     datas=datas,
     # httpx is imported lazily (in the price fetcher), so name it and its
     # dependency chain explicitly to guarantee they're bundled.
@@ -78,6 +90,10 @@ a = Analysis(
         # (and onnxruntime) explicitly to pull the numpy/PIL/ort chain in.
         "tcginventory.services.recognizer",
         "onnxruntime",
+        # Voice search (ticket 76) — the Whisper runtime is imported inside a
+        # try in services/voice.py, so name it and its extension explicitly.
+        "sherpa_onnx",
+        "sherpa_onnx.lib._sherpa_onnx",
     ],
     hookspath=[],
     hooksconfig={},

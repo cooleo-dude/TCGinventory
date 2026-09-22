@@ -31,11 +31,13 @@ from PySide6.QtGui import (
     QDesktopServices,
     QFont,
     QGradient,
+    QKeySequence,
     QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
     QPixmap,
+    QShortcut,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -97,6 +99,7 @@ from tcginventory.ui.views._inventory_delegates import (
 )
 from tcginventory.ui.views._link_delegate import LinkButtonDelegate
 from tcginventory.ui.views._review_delegate import ReviewPriceDelegate
+from tcginventory.ui.views._voice_input import VoiceInputButton
 from tcginventory.ui.views._worker import retire
 from tcginventory.ui.views.item_editor import ItemEditorDialog
 
@@ -319,7 +322,7 @@ class _InventoryFilterProxy(QSortFilterProxyModel):
     def __init__(self) -> None:
         super().__init__()
         self.setSortRole(Qt.UserRole)
-        self._text = ""
+        self._tokens: list[str] = []
         self._intent = "All"
         self._sold = "All"
         self._in_stock_only = False
@@ -327,7 +330,11 @@ class _InventoryFilterProxy(QSortFilterProxyModel):
         self._graded = "All"  # All | Singles | Graded
 
     def set_text(self, text: str) -> None:
-        self._text = text.strip().lower()
+        # Every whitespace-separated token must appear somewhere in the row's
+        # name/set/number/SKU, so "pikachu 25/102" finds a row whose name and
+        # number live in different fields (ticket 76 — voice search emits
+        # exactly that shape, and typed search gains the same reach).
+        self._tokens = text.lower().split()
         self.invalidateFilter()
 
     def set_intent(self, intent: str) -> None:
@@ -364,14 +371,14 @@ class _InventoryFilterProxy(QSortFilterProxyModel):
             return False
         if self._sold != "All" and row.sold_status != self._sold:
             return False
-        if self._text:
+        if self._tokens:
             haystack = " ".join(
                 filter(
                     None,
                     [row.item.name, row.item.set_name, row.item.card_number, row.sku],
                 )
             ).lower()
-            if self._text not in haystack:
+            if any(token not in haystack for token in self._tokens):
                 return False
         return True
 
@@ -410,6 +417,16 @@ class InventoryView(QWidget):
         )
         self._search.textChanged.connect(self._proxy.set_text)
         self._search.textChanged.connect(lambda *_: self._update_summary())
+
+        # Voice search (ticket 76): one click, say "Pikachu 25 out of 102", and
+        # the snapped query lands in the search field as if typed. The
+        # vocabulary it snaps to is whatever the grid currently holds.
+        self._mic = VoiceInputButton(self._voice_vocabulary)
+        self._mic.recognized.connect(self._search.setText)
+        mic_shortcut = QShortcut(QKeySequence("Ctrl+M"), self)
+        mic_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        mic_shortcut.activated.connect(self._mic.click)
+        self._mic.setToolTip(self._mic.toolTip() + "  (Ctrl+M)")
 
         self._intent = _Segmented(
             [
@@ -470,6 +487,7 @@ class InventoryView(QWidget):
         filter_bar = QHBoxLayout()
         filter_bar.setSpacing(8)
         filter_bar.addWidget(self._search, 1)
+        filter_bar.addWidget(self._mic)
         filter_bar.addWidget(self._intent)
         filter_bar.addWidget(self._sold)
         filter_bar.addWidget(self._graded)
@@ -672,6 +690,19 @@ class InventoryView(QWidget):
         chip instead of dead-ending the filter."""
         if value == "Missing" and self._in_stock.isChecked():
             self._in_stock.setChecked(False)  # → set_in_stock_only(False)
+
+    def _voice_vocabulary(self) -> tuple[list[str], list[str]]:
+        """Card and set names present in the grid — what a transcript may snap
+        to. Read from the model's rows, never from the database."""
+        names: set[str] = set()
+        sets: set[str] = set()
+        for i in range(self._model.rowCount()):
+            item = self._model.row_at(i).item
+            if item.name:
+                names.add(item.name)
+            if item.set_name:
+                sets.add(item.set_name)
+        return sorted(names), sorted(sets)
 
     def _clear_filters(self) -> None:
         """Reset the filter bar to 'show everything' (widgets included, so the
