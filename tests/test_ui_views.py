@@ -683,9 +683,9 @@ def test_inventory_voice_query_lands_in_the_search_field(app, seeded_conn, monke
 
 
 def test_voice_button_ends_capture_at_once_on_an_end_word(app, monkeypatch):
-    """Ticket 79: the spotter's ``fired`` stops capture immediately with the
-    end word trimmed off the clip, without waiting out the silence timer."""
-    from tcginventory.services import voice_kws
+    """Ticket 79: the spotter's ``fired`` stops capture immediately, without
+    waiting out the silence timer; the word stays in the clip for recognition
+    to absorb."""
     from tcginventory.ui.views._voice_input import VoiceInputButton
 
     button = VoiceInputButton(lambda: (["Scrafty"], [], []))
@@ -698,34 +698,47 @@ def test_voice_button_ends_capture_at_once_on_an_end_word(app, monkeypatch):
     button._on_end_word("finish")
     assert stopped == []
 
-    # Capture in flight (stand-in for the QAudioSource) → stop now, trim the word.
+    # Capture in flight (stand-in for the QAudioSource) → stop now.
     button._source = object()
-    button._utt_start = 0
+    button._in_utterance = True
     button._heard_speech = False
     button._on_end_word("finish")
     assert stopped == [True]
-    assert voice_kws.END_WORD_MS >= 0  # the trim the True path applies
     assert button._heard_speech is True  # an end word counts as speech
     button._source = None
     button.deleteLater()
 
 
+class _FakeClock:
+    """A monotonic clock the tests advance by hand, in milliseconds."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, ms: float) -> None:
+        self.now += ms / 1000.0
+
+
 def _fake_microphone(button, monkeypatch):
     """Stand in for QAudioSource: ``_open_microphone`` succeeds without a
-    device, ticks are driven by hand, and no spotter thread starts."""
+    device, ticks are driven by hand on a fake clock, and no spotter thread
+    starts. Returns the clips handed to recognition and the clock."""
     from types import SimpleNamespace
 
     from tcginventory.services import voice_kws
 
     monkeypatch.setattr(voice_kws, "available", lambda: False)
+    clock = _FakeClock()
+    button._clock = clock
 
     def open_microphone():
-        button._chunks = []
-        button._utt_start = None
-        button._heard_speech = False
-        button._silence_ms = button._elapsed_ms = button._idle_ms = 0
+        button._reset_buffers()
         button._source = SimpleNamespace(stop=lambda: None, deleteLater=lambda: None)
         button._io = None
+        button._last_tick = clock()
         button.listening.emit(True)
         return True
 
@@ -736,52 +749,85 @@ def _fake_microphone(button, monkeypatch):
         "transcribe",
         lambda pcm, rate=16000, strict=False: clips.append((pcm, strict)),
     )
-    return clips
+    return clips, clock
 
 
-LOUD = b"\x00\x20" * 1600  # 8192 amplitude, well above SPEECH_RMS
-QUIET = b"\x00\x00" * 1600
+# The device hands over 10 ms (320 bytes) at a time, two hundred times a second
+# (measured, ticket 81). Ten of these arrive between 100 ms ticks.
+LOUD10 = b"\x00\x20" * 160  # 8192 amplitude, well above SPEECH_RMS
+QUIET10 = b"\x00\x00" * 160
+
+
+def _tick(button, clock, chunk: bytes, n_chunks: int = 10, ms: float = 100.0):
+    for _ in range(n_chunks):
+        button._ingest(chunk)
+    clock.advance(ms)
+    button._on_tick()
 
 
 def test_always_listening_starts_on_speech_and_keeps_the_microphone(app, monkeypatch):
-    """Ticket 80: in always-listening mode speech starts an utterance (with
-    pre-roll), 1.5 s of quiet ends it, the clip goes to *strict* recognition,
-    and the microphone stays open for the next one."""
+    """Ticket 80/81: in always-listening mode speech starts an utterance that
+    opens with 300 ms of pre-roll *by time*, 1.5 s of quiet on the clock ends
+    it, the clip goes to strict recognition, and the microphone stays open."""
     from tcginventory.ui.views import _voice_input as vi
 
     button = vi.VoiceInputButton(lambda: (["Scrafty"], [], []))
-    clips = _fake_microphone(button, monkeypatch)
+    clips, clock = _fake_microphone(button, monkeypatch)
 
     button.set_always_on(True)
     assert button._source is not None  # listening began with the toggle
 
-    for _ in range(6):  # ambient quiet: no utterance, only the pre-roll kept
-        button._ingest(QUIET)
-        button._on_tick()
-    assert button._utt_start is None
-    assert len(button._chunks) == vi.PRE_ROLL_TICKS
+    for _ in range(6):  # 600 ms of ambient quiet: no utterance
+        _tick(button, clock, QUIET10)
+    assert not button._in_utterance
+    pre_roll = vi._bytes_for_ms(vi.PRE_ROLL_MS)
+    assert button._buffered == pre_roll  # exactly 300 ms kept, not 3 chunks
+    assert len(button._chunks) == pre_roll // len(QUIET10)
 
-    button._ingest(LOUD)
+    # Speech: a loud slice anywhere in the tick's window is enough — here it is
+    # buried between quiet ones, the consonant-gap case the old check missed.
+    for _ in range(4):
+        button._ingest(QUIET10)
+    button._ingest(LOUD10)
+    for _ in range(5):
+        button._ingest(QUIET10)
+    clock.advance(100)
     button._on_tick()
-    assert button._utt_start == 0  # the pre-roll is part of the utterance
-    assert button.isChecked()
+    assert button._in_utterance and button.isChecked()
+    assert button._buffered == pre_roll  # the pre-roll opens the clip
+
     for _ in range(3):
-        button._ingest(LOUD)
-        button._on_tick()
-    ticks = vi.SILENCE_MS // 100
-    for _ in range(ticks):
-        button._ingest(QUIET)
-        button._on_tick()
+        _tick(button, clock, LOUD10)
+    quiet_ticks = vi.SILENCE_MS // 100
+    for _ in range(quiet_ticks):
+        _tick(button, clock, QUIET10)
     assert len(clips) == 1
     pcm, strict = clips[0]
     assert strict is True
-    # The pre-roll window holds the onset chunk and the two quiet ones before it.
-    assert len(pcm) == (vi.PRE_ROLL_TICKS + 3 + ticks) * len(LOUD)
+    assert len(pcm) == pre_roll + (3 + quiet_ticks) * 10 * len(LOUD10)
     assert button._source is not None  # still listening
-    assert button._utt_start is None and not button.isChecked()
+    assert not button._in_utterance and not button.isChecked()
 
     button.set_always_on(False)
     assert button._source is None  # the toggle owns the microphone
+    button.deleteLater()
+
+
+def test_silence_is_measured_on_the_clock_not_in_ticks(app, monkeypatch):
+    """A slow event loop (long gaps between ticks) must not stretch the
+    silence window: 1.5 s of quiet is 1.5 s whatever the tick count."""
+    from tcginventory.ui.views import _voice_input as vi
+
+    button = vi.VoiceInputButton(lambda: (["Scrafty"], [], []))
+    clips, clock = _fake_microphone(button, monkeypatch)
+    button.set_always_on(True)
+    _tick(button, clock, LOUD10)
+    assert button._in_utterance
+    # Three ticks 500 ms apart, all quiet → 1.5 s → the utterance ends.
+    for _ in range(3):
+        _tick(button, clock, QUIET10, n_chunks=50, ms=500)
+    assert len(clips) == 1
+    button.set_always_on(False)
     button.deleteLater()
 
 
@@ -789,18 +835,50 @@ def test_push_to_talk_closes_the_microphone_after_the_utterance(app, monkeypatch
     from tcginventory.ui.views import _voice_input as vi
 
     button = vi.VoiceInputButton(lambda: (["Scrafty"], [], []))
-    clips = _fake_microphone(button, monkeypatch)
+    clips, clock = _fake_microphone(button, monkeypatch)
 
     button._start_capture()
-    assert button._utt_start == 0 and button._source is not None
+    assert button._in_utterance and button._source is not None
     for _ in range(3):
-        button._ingest(LOUD)
-        button._on_tick()
+        _tick(button, clock, LOUD10)
     for _ in range(vi.SILENCE_MS // 100):
-        button._ingest(QUIET)
-        button._on_tick()
+        _tick(button, clock, QUIET10)
     assert [strict for _, strict in clips] == [False]  # the fallback is allowed
     assert button._source is None  # microphone closed
+    button.deleteLater()
+
+
+def test_clips_queue_while_the_recogniser_is_busy(app, monkeypatch):
+    """Ticket 81: a card spoken while the previous one is being recognised is
+    served next, not thrown away."""
+    from types import SimpleNamespace
+
+    from tcginventory.ui.views import _voice_input as vi
+
+    button = vi.VoiceInputButton(lambda: (["Scrafty"], [], []))
+    started: list[tuple[bytes, int, bool]] = []
+    monkeypatch.setattr(button, "_run_job", lambda job: started.append(job))
+
+    button._worker = SimpleNamespace(isRunning=lambda: True)  # busy
+    button.transcribe(b"a" * 320, strict=True)
+    button.transcribe(b"b" * 320, strict=True)
+    assert started == [] and len(button._pending) == 2
+
+    got: list[str] = []
+    button.recognized.connect(got.append)
+    button._on_done("scrafty")  # the busy job finishes
+    assert got == ["scrafty"]
+    assert started == [(b"a" * 320, 16000, True)]  # the next clip starts
+    button._on_done("")  # nothing typed for an empty answer, queue continues
+    assert got == ["scrafty"]
+    assert started[-1] == (b"b" * 320, 16000, True)
+    assert button._pending == []
+
+    # Beyond MAX_PENDING the oldest waiting clip gives way.
+    for i in range(vi.MAX_PENDING + 2):
+        button.transcribe(bytes([i]) * 320)
+    assert [job[0][0] for job in button._pending] == list(range(2, vi.MAX_PENDING + 2))
+    button._worker = None
     button.deleteLater()
 
 

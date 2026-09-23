@@ -168,11 +168,40 @@ def recognize(
             phrases = []
         if phrases:
             return " ".join(p for p in phrases if p).lower()  # "" = an end word
-        if strict:
-            return ""
     elif strict:
         return ""
-    return parse_query(transcribe(pcm16, rate), names, sets)
+    query = parse_query(transcribe(pcm16, rate), names, sets)
+    if strict and not _in_vocabulary(query, names, sets, numbers):
+        # The gate refused and the snap could not account for every word:
+        # hands-free, that is dropped rather than typed (ticket 81 — the gate
+        # refuses about one valid name in five, and the snap recovers most of
+        # those, so strict mode keeps the snap but only when it lands entirely
+        # on words the grid knows).
+        return ""
+    return query
+
+
+def _in_vocabulary(
+    query: str, names: list[str], sets: list[str], numbers: list[str]
+) -> bool:
+    """Whether every token of ``query`` is a word the grid knows: a word of a
+    name or set, a set shorthand, or a collector number as the search token
+    for it. A query with a word from nowhere is a guess."""
+    if not query:
+        return False
+    from tcginventory.services import voice_decode
+
+    known: set[str] = set()
+    for phrase in list(names) + list(sets):
+        known.update(phrase.lower().split())
+    for set_name in sets:
+        for _, token in set_shorthands(set_name):
+            known.update(token.split())
+    for number in numbers:
+        known.add(number.lower())
+        for _, token in voice_decode.number_phrases(number):
+            known.add(token.lower())
+    return all(token in known for token in query.split())
 
 
 #: A constrained answer this many nats less likely than the free transcript is
