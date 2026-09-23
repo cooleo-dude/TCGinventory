@@ -182,6 +182,9 @@ def build_grammar(
                 entries.append((spoken, phrase))
     for set_name in sets:
         entries.extend(voice.set_shorthands(set_name))  # "promo", "black star"
+    # End words resolve to nothing: a "finish" the spotter caught late is legal
+    # to say and adds no token (ticket 79).
+    entries.extend((word, "") for word in voice.END_WORDS)
     for number in numbers:
         entries.extend(number_phrases(number))
     return PhraseTrie(entries, max_phrases=max_phrases)
@@ -365,7 +368,13 @@ class ConstrainedWhisper:
         for tok in order:
             tok = int(tok)
             if tok == EOT:
-                out.append((beam.score + float(logp[tok]), tok, None))
+                # An end word ("finish" → "") is the expected way for a clip
+                # to close, so it pays no phrase penalty: refund it here, where
+                # the reading is known. Otherwise "Abomasnow finish" decodes
+                # as Abomasnow + the nearest real card (ticket 79).
+                readings = PhraseTrie.finished(beam.states)
+                refund = -PHRASE_PENALTY if any(r[-1] == "" for r in readings) else 0.0
+                out.append((beam.score + float(logp[tok]) + refund, tok, None))
             else:
                 states = trie.walk(beam.states, self._tokens[tok])
                 if not states:

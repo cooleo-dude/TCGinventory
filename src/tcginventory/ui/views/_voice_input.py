@@ -1,8 +1,9 @@
 """Push-to-talk microphone button (ticket 76).
 
 One click starts capturing from the default microphone at 16 kHz mono; capture
-stops on its own after about a second of quiet once something has been said, or
-at a hard cap, and the clip is recognised off the UI thread by
+stops the moment an end word ("finish") is spoken, after 1.5 s of quiet once
+something has been said, or at a hard cap, and the clip is recognised off the UI
+thread by
 :func:`tcginventory.services.voice.recognize` against the words the owning view
 knows about — card names, set names, collector numbers — and the result is
 emitted as ``recognized``.
@@ -18,15 +19,17 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import numpy as np
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QMutex, Qt, QThread, QTimer, QWaitCondition, Signal
 from PySide6.QtWidgets import QToolButton
 
-from tcginventory.services import voice
+from tcginventory.services import voice, voice_kws
 from tcginventory.ui import icons, theme
 from tcginventory.ui.views._worker import retire
 
-#: Silence this long after speech ends the capture.
-SILENCE_MS = 1000
+#: Silence this long after speech ends the capture. 1.5 s rather than 1 s since
+#: ticket 79: saying "finish" ends capture at once, so the timer is the
+#: fallback and can afford to let a speaker pause before "VMAX".
+SILENCE_MS = 1500
 #: A capture never runs longer than this, spoken or not.
 MAX_CAPTURE_MS = 8000
 #: With nothing said at all, give up after this long.
@@ -71,6 +74,46 @@ class _TranscribeWorker(QThread):
         self.done.emit(query)
 
 
+class _KeywordWorker(QThread):
+    """Hears microphone chunks as they arrive and fires the moment an end word
+    is spoken (ticket 79). Owns its own spotter; the button pushes chunks in
+    under a mutex and retires the worker when capture ends."""
+
+    fired = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._chunks: list[bytes] = []
+        self._mutex = QMutex()
+        self._wake = QWaitCondition()
+
+    def push(self, chunk: bytes) -> None:
+        self._mutex.lock()
+        self._chunks.append(chunk)
+        self._mutex.unlock()
+        self._wake.wakeAll()
+
+    def run(self) -> None:  # pragma: no cover - exercised via the button
+        import logging
+
+        try:
+            spotter = voice_kws.EndWordSpotter()
+        except Exception:
+            logging.getLogger(__name__).exception("end-word spotter failed to load")
+            return
+        while not self.isInterruptionRequested():
+            self._mutex.lock()
+            if not self._chunks:
+                self._wake.wait(self._mutex, 50)
+            pending, self._chunks = self._chunks, []
+            self._mutex.unlock()
+            for chunk in pending:
+                word = spotter.feed(chunk)
+                if word:
+                    self.fired.emit(word)
+                    return
+
+
 class VoiceInputButton(QToolButton):
     """A mic button that turns a spoken phrase into search text.
 
@@ -93,6 +136,7 @@ class VoiceInputButton(QToolButton):
         self._silence_ms = 0
         self._elapsed_ms = 0
         self._worker: _TranscribeWorker | None = None
+        self._kws_worker: _KeywordWorker | None = None
         self._parked: list[QThread] = []
         self._tick = QTimer(self)
         self._tick.setInterval(100)
@@ -119,7 +163,10 @@ class VoiceInputButton(QToolButton):
     def _apply_availability(self) -> None:
         if voice.available():
             self.setEnabled(True)
-            self.setToolTip("Voice search — click and say a card, set or number")
+            tip = "Voice search — click and say a card, set or number"
+            if voice_kws.available():
+                tip += '; say "finish" to end at once'
+            self.setToolTip(tip)
         else:
             self.setEnabled(False)
             self.setToolTip(
@@ -161,6 +208,13 @@ class VoiceInputButton(QToolButton):
             return
         self._io.readyRead.connect(self._on_ready_read)
         self._tick.start()
+        if voice_kws.available():
+            # Retire (never overwrite) a spotter still winding down from the
+            # previous capture, then start a fresh one for this clip.
+            retire(self._kws_worker, self._parked)
+            self._kws_worker = _KeywordWorker()
+            self._kws_worker.fired.connect(self._on_end_word)
+            self._kws_worker.start()
         self.setIcon(icons.icon("mic", theme.active().accent, 16))
         self.setChecked(True)
         self.listening.emit(True)
@@ -171,6 +225,16 @@ class VoiceInputButton(QToolButton):
         data = bytes(self._io.readAll().data())
         if data:
             self._chunks.append(data)
+            if self._kws_worker is not None and self._kws_worker.isRunning():
+                self._kws_worker.push(data)
+
+    def _on_end_word(self, word: str) -> None:
+        """The spotter heard "finish": stop now, and drop the word from the
+        clip so recognition never sees it."""
+        if self._source is None:
+            return  # capture already ended (silence beat the spotter)
+        self._heard_speech = True  # an end word is speech, whatever the RMS said
+        self._stop_capture(end_word=True)
 
     def _on_tick(self) -> None:
         self._elapsed_ms += self._tick.interval()
@@ -187,7 +251,7 @@ class VoiceInputButton(QToolButton):
         elif not self._heard_speech and self._elapsed_ms >= NO_SPEECH_MS:
             self._stop_capture()
 
-    def _stop_capture(self) -> None:
+    def _stop_capture(self, end_word: bool = False) -> None:
         self._tick.stop()
         if self._source is None:
             self.setChecked(False)
@@ -197,7 +261,10 @@ class VoiceInputButton(QToolButton):
         self._io = None
         self._source.deleteLater()
         self._source = None
+        retire(self._kws_worker, self._parked)  # its clip is over
         pcm = b"".join(self._chunks)
+        if end_word:
+            pcm = voice_kws.trim_end_word(pcm)  # drop the spoken "finish"
         self._chunks = []
         self.setChecked(False)
         self.setIcon(icons.icon("mic", theme.active().ink2, 16))

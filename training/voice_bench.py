@@ -88,7 +88,7 @@ def _parse_args(argv=None):
     p.add_argument("--no-phonetic", action="store_true", help="spelling channel only")
     p.add_argument(
         "--mode",
-        choices=("snap", "constrained", "production"),
+        choices=("snap", "constrained", "production", "kws"),
         default="snap",
         help="snap: free-form Whisper + parse_query; constrained: grammar-masked, "
         "unfiltered (records the gap); production: voice.recognize(), i.e. the "
@@ -175,6 +175,96 @@ def _wrong(query: str, name: str, pairs: list[tuple[str, str]]) -> bool:
     )
 
 
+def _kws_bench(args, targets, names, sets) -> int:
+    """Ticket 79: for each owned name, speak it alone (does the end-word spotter
+    fire falsely?) and followed by " finish" (does it fire, how long after the
+    word ends, and does the trimmed clip still recognise the name?)."""
+    from tcginventory.services import voice_kws
+
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    chunk_ms = 100
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(
+            ["voice", "name", "false_fire", "fired", "delay_ms", "query", "hit"]
+        )
+        for key in args.voices.split(","):
+            tts = _tts(Path(args.tts_dir), key.strip())
+            rate = tts.sample_rate
+            false = fired = hits = n = 0
+            delays: list[float] = []
+            t_start = time.perf_counter()
+            for name, set_name, _owned in targets:
+                n += 1
+                # A microphone keeps streaming after the speaker stops, and the
+                # spotter confirms a keyword on the blanks that follow it; the
+                # synthetic clip ends abruptly, so give it the room a mic would.
+                silence = b"\x00\x00" * (rate // 2)
+                # 1. The bare name must not end capture.
+                audio = tts.generate(name, sid=0, speed=1.0)
+                pcm = _pcm16(audio.samples) + silence
+                spotter = voice_kws.EndWordSpotter()
+                false_fire = any(
+                    spotter.feed(pcm[i : i + rate * chunk_ms // 1000 * 2], rate)
+                    for i in range(0, len(pcm), rate * chunk_ms // 1000 * 2)
+                )
+                false += false_fire
+                # 2. "<name> finish" must fire, soon, and leave the name intact.
+                audio = tts.generate(f"{name} finish", sid=0, speed=1.0)
+                pcm = _pcm16(audio.samples) + silence
+                # Where speech ends: last sample above 2% of full scale.
+                samples = np.frombuffer(pcm, dtype="<i2")
+                loud = np.nonzero(np.abs(samples) > 655)[0]
+                speech_end_ms = (
+                    (int(loud[-1]) if len(loud) else len(samples)) * 1000 / rate
+                )
+                spotter = voice_kws.EndWordSpotter()
+                step = rate * chunk_ms // 1000 * 2
+                fire_at_ms = None
+                for i in range(0, len(pcm), step):
+                    if spotter.feed(pcm[i : i + step], rate):
+                        fire_at_ms = (i + step) / 2 * 1000 / rate
+                        break
+                query = ""
+                hit = False
+                if fire_at_ms is not None:
+                    fired += 1
+                    delays.append(fire_at_ms - speech_end_ms)
+                    heard = pcm[: int(fire_at_ms / 1000 * rate) * 2]
+                    clip = voice_kws.trim_end_word(heard, rate=rate)
+                    query = voice.recognize(clip, rate, names, sets)
+                    hit = _hit(query, name, set_name)
+                    hits += hit
+                writer.writerow(
+                    [
+                        key,
+                        name,
+                        int(false_fire),
+                        int(fire_at_ms is not None),
+                        ""
+                        if fire_at_ms is None
+                        else f"{fire_at_ms - speech_end_ms:.0f}",
+                        query,
+                        int(hit),
+                    ]
+                )
+                fh.flush()
+                if n % 50 == 0:
+                    elapsed = time.perf_counter() - t_start
+                    print(f"  {key}: {n}/{len(targets)}  ({elapsed:.0f}s)")
+            d = np.asarray(delays) if delays else np.zeros(1)
+            print(
+                f"{key:8s} n={n:4d}  false fire {false / n:6.1%}  "
+                f"fired {fired / n:6.1%}  delay after word end: "
+                f"median {np.median(d):.0f} ms  p90 {np.percentile(d, 90):.0f} ms  "
+                f"max {d.max():.0f} ms  |  trimmed clip still hits "
+                f"{hits / max(1, fired):6.1%}"
+            )
+    print(f"\nCSV: {out}")
+    return 0
+
+
 def main(argv=None) -> int:
     args = _parse_args(argv)
     if args.no_near:
@@ -197,6 +287,9 @@ def main(argv=None) -> int:
         f"{len(targets)} names, vocabulary {len(names)} names / {len(sets)} sets, "
         f"from {db}"
     )
+
+    if args.mode == "kws":
+        return _kws_bench(args, [t for t in targets if t[2]], names, sets)
 
     decoder = trie = None
     if args.mode == "constrained":

@@ -237,7 +237,7 @@ def test_no_module_decodes_an_embedding_with_a_hardcoded_dtype():
     # Voice search (ticket 76) decodes *microphone PCM* — a wire format fixed by
     # the audio device, never a stored blob — so its two files are not readers
     # of an embedding and sit outside this rule.
-    exempt = {"vectors.py", "vision.py", "voice.py", "_voice_input.py"}
+    exempt = {"vectors.py", "vision.py", "voice.py", "voice_kws.py", "_voice_input.py"}
     offenders = [
         path.relative_to(root).as_posix()
         for path in root.rglob("*.py")
@@ -245,7 +245,11 @@ def test_no_module_decodes_an_embedding_with_a_hardcoded_dtype():
         and path.name not in exempt  # vision.py: comment only, asserted below
     ]
     assert offenders == []
-    for name in ("services/voice.py", "ui/views/_voice_input.py"):
+    for name in (
+        "services/voice.py",
+        "services/voice_kws.py",
+        "ui/views/_voice_input.py",
+    ):
         assert "card_embedding" not in (root / name).read_text(encoding="utf-8")
 
     text = (root / "data" / "vision.py").read_text(encoding="utf-8")
