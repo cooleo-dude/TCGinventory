@@ -253,6 +253,19 @@ def test_recognize_falls_back_to_snapping_when_the_grammar_hears_nothing(monkeyp
     )
 
 
+def test_strict_recognize_never_guesses(monkeypatch):
+    """Ticket 80: always-listening mode drops a clip the grammar refused
+    rather than filling an unwatched search field with a free-form guess."""
+    monkeypatch.setattr(voice, "_recognize_constrained", lambda *a: [])
+    monkeypatch.setattr(voice, "transcribe", lambda *a: pytest.fail("free-form ran"))
+    assert voice.recognize(b"\x00\x01" * 800, 16000, ["Celebi"], [], strict=True) == ""
+    assert voice.recognize(b"\x00\x01" * 800, 16000, strict=True) == ""
+    monkeypatch.setattr(voice, "_recognize_constrained", lambda *a: ["Celebi"])
+    assert voice.recognize(b"\x00\x01" * 800, 16000, ["Celebi"], [], strict=True) == (
+        "celebi"
+    )
+
+
 def test_recognize_without_a_vocabulary_is_free_form(monkeypatch):
     monkeypatch.setattr(
         voice, "_recognize_constrained", lambda *a: pytest.fail("no grammar to use")

@@ -700,12 +700,136 @@ def test_voice_button_ends_capture_at_once_on_an_end_word(app, monkeypatch):
 
     # Capture in flight (stand-in for the QAudioSource) → stop now, trim the word.
     button._source = object()
+    button._utt_start = 0
     button._heard_speech = False
     button._on_end_word("finish")
     assert stopped == [True]
     assert voice_kws.END_WORD_MS >= 0  # the trim the True path applies
     assert button._heard_speech is True  # an end word counts as speech
     button._source = None
+    button.deleteLater()
+
+
+def _fake_microphone(button, monkeypatch):
+    """Stand in for QAudioSource: ``_open_microphone`` succeeds without a
+    device, ticks are driven by hand, and no spotter thread starts."""
+    from types import SimpleNamespace
+
+    from tcginventory.services import voice_kws
+
+    monkeypatch.setattr(voice_kws, "available", lambda: False)
+
+    def open_microphone():
+        button._chunks = []
+        button._utt_start = None
+        button._heard_speech = False
+        button._silence_ms = button._elapsed_ms = button._idle_ms = 0
+        button._source = SimpleNamespace(stop=lambda: None, deleteLater=lambda: None)
+        button._io = None
+        button.listening.emit(True)
+        return True
+
+    monkeypatch.setattr(button, "_open_microphone", open_microphone)
+    clips: list[tuple[bytes, bool]] = []
+    monkeypatch.setattr(
+        button,
+        "transcribe",
+        lambda pcm, rate=16000, strict=False: clips.append((pcm, strict)),
+    )
+    return clips
+
+
+LOUD = b"\x00\x20" * 1600  # 8192 amplitude, well above SPEECH_RMS
+QUIET = b"\x00\x00" * 1600
+
+
+def test_always_listening_starts_on_speech_and_keeps_the_microphone(app, monkeypatch):
+    """Ticket 80: in always-listening mode speech starts an utterance (with
+    pre-roll), 1.5 s of quiet ends it, the clip goes to *strict* recognition,
+    and the microphone stays open for the next one."""
+    from tcginventory.ui.views import _voice_input as vi
+
+    button = vi.VoiceInputButton(lambda: (["Scrafty"], [], []))
+    clips = _fake_microphone(button, monkeypatch)
+
+    button.set_always_on(True)
+    assert button._source is not None  # listening began with the toggle
+
+    for _ in range(6):  # ambient quiet: no utterance, only the pre-roll kept
+        button._ingest(QUIET)
+        button._on_tick()
+    assert button._utt_start is None
+    assert len(button._chunks) == vi.PRE_ROLL_TICKS
+
+    button._ingest(LOUD)
+    button._on_tick()
+    assert button._utt_start == 0  # the pre-roll is part of the utterance
+    assert button.isChecked()
+    for _ in range(3):
+        button._ingest(LOUD)
+        button._on_tick()
+    ticks = vi.SILENCE_MS // 100
+    for _ in range(ticks):
+        button._ingest(QUIET)
+        button._on_tick()
+    assert len(clips) == 1
+    pcm, strict = clips[0]
+    assert strict is True
+    # The pre-roll window holds the onset chunk and the two quiet ones before it.
+    assert len(pcm) == (vi.PRE_ROLL_TICKS + 3 + ticks) * len(LOUD)
+    assert button._source is not None  # still listening
+    assert button._utt_start is None and not button.isChecked()
+
+    button.set_always_on(False)
+    assert button._source is None  # the toggle owns the microphone
+    button.deleteLater()
+
+
+def test_push_to_talk_closes_the_microphone_after_the_utterance(app, monkeypatch):
+    from tcginventory.ui.views import _voice_input as vi
+
+    button = vi.VoiceInputButton(lambda: (["Scrafty"], [], []))
+    clips = _fake_microphone(button, monkeypatch)
+
+    button._start_capture()
+    assert button._utt_start == 0 and button._source is not None
+    for _ in range(3):
+        button._ingest(LOUD)
+        button._on_tick()
+    for _ in range(vi.SILENCE_MS // 100):
+        button._ingest(QUIET)
+        button._on_tick()
+    assert [strict for _, strict in clips] == [False]  # the fallback is allowed
+    assert button._source is None  # microphone closed
+    button.deleteLater()
+
+
+def test_listening_mode_toggle_drives_the_mic_and_remembers(app, monkeypatch):
+    from tcginventory import config
+    from tcginventory.ui.views import _voice_input as vi
+
+    saved: dict = {}
+    monkeypatch.setattr(config, "set_pref", lambda k, v: saved.__setitem__(k, v))
+    monkeypatch.setattr(config, "get_pref", lambda k, d=None: d)
+    button = vi.VoiceInputButton(lambda: ([], [], []))
+    _fake_microphone(button, monkeypatch)
+    toggle = vi.ListeningModeToggle(button)
+    assert not button.always_on
+
+    toggle.setChecked(True)
+    assert button.always_on and button._source is not None
+    assert saved == {vi.ALWAYS_ON_PREF: True}
+
+    # Leaving the view closes the microphone; coming back reopens it.
+    button.set_active(False)
+    assert button._source is None
+    button.set_active(True)
+    assert button._source is not None
+
+    toggle.setChecked(False)
+    assert not button.always_on and button._source is None
+    assert saved[vi.ALWAYS_ON_PREF] is False
+    toggle.deleteLater()
     button.deleteLater()
 
 

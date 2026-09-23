@@ -1,17 +1,24 @@
-"""Push-to-talk microphone button (ticket 76).
+"""Microphone button and its listening-mode toggle (tickets 76, 79, 80).
 
-One click starts capturing from the default microphone at 16 kHz mono; capture
-stops the moment an end word ("finish") is spoken, after 1.5 s of quiet once
-something has been said, or at a hard cap, and the clip is recognised off the UI
-thread by
-:func:`tcginventory.services.voice.recognize` against the words the owning view
-knows about — card names, set names, collector numbers — and the result is
-emitted as ``recognized``.
+Two modes, one capture machine:
 
-The button is the only place QtMultimedia is touched; the service layer sees PCM
-bytes. It is disabled with an explanatory tooltip when the speech model or the
-runtime is missing, so a build without them degrades to "no mic" rather than to
-a click that fails.
+* **Push-to-talk** (default): a click opens the microphone at 16 kHz mono; the
+  utterance ends the moment an end word ("finish") is spoken, after 1.5 s of
+  quiet once something has been said, or at a hard cap; the microphone closes
+  and the clip is recognised off the UI thread.
+* **Always listening** (the toggle beside the button): the microphone stays
+  open while the owning view is visible. Speech above the floor starts an
+  utterance (with 300 ms of pre-roll); it ends the same three ways; the clip is
+  recognised **strictly** — only a grammar-accepted answer reaches the search
+  field, never a free-form guess, because nobody is watching the box while
+  their hands are in a binder — and listening resumes at once.
+
+Recognition is :func:`tcginventory.services.voice.recognize` against the words
+the owning view knows about — card names, set names, collector numbers — and
+the result is emitted as ``recognized``. The button is the only place
+QtMultimedia is touched; the service layer sees PCM bytes. It is disabled with
+an explanatory tooltip when the speech model or the runtime is missing, so a
+build without them degrades to "no mic" rather than to a click that fails.
 """
 
 from __future__ import annotations
@@ -22,20 +29,27 @@ import numpy as np
 from PySide6.QtCore import QMutex, Qt, QThread, QTimer, QWaitCondition, Signal
 from PySide6.QtWidgets import QToolButton
 
+from tcginventory import config
 from tcginventory.services import voice, voice_kws
 from tcginventory.ui import icons, theme
 from tcginventory.ui.views._worker import retire
 
-#: Silence this long after speech ends the capture. 1.5 s rather than 1 s since
-#: ticket 79: saying "finish" ends capture at once, so the timer is the
-#: fallback and can afford to let a speaker pause before "VMAX".
+#: Silence this long after speech ends the utterance. 1.5 s rather than 1 s since
+#: ticket 79: saying "finish" ends it at once, so the timer is the fallback and
+#: can afford to let a speaker pause before "VMAX".
 SILENCE_MS = 1500
-#: A capture never runs longer than this, spoken or not.
+#: An utterance never runs longer than this, spoken or not.
 MAX_CAPTURE_MS = 8000
-#: With nothing said at all, give up after this long.
+#: Push-to-talk only: with nothing said at all, give up after this long.
 NO_SPEECH_MS = 4000
 #: RMS of int16 samples above which a chunk counts as speech (~-36 dBFS).
 SPEECH_RMS = 400.0
+#: Always listening: the window of 100 ms chunks kept while idle — the chunk
+#: that trips the speech floor and the ones before it — so an utterance starts
+#: with its first syllable intact rather than clipped at the onset.
+PRE_ROLL_TICKS = 3
+#: The preference key the toggle persists under.
+ALWAYS_ON_PREF = "voice_always_on"
 
 #: ``() -> (names, sets, numbers)`` — the words a clip may resolve to.
 Vocabulary = Callable[[], tuple[list[str], list[str], list[str]]]
@@ -53,6 +67,7 @@ class _TranscribeWorker(QThread):
         names: list[str],
         sets: list[str],
         numbers: list[str],
+        strict: bool = False,
     ):
         super().__init__()
         self._pcm = pcm16
@@ -60,13 +75,19 @@ class _TranscribeWorker(QThread):
         self._names = names
         self._sets = sets
         self._numbers = numbers
+        self._strict = strict
 
     def run(self) -> None:  # pragma: no cover - exercised via the button
         import logging
 
         try:
             query = voice.recognize(
-                self._pcm, self._rate, self._names, self._sets, self._numbers
+                self._pcm,
+                self._rate,
+                self._names,
+                self._sets,
+                self._numbers,
+                strict=self._strict,
             )
         except Exception:
             logging.getLogger(__name__).exception("voice recognition failed")
@@ -77,7 +98,7 @@ class _TranscribeWorker(QThread):
 class _KeywordWorker(QThread):
     """Hears microphone chunks as they arrive and fires the moment an end word
     is spoken (ticket 79). Owns its own spotter; the button pushes chunks in
-    under a mutex and retires the worker when capture ends."""
+    under a mutex and retires the worker when the utterance ends."""
 
     fired = Signal(str)
 
@@ -117,24 +138,29 @@ class _KeywordWorker(QThread):
 class VoiceInputButton(QToolButton):
     """A mic button that turns a spoken phrase into search text.
 
-    ``vocabulary`` is called at capture time and returns ``(names, sets,
+    ``vocabulary`` is called at recognition time and returns ``(names, sets,
     numbers)`` — the grammar the clip is decoded against. The owning view
     supplies it from the rows it already holds, so nothing here touches the
     database.
     """
 
     recognized = Signal(str)  # the query text to place in a search field
-    listening = Signal(bool)  # capture started / stopped
+    listening = Signal(bool)  # the microphone is open / closed
+    capturing = Signal(bool)  # an utterance is being recorded
 
     def __init__(self, vocabulary: Vocabulary | None = None, parent=None) -> None:
         super().__init__(parent)
         self._vocabulary = vocabulary or (lambda: ([], [], []))
-        self._source = None  # QAudioSource while capturing
+        self._always_on = False
+        self._active = True  # the owning view is visible
+        self._source = None  # QAudioSource while the microphone is open
         self._io = None  # its QIODevice
-        self._chunks: list[bytes] = []
+        self._chunks: list[bytes] = []  # audio since the microphone opened
+        self._utt_start: int | None = None  # chunk index where the utterance began
         self._heard_speech = False
         self._silence_ms = 0
         self._elapsed_ms = 0
+        self._idle_ms = 0
         self._worker: _TranscribeWorker | None = None
         self._kws_worker: _KeywordWorker | None = None
         self._parked: list[QThread] = []
@@ -173,18 +199,57 @@ class VoiceInputButton(QToolButton):
                 "Voice search needs the speech model, which is not installed"
             )
 
+    # -- modes ------------------------------------------------------------
+
+    @property
+    def always_on(self) -> bool:
+        return self._always_on
+
+    def set_always_on(self, on: bool) -> None:
+        """Switch between push-to-talk and always listening. Listening starts
+        (or stops) immediately when the owning view is visible."""
+        on = bool(on)
+        if on == self._always_on:
+            return
+        self._always_on = on
+        if on:
+            if self._active and self._source is None:
+                self._open_microphone()
+        elif self._source is not None:
+            if self._utt_start is not None:
+                self._finish_utterance()
+            self._close_microphone()
+
+    def set_active(self, visible: bool) -> None:
+        """The owning view came into (or went out of) view. Always listening
+        only listens while the view is on screen."""
+        self._active = visible
+        if not self._always_on:
+            return
+        if visible and self._source is None:
+            self._open_microphone()
+        elif not visible and self._source is not None:
+            if self._utt_start is not None:
+                self._finish_utterance()
+            self._close_microphone()
+
     # -- capture ----------------------------------------------------------
 
     def _on_clicked(self, checked: bool) -> None:
+        if self._always_on:
+            # In always-listening mode the click ends the current utterance
+            # early (or is a no-op); the toggle owns the microphone.
+            self.setChecked(self._utt_start is not None)
+            if self._utt_start is not None:
+                self._finish_utterance()
+            return
         if checked:
             self._start_capture()
         else:
             self._stop_capture()
 
-    def _start_capture(self) -> None:
-        if self._source is not None or (self._worker and self._worker.isRunning()):
-            self.setChecked(self._source is not None)
-            return
+    def _open_microphone(self) -> bool:
+        """Open the default microphone at 16 kHz mono. False if none can."""
         from PySide6.QtMultimedia import QAudioFormat, QAudioSource, QMediaDevices
 
         fmt = QAudioFormat()
@@ -193,99 +258,174 @@ class VoiceInputButton(QToolButton):
         fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
         device = QMediaDevices.defaultAudioInput()
         if device.isNull() or not device.isFormatSupported(fmt):
-            self.setChecked(False)
             self.setToolTip("No microphone that can record 16 kHz mono was found")
-            return
+            return False
         self._chunks = []
+        self._utt_start = None
         self._heard_speech = False
         self._silence_ms = 0
         self._elapsed_ms = 0
+        self._idle_ms = 0
         self._source = QAudioSource(device, fmt, self)
         self._io = self._source.start()
         if self._io is None:
             self._source = None
-            self.setChecked(False)
-            return
+            return False
         self._io.readyRead.connect(self._on_ready_read)
         self._tick.start()
+        self.listening.emit(True)
+        return True
+
+    def _close_microphone(self) -> None:
+        self._tick.stop()
+        retire(self._kws_worker, self._parked)
+        if self._source is not None:
+            self._source.stop()
+            self._source.deleteLater()
+        self._source = None
+        self._io = None
+        self._chunks = []
+        self._utt_start = None
+        self.setChecked(False)
+        self.setIcon(icons.icon("mic", theme.active().ink2, 16))
+        self.listening.emit(False)
+
+    def _start_capture(self) -> None:
+        """Push-to-talk: open the microphone and begin the utterance at once."""
+        if self._source is not None or (self._worker and self._worker.isRunning()):
+            self.setChecked(self._source is not None)
+            return
+        if not self._open_microphone():
+            self.setChecked(False)
+            return
+        self._begin_utterance(pre_roll=0)
+
+    def _begin_utterance(self, pre_roll: int) -> None:
+        self._utt_start = max(0, len(self._chunks) - pre_roll)
+        self._heard_speech = False
+        self._silence_ms = 0
+        self._elapsed_ms = 0
         if voice_kws.available():
             # Retire (never overwrite) a spotter still winding down from the
-            # previous capture, then start a fresh one for this clip.
+            # previous utterance, then start a fresh one for this clip.
             retire(self._kws_worker, self._parked)
             self._kws_worker = _KeywordWorker()
             self._kws_worker.fired.connect(self._on_end_word)
             self._kws_worker.start()
         self.setIcon(icons.icon("mic", theme.active().accent, 16))
         self.setChecked(True)
-        self.listening.emit(True)
+        self.capturing.emit(True)
 
     def _on_ready_read(self) -> None:
         if self._io is None:
             return
         data = bytes(self._io.readAll().data())
         if data:
-            self._chunks.append(data)
-            if self._kws_worker is not None and self._kws_worker.isRunning():
-                self._kws_worker.push(data)
+            self._ingest(data)
 
-    def _on_end_word(self, word: str) -> None:
-        """The spotter heard "finish": stop now, and drop the word from the
-        clip so recognition never sees it."""
-        if self._source is None:
-            return  # capture already ended (silence beat the spotter)
-        self._heard_speech = True  # an end word is speech, whatever the RMS said
-        self._stop_capture(end_word=True)
+    def _ingest(self, data: bytes) -> None:
+        """One chunk of microphone audio has arrived."""
+        self._chunks.append(data)
+        if self._utt_start is None:
+            # Idle in always-listening mode: keep only the pre-roll.
+            excess = len(self._chunks) - PRE_ROLL_TICKS
+            if excess > 0:
+                del self._chunks[:excess]
+        elif self._kws_worker is not None and self._kws_worker.isRunning():
+            self._kws_worker.push(data)
 
     def _on_tick(self) -> None:
-        self._elapsed_ms += self._tick.interval()
         recent = self._chunks[-1] if self._chunks else b""
-        if _rms(recent) >= SPEECH_RMS:
+        loud = _rms(recent) >= SPEECH_RMS
+        if self._utt_start is None:
+            # Always listening, between utterances: wait for speech.
+            if loud:
+                self._begin_utterance(pre_roll=PRE_ROLL_TICKS)
+                self._heard_speech = True
+            return
+        self._elapsed_ms += self._tick.interval()
+        if loud:
             self._heard_speech = True
             self._silence_ms = 0
         else:
             self._silence_ms += self._tick.interval()
         if self._elapsed_ms >= MAX_CAPTURE_MS:
-            self._stop_capture()
+            self._end_utterance()
         elif self._heard_speech and self._silence_ms >= SILENCE_MS:
-            self._stop_capture()
+            self._end_utterance()
         elif not self._heard_speech and self._elapsed_ms >= NO_SPEECH_MS:
-            self._stop_capture()
+            self._end_utterance()
+
+    def _on_end_word(self, word: str) -> None:
+        """The spotter heard "finish": end the utterance now. The word stays in
+        the clip; recognition absorbs it."""
+        if self._source is None or self._utt_start is None:
+            return  # the utterance already ended (silence beat the spotter)
+        self._heard_speech = True  # an end word is speech, whatever the RMS said
+        self._end_utterance(end_word=True)
+
+    def _end_utterance(self, end_word: bool = False) -> None:
+        """An utterance is over: hand it to recognition, then either keep
+        listening (always on) or close the microphone (push-to-talk)."""
+        if self._always_on:
+            self._finish_utterance(end_word)
+        else:
+            self._stop_capture(end_word)
+
+    def _finish_utterance(self, end_word: bool = False) -> None:
+        """Always listening: recognise the utterance and resume listening."""
+        if self._utt_start is None:
+            return
+        self._on_ready_read()  # drain what the device still held
+        retire(self._kws_worker, self._parked)
+        pcm = b"".join(self._chunks[self._utt_start :])
+        if end_word:
+            pcm = voice_kws.trim_end_word(pcm)
+        heard = self._heard_speech
+        self._chunks = []
+        self._utt_start = None
+        self.setChecked(False)
+        self.setIcon(icons.icon("mic", theme.active().ink2, 16))
+        self.capturing.emit(False)
+        if heard and pcm:
+            self.transcribe(pcm, strict=True)
 
     def _stop_capture(self, end_word: bool = False) -> None:
-        self._tick.stop()
+        """Push-to-talk: the utterance is over and so is the microphone."""
         if self._source is None:
             self.setChecked(False)
             return
-        self._source.stop()
         self._on_ready_read()  # drain what the device still held
-        self._io = None
-        self._source.deleteLater()
-        self._source = None
-        retire(self._kws_worker, self._parked)  # its clip is over
-        pcm = b"".join(self._chunks)
+        start = self._utt_start or 0
+        pcm = b"".join(self._chunks[start:])
         if end_word:
-            pcm = voice_kws.trim_end_word(pcm)  # drop the spoken "finish"
-        self._chunks = []
-        self.setChecked(False)
-        self.setIcon(icons.icon("mic", theme.active().ink2, 16))
-        self.listening.emit(False)
-        if self._heard_speech and pcm:
+            pcm = voice_kws.trim_end_word(pcm)  # drop the trailing quiet
+        heard = self._heard_speech
+        self._close_microphone()
+        self.capturing.emit(False)
+        if heard and pcm:
             self.transcribe(pcm)
 
     # -- transcription ----------------------------------------------------
 
-    def transcribe(self, pcm16: bytes, rate: int = voice.SAMPLE_RATE) -> None:
-        """Transcribe ``pcm16`` off the UI thread and emit ``recognized`` with
-        the snapped query. Public so a caller with audio from elsewhere (or a
-        test with a canned clip) can drive the same path the mic does."""
-        # A press that lands while a decode is still running returns early
-        # rather than replacing the worker: interruption is only a flag, and
-        # dropping the reference to a live QThread aborts the process.
+    def transcribe(
+        self, pcm16: bytes, rate: int = voice.SAMPLE_RATE, strict: bool = False
+    ) -> None:
+        """Recognise ``pcm16`` off the UI thread and emit ``recognized`` with
+        the query. Public so a caller with audio from elsewhere (or a test with
+        a canned clip) can drive the same path the mic does. ``strict`` refuses
+        a free-form guess — always-listening mode uses it, since nobody is
+        watching the search box to correct one."""
+        # A clip that lands while a decode is still running is dropped rather
+        # than replacing the worker: interruption is only a flag, and dropping
+        # the reference to a live QThread aborts the process.
         if self._worker is not None and self._worker.isRunning():
             return
         retire(self._worker, self._parked)
         names, sets, numbers = self._vocabulary()
-        worker = _TranscribeWorker(pcm16, rate, list(names), list(sets), list(numbers))
+        worker = _TranscribeWorker(
+            pcm16, rate, list(names), list(sets), list(numbers), strict
+        )
         worker.done.connect(self._on_done)
         self._worker = worker
         worker.start()
@@ -293,6 +433,47 @@ class VoiceInputButton(QToolButton):
     def _on_done(self, query: str) -> None:
         if query:
             self.recognized.emit(query)
+
+
+class ListeningModeToggle(QToolButton):
+    """The chip beside the mic: off = push-to-talk, on = always listening.
+
+    Drives :meth:`VoiceInputButton.set_always_on` and remembers the choice in
+    the preferences file, so the app comes back the way it was left."""
+
+    def __init__(self, mic: VoiceInputButton, parent=None) -> None:
+        super().__init__(parent)
+        self._mic = mic
+        t = theme.active()
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setObjectName("listenmode")
+        self.setText("Always on")
+        self.setIcon(icons.icon("ear", t.ink2, 15))
+        self.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.setStyleSheet(
+            f"QToolButton#listenmode{{background:{t.surface};border:1px solid "
+            f"{t.line2};border-radius:999px;color:{t.ink2};padding:5px 11px;"
+            f"font-weight:600;font-size:12px;}}"
+            f"QToolButton#listenmode:hover{{color:{t.ink};}}"
+            f"QToolButton#listenmode:checked{{background:{t.accent_soft};"
+            f"border-color:{t.accent};color:{t.accent_ink};}}"
+        )
+        self.setToolTip(
+            "Always listening: the microphone stays open while Inventory is "
+            "showing; speak a card and the grid follows, no click needed. Only "
+            "answers the vocabulary accepts reach the search field."
+        )
+        self.setEnabled(mic.isEnabled())
+        self.toggled.connect(self._on_toggled)
+        if mic.isEnabled() and bool(config.get_pref(ALWAYS_ON_PREF, False)):
+            self.setChecked(True)  # fires _on_toggled → mic listens
+
+    def _on_toggled(self, on: bool) -> None:
+        t = theme.active()
+        self.setIcon(icons.icon("ear", t.accent_ink if on else t.ink2, 15))
+        self._mic.set_always_on(on)
+        config.set_pref(ALWAYS_ON_PREF, bool(on))
 
 
 def _rms(chunk: bytes) -> float:
