@@ -111,7 +111,11 @@ offline; no external price feeds in V1.
   "Always on" toggle beside the mic keeps the microphone open while Inventory
   shows — speech starts an utterance, strict recognition only, persisted as
   `voice_always_on`; tests get an in-memory preference store so the suite never
-  opens a mic. ADRs 2026-09-22 (two), 2026-09-23 (three).
+  opens a mic. **Ticket 81**: the mic delivers 10 ms chunks, so capture is
+  accounted in time/bytes (300 ms pre-roll, onset over the whole tick window,
+  clock-based silence), clips queue while one is recognised, and strict mode
+  accepts the snap only when every word is one the grid knows. ADRs 2026-09-22
+  (two), 2026-09-23 (four).
 
 ## Source of truth
 

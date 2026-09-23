@@ -254,16 +254,39 @@ def test_recognize_falls_back_to_snapping_when_the_grammar_hears_nothing(monkeyp
 
 
 def test_strict_recognize_never_guesses(monkeypatch):
-    """Ticket 80: always-listening mode drops a clip the grammar refused
-    rather than filling an unwatched search field with a free-form guess."""
+    """Tickets 80/81: always-listening mode never types a free-form guess. When
+    the grammar refuses, the snapped transcript is accepted only if every word
+    of it is one the grid knows; a word from nowhere drops the clip."""
+    clip = b"\x00\x01" * 800
     monkeypatch.setattr(voice, "_recognize_constrained", lambda *a: [])
-    monkeypatch.setattr(voice, "transcribe", lambda *a: pytest.fail("free-form ran"))
-    assert voice.recognize(b"\x00\x01" * 800, 16000, ["Celebi"], [], strict=True) == ""
-    assert voice.recognize(b"\x00\x01" * 800, 16000, strict=True) == ""
-    monkeypatch.setattr(voice, "_recognize_constrained", lambda *a: ["Celebi"])
-    assert voice.recognize(b"\x00\x01" * 800, 16000, ["Celebi"], [], strict=True) == (
-        "celebi"
+    heard = {"text": "Celiby Triumphant"}
+    monkeypatch.setattr(voice, "transcribe", lambda *a: heard["text"])
+    # The snap recovers the name and every word is in the vocabulary → typed.
+    assert voice.recognize(clip, 16000, ["Celebi"], ["Triumphant"], strict=True) == (
+        "celebi triumphant"
     )
+    # A card the user does not own → the snap keeps the raw word → dropped.
+    heard["text"] = "Gengar"
+    assert voice.recognize(clip, 16000, ["Celebi"], ["Triumphant"], strict=True) == ""
+    # Push-to-talk still types it, so an empty grid says "you don't own it".
+    assert voice.recognize(clip, 16000, ["Celebi"], ["Triumphant"]) == "gengar"
+    # No vocabulary at all → strict has nothing to check against → nothing.
+    assert voice.recognize(clip, 16000, strict=True) == ""
+    # The grammar's own answer is always accepted.
+    monkeypatch.setattr(voice, "_recognize_constrained", lambda *a: ["Celebi"])
+    assert voice.recognize(clip, 16000, ["Celebi"], [], strict=True) == "celebi"
+
+
+def test_in_vocabulary_knows_words_shorthands_and_numbers():
+    names, sets, numbers = ["Charizard VMAX"], ["SVP Black Star Promos"], ["025/102"]
+    ok = lambda q: voice._in_vocabulary(q, names, sets, numbers)  # noqa: E731
+    assert ok("charizard")
+    assert ok("charizard vmax")
+    assert ok("promo")  # a set shorthand
+    assert ok("black star")
+    assert ok("charizard 25/102")  # the number's search token
+    assert not ok("charizard gengar")
+    assert not ok("")
 
 
 def test_recognize_without_a_vocabulary_is_free_form(monkeypatch):

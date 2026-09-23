@@ -3725,3 +3725,37 @@ meant clicking **Edit item…** inside it to open a second dialog,
 - **Not measured:** false utterance starts from ambient noise. The RMS floor
   (−36 dBFS) and strict recognition are the two defences; a noisy room may show
   whether a VAD model (sherpa-onnx ships Silero) should replace the floor.
+
+### 2026-09-23 — Account for audio in time, not chunks (ticket 81)
+
+- **Report:** with always listening on, about half of what the user said was
+  missed. Push-to-talk was fine.
+- **Measured:** the microphone hands the button audio **every 10 ms in
+  320-byte chunks** — 200 `readyRead` events a second. The always-listening
+  machine (ticket 80) assumed one chunk per 100 ms tick, so its pre-roll of
+  "three chunks" was 30 ms (the first syllable was lost), speech onset was
+  judged on one 10 ms slice (a coin flip on any consonant gap, so detection
+  landed late and lost more), and silence was counted in ticks.
+- **Fix:** everything in time and bytes — pre-roll kept by bytes
+  (`PRE_ROLL_MS` = 300 → 9,600), speech judged over every slice that arrived
+  since the last tick, silence and elapsed time from an injectable monotonic
+  clock so a slow event loop cannot stretch the window and tests can drive
+  it. The tests now feed 10 ms chunks, as the hardware does.
+- **Two more leaks closed in the same pass.** A clip that arrived while the
+  previous one was being recognised (~1.5 s) was silently dropped —
+  `transcribe` now queues up to `MAX_PENDING` = 3 clips and serves them in
+  order. And strict mode had no second chance: the likelihood gate refuses
+  about one valid name in five by design, push-to-talk recovers most of those
+  through the spelling-and-sound snap, and strict mode had disabled the snap
+  entirely. Strict mode now keeps the snap but accepts it **only when every
+  token is a word the grid knows** (`voice._in_vocabulary`: words of names and
+  sets, set shorthands, collector-number tokens). A word from nowhere still
+  drops the clip, so a TV still cannot type into the box.
+- **Rejected:** setting the device buffer to 100 ms and keeping chunk counts
+  (a hint the backend may ignore; time is right for any cadence); dropping the
+  newest clip when busy (it is a card the user said); the full fallback in
+  strict mode (junk would be typed); a VAD model in place of the RMS floor
+  (may still come for noisy rooms; orthogonal to this bug, which came first).
+- **Lesson recorded for the next capture change:** measure the device before
+  designing around it. A two-line probe (`readyRead` cadence and chunk size)
+  would have shown the 10 ms cadence at ticket 80.
