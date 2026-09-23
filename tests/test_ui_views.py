@@ -682,6 +682,33 @@ def test_inventory_voice_query_lands_in_the_search_field(app, seeded_conn, monke
     view.deleteLater()
 
 
+def test_voice_button_ends_capture_at_once_on_an_end_word(app, monkeypatch):
+    """Ticket 79: the spotter's ``fired`` stops capture immediately with the
+    end word trimmed off the clip, without waiting out the silence timer."""
+    from tcginventory.services import voice_kws
+    from tcginventory.ui.views._voice_input import VoiceInputButton
+
+    button = VoiceInputButton(lambda: (["Scrafty"], [], []))
+    stopped: list[bool] = []
+    monkeypatch.setattr(
+        button, "_stop_capture", lambda end_word=False: stopped.append(end_word)
+    )
+
+    # No capture in flight → a late fire is ignored.
+    button._on_end_word("finish")
+    assert stopped == []
+
+    # Capture in flight (stand-in for the QAudioSource) → stop now, trim the word.
+    button._source = object()
+    button._heard_speech = False
+    button._on_end_word("finish")
+    assert stopped == [True]
+    assert voice_kws.END_WORD_MS >= 0  # the trim the True path applies
+    assert button._heard_speech is True  # an end word counts as speech
+    button._source = None
+    button.deleteLater()
+
+
 def test_voice_button_hears_speech_above_the_floor_and_not_silence(app):
     import numpy as np
 

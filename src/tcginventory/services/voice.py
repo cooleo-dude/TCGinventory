@@ -163,7 +163,7 @@ def recognize(
         except Exception:  # pragma: no cover - a missing runtime degrades, not fails
             phrases = []
         if phrases:
-            return " ".join(phrases).lower()
+            return " ".join(p for p in phrases if p).lower()  # "" = an end word
     return parse_query(transcribe(pcm16, rate), names, sets)
 
 
@@ -238,10 +238,14 @@ _SLASH_PHRASES = (("out", "of"), ("of",), ("over",), ("slash",), ("on",))
 #: Words Whisper hears that carry no search meaning. Anything else that fails to
 #: snap is kept as spoken — a card the user does not own should filter to an
 #: honest empty grid, not to everything.
+#: Words that end capture (ticket 79). Recognition absorbs them too, so one
+#: left at the tail of a clip never reaches the search field.
+END_WORDS = ("finish", "done")
+
 _FILLER = frozenset(
     "um uh er ah the a an card cards show me search find look for please "
     "up filter and of to in at it is s".split()
-)
+) | frozenset(END_WORDS)
 
 #: Spoken forms of the card-name suffixes, folded to how the catalog writes
 #: them before any snapping: "Charizard X" is *Charizard ex*, not Charizard GX,

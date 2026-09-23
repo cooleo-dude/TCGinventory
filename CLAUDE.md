@@ -104,7 +104,11 @@ offline; no external price feeds in V1.
   back to a transcript snapped by spelling **and sound** (Metaphone key).
   Measured by `training/voice_bench.py` (synthetic voices, dev-only): 44% →
   ~88% of owned names recovered, wrong cards ~4%. The Inventory search field
-  matches **every token**. ADRs 2026-09-22 (two).
+  matches **every token**. **Ticket 79**: saying "finish" (or "done") ends
+  capture at once — a streaming keyword spotter (`services/voice_kws.py`,
+  ~5 MB, `models/kws-*`) hears each mic chunk and fires ~0.4 s after the word;
+  recognition absorbs the word; silence fallback 1.5 s. ADRs 2026-09-22 (two),
+  2026-09-23 (two).
 
 ## Source of truth
 

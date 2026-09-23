@@ -3653,3 +3653,43 @@ meant clicking **Edit item…** inside it to open a second dialog,
 - The lesson generalises: when a correctly heard word turns into a card, the
   vocabulary is missing a word people say, and the sound channel is doing
   exactly what it should with what it was given. Add the word.
+
+### 2026-09-23 — "finish" ends capture at once (ticket 79)
+
+- **Request:** an end word — "Scrafty *finish*" — that stops capture the moment
+  it is said, instead of waiting out the silence timer.
+- **Why not Whisper.** Nothing is recognised until capture ends, and a Whisper
+  pass over the growing buffer costs ~0.5 s on CPU, so a spoken end word would
+  be noticed no sooner than the silence it replaces, with CPU load during
+  capture as the price. The tool for "notice a word while audio is still
+  arriving" is a **streaming keyword spotter**.
+- **What shipped:** sherpa-onnx's KWS Zipformer transducer (GigaSpeech, 3.3 M
+  parameters, ~5 MB int8) bundled as `models/kws-*`, wrapped Qt-free in
+  `services/voice_kws.py`. The keyword list is the model's own BPE of the end
+  words (`▁F IN ISH`, `▁DON E`), generated once at dev time — sentencepiece is
+  not a runtime dependency, and a test asserts the file spells exactly
+  `END_WORDS`. In the mic button a `_KeywordWorker` thread hears each chunk as
+  it arrives; on `fired` capture stops immediately and the clip goes to
+  recognition. The silence fallback stays, lengthened 1.0 → 1.5 s: with an
+  explicit end available, a pause before "VMAX" need not cut anyone off.
+  Measured on synthetic speech: real-time factor ~0.012; it fires a median
+  ~380 ms after the word ends, saving ~1.1 s against the timer; 0 false fires
+  on bare names in the smoke and full runs (numbers in the ticket).
+- **Two things the benchmark decided.** (1) *The spotter confirms a keyword on
+  the blanks that follow it.* A synthetic clip that ends on the word never
+  fired; a microphone streams silence after the speaker stops, so production is
+  fine and the benchmark appends 0.5 s of silence to emulate it. (2) *Do not
+  cut the word out of the clip.* "finish" lasts 250–460 ms with no gap before
+  it, so a fixed trim either leaves part of it or eats the end of the name
+  ("AZ's Tranquility" → "astral qu" at 600 ms). Instead the word stays and
+  recognition **absorbs** it: the grammar has each end word as a phrase that
+  adds no token, EOT after an end word refunds the phrase penalty (otherwise
+  "Abomasnow finish" decoded as Abomasnow + the nearest real card), and the
+  snap fallback treats the words as filler. Only the trailing quiet is trimmed.
+- **Rejected:** shortening the silence timer to ~600 ms (free; cuts off anyone
+  who pauses mid-name; nothing for hands-free); energy-based end detection (it
+  *is* the silence timer); the spotter's token timestamps for a precise cut
+  (the Python binding returned none after `get_result`).
+- **What this buys next.** The same spotter listening for a wake word is the
+  hands-free mode deferred at ticket 76: "inventory" to start capture, "finish"
+  to end it, no mouse. Filed as the follow-on.

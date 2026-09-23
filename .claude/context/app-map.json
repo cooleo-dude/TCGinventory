@@ -395,7 +395,8 @@
         "services/review.py",
         "services/cardimages.py",
         "services/voice.py",
-        "services/voice_decode.py"
+        "services/voice_decode.py",
+        "services/voice_kws.py"
       ],
       "repositories": [
         "ItemRepository",
@@ -433,7 +434,8 @@
         "tests/test_delete_entry.py",
         "tests/test_item_variant.py",
         "tests/test_voice.py",
-        "tests/test_voice_decode.py"
+        "tests/test_voice_decode.py",
+        "tests/test_voice_kws.py"
       ],
       "signals_out": [
         "changed() -> ledger mutated (intent edit, item edit, entry delete)"
