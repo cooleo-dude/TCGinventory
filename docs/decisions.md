@@ -3630,3 +3630,26 @@ meant clicking **Edit item…** inside it to open a second dialog,
 - **Follow-ups, not in this ticket:** a second synthetic voice and a real-voice
   sample to check the margin; catalog-wide vocabulary (unowned names as
   first-class answers) once a use for it exists; wake-word mode.
+
+### 2026-09-23 — "promo" is a word, not a misheard "prime" (ticket 78)
+
+- **Report:** with ticket 77 live, saying "promo" put `prime` in the search
+  field. Thirteen of the ledger's sets are promo sets and nobody says "SVP
+  Black Star Promos" aloud, but the grammar knew only full set names and their
+  suffix aliases, so `" promo"` was not a legal utterance; the snap fallback
+  then matched it by sound (`promo` and `prime` both key `PRM`) to the "Prime"
+  prefix of the owned *Prime Catcher*. Whisper had heard the word correctly.
+- **Fix:** `voice.set_shorthands(set_name)` — for a set containing "Promo",
+  the spoken forms "promo"/"promos" resolve to the token `promo` (a substring
+  of Promo, Promos and Promotional alike); for "Black Star" sets, "black star"
+  and "black star promo(s)". One helper feeds both the grammar and the snap
+  vocabulary, and shorthands enter the latter before name prefixes so they
+  win as exact spelling matches.
+- **Rejected:** guarding the sound channel against snapping to a name prefix
+  ("Umbrian" → Umbreon is a legitimate prefix snap); a vowel-sensitive key
+  (fragile, and "promo" would still be unsayable); generic word-level aliases
+  for every set name (fixes the class, but hundreds of short phrases with no
+  false-accept measurement — the follow-up if more shorthands surface).
+- The lesson generalises: when a correctly heard word turns into a card, the
+  vocabulary is missing a word people say, and the sound channel is doing
+  exactly what it should with what it was given. Add the word.

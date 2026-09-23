@@ -176,6 +176,39 @@ def test_spoken_suffixes_fold_to_the_catalogs_tokens():
     assert voice.parse_query("Charizard G X", names) == "charizard gx"
 
 
+# -- set shorthands (ticket 78) ----------------------------------------------------
+
+PROMO_SETS = ["SM Black Star Promos", "McDonald's Promo", "SV-P Promotional Cards"]
+
+
+def test_promo_is_a_word_not_a_misheard_prime():
+    """Ticket 78: "promo" and "prime" share a sound key, and the ledger holds
+    Prime Catcher — without the shorthand, a correctly heard word became the
+    nearest owned card."""
+    names = NAMES + ["Prime Catcher"]
+    assert voice.parse_query("Pikachu promo", names, PROMO_SETS) == "pikachu promo"
+    assert voice.parse_query("Pikachu promos", names, PROMO_SETS) == "pikachu promo"
+    assert voice.parse_query("Charizard black star promos", names, PROMO_SETS) == (
+        "charizard black star promo"
+    )
+    # Without any promo set in the vocabulary the old behaviour is what it was:
+    # the word is unknown and snaps by sound. The shorthand is what fixes it.
+    assert voice.parse_query("Pikachu promo", names, SETS) == "pikachu prime"
+
+
+@pytest.mark.parametrize(
+    "set_name, expected",
+    [
+        ("SM Black Star Promos", {"promo", "black star", "black star promo"}),
+        ("McDonald's Promo", {"promo"}),
+        ("SV-P Promotional Cards", {"promo"}),
+        ("Evolving Skies", set()),
+    ],
+)
+def test_set_shorthands_cover_every_promo_spelling(set_name, expected):
+    assert {token for _, token in voice.set_shorthands(set_name)} == expected
+
+
 # -- what survives ------------------------------------------------------------------
 
 
