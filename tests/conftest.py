@@ -54,6 +54,27 @@ def _drain_deferred_deletions():
     app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_prefs(monkeypatch):
+    """Every test sees an empty, in-memory preferences store.
+
+    ``preferences.json`` lives in the real data dir. Since ticket 80 a view
+    reads ``voice_always_on`` at construction and *opens the microphone* when
+    it is set — a test must never do that on a developer's machine, nor write
+    a preference back into their file.
+    """
+    from tcginventory import config
+
+    store: dict = {}
+    monkeypatch.setattr(config, "read_prefs", lambda: dict(store))
+
+    def write(prefs: dict) -> None:
+        store.clear()
+        store.update(prefs)
+
+    monkeypatch.setattr(config, "write_prefs", write)
+
+
 @pytest.fixture()
 def conn():
     c = connect(":memory:")

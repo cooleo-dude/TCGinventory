@@ -107,8 +107,11 @@ offline; no external price feeds in V1.
   matches **every token**. **Ticket 79**: saying "finish" (or "done") ends
   capture at once — a streaming keyword spotter (`services/voice_kws.py`,
   ~5 MB, `models/kws-*`) hears each mic chunk and fires ~0.4 s after the word;
-  recognition absorbs the word; silence fallback 1.5 s. ADRs 2026-09-22 (two),
-  2026-09-23 (two).
+  recognition absorbs the word; silence fallback 1.5 s. **Ticket 80**: an
+  "Always on" toggle beside the mic keeps the microphone open while Inventory
+  shows — speech starts an utterance, strict recognition only, persisted as
+  `voice_always_on`; tests get an in-memory preference store so the suite never
+  opens a mic. ADRs 2026-09-22 (two), 2026-09-23 (three).
 
 ## Source of truth
 

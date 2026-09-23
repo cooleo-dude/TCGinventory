@@ -3693,3 +3693,35 @@ meant clicking **Edit item…** inside it to open a second dialog,
 - **What this buys next.** The same spotter listening for a wake word is the
   hands-free mode deferred at ticket 76: "inventory" to start capture, "finish"
   to end it, no mouse. Filed as the follow-on.
+
+### 2026-09-23 — Always listening is a toggle, not a wake word (ticket 80)
+
+- **Request:** hands-free voice search, as a **toggle beside the microphone**
+  that switches push-to-talk to always listening — in place of the wake word
+  floated at tickets 76 and 79. A toggle has visible state and no second
+  keyword to mishear.
+- **One capture machine, two modes.** `VoiceInputButton` differs by mode in
+  three places only: who opens the microphone (a click, or the toggle while the
+  view is visible), what starts an utterance (the click, or speech above the
+  RMS floor with a 300 ms pre-roll window), and what happens when one ends
+  (close the microphone, or recognise and keep listening). End words, the 1.5 s
+  silence fallback and the 8 s cap are identical in both. Two machines would
+  have drifted.
+- **Strict recognition when nobody is watching.** Push-to-talk may fall back to
+  a free-form transcript because the user is looking at the box. Hands-free, a
+  TV or a colleague would otherwise keep writing junk into the search field, so
+  `voice.recognize(strict=True)` returns nothing unless the grammar accepted the
+  clip; everything else is dropped silently.
+- **Only while Inventory is showing.** The view's `showEvent`/`hideEvent` tell
+  the button; the microphone closes on navigation away and reopens on return.
+  The choice persists as `voice_always_on` in `preferences.json`.
+- **A test-suite guard came with it.** Views now read a preference at
+  construction that *opens the microphone*; `tests/conftest.py` gives every test
+  an in-memory preference store, so a developer's own setting can never make the
+  suite listen, and no test writes into their file.
+- **Rejected:** a wake word (the user's call); a separate always-on widget or
+  thread; the free-form fallback in always-on mode; listening app-wide; keeping
+  the whole idle stream in memory (only the pre-roll window is kept).
+- **Not measured:** false utterance starts from ambient noise. The RMS floor
+  (−36 dBFS) and strict recognition are the two defences; a noisy room may show
+  whether a VAD model (sherpa-onnx ships Silero) should replace the floor.

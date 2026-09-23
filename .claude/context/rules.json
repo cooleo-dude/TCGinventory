@@ -328,7 +328,7 @@
       "source": {
         "file": "tests/conftest.py",
         "anchor": null,
-        "excerpt_sha256": "bce086f601bdee08"
+        "excerpt_sha256": "8bfcbec0b30f882a"
       },
       "scope": [
         "src/tcginventory/ui/**/*.py",

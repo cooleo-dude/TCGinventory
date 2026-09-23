@@ -144,6 +144,7 @@ def recognize(
     names: Iterable[str] = (),
     sets: Iterable[str] = (),
     numbers: Iterable[str] = (),
+    strict: bool = False,
 ) -> str:
     """Speech to the text for the search field, the way the app does it.
 
@@ -152,7 +153,10 @@ def recognize(
     entry, so the answer is a catalog name chosen by sound, never an English
     word that resembles one. If constrained decoding is unavailable or hears
     nothing legal, fall back to a free-form transcript snapped by
-    :func:`parse_query`. Blocking — call from a worker thread.
+    :func:`parse_query` — unless ``strict``, which returns ``""`` instead:
+    always-listening mode (ticket 80) uses it, because a free-form guess
+    landing in an unwatched search field is worse than nothing.
+    Blocking — call from a worker thread.
     """
     if not pcm16:
         return ""
@@ -164,6 +168,10 @@ def recognize(
             phrases = []
         if phrases:
             return " ".join(p for p in phrases if p).lower()  # "" = an end word
+        if strict:
+            return ""
+    elif strict:
+        return ""
     return parse_query(transcribe(pcm16, rate), names, sets)
 
 

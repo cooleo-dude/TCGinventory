@@ -99,7 +99,7 @@ from tcginventory.ui.views._inventory_delegates import (
 )
 from tcginventory.ui.views._link_delegate import LinkButtonDelegate
 from tcginventory.ui.views._review_delegate import ReviewPriceDelegate
-from tcginventory.ui.views._voice_input import VoiceInputButton
+from tcginventory.ui.views._voice_input import ListeningModeToggle, VoiceInputButton
 from tcginventory.ui.views._worker import retire
 from tcginventory.ui.views.item_editor import ItemEditorDialog
 
@@ -427,6 +427,8 @@ class InventoryView(QWidget):
         mic_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         mic_shortcut.activated.connect(self._mic.click)
         self._mic.setToolTip(self._mic.toolTip() + "  (Ctrl+M)")
+        # Ticket 80: push-to-talk or always listening (while this view shows).
+        self._listen_mode = ListeningModeToggle(self._mic)
 
         self._intent = _Segmented(
             [
@@ -488,6 +490,7 @@ class InventoryView(QWidget):
         filter_bar.setSpacing(8)
         filter_bar.addWidget(self._search, 1)
         filter_bar.addWidget(self._mic)
+        filter_bar.addWidget(self._listen_mode)
         filter_bar.addWidget(self._intent)
         filter_bar.addWidget(self._sold)
         filter_bar.addWidget(self._graded)
@@ -632,6 +635,14 @@ class InventoryView(QWidget):
         layout.addWidget(body, 1)
 
         self.refresh()
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().showEvent(event)
+        self._mic.set_active(True)  # always listening resumes with the view
+
+    def hideEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        self._mic.set_active(False)  # and the microphone closes when it leaves
+        super().hideEvent(event)
 
     def refresh(self) -> None:
         self._review_delegate.disarm()
