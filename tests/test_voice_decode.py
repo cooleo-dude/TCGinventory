@@ -116,6 +116,20 @@ def test_build_grammar_hears_aliases_and_numbers_and_answers_canonically():
     ]
 
 
+def test_build_grammar_can_say_promo_for_a_promo_set():
+    """Ticket 78: the grammar could not utter "promo" — no set is *spoken* that
+    way — so the decoder had nothing legal to complete and the fallback rewrote
+    the word by sound."""
+    trie = vd.build_grammar(["Pikachu", "Prime Catcher"], ["SVP Black Star Promos"])
+    assert finished(walk(trie, " pikachu promo")) == [("Pikachu", "promo")]
+    # "black star" and "promo" are phrases too, so a three-phrase reading also
+    # finishes here; the decoder takes the shortest, which is the shorthand.
+    readings = finished(walk(trie, " pikachu black star promos"))
+    assert min(readings, key=len) == ("Pikachu", "black star promo")
+    without = vd.build_grammar(["Pikachu", "Prime Catcher"], ["Evolving Skies"])
+    assert walk(without, " pikachu promo") == []
+
+
 def test_log_mel_has_whispers_shape_and_range():
     audio = np.zeros(vd.SR * 2, dtype=np.float32)
     audio[:: vd.SR // 440] = 0.5  # a buzzing 440 Hz pulse train

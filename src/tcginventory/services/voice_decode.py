@@ -180,6 +180,8 @@ def build_grammar(
         for phrase in group:
             for spoken in spoken_variants(phrase):
                 entries.append((spoken, phrase))
+    for set_name in sets:
+        entries.extend(voice.set_shorthands(set_name))  # "promo", "black star"
     for number in numbers:
         entries.extend(number_phrases(number))
     return PhraseTrie(entries, max_phrases=max_phrases)

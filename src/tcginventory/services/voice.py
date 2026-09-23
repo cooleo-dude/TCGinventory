@@ -521,6 +521,30 @@ def _normalise_numbers(words: list[str]) -> list[str]:
     return out
 
 
+def set_shorthands(set_name: str) -> list[tuple[str, str]]:
+    """How people refer to a set in one or two words, and the search token
+    each stands for (ticket 78).
+
+    Nobody says "SVP Black Star Promos"; they say "promo". Thirteen of the
+    ledger's sets are promo sets, and without this the word was outside the
+    vocabulary — the grammar could not say it and the sound channel rewrote it
+    as the nearest owned card ("Prime", from Prime Catcher). The token is a
+    substring of every spelling the catalog uses (Promo, Promos, Promotional),
+    so it filters to all of them at once.
+    """
+    low = set_name.lower()
+    out: list[tuple[str, str]] = []
+    if "promo" in low:
+        out += [("promo", "promo"), ("promos", "promo")]
+    if "black star" in low:
+        out += [
+            ("black star", "black star"),
+            ("black star promo", "black star promo"),
+            ("black star promos", "black star promo"),
+        ]
+    return out
+
+
 @dataclass
 class _Candidates:
     """What a spoken span may snap to, indexed two ways.
@@ -544,6 +568,14 @@ class _Candidates:
 def _candidates(names: Iterable[str], sets: Iterable[str]) -> _Candidates:
     spelling: dict[str, str] = {}
     sound: dict[str, list[str]] = {}
+    # Shorthands first, so "promo" is an exact spelling match before any
+    # prefix of a longer name can claim it by sound.
+    for set_name in sets:
+        for spoken, token in set_shorthands(set_name):
+            norm = _norm(spoken)
+            if norm not in spelling:
+                spelling[norm] = token
+                sound.setdefault(phonetic_key(spoken), []).append(norm)
     for group in (sets, names):
         for value in group:
             # "&", "+" and the like are not words: "Black & White" must yield
