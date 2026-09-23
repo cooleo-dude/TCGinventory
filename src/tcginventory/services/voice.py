@@ -242,10 +242,14 @@ _SLASH_PHRASES = (("out", "of"), ("of",), ("over",), ("slash",), ("on",))
 #: left at the tail of a clip never reaches the search field.
 END_WORDS = ("finish", "done")
 
-_FILLER = frozenset(
-    "um uh er ah the a an card cards show me search find look for please "
-    "up filter and of to in at it is s".split()
-) | frozenset(END_WORDS)
+_FILLER = (
+    frozenset(
+        "um uh er ah the a an card cards show me search find look for please "
+        "up filter and of to in at it is s".split()
+    )
+    | frozenset(END_WORDS)
+    | frozenset({"finnish"})  # how Whisper likes to spell the end word
+)
 
 #: Spoken forms of the card-name suffixes, folded to how the catalog writes
 #: them before any snapping: "Charizard X" is *Charizard ex*, not Charizard GX,
