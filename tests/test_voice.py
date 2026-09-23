@@ -99,16 +99,81 @@ def test_snapping_is_off_when_nothing_resembles_the_words():
     assert parse("mew") == "mew"
 
 
-def test_snap_would_be_lost_without_the_threshold():
-    """A regression guard on the *mechanism*: with the threshold at 1.0 only an
-    exact match may snap, so the misheard name comes back verbatim."""
-    original = voice.SNAP_THRESHOLD
-    try:
-        voice.SNAP_THRESHOLD = 1.0
-        assert parse("pikachoo") == "pikachoo"
-    finally:
-        voice.SNAP_THRESHOLD = original
-    assert parse("pikachoo") == "pikachu"
+def test_snap_would_be_lost_without_the_threshold(monkeypatch):
+    """A regression guard on the *mechanism*: with the spelling threshold at 1.0
+    and the sound channel off, only an exact match may snap, so the misheard
+    name comes back verbatim. Either channel alone recovers it."""
+    monkeypatch.setattr(voice, "SNAP_THRESHOLD", 1.0)
+    monkeypatch.setattr(voice, "PHONETIC_SNAP", False)
+    assert parse("pikachoo") == "pikachoo"
+    monkeypatch.setattr(voice, "PHONETIC_SNAP", True)
+    assert parse("pikachoo") == "pikachu"  # by sound: PKX == PKX
+    monkeypatch.setattr(voice, "PHONETIC_SNAP", False)
+    monkeypatch.setattr(voice, "SNAP_THRESHOLD", 0.8)
+    assert parse("pikachoo") == "pikachu"  # by spelling: ratio 0.8
+
+
+# -- snapping by sound (ticket 77) -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        ("Celebi", "Celiby"),
+        ("Celebi", "sell a bee"),
+        ("Abomasnow", "Obama's no"),
+        ("Cheren", "Sharon"),
+        ("Chansey", "Chancy"),
+        ("Banette", "Bennett"),
+        ("Pikachu", "Pikachoo"),
+        ("Centiskorch", "Santa Scorch"),
+    ],
+)
+def test_phonetic_key_hears_past_whisper_spelling(a, b):
+    assert voice.phonetic_key(a) == voice.phonetic_key(b)
+
+
+@pytest.mark.parametrize("a, b", [("Mew", "Mewtwo"), ("Base Set", "Base Set 2")])
+def test_phonetic_key_keeps_different_names_apart(a, b):
+    assert voice.phonetic_key(a) != voice.phonetic_key(b)
+
+
+def test_misheard_names_snap_by_sound_across_word_boundaries():
+    names = NAMES + ["Celebi", "Abomasnow", "Absol", "Centiskorch", "Cheren"]
+    assert voice.parse_query("Celiby Triumphant", names, ["Triumphant"]) == (
+        "celebi triumphant"
+    )
+    assert voice.parse_query("sell a bee", names, SETS) == "celebi"
+    assert voice.parse_query("Obama's no.", names, SETS) == "abomasnow"
+    assert voice.parse_query("Santa Scorch", names, SETS) == "centiskorch"
+    assert voice.parse_query("of soul", names, SETS) == "absol"  # one key edit away
+
+
+def test_sound_never_outranks_a_name_spelled_right():
+    # "Mew" is exact; "Mewtwo" merely contains it. The exact spelling wins.
+    assert parse("Mew") == "mew"
+    assert parse("Mewtwo") == "mewtwo"
+
+
+def test_short_words_and_filler_never_snap_to_a_card():
+    sets = SETS + ["Neo Genesis"]
+    names = NAMES + ["Entei", "Mr. Mime"]
+    # "no" is two letters: never "Neo". "and" is filler: never "Entei".
+    assert voice.parse_query("no", names, sets) == "no"
+    assert voice.parse_query("Pikachu and Charizard", names, sets) == (
+        "pikachu charizard"
+    )
+    # "Mr." is too short to stand as a prefix, so "more" stays "more".
+    assert voice.parse_query("more", names, sets) == "more"
+
+
+def test_spoken_suffixes_fold_to_the_catalogs_tokens():
+    names = ["Charizard ex", "Charizard GX", "Charizard VMAX", "Charizard δ"]
+    assert voice.parse_query("Charizard X", names) == "charizard ex"
+    assert voice.parse_query("Charizard E X", names) == "charizard ex"
+    assert voice.parse_query("Charizard V Max", names) == "charizard vmax"
+    assert voice.parse_query("Charizard Delta", names) == "charizard δ"
+    assert voice.parse_query("Charizard G X", names) == "charizard gx"
 
 
 # -- what survives ------------------------------------------------------------------
@@ -124,6 +189,86 @@ def test_filler_is_dropped_but_unknown_words_are_kept():
 def test_empty_and_silent_transcripts_yield_nothing():
     assert parse("") == ""
     assert parse(" ... ") == ""
+
+
+# -- recognize: constrained first, snap as the fallback (ticket 77) -------------------
+
+
+def test_recognize_prefers_the_constrained_decoders_answer(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        voice,
+        "_recognize_constrained",
+        lambda pcm, rate, names, sets, numbers: (
+            calls.append(names) or ["Celebi", "Triumphant"]
+        ),
+    )
+    monkeypatch.setattr(voice, "transcribe", lambda *a: pytest.fail("free-form ran"))
+    assert voice.recognize(b"\x00\x01" * 800, 16000, ["Celebi"], ["Triumphant"]) == (
+        "celebi triumphant"
+    )
+    assert calls == [["Celebi"]]
+
+
+def test_recognize_falls_back_to_snapping_when_the_grammar_hears_nothing(monkeypatch):
+    monkeypatch.setattr(voice, "_recognize_constrained", lambda *a: [])
+    monkeypatch.setattr(
+        voice, "transcribe", lambda pcm, rate=16000: "Celiby Triumphant"
+    )
+    assert voice.recognize(b"\x00\x01" * 800, 16000, ["Celebi"], ["Triumphant"]) == (
+        "celebi triumphant"
+    )
+
+
+def test_recognize_without_a_vocabulary_is_free_form(monkeypatch):
+    monkeypatch.setattr(
+        voice, "_recognize_constrained", lambda *a: pytest.fail("no grammar to use")
+    )
+    monkeypatch.setattr(
+        voice, "transcribe", lambda pcm, rate=16000: "Pikachu 25 of 102"
+    )
+    assert voice.recognize(b"\x00\x01" * 800) == "pikachu 25/102"
+    assert voice.recognize(b"") == ""
+
+
+def test_constrained_answer_is_refused_when_the_grammar_forced_it(monkeypatch):
+    """A clip that says something outside the vocabulary still decodes to *some*
+    card under the grammar; the likelihood gap against the free transcript is
+    what tells that case from a real name, and past REJECT_GAP the answer is
+    dropped so the fallback runs instead of naming a wrong card."""
+    from tcginventory.services import voice_decode
+
+    class FakeDecoder:
+        def __init__(self, gap):
+            self.gap = gap
+
+        def decode_scored(self, audio, trie):
+            return voice_decode.Decoded(["Charizard"], -10.0, -10.0 + self.gap)
+
+    monkeypatch.setattr(voice, "_grammar", lambda *a: object())
+    monkeypatch.setattr(voice, "_decoder", FakeDecoder(voice.REJECT_GAP + 1))
+    assert (
+        voice._recognize_constrained(b"\x00\x01" * 800, 16000, ["Charizard"], [], [])
+        == []
+    )
+    monkeypatch.setattr(voice, "_decoder", FakeDecoder(voice.REJECT_GAP - 1))
+    assert voice._recognize_constrained(
+        b"\x00\x01" * 800, 16000, ["Charizard"], [], []
+    ) == ["Charizard"]
+
+
+def test_grammar_is_rebuilt_only_when_the_vocabulary_changes(monkeypatch):
+    from tcginventory.services import voice_decode
+
+    builds = []
+    monkeypatch.setattr(
+        voice_decode, "build_grammar", lambda *a, **k: builds.append(a) or object()
+    )
+    monkeypatch.setattr(voice, "_grammar_cache", None)
+    first = voice._grammar(["Celebi"], ["Triumphant"], [])
+    assert voice._grammar(["Celebi"], ["Triumphant"], []) is first
+    voice._grammar(["Celebi", "Mew"], ["Triumphant"], [])
+    assert len(builds) == 2
 
 
 # -- model location -------------------------------------------------------------------

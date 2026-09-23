@@ -1,15 +1,20 @@
-"""Voice search (ticket 76) — offline speech to a search-bar query. Qt-free.
+"""Voice search (tickets 76, 77) — offline speech to a search-bar query. Qt-free.
 
-Two halves, deliberately separate so each tests on its own:
+:func:`recognize` is the entry point the microphone button calls. Given the
+grid's vocabulary it decodes the clip **under a grammar** of those names, sets
+and numbers (:mod:`voice_decode`), refuses an answer the grammar had to force
+(``REJECT_GAP``), and otherwise falls back to the two halves below, which are
+deliberately separate so each tests on its own:
 
-* :func:`transcribe` turns 16-bit PCM into text with Whisper ``base.en`` running
-  on sherpa-onnx. The model ships as package data beside the DINOv2 weights and
-  is located by :func:`voice_model`; :func:`available` reports whether it is
-  installed so the UI can grey the microphone out instead of failing on click.
+* :func:`transcribe` turns 16-bit PCM into free-form text with Whisper
+  ``base.en`` running on sherpa-onnx. The model ships as package data beside the
+  DINOv2 weights and is located by :func:`voice_model`; :func:`available`
+  reports whether it is installed so the UI can grey the microphone out instead
+  of failing on click.
 * :func:`parse_query` turns what Whisper heard into what the Inventory filter
   bar wants: spoken number forms become the catalog's ``25/102`` shape, and card
-  and set names snap to values that actually exist in the grid, so a slightly
-  misheard "Pikachoo" still filters to Pikachu.
+  and set names snap to values that actually exist in the grid — by spelling,
+  and by sound (:func:`phonetic_key`), so "Celiby" still filters to Celebi.
 
 Audio *capture* is QtMultimedia and therefore lives in ``ui/views/_voice_input.py``;
 this module only ever sees bytes and a sample rate.
@@ -114,6 +119,78 @@ def transcribe(pcm16: bytes, rate: int = SAMPLE_RATE) -> str:
 
 
 # --------------------------------------------------------------------------
+# Speech -> query
+# --------------------------------------------------------------------------
+
+_grammar_cache: tuple[int, object] | None = None
+_decoder = None
+
+
+def _grammar(names: list[str], sets: list[str], numbers: list[str]):
+    """The constrained-decoding grammar for this vocabulary, rebuilt only when
+    the vocabulary changes (the grid's rows between refreshes)."""
+    global _grammar_cache
+    from tcginventory.services import voice_decode
+
+    key = hash((tuple(names), tuple(sets), tuple(numbers)))
+    if _grammar_cache is None or _grammar_cache[0] != key:
+        _grammar_cache = (key, voice_decode.build_grammar(names, sets, numbers))
+    return _grammar_cache[1]
+
+
+def recognize(
+    pcm16: bytes,
+    rate: int = SAMPLE_RATE,
+    names: Iterable[str] = (),
+    sets: Iterable[str] = (),
+    numbers: Iterable[str] = (),
+) -> str:
+    """Speech to the text for the search field, the way the app does it.
+
+    With a vocabulary, the clip is decoded **under the grammar** of those names,
+    sets and collector numbers (ticket 77): Whisper may only spell out a real
+    entry, so the answer is a catalog name chosen by sound, never an English
+    word that resembles one. If constrained decoding is unavailable or hears
+    nothing legal, fall back to a free-form transcript snapped by
+    :func:`parse_query`. Blocking — call from a worker thread.
+    """
+    if not pcm16:
+        return ""
+    names, sets, numbers = sorted(set(names)), sorted(set(sets)), sorted(set(numbers))
+    if names or sets:
+        try:
+            phrases = _recognize_constrained(pcm16, rate, names, sets, numbers)
+        except Exception:  # pragma: no cover - a missing runtime degrades, not fails
+            phrases = []
+        if phrases:
+            return " ".join(phrases).lower()
+    return parse_query(transcribe(pcm16, rate), names, sets)
+
+
+#: A constrained answer this many nats less likely than the free transcript is
+#: refused: the clip said something outside the vocabulary, and naming the
+#: nearest card would be a confident wrong answer. Chosen on the benchmark's
+#: owned/unowned split (``training/voice_bench.py --unowned``, 2026-09-22):
+#: at 10, 79.5% of owned names were still recovered while wrong cards fell
+#: from 13.5% to 1.0% and false accepts on unowned names from 88.5% to 4.0%.
+REJECT_GAP = 10.0
+
+
+def _recognize_constrained(pcm16, rate, names, sets, numbers) -> list[str]:
+    global _decoder
+    from tcginventory.services import voice_decode
+
+    if _decoder is None:
+        _decoder = voice_decode.ConstrainedWhisper()
+    samples = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
+    audio = voice_decode.resample(samples, rate)
+    decoded = _decoder.decode_scored(audio, _grammar(names, sets, numbers))
+    if decoded.gap > REJECT_GAP:
+        return []
+    return decoded.phrases
+
+
+# --------------------------------------------------------------------------
 # Transcript -> query
 # --------------------------------------------------------------------------
 
@@ -163,15 +240,180 @@ _SLASH_PHRASES = (("out", "of"), ("of",), ("over",), ("slash",), ("on",))
 #: honest empty grid, not to everything.
 _FILLER = frozenset(
     "um uh er ah the a an card cards show me search find look for please "
-    "up filter".split()
+    "up filter and of to in at it is s".split()
 )
 
-#: Below this ratio a spoken span is not "the same name, misheard".
+#: Spoken forms of the card-name suffixes, folded to how the catalog writes
+#: them before any snapping: "Charizard X" is *Charizard ex*, not Charizard GX,
+#: and "V Max" is one token. Keys are word tuples, values the catalog token.
+_SUFFIXES: dict[tuple[str, ...], str] = {
+    ("x",): "ex",
+    ("e", "x"): "ex",
+    ("ecks",): "ex",
+    ("g", "x"): "gx",
+    ("v", "max"): "vmax",
+    ("v", "star"): "vstar",
+    ("delta",): "δ",
+}
+_SUFFIX_MAX = max(len(k) for k in _SUFFIXES)
+
+
+def _fold_suffixes(words: list[str]) -> list[str]:
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        for n in range(_SUFFIX_MAX, 0, -1):
+            key = tuple(words[i : i + n])
+            if key in _SUFFIXES:
+                out.append(_SUFFIXES[key])
+                i += n
+                break
+        else:
+            out.append(words[i])
+            i += 1
+    return out
+
+
+#: A leading-word prefix of a name is only a candidate when it is a word in its
+#: own right: "Mr." and "M" from "Mr. Mime" / "M Rayquaza EX" must not catch
+#: every spoken "more" and "am".
+MIN_PREFIX_LETTERS = 4
+
+#: Below this ratio a spoken span is not "the same name, misheard" *by spelling*.
 SNAP_THRESHOLD = 0.8
+#: Whether spans may also snap by sound (ticket 77). Off only in tests that pin
+#: the spelling channel on its own.
+PHONETIC_SNAP = True
+#: Whether a key one edit away may snap too (keys of four or more letters).
+PHONETIC_NEAR = True
+#: Scores a phonetic snap earns in the segmentation: below an exact spelling
+#: match, above the spelling bar, so sound never outranks a name spelled right.
+PHONETIC_EQUAL_SCORE = 0.78
+PHONETIC_NEAR_SCORE = 0.7
+#: A span shorter than this (letters) never snaps — "no" must not become "Neo".
+MIN_SNAP_LETTERS = 3
 
 
 def _norm(text: str) -> str:
     return "".join(ch for ch in text.lower() if ch.isalnum())
+
+
+_VOWELS = frozenset("AEIOU")
+
+
+def phonetic_key(text: str) -> str:
+    """A Metaphone-style sound key: what a word *sounds* like, spelling aside.
+
+    Whisper's errors on proper nouns are phonetic — it hears "Celebi" and writes
+    "Celiby", hears "Abomasnow" and writes "Obama's no" — so two spellings that
+    say the same thing must key the same. Original Metaphone, with one domain
+    change: every leading vowel keys as ``A``, because the vowel Whisper picks
+    for an unstressed opening syllable is noise ("Obama" / "Aboma").
+
+    Digits pass through, so "Base Set 2" keys apart from "Base Set".
+    """
+    s = "".join(ch for ch in text.upper() if ch.isalnum())
+    if not s:
+        return ""
+    # Leading clusters whose first letter is silent.
+    if s[:2] in ("AE", "GN", "KN", "PN", "WR"):
+        s = s[1:]
+    elif s[:1] == "X":
+        s = "S" + s[1:]
+    elif s[:2] == "WH":
+        s = "W" + s[1:]
+    out: list[str] = []
+    n = len(s)
+    for i, ch in enumerate(s):
+        prev = s[i - 1] if i else ""
+        nxt = s[i + 1] if i + 1 < n else ""
+        nxt2 = s[i + 2] if i + 2 < n else ""
+        if ch == prev and ch != "C":
+            continue  # doubled letters say nothing extra
+        if ch.isdigit():
+            out.append(ch)
+        elif ch in _VOWELS:
+            if i == 0:
+                out.append("A")
+        elif ch == "B":
+            if not (prev == "M" and i == n - 1):
+                out.append("B")
+        elif ch == "C":
+            if nxt == "I" and nxt2 == "A":
+                out.append("X")
+            elif nxt == "H":
+                out.append("K" if prev == "S" else "X")
+            elif nxt in ("I", "E", "Y"):
+                if prev != "S":
+                    out.append("S")
+            else:
+                out.append("K")
+        elif ch == "D":
+            out.append("J" if nxt == "G" and nxt2 in ("E", "Y", "I") else "T")
+        elif ch == "G":
+            if nxt == "H" and not (nxt2 and nxt2 in _VOWELS):
+                continue  # "GH" before a consonant or at the end is silent
+            if nxt == "N":
+                continue
+            if nxt in ("I", "E", "Y") and prev != "G":
+                out.append("J")
+            else:
+                out.append("K")
+        elif ch == "H":
+            if nxt and nxt in _VOWELS and prev not in ("C", "S", "P", "T", "G"):
+                out.append("H")
+        elif ch == "K":
+            if prev != "C":
+                out.append("K")
+        elif ch == "P":
+            if nxt == "H":
+                out.append("F")
+            else:
+                out.append("P")
+        elif ch == "Q":
+            out.append("K")
+        elif ch == "S":
+            if nxt == "H" or (nxt == "I" and nxt2 in ("O", "A")):
+                out.append("X")
+            else:
+                out.append("S")
+        elif ch == "T":
+            if nxt == "I" and nxt2 in ("O", "A"):
+                out.append("X")
+            elif nxt == "H":
+                out.append("0")
+            elif not (nxt == "C" and nxt2 == "H"):
+                out.append("T")
+        elif ch == "V":
+            out.append("F")
+        elif ch == "W":
+            if nxt and nxt in _VOWELS:
+                out.append("W")
+        elif ch == "X":
+            out.append("KS")
+        elif ch == "Y":
+            if nxt and nxt in _VOWELS:
+                out.append("Y")
+        elif ch == "Z":
+            out.append("S")
+        else:  # F J L M N R
+            out.append(ch)
+    key = "".join(out)
+    # "PH" -> F consumed the H above via the P branch; drop the H that followed.
+    return key.replace("FH", "F")
+
+
+def _key_distance(a: str, b: str) -> int:
+    """Levenshtein distance, for keys that are a few letters long."""
+    if a == b:
+        return 0
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
 
 
 def _words(transcript: str) -> list[str]:
@@ -279,46 +521,94 @@ def _normalise_numbers(words: list[str]) -> list[str]:
     return out
 
 
-def _candidates(names: Iterable[str], sets: Iterable[str]) -> dict[str, str]:
-    """Normalised span → the text to search for.
+@dataclass
+class _Candidates:
+    """What a spoken span may snap to, indexed two ways.
 
+    ``spelling`` maps a normalised candidate to the text to search for;
+    ``sound`` maps a :func:`phonetic_key` to the candidates that share it.
     Every full name and set is a candidate, and so is each leading-word prefix
     of a multi-word one, mapping to *that prefix*: saying "Umbreon" against a
     grid holding "Umbreon VMAX" and "Umbreon V" yields the token ``umbreon``,
     which the substring filter matches on both. Sets are added first so a full
     name wins a collision with a set prefix.
     """
-    out: dict[str, str] = {}
+
+    spelling: dict[str, str]
+    sound: dict[str, list[str]]
+
+    def __bool__(self) -> bool:
+        return bool(self.spelling)
+
+
+def _candidates(names: Iterable[str], sets: Iterable[str]) -> _Candidates:
+    spelling: dict[str, str] = {}
+    sound: dict[str, list[str]] = {}
     for group in (sets, names):
         for value in group:
-            parts = value.split()
+            # "&", "+" and the like are not words: "Black & White" must yield
+            # the prefix "Black", never "Black &" (the baseline benchmark put
+            # "black &" in the search field for "Black Kyurem").
+            parts = [p for p in value.split() if _norm(p)]
             for n in range(len(parts), 0, -1):
                 prefix = " ".join(parts[:n])
-                key = _norm(prefix)
-                if key:
-                    out.setdefault(key, prefix)
-    return out
+                norm = _norm(prefix)
+                if n < len(parts) and len(norm) < MIN_PREFIX_LETTERS:
+                    continue
+                if norm and norm not in spelling:
+                    spelling[norm] = prefix
+                    sound.setdefault(phonetic_key(prefix), []).append(norm)
+    return _Candidates(spelling, sound)
 
 
 _MAX_SPAN = 4
 
 
-def _snap_span(
-    words: list[str], candidates: dict[str, str]
-) -> tuple[str, float] | None:
-    """The candidate ``words`` most resemble and how closely, or ``None`` when
-    nothing clears ``SNAP_THRESHOLD``."""
+def _snap_span(words: list[str], candidates: _Candidates) -> tuple[str, float] | None:
+    """The candidate ``words`` most resemble and how closely, or ``None``.
+
+    Two channels. **Spelling** first: the closest candidate by character ratio,
+    if it clears ``SNAP_THRESHOLD``. Then **sound**: a candidate whose phonetic
+    key equals the span's, or sits one edit away when the keys are long enough
+    to make that meaningful. A sound match scores below any exact spelling
+    match, so a name Whisper spelled right is never displaced by one that merely
+    sounds like it. Spans under ``MIN_SNAP_LETTERS`` never snap.
+    """
     span = _norm(" ".join(words))
-    if not span:
+    if sum(ch.isalpha() for ch in span) < MIN_SNAP_LETTERS and not span.isdigit():
         return None
-    match = get_close_matches(span, candidates, n=1, cutoff=SNAP_THRESHOLD)
-    if not match:
+    if not span or all(w in _FILLER for w in words):
+        return None  # "and" must never become Entei, however alike they sound
+    match = get_close_matches(span, candidates.spelling, n=1, cutoff=SNAP_THRESHOLD)
+    if match:
+        return candidates.spelling[match[0]], SequenceMatcher(
+            None, span, match[0]
+        ).ratio()
+    if not PHONETIC_SNAP:
         return None
-    return candidates[match[0]], SequenceMatcher(None, span, match[0]).ratio()
+    key = phonetic_key(span)
+    if len(key) < 3:
+        return None  # "feel" and "Volo" both key FL; two consonants prove nothing
+    same = candidates.sound.get(key)
+    if same:
+        # Several spellings share the sound: take the one closest in letters.
+        best = max(same, key=lambda norm: SequenceMatcher(None, span, norm).ratio())
+        return candidates.spelling[best], PHONETIC_EQUAL_SCORE
+    if PHONETIC_NEAR and len(key) >= 4:
+        near = [
+            norm
+            for other, norms in candidates.sound.items()
+            if abs(len(other) - len(key)) <= 1 and _key_distance(key, other) == 1
+            for norm in norms
+        ]
+        if near:
+            best = max(near, key=lambda norm: SequenceMatcher(None, span, norm).ratio())
+            return candidates.spelling[best], PHONETIC_NEAR_SCORE
+    return None
 
 
 def _snap_all(
-    words: list[str], skip: list[bool], candidates: dict[str, str]
+    words: list[str], skip: list[bool], candidates: _Candidates
 ) -> dict[int, tuple[int, str]]:
     """Choose the segmentation of ``words`` into snapped spans that explains the
     most of the transcript: ``{start: (end, text)}``.
@@ -369,7 +659,7 @@ def parse_query(
     the most of the transcript. Filler words are dropped; anything else that
     snaps to nothing is kept as spoken.
     """
-    words = _normalise_numbers(_words(transcript))
+    words = _fold_suffixes(_normalise_numbers(_words(transcript)))
     if not words:
         return ""
     candidates = _candidates(names, sets)

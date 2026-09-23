@@ -106,7 +106,7 @@ maintained afterward.
 | F-SE-1 | Quick text search across item name/set/number/SKU. | MUST |
 | F-SE-2 | Quick-filter presets in the inventory filter bar (intent, game, set, category, condition, graded, location, in-stock/sold) — a convenience layer over the universal filter/sort of `F-VW-9`. | MUST |
 | F-SE-3 | Date-range and type filters on transactions. | SHOULD |
-| F-SE-4 | **Voice search** on the Inventory filter bar: one click (or Ctrl+M) captures a spoken phrase — "Pikachu", "Pikachu Base Set", "Pikachu 25 out of 102" — offline (Whisper `base.en` via sherpa-onnx), snaps names/sets to values in the grid and spoken numbers to `N/M`, and places the result in the search field. The search field matches **every token** (name and number may live in different fields). Greyed out when the speech model is not installed. Ticket 76. | SHOULD |
+| F-SE-4 | **Voice search** on the Inventory filter bar: one click (or Ctrl+M) captures a spoken phrase — "Pikachu", "Pikachu Base Set", "Pikachu 25 out of 102" — offline with Whisper `base.en`, and places the result in the search field. The clip is decoded **under a grammar of the grid's own card names, set names and collector numbers** (each in its spoken forms), so the answer is a real name chosen by sound; an answer far less likely than the free transcript is refused rather than guessed, and a free-form transcript snapped by spelling and sound is the fallback. The search field matches **every token** (name and number may live in different fields). Greyed out when the speech model is not installed. Tickets 76, 77; recovery measured by `training/voice_bench.py`. | SHOULD |
 
 ## Import / export
 

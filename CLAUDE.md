@@ -96,10 +96,15 @@ offline; no external price feeds in V1.
   search field (`ui/views/_voice_input.py`, Ctrl+M). Whisper `base.en` int8 on
   `sherpa-onnx`, fully offline; the 160 MB model ships as package data (LFS)
   and the button greys out when it is missing. `services/voice.py` (Qt-free)
-  transcribes PCM and **snaps** the transcript: spoken numbers → `25/102`, names
-  and sets → values in the grid, choosing the segmentation that explains the
-  most words. The Inventory search field now matches **every token**, so
-  "pikachu 25/102" reaches across name and number. ADR 2026-09-22.
+  owns recognition. **Ticket 77** made it hear names rather than spellings:
+  `services/voice_decode.py` decodes the clip **under a grammar** of the grid's
+  card names, set names and collector numbers (byte-trie NFA over the bundled
+  Whisper pair on onnxruntime, spoken aliases, a phrase penalty), refuses an
+  answer far less likely than the free transcript (`REJECT_GAP`), and falls
+  back to a transcript snapped by spelling **and sound** (Metaphone key).
+  Measured by `training/voice_bench.py` (synthetic voices, dev-only): 44% →
+  ~88% of owned names recovered, wrong cards ~4%. The Inventory search field
+  matches **every token**. ADRs 2026-09-22 (two).
 
 ## Source of truth
 

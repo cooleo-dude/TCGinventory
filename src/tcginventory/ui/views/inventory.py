@@ -691,18 +691,22 @@ class InventoryView(QWidget):
         if value == "Missing" and self._in_stock.isChecked():
             self._in_stock.setChecked(False)  # → set_in_stock_only(False)
 
-    def _voice_vocabulary(self) -> tuple[list[str], list[str]]:
-        """Card and set names present in the grid — what a transcript may snap
-        to. Read from the model's rows, never from the database."""
+    def _voice_vocabulary(self) -> tuple[list[str], list[str], list[str]]:
+        """Card names, set names and collector numbers present in the grid —
+        the grammar a spoken clip is decoded against (ticket 77). Read from the
+        model's rows, never from the database."""
         names: set[str] = set()
         sets: set[str] = set()
+        numbers: set[str] = set()
         for i in range(self._model.rowCount()):
             item = self._model.row_at(i).item
             if item.name:
                 names.add(item.name)
             if item.set_name:
                 sets.add(item.set_name)
-        return sorted(names), sorted(sets)
+            if item.card_number:
+                numbers.add(item.card_number)
+        return sorted(names), sorted(sets), sorted(numbers)
 
     def _clear_filters(self) -> None:
         """Reset the filter bar to 'show everything' (widgets included, so the

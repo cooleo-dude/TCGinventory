@@ -640,9 +640,10 @@ def test_inventory_search_matches_every_token_across_fields(app, seeded_conn):
 
 
 def test_inventory_voice_query_lands_in_the_search_field(app, seeded_conn, monkeypatch):
-    """Ticket 76: the mic's transcription path — worker thread, snap against the
-    grid's own names and sets, ``recognized`` → search field — with Whisper
-    replaced by a canned transcript so no microphone or model is involved."""
+    """Ticket 76/77: the mic's recognition path — worker thread, the grid's own
+    names, sets and numbers as the grammar, ``recognized`` → search field — with
+    the constrained decoder replaced by a canned answer so no microphone or model
+    is involved. The grammar handed to it must come from the grid."""
     from tcginventory.services import voice
     from tcginventory.ui.views.inventory import InventoryView
 
@@ -653,10 +654,14 @@ def test_inventory_voice_query_lands_in_the_search_field(app, seeded_conn, monke
         if view._model.row_at(i).item.card_number
     )
     number = target.item.card_number  # e.g. "004/102"
-    spoken_number = f"{int(number.split('/')[0])} out of {number.split('/')[1]}"
-    # Misspell the last letter: the snap step, fed the grid's names, repairs it.
-    heard = f"Um, {target.item.name[:-1]}o {spoken_number}, please."
-    monkeypatch.setattr(voice, "transcribe", lambda pcm, rate=16000: heard)
+    expected_number = f"{int(number.split('/')[0])}/{number.split('/')[1]}"
+    seen: dict = {}
+
+    def fake_constrained(pcm, rate, names, sets, numbers):
+        seen.update(names=names, sets=sets, numbers=numbers)
+        return [target.item.name, expected_number]
+
+    monkeypatch.setattr(voice, "_recognize_constrained", fake_constrained)
 
     view._mic.transcribe(b"\x00\x10" * 16000)
     worker = view._mic._worker
@@ -665,8 +670,11 @@ def test_inventory_voice_query_lands_in_the_search_field(app, seeded_conn, monke
         app.processEvents()
         if view._search.text():
             break
-    expected_number = f"{int(number.split('/')[0])}/{number.split('/')[1]}"
     assert view._search.text() == f"{target.item.name.lower()} {expected_number}"
+    # The grammar was the grid's vocabulary, numbers included.
+    assert target.item.name in seen["names"]
+    assert target.item.set_name in seen["sets"]
+    assert number in seen["numbers"]
     # The grid filtered on it: "004" is a substring of "004/102", so the leading
     # zeros the speaker never says do not matter.
     assert view._proxy.rowCount() >= 1
