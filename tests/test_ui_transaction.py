@@ -737,3 +737,121 @@ def test_receive_row_graded_switch_is_captioned_and_reacts_to_its_state(app, con
     assert row.graded.styleSheet() != off
     assert row._graded_cap.styleSheet() != off_cap
     view.deleteLater()
+
+
+# -- ticket 82: a typed market value is a reviewed (poll-protected) value ----
+
+
+def test_receive_row_typed_market_value_marks_review(app, conn):
+    """A price the user types over the lookup's ticks the review chip, so the
+    posted card carries review=True and the daily poll leaves the item's
+    current value alone. A lookup-filled price does not, and retyping the
+    lookup's price accepts it. The condition sync is unchanged."""
+    from tcginventory.domain.enums import Condition
+    from tcginventory.ui.views.transaction import TransactionView
+
+    view = TransactionView(conn)
+    row = view._add_receive_row()
+    row.name.setText("Camerupt")
+
+    row.set_market_cents(3666)  # what the lookup found
+    assert not row.review.isChecked()
+    assert row.to_card().review is False
+
+    row.market.setValue(5.00)  # typed over it
+    assert row.review.isChecked()
+    assert row.to_card().review is True
+    assert row.to_card().market_value_cents == 500
+
+    row.market.setValue(36.66)  # retyping the lookup's price accepts it
+    assert not row.review.isChecked()
+
+    row.condition.setCurrentText(Condition.LP.value)
+    assert row.review.isChecked()
+    row.condition.setCurrentText(Condition.NM.value)
+    assert not row.review.isChecked()
+    view.deleteLater()
+
+
+def test_late_price_lookup_keeps_a_typed_market_value(app, conn):
+    """The off-thread lookup landing after the user typed a price must not
+    clobber it. It still links the card and offers the printings, and a
+    printing the user then picks deliberately does replace the typed price."""
+    from tcginventory.services.pricing import CardVariant
+    from tcginventory.ui.views.transaction import TransactionView
+
+    view = TransactionView(conn)
+    row = view._add_receive_row()
+    row.name.setText("Mew ex")
+    row.market.setValue(20.00)
+    assert row.review.isChecked()
+
+    variants = [
+        CardVariant("Base", "u-base", 3235, True),
+        CardVariant("151 Metal Card", "u-metal", 2557, False),
+    ]
+    view._on_price_ready(row, object(), variants)
+    assert round(row.market.value() * 100) == 2000  # the typed value survives
+    assert row.review.isChecked()
+    assert row.tcgplayer.text() == "u-base"  # the link still lands
+    assert not row._printing_cell.isHidden()  # the picker is still offered
+
+    row.printing.setCurrentIndex(1)
+    row._on_printing_changed()
+    assert round(row.market.value() * 100) == 2557
+    assert not row.review.isChecked()
+    view.deleteLater()
+
+
+def test_ui_typed_market_value_survives_the_daily_price_refresh(app, conn):
+    """End to end: a purchase posted with a typed price keeps that price as the
+    item's current value through PricingService.refresh, while a lookup-filled
+    price is polled over as before. This is the ledger-level symptom of ticket
+    82 — ~60 items entered 2026-09-21 lost their typed values to the poll."""
+    from tcginventory.services.pricing import PriceQuote, PricingService
+    from tcginventory.ui.views.transaction import TransactionView
+
+    view = TransactionView(conn)
+    typed = view._add_receive_row()
+    typed.name.setText("Camerupt")
+    typed.set_market_cents(3666)
+    typed.market.setValue(5.00)
+    auto = view._add_receive_row()
+    auto.name.setText("Skitty")
+    auto.set_market_cents(2000)
+    view._cash_out.setValue(20.00)
+    view.submit()
+
+    items = {i.name: i for i in ItemRepository(conn).list_all()}
+    assert items["Camerupt"].review is True
+    assert items["Skitty"].review is False
+
+    class Poll:
+        def quotes_for(self, its):
+            return [PriceQuote(item_id=i.id, price_cents=9999) for i in its]
+
+    PricingService(conn, provider=Poll()).refresh()
+    items = {i.name: i for i in ItemRepository(conn).list_all()}
+    assert items["Camerupt"].market_value_cents == 500  # typed: kept
+    assert items["Skitty"].market_value_cents == 9999  # lookup: polled over
+    view.deleteLater()
+
+
+def test_set_card_repopulates_market_without_flipping_review(app, conn):
+    """Edit mode fills Market programmatically: not a typed price, so it neither
+    ticks review on an unreviewed line nor clears it on a reviewed one."""
+    from tcginventory.ui.views.transaction import TransactionView
+
+    view = TransactionView(conn)
+    row = view._add_receive_row()
+    row.set_card(_inc("A", 6000))
+    assert not row.review.isChecked()
+    assert row.to_card().review is False
+
+    reviewed = IncomingCard(
+        Item(name="B", category=Category.SINGLE), 1, 6000, Intent.RESALE, review=True
+    )
+    row.set_card(reviewed)
+    assert row.review.isChecked()
+    assert row.to_card().review is True
+    view.deleteLater()

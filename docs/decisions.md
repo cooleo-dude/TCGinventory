@@ -3759,3 +3759,48 @@ meant clicking **Edit item…** inside it to open a second dialog,
 - **Lesson recorded for the next capture change:** measure the device before
   designing around it. A two-line probe (`readyRead` cadence and chunk size)
   would have shown the 10 ms cadence at ticket 80.
+
+---
+
+### 2026-09-28 — A market value typed at entry is a reviewed value (ticket 82)
+
+- **The symptom:** values typed by hand in the Transaction window were replaced
+  by the tcgcsv quote at the next 9:00 `prices.refresh`. About 60 items across
+  ten purchases from 2026-09-21 on had lost them (Camerupt 4/107 entered $5.00
+  → $36.66; Skitty 41/100 $35.00 → $20.00). Cost basis was never touched: the
+  lot's `acquired_market_value_cents` kept every typed value. What moved was
+  `item.market_value_cents`, the *current* value behind the Inventory grid and
+  unrealized P/L (spec 02 § *Two market values*).
+- **Why:** `PricingService.refresh` skips items whose `review` flag is set —
+  that flag has meant "manual, poll-protected price" since 2026-07-10 — and the
+  receive row only set it for a non-NM condition or a hand tick. A typed price
+  on an NM card posted with `review = 0`, so the poll owned it by morning. The
+  Auctions row already tracked auto-versus-manual (`_market_is_manual`); the
+  Transaction row, the one path that creates items, never did.
+- **Decision:** the receive row tracks it too. Every programmatic fill — the
+  off-thread lookup, the printing picker, the foil picker, edit-mode
+  `set_card` — goes through `set_market_cents`, which records the auto price
+  and does not count as an edit. A `valueChanged` that differs from that auto
+  price is manual, and the review chip now follows *manual or non-NM* the way
+  it followed condition alone. Posting is unchanged: `IncomingCard.review`
+  already reaches `item.review` and the review note.
+- **The late lookup no longer clobbers a typed price.** `_on_price_ready` used
+  to write Market unconditionally; the same tracking makes a lookup result that
+  lands after a typed value remember the auto price but leave the field alone.
+  A printing or foil the user then *picks* still replaces it, and clears the
+  tick the typed value earned — a chosen price is the poll's price.
+- **Rejected:** marking every Transaction-entered value reviewed (freezes
+  auto-filled prices at purchase day and ambers the whole grid); a new
+  `manual` column or `market_value_source` (a migration and a second flag with
+  `review`'s exact meaning); having the refresh keep any value newer than its
+  last snapshot (cannot tell typed from auto-filled, and breaks the contract
+  that unreviewed items follow the poll).
+- **Repair** of the ~60 items was a one-off script run once against the live
+  ledger after a backup — restore each affected item to its most recent lot's
+  entered value and mark it reviewed — not shipped tooling, per the standing
+  no-data-hygiene-jobs preference. The cost accepted: rows that were
+  auto-filled on 09-21 are now poll-protected at that day's price until their
+  review tick is cleared in the grid.
+- **Proven by:** the three new tests in `tests/test_ui_transaction.py` fail on
+  the pre-fix code (typed value not marked, lookup clobbers it, refresh polls
+  it over); the fourth guards edit-mode repopulation against flipping the flag.
