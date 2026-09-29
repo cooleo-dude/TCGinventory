@@ -578,7 +578,7 @@ class _ReceiveRow(CardEntryMixin):
         self.graded.toggled.connect(lambda *_: on_change())
         self.condition = _combo(Condition)
         # Auto-mark for review when a non-NM condition is chosen.
-        self.condition.currentIndexChanged.connect(self._maybe_flag_review)
+        self.condition.currentIndexChanged.connect(self._sync_review)
         self.holo = _combo(HoloPattern)  # narrowed once a card's printings load
         self.edition = _combo(Edition)  # default N/A
         self.init_treatments()
@@ -587,7 +587,17 @@ class _ReceiveRow(CardEntryMixin):
         self.cert = QLineEdit()
         self.market = money_spin()
         self.market.setButtonSymbols(QAbstractSpinBox.NoButtons)  # no up/down arrows
-        self.market.valueChanged.connect(lambda *_: on_change())
+        # Whether Market holds a price the user typed (ticket 82). A typed price
+        # is the one thing the daily poll must not overwrite, and the only way
+        # to tell the service that is the review flag — so a manual price marks
+        # the row for review the way a non-NM condition already does. The
+        # lookup, the printing picker, the foil picker and edit-mode population
+        # all fill Market through set_market_cents, which does not count.
+        self._auto_market_cents: int | None = None
+        self._market_is_manual = False
+        self._setting_market = False
+        self._filling_from_lookup = False
+        self.market.valueChanged.connect(self._on_market_changed)
         self.qty = QSpinBox()
         self.qty.setMinimum(1)
         self.qty.setButtonSymbols(QAbstractSpinBox.NoButtons)
@@ -622,7 +632,7 @@ class _ReceiveRow(CardEntryMixin):
         205/165 printings into a single item and let the metal card's price
         overwrite the base card's.
         """
-        self.market.setValue(variant.price_cents / 100)
+        self.set_market_cents(variant.price_cents)
         self.tcgplayer.setText(variant.tcgplayer_url)
         self.variant.setText("" if variant.is_base else variant.label)
         # A stamped printing may offer a different set of foils than the base
@@ -652,11 +662,50 @@ class _ReceiveRow(CardEntryMixin):
             self.notes,
         ]
 
-    def _maybe_flag_review(self) -> None:
-        """Sync review to condition (ungraded): a worse-than-NM condition marks
-        the card for review; switching back to NM clears it."""
-        if not self.graded.isChecked():
-            self.review.setChecked(self.condition.currentData() != Condition.NM.value)
+    def _sync_review(self) -> None:
+        """The review chip follows the two inputs that make a price
+        user-maintained: a worse-than-NM condition (ungraded) or a Market value
+        typed by hand. Either one ticks it; clearing both clears it. The user
+        can still untick it, and that sticks until one of the two changes."""
+        non_nm = (
+            not self.graded.isChecked()
+            and self.condition.currentData() != Condition.NM.value
+        )
+        self.review.setChecked(non_nm or self._market_is_manual)
+
+    def _on_market_changed(self, *_args) -> None:
+        # A user edit (not our own programmatic fill) that differs from the last
+        # auto-filled price is a manual override.
+        if not self._setting_market:
+            cents = round(self.market.value() * 100)
+            self._market_is_manual = (
+                self._auto_market_cents is None or cents != self._auto_market_cents
+            )
+            self._sync_review()
+        self._on_change()
+
+    def set_market_cents(self, cents: int) -> None:
+        """Fill Market programmatically — the lookup, a printing or foil pick,
+        or edit-mode population — so the fill does not read as a manual edit.
+
+        A lookup result that lands after the user has already typed a price is
+        remembered as the auto price but not written: the typed value wins, and
+        retyping the auto price later still counts as accepting it. A price the
+        user *chooses* (printing, foil) replaces a typed one, and clears the
+        review tick that the typed value had earned.
+        """
+        self._auto_market_cents = cents
+        if self._market_is_manual and self._filling_from_lookup:
+            return
+        was_manual = self._market_is_manual
+        self._setting_market = True
+        try:
+            self.market.setValue(cents / 100)
+        finally:
+            self._setting_market = False
+        self._market_is_manual = False
+        if was_manual:
+            self._sync_review()
 
     def _toggle_graded(self, graded: bool) -> None:
         # Condition greys out when graded; grade fields enable (Spec 02).
@@ -723,7 +772,7 @@ class _ReceiveRow(CardEntryMixin):
             _select(self.company, item.grading_company.value)
         self.grade.setText(item.grade or "")
         self.cert.setText(item.cert_number or "")
-        self.market.setValue(card.market_value_cents / 100)
+        self.set_market_cents(card.market_value_cents)
         self.qty.setValue(card.quantity)
         _select(self.intent, card.intent.value)
         self.review.setChecked(getattr(card, "review", False))
@@ -1583,14 +1632,22 @@ class TransactionView(QWidget):
         if not variants or row not in self._receive_rows:
             return
         base = variants[0]
-        row.market.setValue(base.price_cents / 100)
-        if base.tcgplayer_url and not row.tcgplayer.text().strip():
-            row.tcgplayer.setText(base.tcgplayer_url)
-        row.set_variants(variants)  # offer the picker when >1 printing
-        # Narrow Foil to the printings this product comes in, which also
-        # re-prices to the chosen one. After set_variants, so it reads the
-        # selected printing. (Ticket 57.)
-        row.offer_treatments()
+        # Everything below fills Market through set_market_cents. The flag tells
+        # it these are lookup results, which a price the user has typed in the
+        # meantime outranks (ticket 82); a printing or foil the user picks later
+        # goes through the same setter without the flag and does replace it.
+        row._filling_from_lookup = True
+        try:
+            row.set_market_cents(base.price_cents)
+            if base.tcgplayer_url and not row.tcgplayer.text().strip():
+                row.tcgplayer.setText(base.tcgplayer_url)
+            row.set_variants(variants)  # offer the picker when >1 printing
+            # Narrow Foil to the printings this product comes in, which also
+            # re-prices to the chosen one. After set_variants, so it reads the
+            # selected printing. (Ticket 57.)
+            row.offer_treatments()
+        finally:
+            row._filling_from_lookup = False
         self._update_summary()
 
     # Test/programmatic API (used by the lifecycle tests).
